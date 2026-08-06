@@ -242,27 +242,85 @@ For the shared-phase design to hold, gait clips must be:
 
 **Measurement method** — **`emerge_core::clips`** (`crates/emerge-core/src/clips.rs`), driven from the
 editor's ANIM tab. It samples the GLB's animation channels, runs forward kinematics down the leg chains
-to get each foot's world position over the cycle, and reports:
+to get each foot's world position over the cycle, resamples onto a 128-bin phase grid, and reports:
 
-- **cycle_distance** = the planted foot's speed relative to the static `Root`, ×`FIGURINE_SCALE`;
+- **contact** = per-bin stance labels by GANimator's velocity condition restated in the ground frame
+  (`‖v − v_stance‖ < 0.35·‖v_stance‖`; Li et al. 2022, 10.1145/3528223.3530094) — the in-place clip's
+  planted foot slides backward at exactly body speed, so `-v_stance` is also the body's travel
+  **vector**, which is what measures a mis-named strafe rather than annotating it;
+- **cycle_distance** = the planted foot's median speed over the contact bins × the clip duration,
+  × the rig's manifest `scale` (rigs.ron owns it since v2; the per-module literals are gone);
 - **phase_offset** = the negative of the lag that best cross-correlates the two clips' foot-height
-  curves (φ is expressed in the reference clip's frame);
+  curves (φ is expressed in the reference clip's frame). Height, not the contact train — the trains
+  were tried and measured walk→walk_back at +0.039 where the height curve reproduces the validated
+  −0.141;
 - **duration** = the clip's longest keyframe time.
 
 It is engine-free — the FK is hand-rolled, quaternion to matrix to chain, because the `engine_free`
 allowlist has no math crate. Validated against the shipped Valkyrie: durations exact, root motion zero,
-walk 1.373 measured vs 1.388 declared (1.1%), run 2.106 vs 2.135 (1.4%), walk→walk_back phase −0.133 vs
-−0.141. The declared numbers stay authored rather than generated, and `rigs_match_assets.rs` is the drift
+walk 1.376 measured vs 1.388 declared (0.9%), run 2.177 vs 2.135 (2.0%), walk→walk_back phase −0.133 vs
+−0.141, and the strafe clips' measured travel vectors point the directions the LEFTWARD note records
+(clip 13 → −X, clip 14 → +X, pinned by `the_strafe_clips_travel_the_directions_the_guide_records`).
+The declared numbers stay authored rather than generated, and `rigs_match_assets.rs` is the drift
 guard between the two — a manifest that agrees only with itself proves nothing.
 
-**Tolerances are deliberately loose.** The guard is 20% and the reference gaits in `clips.rs` are pinned
-at 3%, because `docs/artist_guide.md` §4 says the back and strafe numbers are themselves rough. A tight
-bound there would be asserting their error rather than the asset's truth.
+**Tolerances are tiered, not flat.** The default guard is 20% (`rig_check::CYCLE_TOL_DEFAULT`),
+because §4's hand-measured back and strafe numbers are themselves rough — a tight bound would assert
+their error rather than the asset's truth. But once a rig's numbers are **measured-and-adopted** and
+its provenance stamp matches the bytes on disk, the guard tightens to 2% (`CYCLE_TOL_MEASURED`): the
+same deterministic instrument re-reading the same file should agree with itself. A slot can opt out
+with `keep:` (stays loose — its numbers are deliberately not the asset's) or pin its own margin with
+`tolerance:`. The policy lives once, in `rig_check::cycle_tolerance`, and CI computes the same
+staleness the editor does — they tighten together or not at all. The reference gaits in `clips.rs`
+stay pinned at 3%.
 
 Mask groups (which bones the upper-body layer excludes) are matched **by name** against the live
 skeleton, never a precomputed path, so a re-export that renames a bone surfaces as a missing name rather
 than a silently wrong mask. The name list (`LOWER_BODY_BONES`) is asserted against the GLB by
 `tests/valkyrie_asset.rs`.
+
+---
+
+## The bench (the editor's ANIM tab)
+
+The tab is the verification instrument for everything above, and since 2026-08 it closes the loop
+rather than just detecting the break. The round trip is: **re-export → the bench notices → Enter
+adopts.**
+
+- **It notices.** A frame-driven mtime poll (`anim_watch`, no threads, no `notify`) re-measures a
+  changed GLB once its mtime holds still across two polls, one rig per frame through one queue —
+  selection, the watcher and check-all all feed it. The tab strip's label turns `ANIM (2 STALE)`
+  so the fact survives tab switches.
+- **Staleness beats value-diffing.** Each adopt stamps a `provenance:` record beside the rig —
+  file-bytes FNV-1a, clip count and names, tool version, date. The bench's strongest sentence is
+  *"this GLB changed since these numbers were measured"*, and when the clip list changed it says
+  what happened causally: *"strafe_l added at index 6; every clip index after it shifted"*.
+- **Enter adopts.** Measured `duration`/`phase_offset`/`cycle_distance` for every unkept gait slot
+  are written into `rigs.ron` through `rigs_edit::RigDoc` — surgical line edits that keep every
+  comment and note byte-identical (Rigs::to_ron would delete ~30 lines of load-bearing prose) —
+  then the provenance stamp, then an atomic save, all refused wholesale unless the edited text
+  parses back to exactly the intended value. Cmd+Z / Shift+Cmd+Z restore the previous file text
+  through the same validated commit door.
+- **The plots say WHERE.** Because this design has no transitions, a wrong number *skates* rather
+  than glitches — a continuous error smeared across the cycle. Three curves (foot height, foot
+  ground speed, root drift) are drawn against the SHARED phase, each slot sampled at
+  `wrap01(φ + declared_offset)` — the runtime's own seek formula — plus a top-down trace whose
+  travel arrow (measured direction × declared cycle distance) settles the strafe-naming question
+  by looking. Contact labelling is `emerge_core::clips::contact_track` (GANimator's velocity
+  condition restated in the ground frame).
+- **The staged figure is the real runtime.** The selected rig spawns at the bench's own far corner
+  driven by `emerge_anim::rigs::build` + `apply_pose_blenders` — every clip resident, weights and
+  one shared phase, never a transition. Space toggles play/scrub; Left/Right sweep the phase
+  (Shift: fine) through `PoseBlender::hold_phase`, which exists because the cadence clamp floors at
+  half nominal — zero ground speed alone cannot pause. The one `set_seek_time` formula stays the
+  only author of clip time.
+- **C checks all sixteen rigs** through the same queue and shows worst-first jump-to-detail rows —
+  the audit that never happened when it cost sixteen clicks, and the same code path CI runs, so a
+  red build reproduces locally as the same words.
+
+Anchors are per-rig data: `root_node:` / `contact_joints:` in the manifest (defaults `Root` /
+`foot_l`), and a gait rig missing them is a loud finding that lists measured contact-joint
+candidates — never a silently skipped check.
 
 ---
 

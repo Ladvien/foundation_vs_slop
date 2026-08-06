@@ -35,7 +35,7 @@ pub(crate) fn build_crab_anim(
         }
     };
     let (graph, slots) = crate::rigs::build(rig, &assets, &mut graphs);
-    commands.insert_resource(CrabAnim { graph, slots });
+    commands.insert_resource(CrabAnim { graph, slots, scale: rig.scale });
 }
 
 /// Build the shared crab collider + scene handles. One builder so `spawn_crabs` (normal play) and the
@@ -284,7 +284,7 @@ pub(crate) fn spawn_crab_on_patch(
         ));
     ec.with_child((
         WorldAssetRoot(scene.clone()),
-        Transform::from_translation(Vec3::Y * CRAB_MODEL_Y).with_scale(Vec3::splat(CRAB_RENDER_SCALE)),
+        Transform::from_translation(Vec3::Y * CRAB_MODEL_Y).with_scale(Vec3::splat(anim.scale)),
     ));
     // Caste hysteresis timer + the immortal spawn seed, so `re_role_crabs` can flip this crab's role
     // deterministically as the swarm's needs shift (see that system's determinism note).

@@ -146,6 +146,17 @@ anyone re-authoring these clips:
 > `crates/emerge-core/tests/rigs_match_assets.rs` re-measures them from the asset on every run. They
 > used to be written out in this table as well, and two copies of a measurement is one copy that goes
 > stale. What stays here is what an **artist** decides; what moved is what a **tool** reports.
+>
+> **The re-export workflow:** re-export the GLB → within a couple of seconds the editor's tab strip
+> reads `ANIM (1 STALE)` and the bench shows what changed (down to "strafe_l added at index 6, every
+> index after it shifted") → press **Enter** to adopt the freshly measured numbers into `rigs.ron`,
+> stamped with a `provenance:` record (file hash, clip list, date). Cmd+Z takes the write back.
+> Hand-transcription is gone. Three per-slot fields are yours to author: `keep: Some("why")` tells
+> adopt to leave a slot's numbers alone (with the reason recorded), `tolerance: Some(0.07)` pins a
+> slot's own drift margin, and `note:` remains free prose. `provenance:` is tool-owned — never
+> hand-edit it. The per-rig `scale:` is also authored in `rigs.ron` now (the game reads it at spawn;
+> the old per-module constants are deleted), as are the measurement anchors `root_node:` /
+> `contact_joints:` for rigs whose exporters do not use the conventional `Root`/`foot_l` names.
 
 | glTF index | Name | Slot | Authored speed |
 |---|---|---|---|
@@ -191,7 +202,11 @@ The rules these numbers impose:
 > `valkyrie_strafe_l` (13) carries the body toward **−X**, which for a +Z-facing
 > rig is the character's own **right**; `valkyrie_strafe_r` (14) goes left. The
 > code wires them by measured direction and ignores the names. Please swap the
-> names in the source asset when these are next touched.
+> names in the source asset when these are next touched. The bench's top-down
+> trace draws every clip's *measured* travel arrow beside its asset name, so the
+> swap is visible at a glance rather than folklore — and
+> `the_strafe_clips_travel_the_directions_the_guide_records` pins the measured
+> directions in CI.
 
 #### Animations we still need
 
@@ -221,7 +236,7 @@ Ranked by how visible the gap is in play:
 |---|---|---|
 | Clips (glTF index) | 0 attack · 1 idle · 2 walk | `src/crab/setup.rs` |
 | Native body length | ~3.06 m (Blender units) | `src/crab/mod.rs:65` |
-| Render scale | 0.15 (→ ~0.46 m, ~1.5 ft tall) | `src/crab/mod.rs:66` |
+| Render scale | 0.15 (→ ~0.46 m, ~1.5 ft tall) | `assets/emerge/rigs.ron` (`scale:`) |
 | Playback rates | walk ×7, attack ×4 (clips authored very long) | `src/crab/mod.rs` |
 | Clip switching | all three clips stay resident and cross-fade by weight — none is ever rewound, so a crab flickering between states no longer restarts its scuttle | `src/anim/`, `src/crab/movement.rs` |
 | Facing | model's forward axis is the standard −Z after surface-nav seating; rotate at spawn if yours differs | `src/crab/mod.rs` |

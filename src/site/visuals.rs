@@ -38,9 +38,6 @@ const AVATAR_HALF: f32 = 0.25;
 const AVATAR_SPEED: f32 = 3.2;
 /// How close counts as arrived, so an avatar does not jitter on its target.
 const ARRIVE_EPS: f32 = 0.15;
-/// The Valkyrie figurine's authored render scale (mirrors `squad`'s, so an operative is the same size
-/// here as in the field).
-const FIGURINE_SCALE: f32 = 1.13;
 /// Time constant for smoothing an operative's measured speed before it drives the blend. Matches the
 /// squad's `LOCO_SMOOTH_TAU` in spirit: long enough that a single stuttery frame cannot flip the pose.
 const AVATAR_LOCO_TAU: f32 = 0.12;
@@ -864,7 +861,7 @@ fn spawn_site_geometry(
             WorldAssetRoot(
                 assets.load(GltfAssetLabel::Scene(0).from_asset("characters/valkyrie.glb")),
             ),
-            Transform::from_scale(Vec3::splat(FIGURINE_SCALE))
+            Transform::from_scale(Vec3::splat(valk.scale))
                 .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
             // Without this the operatives stand in the GLB's BIND POSE — arms straight out, rifle
             // held level at chest height a metre to the side, which reads as a lance run through
@@ -924,10 +921,10 @@ fn spawn_site_geometry(
                     // Constant per person and stable across boots — see `IdleLook`.
                     IdleLook(crate::util::hash01_u32(cast.0 as u32) < 0.5),
                     WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(rig.glb()))),
-                    // Same authored scale and the same half-turn as the operatives: these rigs share
-                    // the Valkyrie's MPFB2 lineage and face glTF +Z, so an unrotated body would stand
-                    // with its back to the camera.
-                    Transform::from_scale(Vec3::splat(FIGURINE_SCALE))
+                    // Same authored scale (from the manifest) and the same half-turn as the
+                    // operatives: these rigs share the Valkyrie's MPFB2 lineage and face glTF +Z, so
+                    // an unrotated body would stand with its back to the camera.
+                    Transform::from_scale(Vec3::splat(staff_anim.get(rig).scale))
                         .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
                     anim::BlendSource {
                         graph: staff_anim.get(rig).graph.clone(),

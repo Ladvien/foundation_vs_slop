@@ -73,6 +73,8 @@ const MOVING_ABOVE: f32 = 0.05;
 pub struct RigAnim {
     pub graph: Handle<AnimationGraph>,
     pub slots: Arc<[anim::Slot]>,
+    /// The manifest's render scale for this body's model child (1.13; see rigs.ron).
+    pub scale: f32,
 }
 
 /// Every staff rig's animation, built once at `Startup`.
@@ -108,7 +110,7 @@ fn build_one(
     };
     let (graph, slots) = crate::rigs::build(spec, assets, graphs);
     debug_assert_eq!(slots.len(), SLOTS);
-    Some(RigAnim { graph, slots })
+    Some(RigAnim { graph, slots, scale: spec.scale })
 }
 
 /// `Startup`. Must run before any staff body spawns, since the spawn clones the graph handle onto the

@@ -291,6 +291,162 @@ mod stepped {
         }
     }
 
+    /// **The anim bench's measurement pipeline runs headless**: entering the tab loads the
+    /// manifest, the selected rig enters the queue, and one stepped frame later its report exists —
+    /// the same three systems the watcher and check-all feed.
+    #[test]
+    fn the_anim_bench_measures_the_selected_rig_through_the_queue() {
+        let mut app = harness::build_headless(&root(), "untitled_map", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        for _ in 0..2 {
+            app.update();
+        }
+        app.world_mut().insert_resource(emerge_mapper::tiles::Mode::Anim);
+        for _ in 0..10 {
+            app.update();
+        }
+        let bench = app.world().resource::<emerge_mapper::anim_tab::BenchState>();
+        assert!(bench.loaded, "entering the tab did not load the manifest");
+        let selected = bench
+            .names()
+            .get(bench.selected)
+            .map(|s| (*s).to_owned())
+            .unwrap_or_else(|| panic!("no selectable rig"));
+        let reports = app
+            .world()
+            .resource::<emerge_mapper::anim_watch::BenchReports>();
+        assert!(
+            reports.by_rig.contains_key(&selected),
+            "no report for `{selected}` after ten frames"
+        );
+    }
+
+    /// **The staged figure spawns configured and retires with the tab, without a panic.**
+    ///
+    /// What this deliberately does NOT assert: the streamed-in `AnimationPlayer` reaching the
+    /// blender. Scene assets never finish loading in this deviceless harness — the tiles preview's
+    /// root sits at `Loading` forever too — so the attach-and-hold contract is pinned where a real
+    /// player exists: `emerge-anim`'s `a_held_phase_freezes_while_weights_still_ease`. What IS this
+    /// harness's to check: the stage spawns for the selection with the manifest's scale and the
+    /// blend source, the scrub state survives frames, and retiring it does not panic — which it
+    /// did, until `build_headless` gave the render-sync hooks their ledger (see the harness).
+    #[test]
+    fn the_staged_figure_spawns_configured_and_retires() {
+        let mut app = harness::build_headless(&root(), "untitled_map", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        for _ in 0..2 {
+            app.update();
+        }
+        app.world_mut().insert_resource(emerge_mapper::tiles::Mode::Anim);
+        for _ in 0..3 {
+            app.update();
+        }
+        {
+            let mut bench = app
+                .world_mut()
+                .resource_mut::<emerge_mapper::anim_tab::BenchState>();
+            let at = bench
+                .names()
+                .iter()
+                .position(|n| *n == "valkyrie")
+                .unwrap_or_else(|| panic!("no valkyrie in the manifest"));
+            bench.selected = at;
+        }
+        for _ in 0..5 {
+            app.update();
+        }
+        let (transform, source) = app
+            .world_mut()
+            .query_filtered::<(&Transform, &emerge_anim::BlendSource), With<emerge_mapper::anim_stage::BenchStage>>()
+            .iter(app.world())
+            .next()
+            .map(|(t, s)| (*t, s.slots.len()))
+            .unwrap_or_else(|| panic!("no staged figure for the valkyrie"));
+        assert_eq!(
+            transform.translation,
+            emerge_mapper::anim_stage::BENCH_STAGE,
+            "the figure stands at the bench's own corner"
+        );
+        assert!(
+            (transform.scale.x - 1.13).abs() < 1.0e-6,
+            "the figure wears the manifest's scale, not a literal"
+        );
+        assert_eq!(source, 10, "all ten valkyrie slots are resident");
+
+        // The default mix is every gait; pausing into a scrub holds across frames without panic.
+        {
+            let mut scrub = app
+                .world_mut()
+                .resource_mut::<emerge_mapper::anim_stage::BenchScrub>();
+            assert_eq!(scrub.mixed.len(), 6, "six gaits in the default mix");
+            scrub.playing = false;
+            scrub.phase = 0.25;
+        }
+        for _ in 0..5 {
+            app.update();
+        }
+        let scrub = app
+            .world()
+            .resource::<emerge_mapper::anim_stage::BenchScrub>();
+        assert!(!scrub.playing && (scrub.phase - 0.25).abs() < 1.0e-6);
+
+        // Leaving the tab retires the stage — lights and all, which is the despawn that used to
+        // panic the deviceless world.
+        app.world_mut().insert_resource(emerge_mapper::tiles::Mode::Map);
+        for _ in 0..3 {
+            app.update();
+        }
+        let remaining = app
+            .world_mut()
+            .query_filtered::<bevy::prelude::Entity, With<emerge_mapper::anim_stage::BenchStage>>()
+            .iter(app.world())
+            .count();
+        assert_eq!(remaining, 0, "the staged figure must not outlive the tab");
+    }
+
+    /// **The plots paint pixels for a gait rig.** Select the valkyrie (the one rig with gaits),
+    /// step, and the height plot's image must be non-uniform — a curve landed.
+    #[test]
+    fn the_plots_paint_the_valkyrie_curves() {
+        let mut app = harness::build_headless(&root(), "untitled_map", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        for _ in 0..2 {
+            app.update();
+        }
+        app.world_mut().insert_resource(emerge_mapper::tiles::Mode::Anim);
+        for _ in 0..3 {
+            app.update();
+        }
+        // Point the selection at the valkyrie by name — the manifest's order is the list's order.
+        {
+            let mut bench = app
+                .world_mut()
+                .resource_mut::<emerge_mapper::anim_tab::BenchState>();
+            let at = bench
+                .names()
+                .iter()
+                .position(|n| *n == "valkyrie")
+                .unwrap_or_else(|| panic!("no valkyrie in the manifest"));
+            bench.selected = at;
+        }
+        for _ in 0..5 {
+            app.update();
+        }
+        let plots = app.world().resource::<emerge_mapper::anim_plots::BenchPlots>();
+        assert_eq!(plots.plotted.as_deref(), Some("valkyrie"));
+        let handle = plots.height.clone();
+        let images = app.world().resource::<Assets<bevy::image::Image>>();
+        let data = images
+            .get(&handle)
+            .and_then(|i| i.data.as_ref())
+            .unwrap_or_else(|| panic!("the height plot has no pixel data"));
+        let first = &data[0..4];
+        assert!(
+            data.chunks(4).any(|px| px != first),
+            "the height plot is uniform — no curve was painted"
+        );
+    }
+
     /// And on a kit, which is a different library, a different policy and 45 more pieces.
     #[test]
     fn the_editor_boots_on_the_site_kit() {

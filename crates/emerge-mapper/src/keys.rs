@@ -138,6 +138,13 @@ pub enum Action {
     // ── Anim ─────────────────────────────────────────────────────────────────
     PrevRig,
     NextRig,
+    AdoptMeasured,
+    UndoBench,
+    RedoBench,
+    ScrubBack,
+    ScrubFwd,
+    PlayPause,
+    CheckAllRigs,
 }
 
 /// One binding: the key, when it is live, and how to say it.
@@ -346,6 +353,20 @@ pub const BINDINGS: &[Binding] = &[
     // the two tabs are never live together, so the same key means one thing in each.
     b(Action::PrevRig, KeyCode::ArrowUp, false, Context::Anim, "up", "previous rig"),
     b(Action::NextRig, KeyCode::ArrowDown, false, Context::Anim, "down", "next rig"),
+
+    // Enter is the Tiles tab's Accept too — same legal cross-context share as the arrows above.
+    b(Action::AdoptMeasured, KeyCode::Enter, false, Context::Anim, "Enter", "adopt measured values into rigs.ron"),
+    // One row, two chords, same as the Map and Tiles undo pairs.
+    bs(Action::UndoBench, KeyCode::KeyZ, true, false, Context::Anim, "Z", "undo / redo the last write"),
+    bs(Action::RedoBench, KeyCode::KeyZ, true, true, Context::Anim, "Z", "undo / redo the last write"),
+
+    // The staged figure's phase scrub. Left/Right are held keys (`pressed`, like panning), Shift
+    // slows the sweep — read in the handler, the `rotate_mesh` precedent, so `needs_shift` stays
+    // `None` and the escape hatch keeps working.
+    b(Action::ScrubBack, KeyCode::ArrowLeft, false, Context::Anim, "left", "scrub phase (Shift: fine)"),
+    b(Action::ScrubFwd, KeyCode::ArrowRight, false, Context::Anim, "right", "scrub phase (Shift: fine)"),
+    b(Action::PlayPause, KeyCode::Space, false, Context::Anim, "Space", "play / scrub"),
+    b(Action::CheckAllRigs, KeyCode::KeyC, false, Context::Anim, "C", "check all rigs"),
 ];
 
 const fn b(
@@ -698,6 +719,8 @@ mod tests {
             Action::RotateMeshX, Action::RotateMeshY, Action::RotateMeshZ,
             Action::FocusCandidates, Action::FocusLibrary,
             Action::PrevRig, Action::NextRig,
+            Action::AdoptMeasured, Action::UndoBench, Action::RedoBench,
+            Action::ScrubBack, Action::ScrubFwd, Action::PlayPause, Action::CheckAllRigs,
             Action::TurnPieceLeft, Action::TurnPieceRight,
         ];
         assert_eq!(

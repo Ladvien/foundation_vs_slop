@@ -234,15 +234,10 @@ pub struct FigurineSource(pub Handle<WorldAsset>);
 #[derive(Component)]
 struct Recolored;
 
-/// Scale VALKYRIE to a ~6 ft squad member: her rig exports at 1.61 m native, so 1.61 × 1.13 ≈ 1.82 m —
-/// about three-quarters of the 2.4 m (~8 ft) ceiling, a believable human proportion. Deliberately the
-/// same ~1.82 m target the old greybox used, so the floating health bar (`health::BAR_Y`) and every other
-/// eyeballed offset stay calibrated. Uniform, so the slung rifle and the autogib fragments stay
-/// proportional. Collision (`UNIT_HALF_EXTENTS`) stays narrower than the visual on purpose — see below.
-const FIGURINE_SCALE: f32 = 1.13;
 /// Where an SCP-150 gestation lump sits on a unit, in the unit root's local space.
 ///
-/// **Pre-`FIGURINE_SCALE`**, because the lump is a child of the unit root and that root carries the 1.13.
+/// **Pre-render-scale**, because the lump is a child of the unit root and that root carries the
+/// manifest's 1.13 (`rigs.ron`, the valkyrie's `scale`).
 /// The figurine's mesh spans world y −0.284..1.820, so the sternum is around world 1.15 → local
 /// `1.15 / 1.13 ≈ 1.02`. The shared 0.45 this replaced landed at world 0.51 — mid-thigh — despite being
 /// documented as "upper body / chest area". A chestburster wants the chest. Cosmetic; tune by devshot.
@@ -284,14 +279,14 @@ pub(crate) const RIG: &str = "valkyrie";
 
 /// Laser bolts spawn from this fixed offset in the unit's **rotated, unscaled** local frame:
 /// `laser::fire_laser` computes `unit.translation + unit.rotation * MUZZLE_OFFSET`. Deliberately
-/// **decoupled from the cosmetic `FIGURINE_SCALE`** — the muzzle's world position feeds the hashed sim
+/// **decoupled from the cosmetic render scale** — the muzzle's world position feeds the hashed sim
 /// (combat targeting: front-arc gate + nearest-enemy rank, and bolt spawn), so it must NOT move when the
 /// art is rescaled. Tying it to the model scale is what let the VALKYRIE swap silently shift targeting and
 /// wipe the squad on a borderline world (`search_calibration::the_authored_brains_produce_a_real_encounter_on_every_world`).
 /// Kept a `const` (never read from the async-loaded rifle bone) for the same determinism reason.
 ///
 /// The value reproduces the SHIPPED muzzle world offset **exactly**: the old greybox fired from
-/// `transform_point((0.18, 0.3, -0.55))` at `FIGURINE_SCALE` 2.6 — and `transform_point` applies scale
+/// `transform_point((0.18, 0.3, -0.55))` at the greybox's render scale 2.6 — and `transform_point` applies scale
 /// (component-wise) then rotation then translation, so that is `rotation * (2.6 * (0.18, 0.3, -0.55))`.
 /// `f32` multiply is commutative, so folding the 2.6 into the constant is bit-identical — the deterministic
 /// core stays frozen (golden hash unchanged) across the mesh swap.
@@ -304,11 +299,11 @@ pub const MUZZLE_OFFSET: Vec3 = Vec3::new(0.18 * 2.6, 0.3 * 2.6, -0.55 * 2.6);
 /// — the gameplay light cone points along the unit's facing, not the model (see `light`).
 const FLASHLIGHT_GLB: &str = "low_poly_flashlight/low_poly_flashlight.glb";
 // Chest-height, forward — VALKYRIE's hands rest at her slung rifle across the torso, so the flashlight
-// reads as held there. Pre-scale local (child of the unit, ×`FIGURINE_SCALE`); scale bumped to keep the
+// reads as held there. Pre-scale local (child of the unit, × the manifest render scale); scale bumped to keep the
 // same world size now that the unit scale dropped from 2.6 to 1.13. Cosmetic — tune by devshot.
 const FLASHLIGHT_OFFSET: Vec3 = Vec3::new(0.15, 1.2, -0.35);
 // The flashlight model exports ~2.5 units tall, so this lands it at a handheld ~0.2 m once multiplied
-// through `FIGURINE_SCALE` (child of the unit). Cosmetic — tune by devshot.
+// through the unit's render scale (child of the unit). Cosmetic — tune by devshot.
 const FLASHLIGHT_SCALE: f32 = 0.08;
 /// Pitch that tips the model's local +Y (lens up) forward to the unit's −Z; tuned by screenshot.
 const FLASHLIGHT_PITCH: f32 = -std::f32::consts::FRAC_PI_2;
@@ -358,7 +353,7 @@ const SPAWN_SPIRAL: [(i32, i32); 13] = [
 /// sides. See the artist notes in `docs/artist_guide.md`.
 
 /// `(duration s, phase offset, cycle distance world u)` for each gait clip, measured off
-/// `assets/characters/valkyrie.glb` and scaled by [`FIGURINE_SCALE`]:
+/// `assets/characters/valkyrie.glb` and scaled by the manifest's `scale` (1.13):
 ///
 /// * **duration** — the clip's own length.
 /// * **phase offset** — where this clip sits relative to `walk`, from cross-correlating both feet's
@@ -441,6 +436,9 @@ const DIR_HOLD_SPEED: f32 = 0.05;
 pub(crate) struct ValkyrieAnim {
     pub(crate) graph: Handle<AnimationGraph>,
     pub(crate) slots: Arc<[anim::Slot]>,
+    /// The manifest's render scale — 1.61 m native × 1.13 ≈ 1.82 m, the ~6 ft squaddie every
+    /// eyeballed offset (`health::BAR_Y`, `rig_watch`) is calibrated to. See rigs.ron.
+    pub(crate) scale: f32,
 }
 
 /// Cosmetically smoothed locomotion parameters for one figurine. Lives on the `FigurineModel` child
@@ -481,7 +479,7 @@ pub(crate) fn build_valkyrie_anim(
     let (graph, slots) = crate::rigs::build(rig, &assets, &mut graphs);
     debug_assert_eq!(slots.len(), N_SLOTS);
 
-    commands.insert_resource(ValkyrieAnim { graph, slots });
+    commands.insert_resource(ValkyrieAnim { graph, slots, scale: rig.scale });
 }
 
 /// Populate [`MASK_LOWER_BODY`] from the first VALKYRIE skeleton to finish streaming in. Every figurine
@@ -808,7 +806,7 @@ pub(crate) fn spawn_unit(
         ),
         FigurineSource(figurine.clone()),
         Visibility::default(),
-        Transform::from_translation(pos).with_scale(Vec3::splat(FIGURINE_SCALE)),
+        Transform::from_translation(pos).with_scale(Vec3::splat(valk.scale)),
         avian3d::prelude::TransformInterpolation,
     ));
     unit.insert(crate::parasite::host_infestation_bundle(

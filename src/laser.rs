@@ -298,7 +298,7 @@ pub(crate) fn fire_laser(
             continue;
         }
         // Rotated + translated but NOT scaled: the muzzle world offset is fixed gameplay geometry,
-        // independent of the cosmetic `FIGURINE_SCALE` (see `squad::MUZZLE_OFFSET`). This reproduces the
+        // independent of the cosmetic render scale (see `squad::MUZZLE_OFFSET`). This reproduces the
         // shipped greybox's muzzle world position bit-for-bit, so the mesh swap leaves combat unperturbed.
         let muzzle = unit.translation + unit.rotation * crate::squad::MUZZLE_OFFSET;
         // The unit faces its travel direction (local -Z); it can only shoot what's in front of it.
