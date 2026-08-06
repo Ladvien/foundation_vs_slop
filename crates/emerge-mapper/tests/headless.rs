@@ -104,6 +104,39 @@ fn the_editor_plugin_registers_the_tool_resources_its_systems_take() {
     }
 }
 
+/// **`Cmd+2` is the bare `2` with a subject**, and the two do not shadow each other.
+///
+/// The same pairing `S`/`Cmd+S` and `Z`/`Cmd+Z` already rely on: `just_pressed` refuses a bare
+/// binding while the modifier is down and a modified one while it is not, so one key can carry both
+/// "the Tiles tab" and "the Tiles tab, about this piece". Asserted here because getting it wrong is
+/// silent — the bare key would simply switch tabs and the send would look unimplemented.
+#[test]
+fn sending_a_tile_to_be_edited_is_the_modified_tab_key() {
+    use emerge_mapper::keys::{binding, just_pressed, Action, Context, MOD_KEYS};
+
+    let send = binding(Action::EditTile);
+    let tab = binding(Action::TilesTab);
+    assert_eq!(send.key, tab.key, "it is the tab key, with a modifier");
+    assert!(send.needs_mod && !tab.needs_mod);
+
+    // Bare `2` switches tabs and does not send.
+    let mut input = ButtonInput::<KeyCode>::default();
+    input.press(KeyCode::Digit2);
+    assert!(just_pressed(&input, Context::Map, Action::TilesTab));
+    assert!(!just_pressed(&input, Context::Map, Action::EditTile));
+
+    // A FRESH input, not `clear()`: `clear` keeps the pressed state, so an already-held key never
+    // re-registers as just-pressed and the assertion below would fail for an unrelated reason.
+    let mut input = ButtonInput::<KeyCode>::default();
+    input.press(MOD_KEYS[0]);
+    input.press(KeyCode::Digit2);
+    assert!(just_pressed(&input, Context::Map, Action::EditTile));
+    assert!(
+        !just_pressed(&input, Context::Map, Action::TilesTab),
+        "the modified chord must not also switch tabs, or the send would be one frame of a tab change"
+    );
+}
+
 /// **The move tool has a key, and it is one the left hand can reach without moving.**
 ///
 /// `B` is the last free letter in the `Q W E R T / A S D F G / Z X C V B` cluster. It is also the

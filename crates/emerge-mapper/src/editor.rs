@@ -60,8 +60,16 @@ const HEAVY_SCENE: usize = 5_000_000;
 
 #[derive(Resource)]
 pub struct EditorState {
-    /// Index into the library — what a click would place.
-    pub brush: usize,
+    /// Index into the library — what a click would place, or `None` for **nothing armed**.
+    ///
+    /// This was a bare `usize`, so index 0 was always armed and "I am not placing anything" was a
+    /// state the editor could not be in. There was therefore nothing for `Esc` to clear, and no way to
+    /// put the cursor over the map without a piece following it — which matters most for the two tools
+    /// that are *about* pieces already on the map rather than about the palette.
+    ///
+    /// `None` is a real answer everywhere it is read: no ghost, no placement, no highlighted row, and
+    /// `BRUSH  none` on the status block.
+    pub brush: Option<usize>,
     pub brush_yaw: f32,
     pub status: String,
     /// The ghost's running commentary. Written every frame; never mixed with [`Self::status`].
@@ -91,6 +99,16 @@ pub struct EditorState {
     renaming: Option<String>,
     /// What can be undone, most recent last. See [`Undo`].
     undo: Vec<Undo>,
+    /// What has been undone and can be put back, most recent last.
+    ///
+    /// **Cleared by any new edit**, which is what stops a redo from replaying an operation against a
+    /// map that has moved on underneath it — `Undo` addresses rows by index, so a redo across an
+    /// intervening edit would put pieces back at positions that now mean something else.
+    ///
+    /// It is **not** cleared by changing tabs. The Tiles tab keeps its own pair (`ImportState::undo`)
+    /// and neither can reach the other's, so leaving a tab is not a reason to forget what you did on
+    /// it.
+    redo: Vec<Undo>,
     /// Which tool the next click belongs to. See [`Tool`].
     ///
     /// **The tool here and the drag in [`RemovalDrag`] / [`MoveDrag`]**, not one struct:
@@ -98,6 +116,19 @@ pub struct EditorState {
     /// frame would tear the whole palette down and rebuild it at frame rate. This changes twice per
     /// use; those change every frame, so they live elsewhere.
     pub tool: Tool,
+}
+
+impl EditorState {
+    /// **Record an edit**, and drop anything that was waiting to be redone.
+    ///
+    /// One place, so no edit site can forget the second half. A redo stack that survived a new edit
+    /// would replay operations against a map that had moved on under them — and `Undo` addresses rows
+    /// by index, so "put these three back at 7, 8 and 9" means something different once anything else
+    /// has been inserted or removed.
+    fn record(&mut self, op: Undo) {
+        self.undo.push(op);
+        self.redo.clear();
+    }
 }
 
 /// **What a click on the map does.** Exactly one of these at a time.
@@ -167,12 +198,18 @@ struct RemovalTile;
 ///
 /// Only placements, and deliberately: the map's *size* and *name* are settings rather than edits, and
 /// folding them into the same stack would mean Ctrl+Z sometimes resized the map when an author meant
-/// to take back a crate. One undo stack, one kind of thing in it.
+/// to take back a crate. One kind of thing in the stacks.
+///
+/// # Closed under inversion, which is what makes redo one mechanism instead of two
+///
+/// Every variant's inverse is another variant of this same enum: undoing an `Added` produces a
+/// `RemovedMany` holding what it took out, undoing that produces an `Added` again, and `Moved`,
+/// `Turned` and `Pinned` each invert to themselves carrying the other value. So [`apply`] does the
+/// work and *returns the inverse*, and undo and redo are the same function reading opposite stacks —
+/// rather than a second body that has to be kept in step with the first.
 enum Undo {
     /// Remove the last `count` placements — the inverse of a place or a fill.
     Added { count: usize },
-    /// Put a removed placement back where it was, at its old index.
-    Removed { index: usize, placed: Box<Placed> },
     /// Put back everything one drag took out. **Ascending by index**, which is what lets them go
     /// back in that order and each land where it came from — an earlier row returning first shifts
     /// the later ones into place. One entry for the whole rectangle, on the same argument the fill
@@ -183,12 +220,29 @@ enum Undo {
     /// author performed is one act to take back. `emerge_core::stack::Moved` records what changed and
     /// `restore_moved` is its inverse, so the undo cannot drift from the move.
     Moved { moved: emerge_core::stack::Moved },
+    /// Remove exactly these rows again — the inverse of [`Undo::RemovedMany`].
+    ///
+    /// **Not `Added { count }`.** That one removes the *last* `count`, which is right for a place or a
+    /// fill because both append; but `RemovedMany` puts rows back at their original indices, which are
+    /// not generally the tail. Redoing a delete through `Added` would have removed whatever happened to
+    /// be at the end of the list instead.
+    RemoveAt { indices: Vec<usize> },
+    /// Put a placement's yaw back. Its own inverse, carrying the other angle.
+    Turned { index: usize, yaw: f32 },
+    /// Put a placement's pin back, reason included. Its own inverse.
+    Pinned {
+        index: usize,
+        owned: bool,
+        because: Option<String>,
+    },
 }
 
 impl Default for EditorState {
     fn default() -> Self {
         EditorState {
-            brush: 0,
+            // Armed on the first piece at startup, as it has always been — an editor that opens with
+            // nothing selected makes the first click do nothing and reads as broken.
+            brush: Some(0),
             brush_yaw: 0.0,
             status: String::new(),
             hint: String::new(),
@@ -198,6 +252,7 @@ impl Default for EditorState {
             pinning: None,
             renaming: None,
             undo: Vec::new(),
+            redo: Vec::new(),
             tool: Tool::default(),
         }
     }
@@ -403,6 +458,7 @@ impl Plugin for EditorPlugin {
                     drive_place.run_if(not_typing).run_if(in_map_mode),
                     drive_removal.run_if(not_typing).run_if(in_map_mode),
                     drive_move.run_if(not_typing).run_if(in_map_mode),
+                    hide_carried.run_if(in_map_mode),
                     drive_ghost.run_if(in_map_mode),
                     fade_ghost,
                     style_rows,
@@ -825,7 +881,7 @@ fn on_row_click(
     let Ok(row) = rows.get(activate.entity) else {
         return;
     };
-    state.brush = row.0;
+    state.brush = Some(row.0);
     // **Arming a piece returns to placing.** Picking something to place is an unambiguous statement
     // that you are done deleting or moving, and a tool is otherwise only escapable by a key — which a
     // borderless-fullscreen window can have taken from it before Bevy ever sees it. A mode you can
@@ -1085,7 +1141,7 @@ fn style_rows(
     mut rows: Query<(&PaletteRow, &Hovered, &mut BackgroundColor)>,
 ) {
     for (row, hovered, mut bg) in &mut rows {
-        let want = if row.0 == state.brush {
+        let want = if state.brush == Some(row.0) {
             ROW_SELECTED
         } else if hovered.0 {
             Color::srgb(0.16, 0.15, 0.14)
@@ -1104,10 +1160,11 @@ fn refresh_status(
     state: Res<EditorState>,
     mut fields: Query<(&Field, &mut Text, &mut TextColor)>,
 ) {
-    let brush = project
-        .library
-        .descriptors
-        .get(state.brush)
+    // `none` covers both "nothing armed" and "the armed index no longer exists", which read the same
+    // to an author and want the same word.
+    let brush = state
+        .brush
+        .and_then(|ix| project.library.descriptors.get(ix))
         .map(|d| d.id.as_str())
         .unwrap_or("none");
 
@@ -1193,6 +1250,7 @@ pub fn not_typing(
     cell: Res<crate::tiles::CellEdit>,
     note: Res<crate::tiles::NoteEdit>,
     width: Res<crate::tiles::ScaleEdit>,
+    height: Res<crate::tiles::HeightEdit>,
 ) -> bool {
     state.renaming.is_none()
         && state.pinning.is_none()
@@ -1202,6 +1260,7 @@ pub fn not_typing(
         && !cell.typing()
         && !note.typing()
         && !width.typing()
+        && !height.typing()
 }
 
 /// **Decide who owns the keyboard, once, before anything reads a key.**
@@ -1223,6 +1282,7 @@ pub fn sense_context(
     cell: Res<crate::tiles::CellEdit>,
     note: Res<crate::tiles::NoteEdit>,
     width: Res<crate::tiles::ScaleEdit>,
+    height: Res<crate::tiles::HeightEdit>,
     mut live: ResMut<keys::Live>,
 ) {
     let typing = state.renaming.is_some()
@@ -1232,7 +1292,8 @@ pub fn sense_context(
         || filters.typing()
         || cell.typing()
         || note.typing()
-        || width.typing();
+        || width.typing()
+        || height.typing();
     let want = keys::Live(keys::live(mode.context(), typing));
     // Written through the change detector only when it actually moves, so `Live` staying put does not
     // wake every `resource_changed` reader in the editor every frame.
@@ -1514,7 +1575,7 @@ fn box_fill_between(
     project.dirty = true;
     // **One entry for the whole box**, the rule `RemovedMany` states: one act the author performed is
     // one act to take back.
-    state.undo.push(Undo::Added { count });
+    state.record(Undo::Added { count });
     state.status = if filled.truncated {
         format!(
             "filled {count} — stopped at the {} cell cap",
@@ -1781,14 +1842,21 @@ fn drive_removal(
 
     let (x0, z0) = (from.0.min(at.0), from.1.min(at.1));
     let (x1, z1) = (from.0.max(at.0), from.1.max(at.1));
-    let doomed: Vec<usize> = project
+    // **Each group the box touches goes whole**, the same rule the single delete follows: a rider
+    // whose host is inside the box but which is itself a few centimetres outside it would otherwise
+    // be left pointing at a placement that no longer exists, and `resolve_y` refuses the whole map for
+    // it. Sorted and deduped, so a group caught twice — box over both a table and its lamp — is
+    // removed once.
+    let mut doomed: Vec<usize> = project
         .map
         .placements
         .iter()
         .enumerate()
         .filter(|(_, p)| p.at.0 >= x0 && p.at.0 <= x1 && p.at.1 >= z0 && p.at.1 <= z1)
-        .map(|(i, _)| i)
+        .flat_map(|(i, _)| emerge_core::stack::group_of(&project.map, i))
         .collect();
+    doomed.sort_unstable();
+    doomed.dedup();
     if doomed.is_empty() {
         state.status = "nothing inside that box".to_owned();
         return;
@@ -1810,7 +1878,7 @@ fn drive_removal(
     items.reverse();
 
     let n = items.len();
-    state.undo.push(Undo::RemovedMany { items });
+    state.record(Undo::RemovedMany { items });
     project.dirty = true;
     // The whole chord, rendered by the census — naming just the modifier told the author to press
     // `Cmd`, which is not a thing anyone can do.
@@ -1901,7 +1969,16 @@ fn drive_place(
         return;
     };
 
-    let Some(d) = project.library.descriptors.get(state.brush).cloned() else {
+    // **Nothing armed places nothing** — and takes no drag with it, so a press-and-sweep over the map
+    // with the palette cleared leaves no box hanging on screen waiting for a release.
+    let Some(d) = state
+        .brush
+        .and_then(|ix| project.library.descriptors.get(ix))
+        .cloned()
+    else {
+        if drag.from.is_some() {
+            drag.from = None;
+        }
         return;
     };
     let free = keys::mod_held(&keyboard);
@@ -2001,7 +2078,7 @@ fn drive_place(
     };
     project.map.placements.push(placed);
     project.dirty = true;
-    state.undo.push(Undo::Added { count: 1 });
+    state.record(Undo::Added { count: 1 });
 
     if let Some(e) = spawn_piece(
         &mut commands,
@@ -2050,6 +2127,9 @@ fn keys(
     time: Res<Time>,
     mut repeat: ResMut<keys::Repeat>,
     mut move_drag: ResMut<MoveDrag>,
+    // The Tiles tab's state, written by exactly one action here — `EditTile`. See `send_to_tiles`.
+    mut mode: ResMut<crate::tiles::Mode>,
+    mut import: ResMut<crate::tiles::ImportState>,
 ) {
 
     // One clock for every key that repeats while held — see `keys::repeating`.
@@ -2057,6 +2137,18 @@ fn keys(
 
     if keys::just_pressed(&keyboard, live.0, Action::Undo) {
         undo(&mut commands, &assets, &mut project, &mut state, &placed);
+        return;
+    }
+
+    if keys::just_pressed(&keyboard, live.0, Action::Redo) {
+        redo(&mut commands, &assets, &mut project, &mut state, &placed);
+        return;
+    }
+
+    // **Map to Tiles, carrying the piece.** Before the branches below, because they consume the
+    // window and camera singles.
+    if keys::just_pressed(&keyboard, live.0, Action::EditTile) {
+        send_to_tiles(window, camera, &project, &mut state, &mut mode, &mut import);
         return;
     }
 
@@ -2106,18 +2198,30 @@ fn keys(
         return;
     }
 
-    // **One Esc for every tool**, including a piece still in hand — which goes back exactly where it
-    // came from rather than being dropped wherever the cursor happens to be.
-    if keys::just_pressed(&keyboard, live.0, Action::Cancel) && state.tool != Tool::Place {
-        let was_holding = move_drag.held.is_some();
-        move_drag.held = None;
-        let leaving = state.tool.label();
-        state.tool = Tool::Place;
-        state.status = if was_holding {
-            "put back — move mode off".to_owned()
-        } else {
-            format!("{leaving} off")
-        };
+    // **One Esc, and it undoes the most specific thing first.**
+    //
+    // A piece in hand, then an armed tool, then the armed piece. Each press steps back out one layer,
+    // so `Esc` always means "not that" without the author having to work out which of three states
+    // they are in — and pressing it twice from the move tool leaves them with a clear palette rather
+    // than doing nothing the second time.
+    if keys::just_pressed(&keyboard, live.0, Action::Cancel) {
+        if move_drag.held.is_some() {
+            move_drag.held = None;
+            state.status = "put back".to_owned();
+            return;
+        }
+        if state.tool != Tool::Place {
+            let leaving = state.tool.label();
+            state.tool = Tool::Place;
+            state.status = format!("{leaving} off");
+            return;
+        }
+        // **Clearing the selection is a real state**, not a no-op: with nothing armed the ghost goes,
+        // a click places nothing, and the palette shows no highlighted row — so the cursor can be over
+        // the map without a piece following it.
+        if state.brush.take().is_some() {
+            state.status = "selection cleared".to_owned();
+        }
         return;
     }
 
@@ -2235,18 +2339,40 @@ fn delete_index(
         state.status = "nothing here to remove".to_owned();
         return;
     }
-    let removed = project.map.placements.remove(index);
-    for (entity, marker) in placed {
-        if marker.0 == removed.id {
-            commands.entity(entity).despawn();
+    // **A stack goes whole.** `Placed::on` is a hard reference, so removing a host on its own left
+    // its riders pointing at a placement that no longer existed — and `resolve_y` then refused the
+    // whole map with *"rests on `table@3`, which does not exist"*. The editor could not draw it, the
+    // file could not be reloaded, and the only thing an author had done was delete a table.
+    //
+    // The same set the move tool carries, from the same function, so "this piece and what it holds up"
+    // means one thing in both verbs.
+    let group = emerge_core::stack::group_of(&project.map, index);
+    let head = project.map.placements[index].id.clone();
+
+    // **Back to front.** Removing an earlier row shifts every later one down, so a forward pass would
+    // take the wrong pieces the moment the group held more than one — the rule the box removal below
+    // already follows, and now the single delete needs it too.
+    let mut ordered = group.clone();
+    ordered.sort_unstable();
+    let mut items: Vec<(usize, Box<Placed>)> = Vec::with_capacity(ordered.len());
+    for i in ordered.iter().rev() {
+        let removed = project.map.placements.remove(*i);
+        for (entity, marker) in placed {
+            if marker.0 == removed.id {
+                commands.entity(entity).despawn();
+            }
         }
+        items.push((*i, Box::new(removed)));
     }
+    // Ascending, which is the order `Undo::RemovedMany` puts them back in — an earlier row returning
+    // first shifts the later ones into place.
+    items.reverse();
     project.dirty = true;
-    state.status = format!("removed {}", removed.id);
-    state.undo.push(Undo::Removed {
-        index,
-        placed: Box::new(removed),
-    });
+    state.status = match items.len() {
+        1 => format!("removed {head}"),
+        n => format!("removed {head} and {} on it", n - 1),
+    };
+    state.record(Undo::RemovedMany { items });
 }
 
 /// Take back the last edit.
@@ -2261,18 +2387,76 @@ fn undo(
         state.status = "nothing to undo".to_owned();
         return;
     };
-    match op {
+    if let Some(inverse) = apply(commands, assets, project, state, placed, op) {
+        state.redo.push(inverse);
+    }
+}
+
+/// Take back the last thing undone.
+fn redo(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    project: &mut Project,
+    state: &mut EditorState,
+    placed: &Query<(Entity, &Placement)>,
+) {
+    let Some(op) = state.redo.pop() else {
+        state.status = "nothing to redo".to_owned();
+        return;
+    };
+    // **`undo.push`, not `record`.** `record` clears the redo stack, which is right for a *new* edit
+    // and exactly wrong here: redoing the first of five undone steps would throw away the other four,
+    // so a redo could never be repeated. Redo moves an entry between the stacks; it does not author
+    // anything.
+    if let Some(inverse) = apply(commands, assets, project, state, placed, op) {
+        state.undo.push(inverse);
+    }
+}
+
+/// **Perform one reversal, and hand back the reversal of it.**
+///
+/// The single body behind both stacks — see [`Undo`] on why the enum is closed under inversion. A
+/// `None` return means the operation could not be applied and nothing should be pushed anywhere,
+/// which is how a half-applied edit is kept out of the other stack.
+fn apply(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    project: &mut Project,
+    state: &mut EditorState,
+    placed: &Query<(Entity, &Placement)>,
+    op: Undo,
+) -> Option<Undo> {
+    let inverse = match op {
         Undo::Added { count } => {
             let keep = project.map.placements.len().saturating_sub(count);
-            let gone: Vec<String> = project.map.placements.drain(keep..).map(|p| p.id).collect();
+            let taken: Vec<(usize, Box<Placed>)> = project
+                .map
+                .placements
+                .drain(keep..)
+                .enumerate()
+                .map(|(n, p)| (keep + n, Box::new(p)))
+                .collect();
+            let gone: Vec<String> = taken.iter().map(|(_, p)| p.id.clone()).collect();
             for (entity, marker) in placed {
                 if gone.contains(&marker.0) {
                     commands.entity(entity).despawn();
                 }
             }
             state.status = format!("undid {} placement(s)", gone.len());
+            Undo::RemovedMany { items: taken }
         }
         Undo::Moved { moved } => {
+            // **The inverse is where they are NOW**, read before the restore puts them back. `moved`
+            // records where they came *from*; redoing needs where they went *to*.
+            let now = emerge_core::stack::Moved {
+                was: moved
+                    .was
+                    .iter()
+                    .filter_map(|(i, _, _)| {
+                        project.map.placements.get(*i).map(|p| (*i, p.at, p.on.clone()))
+                    })
+                    .collect(),
+            };
             // `restore_moved` is the recorded inverse, so the undo cannot drift from the move: it
             // replays exactly the `(at, on)` pairs the move displaced, rather than recomputing where
             // things "should" go and hoping the two agree.
@@ -2311,22 +2495,26 @@ fn undo(
                 Err(e) => {
                     state.status = format!("put back, but cannot draw it: {e}");
                     error!("{e}");
-                    return;
+                    // Nothing goes on the other stack: the map moved but could not be drawn, and
+                    // offering to redo a state the author cannot see would compound it.
+                    return None;
                 }
             }
             state.status = format!("put back {} placement(s)", moved.was.len());
+            Undo::Moved { moved: now }
         }
         Undo::RemovedMany { items } => {
             let n = items.len();
             // Rows back first, all of them, and only THEN drawn: how high a piece sits is a question
             // about the finished map, so asking `heights` mid-restore would answer it against a map
             // that is still missing some of its own contents.
-            let mut at_indices = Vec::with_capacity(n);
+            let mut at_indices: Vec<usize> = Vec::with_capacity(n);
             for (index, p) in items {
                 let at = index.min(project.map.placements.len());
                 project.map.placements.insert(at, *p);
                 at_indices.push(at);
             }
+            let at_indices_for_inverse = at_indices.clone();
             match heights(project) {
                 Ok(ys) => {
                     for at in at_indices {
@@ -2352,40 +2540,79 @@ fn undo(
                     error!("{e}");
                 }
             }
-        }
-        Undo::Removed { index, placed: p } => {
-            state.status = format!("restored {}", p.id);
-            let id = p.id.clone();
-            let descriptor = p.descriptor.clone();
-            // Back at its old index, so a location referring to it by position in the list is not
-            // quietly re-pointed at its neighbour. **Into the map before it is drawn**, because what
-            // it rests on decides how high it goes and that is a question about the map.
-            let at = index.min(project.map.placements.len());
-            project.map.placements.insert(at, *p);
-
-            // Drawn from the finished map. A failure here is loud rather than a piece that is in the
-            // file and not on the screen — the two disagreeing is exactly the state an author cannot
-            // see and would go on editing around.
-            match heights(project) {
-                Ok(ys) => {
-                    let d = project.library.get(&descriptor).cloned();
-                    let placed = project.map.placements.get(at).map(|q| (q.at, q.yaw));
-                    if let (Some(d), Some((pat, pyaw)), Some(&y)) = (d, placed, ys.get(at)) {
-                        if let Some(e) =
-                            spawn_piece(commands, assets, &d, pat, pyaw, project.map.origin, y)
-                        {
-                            commands.entity(e).insert(Placement(id));
-                        }
-                    }
-                }
-                Err(e) => {
-                    state.status = format!("restored {id} but cannot draw it: {e}");
-                    error!("{e}");
-                }
+            Undo::RemoveAt {
+                indices: at_indices_for_inverse,
             }
         }
-    }
+        Undo::RemoveAt { indices } => {
+            // Descending, so removing an earlier row cannot shift a later one out from under us —
+            // the rule every removal in this file follows.
+            let mut ordered = indices.clone();
+            ordered.sort_unstable();
+            let mut items: Vec<(usize, Box<Placed>)> = Vec::with_capacity(ordered.len());
+            for i in ordered.iter().rev() {
+                if *i >= project.map.placements.len() {
+                    continue;
+                }
+                let removed = project.map.placements.remove(*i);
+                for (entity, marker) in placed {
+                    if marker.0 == removed.id {
+                        commands.entity(entity).despawn();
+                    }
+                }
+                items.push((*i, Box::new(removed)));
+            }
+            items.reverse();
+            state.status = format!("removed {} placement(s) again", items.len());
+            Undo::RemovedMany { items }
+        }
+        Undo::Turned { index, yaw } => {
+            let Some(p) = project.map.placements.get_mut(index) else {
+                return None;
+            };
+            let was = std::mem::replace(&mut p.yaw, yaw);
+            let (id, at, descriptor) = (p.id.clone(), p.at, p.descriptor.clone());
+            for (entity, marker) in placed {
+                if marker.0 == id {
+                    commands.entity(entity).despawn();
+                }
+            }
+            if let Ok(ys) = heights(project) {
+                if let (Some(d), Some(&y)) = (project.library.get(&descriptor).cloned(), ys.get(index))
+                {
+                    if let Some(e) = spawn_piece(commands, assets, &d, at, yaw, project.map.origin, y)
+                    {
+                        commands.entity(e).insert(Placement(id.clone()));
+                    }
+                }
+            }
+            state.status = format!("{id} back to {yaw:.0} deg");
+            Undo::Turned { index, yaw: was }
+        }
+        Undo::Pinned {
+            index,
+            owned,
+            because,
+        } => {
+            let Some(p) = project.map.placements.get_mut(index) else {
+                return None;
+            };
+            let was_owned = std::mem::replace(&mut p.owned, owned);
+            let was_because = std::mem::replace(&mut p.owned_because, because);
+            state.status = format!(
+                "{} {}",
+                p.id,
+                if owned { "pinned again" } else { "unpinned" }
+            );
+            Undo::Pinned {
+                index,
+                owned: was_owned,
+                because: was_because,
+            }
+        }
+    };
     project.dirty = true;
+    Some(inverse)
 }
 
 /// Pin or unpin the placement nearest the cursor.
@@ -2405,8 +2632,14 @@ fn toggle_pin(
         return;
     };
     if p.owned {
+        let because = p.owned_because.clone();
         p.owned = false;
         p.owned_because = None;
+        state.record(Undo::Pinned {
+            index,
+            owned: true,
+            because,
+        });
         project.dirty = true;
         state.status = format!("unpinned {}", p.id);
     } else {
@@ -2439,9 +2672,15 @@ fn turn_under_cursor(
     let Some(p) = project.map.placements.get_mut(index) else {
         return;
     };
+    // Recorded before it moves — the entry carries the angle to go back to.
+    let was_yaw = p.yaw;
     p.yaw = (p.yaw + step).rem_euclid(360.0);
     let (id, at, yaw, descriptor) = (p.id.clone(), p.at, p.yaw, p.descriptor.clone());
     project.dirty = true;
+    state.record(Undo::Turned {
+        index,
+        yaw: was_yaw,
+    });
 
     for (entity, marker) in placed {
         if marker.0 == id {
@@ -2464,6 +2703,88 @@ fn turn_under_cursor(
         }
     }
     state.status = format!("{id} now at {yaw:.0} deg");
+}
+
+/// **A carried piece leaves its spot.**
+///
+/// Picking something up should look like picking something up: the ghost follows the cursor and the
+/// hole it came out of stays a hole, exactly as it does when placing a new piece. Without this the
+/// original sat where it was and the ghost hovered elsewhere, so a move read as *copying* right up to
+/// the moment it committed.
+///
+/// **The whole group goes**, not just the anchor — a table hidden with its lamp still floating in mid
+/// air would be worse than not hiding anything.
+///
+/// Visibility only: the map row, the entity and the file are all untouched while a piece is in hand,
+/// which is what makes `Esc` a matter of putting the visibility back rather than reversing a move.
+/// See [`MoveDrag`].
+fn hide_carried(
+    drag: Res<MoveDrag>,
+    project: Res<Project>,
+    mut placed: Query<(&Placement, &mut Visibility)>,
+) {
+    let carried: Vec<String> = drag
+        .held
+        .as_ref()
+        .and_then(|id| project.map.placements.iter().position(|p| &p.id == id))
+        .map(|ix| emerge_core::stack::group_of(&project.map, ix))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|i| project.map.placements.get(i).map(|p| p.id.clone()))
+        .collect();
+
+    for (marker, mut vis) in &mut placed {
+        let want = if carried.iter().any(|id| *id == marker.0) {
+            Visibility::Hidden
+        } else {
+            // Nothing else in this crate manages a placement's visibility — `spawn_descriptor` gives
+            // it `Inherited` and leaves it there — so restoring unconditionally cannot fight another
+            // system for it. Written only on a change, or this marks the component every frame.
+            Visibility::Inherited
+        };
+        if *vis != want {
+            *vis = want;
+        }
+    }
+}
+
+/// **Send the piece under the cursor to the Tiles tab**, and go there.
+///
+/// The gap this closes: a map is where you *notice* a piece is wrong — too big, floating, facing the
+/// wrong way — and until now the only route from noticing to fixing was to read its id off the status
+/// block, switch tabs, and find it in a list of forty. The map already knows which piece you mean.
+///
+/// It sends the **descriptor**, not the placement: what the Tiles tab edits is the definition, so
+/// every copy on the map moves with the edit. That is the point of editing it there rather than
+/// patching one placement.
+fn send_to_tiles(
+    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    project: &Project,
+    state: &mut EditorState,
+    mode: &mut crate::tiles::Mode,
+    import: &mut crate::tiles::ImportState,
+) {
+    let Some(index) = nearest_placement(window, camera, project) else {
+        state.status = "nothing here to edit".to_owned();
+        return;
+    };
+    let Some(id) = project.map.placements.get(index).map(|p| p.descriptor.clone()) else {
+        return;
+    };
+    // A placement naming a descriptor the library does not have is a map/library mismatch, and
+    // switching tabs to show an empty pane would report it as nothing happening.
+    if project.library.get(&id).is_none() {
+        state.status = format!("`{id}` is not in this library, so there is nothing to edit");
+        return;
+    }
+    // `selected_library_id` is the discriminant `ImportState::editing` follows, so setting it is the
+    // whole of "focus this piece" — the detail pane, the preview, the lattice and the fields all read
+    // through that one accessor.
+    import.selected_library_id = Some(id.clone());
+    import.status = format!("editing `{id}`, sent from the map");
+    *mode = crate::tiles::Mode::Tiles;
+    state.status = format!("`{id}` — opened on the tiles tab");
 }
 
 /// **Pick a piece up, and put it down** — the whole of [`Tool::Move`].
@@ -2595,13 +2916,13 @@ fn drive_move(
                 Err(e) => {
                     state.status = format!("moved, but cannot draw it: {e}");
                     error!("{e}");
-                    state.undo.push(Undo::Moved { moved });
+                    state.record(Undo::Moved { moved });
                     return;
                 }
             }
 
             let carried = moved.was.len();
-            state.undo.push(Undo::Moved { moved });
+            state.record(Undo::Moved { moved });
             let head = ids.first().cloned().unwrap_or_default();
             let how = if free { " free" } else { "" };
             state.status = if carried > 1 {
@@ -2723,6 +3044,12 @@ fn pin_reason_keys(
                     state.status = "a pin needs a reason; nothing was pinned".to_owned();
                     return;
                 }
+                // Unpinned is what it was — this field only opens for a piece being pinned.
+                state.record(Undo::Pinned {
+                    index,
+                    owned: false,
+                    because: None,
+                });
                 let pinned_id = project.map.placements.get_mut(index).map(|p| {
                     p.owned = true;
                     p.owned_because = Some(reason.clone());
@@ -2812,7 +3139,7 @@ fn generate(
     project.map.placements.extend(solved.placements);
     spawn_range(commands, assets, project, state, first);
     project.dirty = true;
-    state.undo.push(Undo::Added { count });
+    state.record(Undo::Added { count });
     state.status = format!(
         "continued the layout: {count} placed around {} pinned cell(s), from {} prototype(s)",
         solved.owned_cells,
@@ -2836,7 +3163,14 @@ fn flood_from_cursor(
     let Some(hit) = cursor_ground(&window, cam, cam_tf) else {
         return;
     };
-    let Some(brush) = project.library.descriptors.get(state.brush).cloned() else {
+    // Said rather than silent: `F` with nothing armed used to be indistinguishable from `F` not being
+    // bound, and now that the palette can be cleared it is a state an author can actually reach.
+    let Some(brush) = state
+        .brush
+        .and_then(|ix| project.library.descriptors.get(ix))
+        .cloned()
+    else {
+        state.status = "nothing armed to fill with — pick a piece from the palette".to_owned();
         return;
     };
 
@@ -2872,7 +3206,7 @@ fn flood_from_cursor(
     // undo stack that made them press Ctrl+Z 1,408 times would be a stack that models the code rather
     // than the work.
     if count > 0 {
-        state.undo.push(Undo::Added { count });
+        state.record(Undo::Added { count });
     }
     // A cap that stopped the fill has to say so — a truncated fill looks exactly like a finished one.
     state.status = if filled.truncated {
@@ -2956,7 +3290,8 @@ fn drive_ghost(
                     .position(|d| d.id == p.descriptor)
                     .map(|ix| (ix, p.yaw))
             }),
-        Tool::Place => Some((state.brush, state.brush_yaw)),
+        // Nothing armed is a real answer: no ghost, because no click is going to place anything.
+        Tool::Place => state.brush.map(|ix| (ix, state.brush_yaw)),
     };
     let Some((brush_ix, want_yaw)) = subject else {
         clear(&mut commands);

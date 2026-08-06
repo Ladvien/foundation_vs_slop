@@ -107,6 +107,55 @@ pub struct ImportState {
     pub selected_library_id: Option<String>,
     /// Packs the author has folded away.
     pub folded_packs: std::collections::HashSet<String>,
+    /// **This tab's history**, most recent last. See [`Snapshot`].
+    pub undo: Vec<Snapshot>,
+    /// What has been undone here and can be put back. Cleared by any new edit on this tab.
+    pub redo: Vec<Snapshot>,
+}
+
+/// **Everything one Tiles-tab edit can change**, taken before it changes.
+///
+/// The edits here are heterogeneous — a lattice cell, an id, a float, a whole mount, an entry added or
+/// removed — and ten inverse operations would be ten things to keep in step with the ten forward ones.
+/// A snapshot is one mechanism for all of them, and `commit_measured` already exists as the single
+/// writer to restore through, so undoing re-runs exactly the validation an edit does.
+///
+/// Both halves, because an edit lands in one or the other: a **library** entry is written to
+/// `library.ron`, while a **candidate** is `Persist::InMemory` until Accept. Snapshotting only the
+/// library would leave every pre-Accept edit — id, mount, size, height, lattice — outside the history.
+#[derive(Clone)]
+pub struct Snapshot {
+    pub measured: emerge_core::library::Library,
+    pub candidates: Vec<Candidate>,
+}
+
+/// How many steps this tab remembers.
+///
+/// Bounded because a snapshot is a whole library plus the candidate list, and a scan can turn up
+/// hundreds of candidates — an unbounded stack would grow without anything ever freeing it. Deep
+/// enough that it is not a limit anyone reaches by working normally.
+pub const TILE_HISTORY: usize = 64;
+
+impl ImportState {
+    /// The state as it stands, for the history.
+    pub fn snapshot(&self, project: &Project) -> Snapshot {
+        Snapshot {
+            measured: project.measured.clone(),
+            candidates: self.candidates.clone(),
+        }
+    }
+
+    /// **Record an edit on this tab**, and drop anything waiting to be redone.
+    ///
+    /// One place, so no edit site can forget the second half — the same rule `EditorState::record`
+    /// follows on the map side, and for the same reason.
+    pub fn record(&mut self, before: Snapshot) {
+        if self.undo.len() >= TILE_HISTORY {
+            self.undo.remove(0);
+        }
+        self.undo.push(before);
+        self.redo.clear();
+    }
 }
 
 
@@ -132,11 +181,25 @@ struct MapView(Option<crate::view::Rig>);
 /// Move the camera to the stage on entering the tab, and back on leaving.
 fn stage_camera(
     mode: Res<Mode>,
+    state: Res<ImportState>,
+    project: Res<Project>,
     mut rig: ResMut<crate::view::Rig>,
     mut saved: ResMut<MapView>,
+    mut staged: ResMut<StagedLift>,
 ) {
-    if !mode.is_changed() {
+    // **Re-centre when the piece moves up, as well as when the tab changes.** Raising a sconce to
+    // 2.4 m would otherwise push it out of a view framed on the floor, and the author's own edit would
+    // look like the preview breaking.
+    //
+    // On a *change*, never every frame: `rig.focus` is also written by `view::drive`, so holding it
+    // here would take panning away on this tab. A lift is a discrete event, exactly like a tab change.
+    let want_lift = state.placed(&project).map(stage_lift).unwrap_or(0.0);
+    let lift_moved = *mode == Mode::Tiles && (staged.0 - want_lift).abs() > 1e-4;
+    if !mode.is_changed() && !lift_moved {
         return;
+    }
+    if lift_moved {
+        staged.0 = want_lift;
     }
     match *mode {
         Mode::Tiles => {
@@ -148,7 +211,7 @@ fn stage_camera(
                     goal_yaw: rig.goal_yaw,
                 });
             }
-            rig.focus = STAGE;
+            rig.focus = STAGE + Vec3::new(0.0, want_lift, 0.0);
             // Close enough that one grid cell fills the view — the tab is about a single tile.
             rig.height = TILE_VIEW_HEIGHT;
         }
@@ -383,6 +446,7 @@ fn note_keys(
                 let Some((target, raw)) = edit.active.take() else { return };
                 let text = raw.trim().to_owned();
                 // The piece this field was opened on, not whatever has the focus now.
+                let before = state.snapshot(&project);
                 let Some((d, where_to)) = state.at_target(&target, &mut project.measured) else {
                     state.status = "the description was not kept — that tile is gone".to_owned();
                     return;
@@ -390,12 +454,13 @@ fn note_keys(
                 // Empty clears, the same rule the edge and anchor tokens follow — one keystroke path
                 // for setting and unsetting rather than a second control for "remove".
                 d.note = (!text.is_empty()).then(|| text.clone());
+                state.record(before);
                 let said = if text.is_empty() {
                     "description cleared".to_owned()
                 } else {
                     format!("described: {text}")
                 };
-                state.status = persist(&mut project, where_to, said);
+    state.status = persist(&mut project, where_to, said);
             }
             Key::Escape => {
                 edit.active = None;
@@ -432,6 +497,13 @@ fn note_keys(
 /// Width alone determines it — scale is one number by construction, so depth and height follow.
 ///
 /// [`Align::scale`]: emerge_core::descriptor::Align::scale
+/// **The lift the staged camera is currently framed on.** See `stage_camera`.
+///
+/// Its own resource so the re-centre fires on a *change* rather than every frame — holding
+/// `rig.focus` would take panning away on this tab, which is the camera's, not this system's.
+#[derive(Resource, Default)]
+pub struct StagedLift(pub f32);
+
 #[derive(Resource, Default)]
 pub struct ScaleEdit {
     /// The piece this was opened against, and the digits so far. The target is captured at open for
@@ -566,18 +638,21 @@ fn scale_keys(
                         return;
                     }
                 };
+                // Taken before the write, which is the only moment the old value still exists.
+                let before = state.snapshot(&project);
                 let Some((d, _)) = state.at_target(&target, &mut project.measured) else {
                     state.status = "the width was not kept — that tile is gone".to_owned();
                     return;
                 };
                 d.align.scale = scale;
+                state.record(before);
                 let factor = scale.unwrap_or(1.0);
                 let said = format!(
                     "{id} — {:.2} x {:.2} m at {factor:.3}x",
                     mw * factor,
                     md * factor
                 );
-                state.status = persist(&mut project, where_to, said);
+    state.status = persist(&mut project, where_to, said);
             }
             Key::Escape => {
                 edit.active = None;
@@ -601,6 +676,198 @@ fn scale_keys(
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// **How far up a wall a piece hangs**, in metres. Clicking [`MountHeightField`] opens it.
+///
+/// `M` could put a piece *on* a wall and then not say where: [`mount_options`] is a list of literals,
+/// so `1.8` — eye level, for a sign — was the only wall height reachable without hand-editing the kit's
+/// `library.ron`. A picture at 1.2 m and a sconce at 2.1 m were both a text editor away.
+///
+/// Only offered for the two mounts that carry a height. For the rest the field is not drawn at all
+/// rather than drawn dead: `emerge_core::descriptor::mount_height` is the one place that decides
+/// which those are, and a disabled control is a question the panel does not need to ask.
+#[derive(Resource, Default)]
+pub struct HeightEdit {
+    active: Option<(EditTarget, String)>,
+}
+
+impl HeightEdit {
+    pub fn typing(&self) -> bool {
+        self.active.is_some()
+    }
+}
+
+/// The clickable height field.
+#[derive(Component)]
+pub struct MountHeightField;
+
+/// The text inside it.
+#[derive(Component)]
+pub struct MountHeightReadout;
+
+fn on_mount_height_click(
+    activate: On<Activate>,
+    fields: Query<&MountHeightField>,
+    mut edit: ResMut<HeightEdit>,
+    mut state: ResMut<ImportState>,
+) {
+    if fields.get(activate.entity).is_err() {
+        return;
+    }
+    let Some(target) = state.target() else {
+        return;
+    };
+    // Starts empty, the same call `on_size_field_click` and `on_scale_click` make — seeding it means
+    // the first digit appends to the number already there.
+    edit.active = Some((target, String::new()));
+    state.status =
+        "height: type the metres up the wall, Enter to keep it, Esc to leave it alone".to_owned();
+}
+
+/// Digits and a single point, filtered at the keystroke — the rule `size_edit_keys` states.
+fn mount_height_keys(
+    mut events: MessageReader<KeyboardInput>,
+    mut edit: ResMut<HeightEdit>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<ImportState>,
+) {
+    for event in events.read() {
+        // Drained even while shut, so the click that opens this field cannot be typed into it.
+        if edit.active.is_none() || !event.state.is_pressed() {
+            continue;
+        }
+        match &event.logical_key {
+            Key::Enter => {
+                let Some((target, raw)) = edit.active.take() else {
+                    return;
+                };
+                let text = raw.trim().to_owned();
+                if text.is_empty() {
+                    state.status = "height unchanged — nothing typed".to_owned();
+                    return;
+                }
+                let Ok(want) = text.parse::<f32>() else {
+                    state.status = format!("`{text}` is not a number of metres");
+                    return;
+                };
+                // **Zero is legal, below the floor is not.** A wall marking at skirting height is a
+                // real thing to author; a negative one is under the floor, where no wall is.
+                if !want.is_finite() || want < 0.0 {
+                    state.status = format!("a wall mount cannot sit at {text} m");
+                    return;
+                }
+                let found = state
+                    .at_target(&target, &mut project.measured)
+                    .and_then(|(d, where_to)| {
+                        d.mount.as_ref().map(|m| (d.id.clone(), m.clone(), where_to))
+                    });
+                let Some((id, mount, where_to)) = found else {
+                    state.status = "the height was not kept — that tile is gone".to_owned();
+                    return;
+                };
+                // Refused by name rather than silently ignored: the field is only drawn for mounts
+                // that carry a height, so reaching here means the mount changed under an open field.
+                let Some(next) = emerge_core::descriptor::with_mount_height(&mount, want) else {
+                    state.status =
+                        format!("`{id}` is not on a wall, so it has no height to set");
+                    return;
+                };
+                let before = state.snapshot(&project);
+                let Some((d, _)) = state.at_target(&target, &mut project.measured) else {
+                    state.status = "the height was not kept — that tile is gone".to_owned();
+                    return;
+                };
+                d.mount = Some(next);
+                state.record(before);
+                let said = format!("{id} — {want:.2} m up the wall");
+    state.status = persist(&mut project, where_to, said);
+            }
+            Key::Escape => {
+                edit.active = None;
+                state.status = "height unchanged".to_owned();
+            }
+            Key::Backspace => {
+                if let Some((_, raw)) = edit.active.as_mut() {
+                    raw.pop();
+                }
+            }
+            Key::Character(ch) => {
+                if let Some((_, raw)) = edit.active.as_mut() {
+                    for c in ch.chars() {
+                        let ok = c.is_ascii_digit()
+                            || (c == '.' && !raw.contains('.') && !raw.is_empty());
+                        if ok && raw.len() < 6 {
+                            raw.push(c);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// **Take back the last Tiles edit, or put it back.**
+///
+/// One body for both directions: the current state is snapshotted, the stored one is restored, and the
+/// snapshot goes on the opposite stack — so undo and redo cannot drift apart the way two separate
+/// implementations would.
+///
+/// Restored **through `commit_measured`**, the one writer, so an undo re-runs the same layering,
+/// validation and atomic save an edit does. An undo that wrote the file by a second route could put
+/// back a library the forward path would have refused.
+fn tile_history_keys(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<crate::keys::Live>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<ImportState>,
+) {
+    let back = keys::just_pressed(&keyboard, live.0, Action::UndoTile);
+    let forward = keys::just_pressed(&keyboard, live.0, Action::RedoTile);
+    if !back && !forward {
+        return;
+    }
+    let taken = if back { state.undo.pop() } else { state.redo.pop() };
+    let Some(want) = taken else {
+        state.status = if back {
+            "nothing to undo on this tab".to_owned()
+        } else {
+            "nothing to redo on this tab".to_owned()
+        };
+        return;
+    };
+    let now = state.snapshot(&project);
+
+    state.candidates = want.candidates;
+    // Keep the selection inside the list it may just have shrunk.
+    state.selected = state.selected.min(state.candidates.len().saturating_sub(1));
+    match commit_measured(&mut project, want.measured) {
+        Ok(_) => {
+            if back {
+                state.redo.push(now);
+                state.status = "undid the last tile edit".to_owned();
+            } else {
+                state.undo.push(now);
+                state.status = "put the tile edit back".to_owned();
+            }
+        }
+        // Nothing was written — `commit_measured` refuses before it touches the disk — so the entry
+        // goes back where it came from rather than being lost to a failed restore.
+        Err(e) => {
+            let restore = Snapshot {
+                measured: now.measured,
+                candidates: now.candidates,
+            };
+            state.candidates = restore.candidates.clone();
+            if back {
+                state.undo.push(restore);
+            } else {
+                state.redo.push(restore);
+            }
+            state.status = format!("could not undo: {e}");
         }
     }
 }
@@ -811,6 +1078,8 @@ fn rotate_mesh(axis: RotateAxis, force: bool, project: &mut Project, state: &mut
         }
     };
 
+    // Taken before the write — the only moment the old value still exists.
+    let history_before = state.snapshot(&project);
     let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
         return;
     };
@@ -848,6 +1117,7 @@ fn rotate_mesh(axis: RotateAxis, force: bool, project: &mut Project, state: &mut
         "{} {},{},{} deg — now {w:.2} x {h:.2} x {dep:.2} m{lattice}",
         d.id, want.0, want.1, want.2
     );
+    state.record(history_before);
     state.status = persist(project, where_to, said);
 }
 
@@ -928,6 +1198,8 @@ fn scan_mesh(project: &mut Project, state: &mut ImportState) {
         }
     };
 
+    // Taken before the write — the only moment the old value still exists.
+    let history_before = state.snapshot(&project);
     let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
         return;
     };
@@ -941,6 +1213,7 @@ fn scan_mesh(project: &mut Project, state: &mut ImportState) {
         "scanned {mesh}: {} of {total} cells solid",
         cells.len()
     );
+    state.record(history_before);
     state.status = persist(project, where_to, said);
 }
 
@@ -1038,7 +1311,9 @@ fn apply_verb_to(
     };
     match verb {
         CellVerb::Solid => {
-            let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
+            // Taken before the write — the only moment the old value still exists.
+    let history_before = state.snapshot(&project);
+    let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
                 return;
             };
             // **A span is set, not toggled.** Toggling many cells at once flips a mixed row into its
@@ -1057,10 +1332,13 @@ fn apply_verb_to(
                 }
             };
             d.settle_lattice();
-            state.status = persist(project, where_to, said);
+    state.record(history_before);
+    state.status = persist(project, where_to, said);
         }
         CellVerb::Clear => {
-            let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
+            // Taken before the write — the only moment the old value still exists.
+    let history_before = state.snapshot(&project);
+    let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
                 return;
             };
             if let Some(grid) = d.subgrid.as_mut() {
@@ -1074,7 +1352,8 @@ fn apply_verb_to(
             } else {
                 format!("cell {},{},{} cleared", first.0, first.1, first.2)
             };
-            state.status = persist(project, where_to, said);
+    state.record(history_before);
+    state.status = persist(project, where_to, said);
         }
         CellVerb::Edge | CellVerb::Anchor => {
             let field = if verb == CellVerb::Edge {
@@ -1124,6 +1403,23 @@ pub struct LatticePick(pub Option<((u32, u32, u32), Option<emerge_core::descript
 /// The one place this geometry is written down, because `draw_subgrid`, the highlight and the picker
 /// must agree about where the lattice is to within nothing at all — a highlight half a cell off the
 /// box it highlights is worse than no highlight.
+/// **How far off the stage floor a piece hangs**, metres — its mount's own height, or zero.
+///
+/// The Tiles tab used to draw every piece sitting on the stage floor, whatever its mount said, so a
+/// sconce at 1.8 m and a floor crate were displayed identically and the height field's effect was
+/// invisible until the piece was placed on a map. This is the one number that makes the preview show
+/// what the map will show, and every part of the staged drawing reads it: the mesh, the lattice box,
+/// the picker, and the footprint rectangles.
+///
+/// `mount_height` is the only thing that decides which mounts have a height, so this cannot disagree
+/// with the field that edits it.
+fn stage_lift(d: &Descriptor) -> f32 {
+    d.mount
+        .as_ref()
+        .and_then(emerge_core::descriptor::mount_height)
+        .unwrap_or(0.0)
+}
+
 fn stage_box(state: &ImportState, project: &Project) -> Option<(Vec3, Vec3, (u32, u32, u32))> {
     // As placed: the box is the piece a click has to land on, and a stretched wall stands 2.40 m
     // whatever its measurement says.
@@ -1136,8 +1432,11 @@ fn stage_box(state: &ImportState, project: &Project) -> Option<(Vec3, Vec3, (u32
     let (w, dep) = emerge_core::descriptor::placed_footprint(d)?;
     // The same floor `draw_subgrid` gives a flat piece, so a decal can still be picked.
     let h = emerge_core::descriptor::placed_height(d).unwrap_or(0.0).max(0.05);
+    // **Lifted with the mesh.** The picker turns a click into a cell by dividing this box by `div`,
+    // so a box left on the floor under a mesh drawn 1.8 m up would hand every click the wrong cell —
+    // or no cell, since the ray would miss it entirely.
     Some((
-        STAGE - Vec3::new(w * 0.5, 0.0, dep * 0.5),
+        STAGE - Vec3::new(w * 0.5, -stage_lift(d), dep * 0.5),
         Vec3::new(w, h, dep),
         div,
     ))
@@ -1495,7 +1794,9 @@ fn refresh_cells(
     mut glyphs: Query<(&CellGlyph, &CellLayer, &mut Text, &mut TextColor), (Without<SelectedCellLine>, Without<NoteReadout>, Without<ScaleReadout>)>,
     mut lines: Query<(&mut Text, &mut TextColor), (With<SelectedCellLine>, Without<CellGlyph>, Without<NoteReadout>, Without<ScaleReadout>)>,
     mut notes: Query<(&mut Text, &mut TextColor), (With<NoteReadout>, Without<CellGlyph>, Without<SelectedCellLine>, Without<ScaleReadout>)>,
-    mut widths: Query<(&mut Text, &mut TextColor), (With<ScaleReadout>, Without<CellGlyph>, Without<SelectedCellLine>, Without<NoteReadout>)>,
+    mut widths: Query<(&mut Text, &mut TextColor), (With<ScaleReadout>, Without<CellGlyph>, Without<SelectedCellLine>, Without<NoteReadout>, Without<MountHeightReadout>)>,
+    height_edit: Res<HeightEdit>,
+    mut heights: Query<(&mut Text, &mut TextColor), (With<MountHeightReadout>, Without<CellGlyph>, Without<SelectedCellLine>, Without<NoteReadout>, Without<ScaleReadout>)>,
 ) {
     // As placed, so the cells shown are the cells that exist. See [`ImportState::placed`].
     let Some(d) = state.placed(&project) else {
@@ -1592,6 +1893,27 @@ fn refresh_cells(
         }
         if colour.0 != width_tint {
             colour.0 = width_tint;
+        }
+    }
+
+    // The wall-height caret, on the same argument as the two above: `rebuild_detail` only runs on
+    // `resource_changed::<ImportState>`, so without this the digits would not appear until something
+    // else touched the pane.
+    let height_text = match &height_edit.active {
+        Some((_, raw)) => format!("{raw}_"),
+        None => state
+            .editing(&project.measured)
+            .and_then(|e| e.mount.as_ref())
+            .and_then(emerge_core::descriptor::mount_height)
+            .map_or_else(|| "--".to_owned(), |h| format!("{h:.2}")),
+    };
+    let height_tint = if height_edit.typing() { ACCENT } else { TEXT };
+    for (mut text, mut colour) in &mut heights {
+        if text.0 != height_text {
+            text.0 = height_text.clone();
+        }
+        if colour.0 != height_tint {
+            colour.0 = height_tint;
         }
     }
 }
@@ -1960,6 +2282,9 @@ const FOOTPRINT: Color = Color::srgb(0.35, 0.72, 0.85);
 const CELLS: Color = Color::srgb(0.42, 0.38, 0.30);
 /// The volume, so a height is seen rather than only read.
 const EXTENT: Color = Color::srgb(0.24, 0.42, 0.50);
+/// The stage floor and the plumb line up to a wall-mounted piece — dimmer than anything describing
+/// the piece itself, because it is the reference rather than the subject.
+const GROUND: Color = Color::srgb(0.30, 0.28, 0.26);
 
 pub struct TilesPlugin;
 
@@ -1974,6 +2299,8 @@ impl Plugin for TilesPlugin {
             // Registered in the same commit as `scale_keys` and `rebuild_detail` read it — a missing
             // `Res<T>` panics its system in Bevy 0.19 rather than skipping it (`CLAUDE.md`).
             .init_resource::<ScaleEdit>()
+            .init_resource::<HeightEdit>()
+            .init_resource::<StagedLift>()
             .add_systems(Startup, (spawn_tab_strip, spawn_tiles_panel))
             .add_systems(
                 Update,
@@ -2033,6 +2360,8 @@ impl Plugin for TilesPlugin {
                 (
                     note_keys.in_set(crate::keys::Phase::Text),
                     scale_keys.in_set(crate::keys::Phase::Text),
+                    mount_height_keys.in_set(crate::keys::Phase::Text),
+                    tile_history_keys.in_set(crate::keys::Phase::Act),
                     refresh_cells,
                 ),
             )
@@ -2044,6 +2373,7 @@ impl Plugin for TilesPlugin {
             .add_observer(on_fill_header)
             .add_observer(on_note_click)
             .add_observer(on_scale_click)
+            .add_observer(on_mount_height_click)
             .add_observer(on_candidate_click)
             .add_observer(on_library_click)
             .add_observer(on_pack_click)
@@ -2435,16 +2765,44 @@ fn cycle_mount(
     }
     let surfaces: Vec<String> = project.vocab.surfaces.names().map(str::to_owned).collect();
     let options = mount_options(&surfaces);
+    // Taken before the write — the only moment the old value still exists.
+    let history_before = state.snapshot(&project);
     let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
         return;
     };
+    // **An authored height survives the cycle.** Every entry in `options` is a literal, so landing on
+    // a wall mount used to overwrite whatever height the piece had with the list's `1.8`. Tapping `M`
+    // past a wall mount and back therefore silently discarded an authored number — the same class of
+    // loss as `remeasure_rotated` zeroing `y_offset`s, which is a shipped bug this project has already
+    // paid for once.
+    //
+    // Matched on the *current* mount rather than the list's, so the carry happens only when there is
+    // genuinely a height to carry: floor -> wall gets the list's default, wall -> wall keeps yours.
+    let had = d.mount.as_ref().and_then(emerge_core::descriptor::mount_height);
+    // **Found by kind, not by value.** `Mount` compares its payload too, so once a height is
+    // authorable this lookup stops matching the moment it is anything but the list's `1.8` — and a
+    // miss here reads as `map_or(0, ..)`, which would silently reset the piece to `on floor`. Asking
+    // "does this option become the current mount if given the current height" is the same question
+    // without the payload getting in the way.
     let next = d
         .mount
         .as_ref()
-        .and_then(|m| options.iter().position(|o| o == m))
+        .and_then(|m| {
+            options.iter().position(|o| match had {
+                Some(h) => emerge_core::descriptor::with_mount_height(o, h).as_ref() == Some(m),
+                None => o == m,
+            })
+        })
         .map_or(0, |i| (i + 1) % options.len());
-    d.mount = Some(options[next].clone());
+    let mut want = options[next].clone();
+    if let Some(h) = had {
+        if let Some(kept) = emerge_core::descriptor::with_mount_height(&want, h) {
+            want = kept;
+        }
+    }
+    d.mount = Some(want);
     let said = format!("mount: {}", mount_label(d.mount.as_ref()));
+    state.record(history_before);
     state.status = persist(&mut project, where_to, said);
 }
 
@@ -2495,6 +2853,8 @@ fn commit_candidate(
     // surface check on the result, which is the right shape for that check: it is about the finished
     // set, so a piece that offers `worktop` makes another piece's `on worktop` legal, and checking it
     // in isolation would reject the pair that fixes each other.
+    // `trial` is a clone, so `project.measured` is still the pre-edit state here.
+    let before = state.snapshot(&project);
     let mut trial = project.measured.clone();
     trial.descriptors.push(descriptor.clone());
     match commit_measured(&mut project, trial) {
@@ -2505,6 +2865,7 @@ fn commit_candidate(
             state.candidates.remove(at);
             state.selected = at.min(state.candidates.len().saturating_sub(1));
             state.summary = format!("{} mesh(es) left to import", state.candidates.len());
+            state.record(before);
             state.status = format!(
                 "added `{}` — it is in the palette now",
                 descriptor.id
@@ -2569,9 +2930,11 @@ fn remove_tile(
     // `commit_measured` re-validates, which is what catches the interesting failure: removing a piece
     // can strand another that rested on a surface only it offered, and it can leave a policy patch
     // matching nothing.
+    let before = state.snapshot(&project);
     match commit_measured(&mut project, trial) {
         Ok(path) => {
             state.selected_library_id = None;
+            state.record(before);
             state.status = format!("removed `{id}` from the library");
             info!("removed `{id}` from {}", path.display());
         }
@@ -2608,6 +2971,8 @@ fn on_tag_chip(
     // library tile edited an invisible candidate: the chip did not light, the descriptor did not
     // change, and nothing reached disk. The one accessor exists so this cannot happen; missing it
     // here is what it looks like when it does.
+    // Taken before the write — the only moment the old value still exists.
+    let history_before = state.snapshot(&project);
     let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
         return;
     };
@@ -2624,6 +2989,7 @@ fn on_tag_chip(
         }
     }
     let said = format!("{} tags updated", chip.axis.label().to_lowercase());
+    state.record(history_before);
     state.status = persist(&mut project, where_to, said);
 }
 
@@ -2873,10 +3239,11 @@ fn drive_preview(
     assets: Res<AssetServer>,
     state: Res<ImportState>,
     project: Res<Project>,
-    previews: Query<(Entity, &PreviewOf), With<Preview>>,
+    previews: Query<(Entity, &PreviewOf, &Children), With<Preview>>,
+    mut transforms: Query<&mut Transform>,
 ) {
     let clear = |commands: &mut Commands| {
-        for (e, _) in &previews {
+        for (e, _, _) in &previews {
             commands.entity(e).despawn();
         }
     };
@@ -2903,40 +3270,65 @@ fn drive_preview(
         return;
     };
 
-    for (e, of) in &previews {
+    for (e, of, _) in &previews {
         if &of.0 != mesh {
             commands.entity(e).despawn();
         }
     }
-    if previews.iter().any(|(_, of)| &of.0 == mesh) {
-        return;
-    }
-    let scene: Handle<WorldAsset> = assets.load(GltfAssetLabel::Scene(0).from_asset(mesh.clone()));
+
     let a = &d.align;
     // The pivot shifts the model so its bounding-box centre lands on the placement point, which is
     // what makes the symmetric footprint an accurate reservation rather than an approximation.
     let pivot = a.pivot.unwrap_or((0.0, 0.0));
+    // **The transform a real placement applies**, which is `(scale, scale * stretch_y, scale)` — see
+    // `emerge_bevy::spawn_descriptor`.
+    let want = Transform::from_xyz(
+        STAGE.x - pivot.0,
+        // **The mount's height, then the mesh's own correction on top** — the same order
+        // `stack::datum` applies them in, so the staged piece stands where a placed one will.
+        STAGE.y + stage_lift(d) + a.y_offset.unwrap_or(0.0),
+        STAGE.z - pivot.1,
+    )
+    .with_scale(Vec3::new(
+        a.scale.unwrap_or(1.0),
+        a.scale.unwrap_or(1.0) * a.stretch_y.unwrap_or(1.0),
+        a.scale.unwrap_or(1.0),
+    ));
+    let want_rot = emerge_bevy::mesh_rotation(d);
+
+    // **Re-applied every frame, not written once at spawn.**
+    //
+    // This used to `return` here the moment a preview for this mesh existed — so the transform was
+    // whatever the descriptor said at the instant the piece was first staged, and every later edit to
+    // it changed nothing. Editing the size or the wall height moved the gizmos, which are redrawn from
+    // the descriptor each frame, and left the mesh where it was: the author saw *"the box markers get
+    // bigger"* and no piece move. `align.rotate` had the same hole — the mesh path does not change
+    // when a piece is turned, so the rotate chips only ever took effect on a freshly staged piece.
+    //
+    // Written only when it differs, because a `Transform` marked changed every frame re-propagates
+    // the whole hierarchy.
+    if let Some((e, _, children)) = previews.iter().find(|(_, of, _)| &of.0 == mesh) {
+        if let Ok(mut tf) = transforms.get_mut(e) {
+            if *tf != want {
+                *tf = want;
+            }
+        }
+        for child in children.iter() {
+            if let Ok(mut tf) = transforms.get_mut(child) {
+                if tf.rotation != want_rot {
+                    tf.rotation = want_rot;
+                }
+            }
+        }
+        return;
+    }
+
+    let scene: Handle<WorldAsset> = assets.load(GltfAssetLabel::Scene(0).from_asset(mesh.clone()));
     commands
         .spawn((
             Preview,
             PreviewOf(mesh.clone()),
-            Transform::from_xyz(
-                STAGE.x - pivot.0,
-                STAGE.y + a.y_offset.unwrap_or(0.0),
-                STAGE.z - pivot.1,
-            )
-            // **The transform a real placement applies**, which is
-            // `(scale, scale * stretch_y, scale)` — see `emerge_bevy::spawn_descriptor`. This was a
-            // uniform `splat(scale)`, so the preview showed an unstretched piece while
-            // `draw_subgrid` and `stage_box` sized their box off `placed_height`, which includes the
-            // stretch: the lattice floated above a mesh that did not reach it. The same class as the
-            // rotate bug on the child below — the one tab that edits these fields was the one place
-            // they did not all show.
-            .with_scale(Vec3::new(
-                a.scale.unwrap_or(1.0),
-                a.scale.unwrap_or(1.0) * a.stretch_y.unwrap_or(1.0),
-                a.scale.unwrap_or(1.0),
-            )),
+            want,
             Visibility::Inherited,
         ))
         // **The mesh child carries `align.rotate`**, the same way `emerge_bevy::spawn_world` does —
@@ -2947,10 +3339,7 @@ fn drive_preview(
         // rewrote the footprint, height, pivot and y_offset, `draw_preview_footprint` and
         // `draw_subgrid` redrew for the standing piece, and the mesh stayed lying down — offset by
         // the *rotated* pivot, so it also floated off its own footprint rectangle.
-        .with_child((
-            WorldAssetRoot(scene),
-            Transform::from_rotation(emerge_bevy::mesh_rotation(d)),
-        ));
+        .with_child((WorldAssetRoot(scene), Transform::from_rotation(want_rot)));
 }
 
 /// Draw the footprint the placement rules will reserve, and the grid cells it occupies.
@@ -2991,7 +3380,8 @@ fn draw_subgrid(state: Res<ImportState>, project: Res<Project>, mut gizmos: Gizm
         return;
     }
     let step = Vec3::new(w / dx as f32, h.max(0.05) / dy as f32, d / dz as f32);
-    let origin = STAGE - Vec3::new(w * 0.5, 0.0, d * 0.5);
+    // Lifted with the mesh — see `stage_lift`.
+    let origin = STAGE - Vec3::new(w * 0.5, -stage_lift(desc), d * 0.5);
 
     // The division planes, drawn as a wire box per column rather than per cell: a floor grid plus the
     // vertical extent reads as a lattice without 27 outlines competing with the mesh.
@@ -3042,11 +3432,29 @@ fn draw_preview_footprint(state: Res<ImportState>, project: Res<Project>, mut gi
         return;
     };
     let height = emerge_core::descriptor::placed_height(desc).unwrap_or(0.0);
+    let lift = stage_lift(desc);
 
-    // The mesh's own footprint, at the floor.
+    // **The ground, when the piece is not on it.** A lifted piece with nothing under it just looks
+    // centred differently — there is no cue that it is 1.8 m up rather than that the camera moved. So
+    // the floor it hangs above is drawn where it is, with a plumb line up to the piece: the gap
+    // between them IS the height, which is the thing the field is for.
+    if lift > 0.0 {
+        gizmos.rect(
+            Isometry3d::new(
+                STAGE + Vec3::new(0.0, 0.002, 0.0),
+                Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+            ),
+            Vec2::new(w, d),
+            GROUND,
+        );
+        gizmos.line(STAGE, STAGE + Vec3::new(0.0, lift, 0.0), GROUND);
+    }
+
+    let up = Vec3::new(0.0, lift, 0.0);
+    // The mesh's own footprint, at the plane it sits on.
     gizmos.rect(
         Isometry3d::new(
-            STAGE + Vec3::new(0.0, 0.005, 0.0),
+            STAGE + up + Vec3::new(0.0, 0.005, 0.0),
             Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
         ),
         Vec2::new(w, d),
@@ -3057,7 +3465,7 @@ fn draw_preview_footprint(state: Res<ImportState>, project: Res<Project>, mut gi
     let (cz, _) = emerge_core::grid::cells(d);
     gizmos.rect(
         Isometry3d::new(
-            STAGE + Vec3::new(0.0, 0.01, 0.0),
+            STAGE + up + Vec3::new(0.0, 0.01, 0.0),
             Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
         ),
         Vec2::new(cx as f32 * emerge_core::grid::SNAP, cz as f32 * emerge_core::grid::SNAP),
@@ -3070,7 +3478,7 @@ fn draw_preview_footprint(state: Res<ImportState>, project: Res<Project>, mut gi
     // shows a piece's height was drawn 4 km from the piece and nobody had ever seen it.
     if height > 0.0 {
         gizmos.cube(
-            Transform::from_translation(STAGE + Vec3::new(0.0, height * 0.5, 0.0))
+            Transform::from_translation(STAGE + up + Vec3::new(0.0, height * 0.5, 0.0))
                 .with_scale(Vec3::new(w, height, d)),
             EXTENT,
         );
@@ -3309,6 +3717,7 @@ fn rebuild_detail(
     cell_edit: Res<CellEdit>,
     note_edit: Res<NoteEdit>,
     scale_edit: Res<ScaleEdit>,
+    height_edit: Res<HeightEdit>,
     project: Res<Project>,
     panes: Query<Entity, With<DetailPane>>,
 ) {
@@ -3556,6 +3965,64 @@ fn rebuild_detail(
                     TextFont::from_font_size(11.0),
                 ));
             });
+
+            // **How far up, for the two mounts that have an up.**
+            //
+            // Drawn only when the mount carries a height — `mount_height` is the one place that
+            // decides which those are, so this cannot drift from the schema. A dead field beside
+            // `on floor` would be the panel asking a question with no answer.
+            if let Some(now) = d.mount.as_ref().and_then(emerge_core::descriptor::mount_height) {
+                let (height_text, height_tint) = match &height_edit.active {
+                    Some((_, raw)) => (format!("{raw}_"), ACCENT),
+                    None => (format!("{now:.2}"), TEXT),
+                };
+                p.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    margin: UiRect::top(Val::Px(crate::chrome::GAP_TIGHT)),
+                    ..default()
+                })
+                .with_children(|row| {
+                    row.spawn((
+                        Node {
+                            width: Val::Px(48.0),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                        Text::new("height"),
+                        TextColor(LABEL),
+                        TextFont::from_font_size(10.0),
+                    ));
+                    row.spawn((
+                        UiButton,
+                        Hovered::default(),
+                        MountHeightField,
+                        Node {
+                            width: Val::Px(62.0),
+                            // Stated: the text is empty the moment somebody clicks in, and an
+                            // unstated height lays this out at 7 logical px (`docs/ui.md` §5).
+                            min_height: Val::Px(18.0),
+                            padding: UiRect::axes(Val::Px(4.0), Val::Px(2.0)),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                        BackgroundColor(ROW_BG),
+                    ))
+                    .with_children(|f| {
+                        f.spawn((
+                            Text::new(height_text),
+                            TextColor(height_tint),
+                            TextFont::from_font_size(11.0),
+                            MountHeightReadout,
+                        ));
+                    });
+                    row.spawn((
+                        Text::new("  m up the wall, from the map floor"),
+                        TextColor(LABEL),
+                        TextFont::from_font_size(10.0),
+                    ));
+                });
+            }
 
             // A piece whose size is not measured yet has no derivable lattice, and the honest thing
             // is to say which piece and why rather than draw an empty grid that looks authored.
@@ -3958,6 +4425,76 @@ fn rebuild_detail(
 /// `library_path`, so under `--kit site` — whose `project.ron` stretches walls to a 2.40 m facility
 /// — toggling one lattice cell wrote that facility's wall height into the measurements file the kit
 /// exists to share, and the next load applied the patch again on top of it.
+/// **What `M` does to an authored wall height.** See `cycle_mount`.
+#[cfg(test)]
+mod mount_cycle_tests {
+    use emerge_core::descriptor::{
+        mount_height, mount_options, with_mount_height, Mount, OverlayHost,
+    };
+
+    /// The lookup `cycle_mount` performs, extracted so the rule can be tested without an `App`. It
+    /// must find the current mount **by kind**, ignoring the height payload.
+    fn position_of(options: &[Mount], current: &Mount) -> Option<usize> {
+        let had = mount_height(current);
+        options.iter().position(|o| match had {
+            Some(h) => with_mount_height(o, h).as_ref() == Some(current),
+            None => o == current,
+        })
+    }
+
+    /// **The reset this guards against.** `Mount` compares its payload, so a piece authored at 1.2 m
+    /// is not equal to the list's `OnWall { height: 1.8 }` — and a miss in `cycle_mount` falls through
+    /// to `map_or(0, ..)`, which is `OnFloor`. Before the height was authorable every wall mount was
+    /// 1.8 and this could not happen; the moment it is authorable, one tap of `M` would have taken a
+    /// picture off the wall and put it on the ground.
+    #[test]
+    fn a_piece_at_an_authored_height_is_still_found_in_the_list() {
+        let options = mount_options(&["worktop".to_owned()]);
+        for current in [
+            Mount::OnWall { height: 1.2 },
+            Mount::OnWall { height: 0.0 },
+            Mount::Overlay {
+                on: OverlayHost::Wall { height: 2.35 },
+            },
+        ] {
+            let at = position_of(&options, &current)
+                .unwrap_or_else(|| panic!("{current:?} is not in the offered list"));
+            assert!(
+                mount_height(&options[at]).is_some(),
+                "{current:?} matched {:?}, which is not a wall mount",
+                options[at]
+            );
+        }
+    }
+
+    /// Naive equality is what fails, which is worth pinning so nobody simplifies the lookup back.
+    #[test]
+    fn plain_equality_is_what_does_not_work() {
+        let options = mount_options(&[]);
+        let authored = Mount::OnWall { height: 1.2 };
+        assert!(
+            !options.iter().any(|o| *o == authored),
+            "if this ever passes, the offered list gained a 1.2 m entry and this test is stale"
+        );
+    }
+
+    /// A mount with no height is still found the plain way — the carry must not disturb the common
+    /// case, which is every piece that stands on the floor.
+    #[test]
+    fn a_mount_with_no_height_is_unaffected() {
+        let options = mount_options(&["worktop".to_owned()]);
+        for current in [
+            Mount::OnFloor,
+            Mount::OnCeiling,
+            Mount::OnSurface { class: "worktop".into() },
+        ] {
+            let at = position_of(&options, &current)
+                .unwrap_or_else(|| panic!("{current:?} is not in the offered list"));
+            assert_eq!(options[at], current);
+        }
+    }
+}
+
 /// **The `SIZE (m)` field's arithmetic.** See [`scale_for_width`].
 #[cfg(test)]
 mod scale_field_tests {

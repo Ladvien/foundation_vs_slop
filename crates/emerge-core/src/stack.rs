@@ -339,25 +339,7 @@ pub fn move_placement(
     })?;
     let from = anchor.at;
     let delta = (to.0 - from.0, to.1 - from.1);
-
-    // Everything that rides on the anchor, transitively.
-    let mut group = vec![index];
-    let mut seen: Vec<usize> = vec![index];
-    let mut frontier = vec![index];
-    while let Some(host) = frontier.pop() {
-        let host_id = map.placements[host].id.clone();
-        for (i, p) in map.placements.iter().enumerate() {
-            if seen.contains(&i) || p.on.as_deref() != Some(host_id.as_str()) {
-                continue;
-            }
-            seen.push(i);
-            group.push(i);
-            frontier.push(i);
-        }
-    }
-    // **A total order over a unique key.** `id` is unique within a map — `pick_at` already leans on
-    // that — so this does not depend on which order the frontier happened to pop.
-    group.sort_by(|a, b| map.placements[*a].id.cmp(&map.placements[*b].id));
+    let group = group_of(map, index);
 
     // Proposed, on a copy. Nothing below can leave `map` half-written.
     let mut next = map.clone();
@@ -408,6 +390,41 @@ pub fn move_placement(
         }
     }
     Ok(Moved { was })
+}
+
+/// **A placement and everything riding on it**, transitively — the set a move carries.
+///
+/// A mug on a tray on the table is in here, found by walking `Placed::on` breadth-first. Shared with
+/// the editor, which needs the same set *before* the move so it can take the whole group out of the
+/// map while it is in hand; computing it twice is how the thing you see picked up comes to differ
+/// from the thing that lands.
+///
+/// The result is sorted by `Placed::id` — unique within a map, which `pick_at` already leans on — so
+/// it does not depend on which order the walk happened to pop. `Map::validate` has already refused
+/// cycles, and the `seen` set means a malformed map terminates here rather than hanging.
+///
+/// Empty for an index the map does not have, rather than a panic: the editor holds a placement across
+/// frames in which an undo can remove it.
+pub fn group_of(map: &Map, index: usize) -> Vec<usize> {
+    if index >= map.placements.len() {
+        return Vec::new();
+    }
+    let mut group = vec![index];
+    let mut seen: Vec<usize> = vec![index];
+    let mut frontier = vec![index];
+    while let Some(host) = frontier.pop() {
+        let host_id = map.placements[host].id.clone();
+        for (i, p) in map.placements.iter().enumerate() {
+            if seen.contains(&i) || p.on.as_deref() != Some(host_id.as_str()) {
+                continue;
+            }
+            seen.push(i);
+            group.push(i);
+            frontier.push(i);
+        }
+    }
+    group.sort_by(|a, b| map.placements[*a].id.cmp(&map.placements[*b].id));
+    group
 }
 
 /// Put back exactly what [`move_placement`] recorded. The inverse, and the editor's undo.

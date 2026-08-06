@@ -486,6 +486,41 @@ pub fn mount_options(surfaces: &[String]) -> Vec<Mount> {
     out
 }
 
+/// **The height a mount carries**, metres, or `None` for one where the question does not arise.
+///
+/// Two variants carry a height and they carry the same one for the same reason — a wall's height is
+/// nobody else's to state, unlike the floor and the ceiling, which the map states. [`OverlayHost`]'s
+/// own doc says so.
+///
+/// This exists because the editor could put a piece **on** a wall and then not say how far up: the
+/// mount cycles through [`mount_options`], every entry of which is a literal, so `1.8` was the only
+/// wall height reachable without hand-editing the RON.
+pub fn mount_height(m: &Mount) -> Option<f32> {
+    match m {
+        Mount::OnWall { height } => Some(*height),
+        Mount::Overlay {
+            on: OverlayHost::Wall { height },
+        } => Some(*height),
+        _ => None,
+    }
+}
+
+/// The same mount at a different height — or `None` when it has no height to set.
+///
+/// Returns a new mount rather than mutating one, so a caller that asks the wrong question gets an
+/// answer it has to handle instead of a silent no-op on a piece it thought it had changed.
+pub fn with_mount_height(m: &Mount, height: f32) -> Option<Mount> {
+    match m {
+        Mount::OnWall { .. } => Some(Mount::OnWall { height }),
+        Mount::Overlay {
+            on: OverlayHost::Wall { .. },
+        } => Some(Mount::Overlay {
+            on: OverlayHost::Wall { height },
+        }),
+        _ => None,
+    }
+}
+
 /// A short label for a mount, for a panel that has one line to say it in.
 pub fn mount_label(mount: Option<&Mount>) -> String {
     match mount {
@@ -1062,6 +1097,71 @@ mod tests {
         d.align.scale = Some(0.6);
         assert_eq!(placed_footprint(&d), None);
         assert!(divisions(&d, 1).is_err(), "and the lattice is refused by name");
+    }
+
+    /// **Both wall mounts carry a height, and nothing else does.** The floor and the ceiling are the
+    /// map's to state; a wall's is not, which is why these two carry one and `OnFloor` does not.
+    #[test]
+    fn the_two_wall_mounts_are_the_ones_with_a_height() {
+        assert_eq!(mount_height(&Mount::OnWall { height: 1.6 }), Some(1.6));
+        assert_eq!(
+            mount_height(&Mount::Overlay {
+                on: OverlayHost::Wall { height: 2.1 }
+            }),
+            Some(2.1)
+        );
+        for no_height in [
+            Mount::OnFloor,
+            Mount::OnCeiling,
+            Mount::Tiled,
+            Mount::InOpening { clear: None },
+            Mount::OnSurface { class: "worktop".into() },
+            Mount::Overlay { on: OverlayHost::Floor },
+            Mount::Overlay { on: OverlayHost::Ceiling },
+        ] {
+            assert_eq!(mount_height(&no_height), None, "{no_height:?}");
+            assert_eq!(
+                with_mount_height(&no_height, 1.0),
+                None,
+                "{no_height:?} has no height to set, and must say so rather than no-op"
+            );
+        }
+    }
+
+    /// Setting a height keeps the mount it was set on. A poster must not become a sconce because
+    /// somebody typed a number at it.
+    #[test]
+    fn setting_a_height_does_not_change_which_mount_it_is() {
+        let poster = Mount::Overlay {
+            on: OverlayHost::Wall { height: 1.8 },
+        };
+        let moved = with_mount_height(&poster, 1.2).unwrap_or_else(|| panic!("has a height"));
+        assert!(matches!(
+            moved,
+            Mount::Overlay {
+                on: OverlayHost::Wall { .. }
+            }
+        ));
+        assert_eq!(mount_height(&moved), Some(1.2));
+
+        let sconce = with_mount_height(&Mount::OnWall { height: 1.8 }, 2.4)
+            .unwrap_or_else(|| panic!("has a height"));
+        assert!(matches!(sconce, Mount::OnWall { .. }));
+        assert_eq!(mount_height(&sconce), Some(2.4));
+    }
+
+    /// Every wall mount `mount_options` offers can be re-heighted — otherwise the editor could cycle
+    /// onto one it then had no way to adjust, which is the gap this pair closes.
+    #[test]
+    fn every_offered_wall_mount_can_be_re_heighted() {
+        for m in mount_options(&["worktop".to_owned()]) {
+            if mount_height(&m).is_some() {
+                assert!(
+                    with_mount_height(&m, 1.0).is_some(),
+                    "{m:?} reports a height but cannot be given one"
+                );
+            }
+        }
     }
 
     /// The surface mount is the one whose payload is a project token, so the options have to come

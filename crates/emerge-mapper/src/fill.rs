@@ -179,11 +179,23 @@ pub fn flood(
 ///
 /// # What it does not share with `flood`
 ///
-/// `flood` spreads from a point until something stops it, so "where does it end" is the map's answer.
-/// Here the author drew the edges, so the rectangle is the answer and there is no spreading — which
-/// also means a box drawn over a wall does not route around it. Occupied cells are **skipped**, not
-/// refused: the alternative is refusing the whole drag because one crate is in the way, and an author
-/// dragging a floor across a room is not asking about that crate.
+/// `flood` spreads from a point until something stops it, so "where does it end" is the map's answer,
+/// and a piece already standing somewhere is a wall to stop at. Here the author drew the edges, so the
+/// rectangle is the answer and there is no spreading.
+///
+/// # It fills UNDER what is already there
+///
+/// A cell holding something is not a cell that is spoken for. Laying a floor across a dressed room is
+/// the ordinary case, and the placement rules do not forbid it — `place_on_click` asks
+/// `stack::placement_at` whether the *mount* can be satisfied and nothing else, so a single click has
+/// always been able to put a floor tile under a crate. A fill that skipped those cells was answering a
+/// stricter question than the click path, which is the sort of disagreement `CLAUDE.md`'s one-path rule
+/// exists to prevent: the same piece, the same spot, two answers depending on the gesture.
+///
+/// The one thing skipped is a cell that already holds **this same descriptor**. That is not a rule
+/// about space, it is about idempotence: dragging twice over the same floor would otherwise lay a
+/// second identical tile inside the first, doubling the triangles and leaving a duplicate that only
+/// shows up as a cost. Re-dragging to catch a missed corner is a thing authors do.
 ///
 /// The refusals it *does* share are the ones about the brush rather than the region: a piece that
 /// mounts on a surface cannot be laid on open floor, and [`MAX_CELLS`] caps the batch. Both are
@@ -217,9 +229,13 @@ pub fn box_fill(
         ((c.0 as f32 + 0.5) * cell_x, (c.1 as f32 + 0.5) * cell_z)
     };
 
-    // Everything already placed blocks its own cell, keyed the same way `flood` keys it.
-    let occupied: std::collections::HashSet<(i64, i64)> =
-        map.placements.iter().map(|p| to_cell(p.at)).collect();
+    // Only this brush's own cells, so a re-drag is idempotent. Everything else is filled under.
+    let mine: std::collections::HashSet<(i64, i64)> = map
+        .placements
+        .iter()
+        .filter(|p| p.descriptor == brush.id)
+        .map(|p| to_cell(p.at))
+        .collect();
 
     let (cx0, cz0) = to_cell((x0, z0));
     let (cx1, cz1) = to_cell((x1, z1));
@@ -238,7 +254,7 @@ pub fn box_fill(
             if !(at.0 >= min_x && at.0 < max_x && at.1 >= min_z && at.1 < max_z) {
                 continue;
             }
-            if occupied.contains(&(cx, cz)) {
+            if mine.contains(&(cx, cz)) {
                 continue;
             }
             out.push(Placed {
@@ -253,8 +269,8 @@ pub fn box_fill(
 
     if out.is_empty() {
         return Err(
-            "nothing to fill there — that box is outside the map, or every cell in it is already \
-             taken"
+            "nothing to fill there — that box is outside the map, or every cell in it already has \
+             this piece in it"
                 .to_owned(),
         );
     }
@@ -351,11 +367,12 @@ mod tests {
         assert_eq!(names(&a), names(&b), "ids must not depend on the drag direction");
     }
 
-    /// Occupied cells are skipped, not refused — an author dragging a floor across a room is not
-    /// asking about the crate already standing in it. This is the one place `box_fill` deliberately
-    /// parts company with `flood`, which stops dead at an occupied cell.
+    /// **A floor goes under the furniture.** A cell holding something else is not spoken for — the
+    /// click path has always allowed it, and a fill that refused would answer a stricter question
+    /// than a click on the same spot. This is where `box_fill` parts company with `flood`, which
+    /// stops dead at an occupied cell because stopping is what a flood's edge means.
     #[test]
-    fn a_box_fills_around_what_is_already_there() {
+    fn a_box_fills_under_what_is_already_there() {
         let mut m = map((10.0, 3.0, 10.0));
         m.placements.push(Placed {
             id: "crate1".into(),
@@ -365,11 +382,34 @@ mod tests {
         });
         let f = box_fill(&m, &brush(1.0), ((0.2, 0.2), (2.8, 1.8)), 0.0, ids())
             .unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(f.placements.len(), 5, "the taken cell is skipped, the rest are filled");
+        assert_eq!(f.placements.len(), 6, "every cell in the box, the crate's included");
         assert!(
-            !f.placements.iter().any(|p| p.at == (0.5, 0.5)),
-            "nothing may be laid on top of the crate"
+            f.placements.iter().any(|p| p.at == (0.5, 0.5)),
+            "the floor must reach under the crate"
         );
+    }
+
+    /// **Re-dragging the same floor lays nothing twice.** Not a rule about space — a duplicate tile
+    /// inside the first is invisible except as doubled triangles, and catching a missed corner with a
+    /// second drag is a thing authors do.
+    #[test]
+    fn filling_the_same_area_twice_with_the_same_piece_adds_nothing() {
+        let mut m = map((10.0, 3.0, 10.0));
+        let b = brush(1.0);
+        let first = box_fill(&m, &b, ((0.2, 0.2), (2.8, 1.8)), 0.0, ids())
+            .unwrap_or_else(|e| panic!("{e}"));
+        m.placements.extend(first.placements);
+
+        let again = box_fill(&m, &b, ((0.2, 0.2), (2.8, 1.8)), 0.0, ids());
+        assert!(again.is_err(), "a second identical drag has nothing left to lay");
+
+        // But a DIFFERENT piece still fills the same cells — it is the descriptor that repeats, not
+        // the cell that is taken.
+        let mut other = brush(1.0);
+        other.id = "rug".into();
+        let over = box_fill(&m, &other, ((0.2, 0.2), (2.8, 1.8)), 0.0, ids())
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(over.placements.len(), 6);
     }
 
     /// The same refusal `flood` makes, for the same reason — the box gesture must not be a second way
