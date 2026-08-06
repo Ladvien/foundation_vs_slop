@@ -115,6 +115,17 @@ pub fn build_headless(root: &Path, map: &str, kit: Option<&str>) -> Result<App, 
     .insert_resource(ClearColor(Color::srgb(0.035, 0.033, 0.030)))
     .insert_resource(UiScale(1.2));
 
+    // **Despawning a light or a mesh must not panic in here.** `backends: None` registers every
+    // render type but skips the render world — and with it `SyncWorldPlugin`, whose
+    // `PendingSyncEntity` resource the `on_remove` hooks of every synced component (`PointLight`,
+    // `Mesh3d`, …) unconditionally reach for. The hooks ARE registered, so the first test that
+    // retired a staged figure panicked inside `sync_component.rs`. Adding the plugin gives the
+    // hooks their ledger; nothing consumes the records without a render world, which over a
+    // bounded test run is a small vec nobody reads — the honest cost of stepping frames deviceless.
+    if !app.is_plugin_added::<bevy::render::sync_world::SyncWorldPlugin>() {
+        app.add_plugins(bevy::render::sync_world::SyncWorldPlugin);
+    }
+
     add_editor_plugins(&mut app);
     install_font(&mut app, root)?;
     Ok(app)

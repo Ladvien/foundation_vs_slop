@@ -244,11 +244,9 @@ impl Scp1048Build {
     }
 }
 
-/// Render scale for the model child. `1.0` is the asset's authored, canon size (~0.33 m tall).
-///
-/// The asset docs sanction 1.3–1.6 if the bear reads too small at the RTS camera height. Kept as one
-/// constant so that decision stays one number and never becomes an edit to the glb.
-pub const RENDER_SCALE: f32 = 1.0;
+// Render scale for the model child: rigs.ron declares 1.0 per variant — the asset's authored, canon
+// size (~0.33 m tall). The asset docs sanction 1.3–1.6 if the bear reads too small at the RTS camera
+// height; that decision stays one number in the manifest and never becomes an edit to the glb.
 
 /// Half-extent used for wall-sliding movement (`Dungeon::resolve_move`).
 pub const SCP1048_HALF: Vec2 = Vec2::splat(0.2);
@@ -534,7 +532,7 @@ pub fn spawn_scp1048_at(
     // The model child: authored facing is +Z and the game's forward is -Z, hence the 180° yaw.
     ec.with_child((
         WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(variant.glb()))),
-        Transform::from_scale(Vec3::splat(RENDER_SCALE))
+        Transform::from_scale(Vec3::splat(table.scale))
             .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
     ));
     ec.id()

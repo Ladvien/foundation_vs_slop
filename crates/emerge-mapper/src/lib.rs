@@ -41,7 +41,10 @@
 //! The game crate made the same split for the same reason (`TESTING.md`). `main.rs` keeps only
 //! argument parsing and the app; everything else lives here, where `tests/` can reach it.
 
+pub mod anim_plots;
+pub mod anim_stage;
 pub mod anim_tab;
+pub mod anim_watch;
 pub mod harness;
 pub mod chrome;
 pub mod devshot;

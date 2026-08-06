@@ -89,6 +89,8 @@ pub(crate) fn slot_for(
 pub struct BearAnim {
     pub(crate) graph: Handle<AnimationGraph>,
     pub(crate) slots: Arc<[crate::anim::Slot]>,
+    /// The manifest's render scale for this variant's model child (see rigs.ron).
+    pub(crate) scale: f32,
 }
 
 /// The four graphs, built once at `Startup`. Spawning clones by refcount — never a table copy.
@@ -132,7 +134,7 @@ fn build_one(
         }
     }
     let (graph, slots) = crate::rigs::build(rig, assets, graphs);
-    Some(BearAnim { graph, slots })
+    Some(BearAnim { graph, slots, scale: rig.scale })
 }
 
 /// `Startup`: build all four graphs. Every bear that spawns later clones handles out of this.

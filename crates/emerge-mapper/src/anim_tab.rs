@@ -20,27 +20,47 @@
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, Button as UiButton};
+use emerge_core::rig_check::{Level, Staleness};
 use emerge_core::rigs::{Playback, Rigs};
 
 use crate::chrome::{ACCENT, DANGER, DIM, LABEL, ROW_BG, ROW_SELECTED, TEXT};
 use crate::tiles::{AnimRoot, Mode};
+
+/// How many manifest snapshots the bench keeps. The undo unit is the whole file's text — writes are
+/// rare and a manifest is ~10 KB, so the cost of a text snapshot is nothing next to the cost of a
+/// write that cannot be taken back.
+const BENCH_HISTORY: usize = 64;
+
+/// Which face the left pane shows.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum View {
+    /// The selected rig's slot table, findings, plots and stage controls.
+    #[default]
+    One,
+    /// The project-wide summary — every rig's worst finding, jump-to-detail.
+    All,
+}
 
 /// What the bench is looking at.
 #[derive(Resource, Default)]
 pub struct BenchState {
     /// The manifest, read on first entry to the tab.
     pub rigs: Option<Rigs>,
+    /// The manifest's TEXT as loaded or last written — what `RigDoc` edits, and the undo unit.
+    /// Kept beside `rigs` because the parsed value cannot reproduce the file's comments.
+    pub text: Option<String>,
+    /// Manifest texts to restore, newest last. Restored THROUGH `commit_text`, so an undo re-runs
+    /// the same validation and atomic save as the write it takes back.
+    undo: Vec<String>,
+    redo: Vec<String>,
     /// Which rig, as an index into the manifest's sorted names.
     pub selected: usize,
     /// Whether the read has happened. Separate from `rigs.is_none()`, which is also true of a read
     /// that failed — and those two want different words on screen.
     pub loaded: bool,
     pub status: String,
-    /// The selected rig's measurements. Recomputed on selection change only: `measure` reads the GLB
-    /// off disk and runs forward kinematics over every keyframe, which is not per-frame work.
-    pub findings: Vec<Finding>,
-    /// Which rig `findings` describes, so a re-measure happens exactly once per selection.
-    measured: Option<usize>,
+    /// One rig, or the whole project.
+    pub view: View,
 }
 
 impl BenchState {
@@ -53,11 +73,25 @@ impl BenchState {
             .map(|r| r.rigs.keys().map(String::as_str).collect())
             .unwrap_or_default()
     }
+
+    /// Push the pre-write text onto the undo stack. Called only after a write actually landed —
+    /// the tiles idiom: `record` on `Ok`, never on refusal.
+    fn record(&mut self, before: String) {
+        if self.undo.len() >= BENCH_HISTORY {
+            self.undo.remove(0);
+        }
+        self.undo.push(before);
+        self.redo.clear();
+    }
 }
 
 /// One rig row, carrying its index.
 #[derive(Component, Clone, Copy)]
 struct RigRow(usize);
+
+/// One summary row in the check-all view, carrying the rig index it jumps to.
+#[derive(Component, Clone, Copy)]
+struct JumpRow(usize);
 
 /// The node the rig list is rebuilt into.
 #[derive(Component)]
@@ -76,7 +110,15 @@ pub struct AnimTabPlugin;
 impl Plugin for AnimTabPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BenchState>()
-            .add_systems(Startup, spawn_panels)
+            .init_resource::<crate::anim_watch::RigWatch>()
+            .init_resource::<crate::anim_watch::MeasureQueue>()
+            .init_resource::<crate::anim_watch::BenchReports>()
+            .init_resource::<crate::anim_watch::BenchGeneration>()
+            .init_resource::<crate::anim_stage::BenchScrub>()
+            // The editor registers the game's blend pass once, here — the staged figure is driven
+            // by the REAL machinery, which is the whole reason emerge-anim is a crate.
+            .add_plugins(emerge_anim::PoseBlendPlugin)
+            .add_systems(Startup, (spawn_panels, crate::anim_plots::create_plot_images))
             .add_systems(
                 Update,
                 (
@@ -85,17 +127,43 @@ impl Plugin for AnimTabPlugin {
                     // tab owns the keyboard, so a run condition here would be the second census
                     // this module exists to prevent.
                     move_selection.in_set(crate::keys::Phase::Act),
+                    check_all_keys.in_set(crate::keys::Phase::Act),
+                    adopt_measured.in_set(crate::keys::Phase::Act),
+                    bench_history_keys.in_set(crate::keys::Phase::Act),
                     keep_selection_visible,
-                    measure_selected,
+                    // The one measurement path: selection, the watcher and check-all feed the
+                    // queue; the queue steps one rig per frame; the pane reads the reports.
+                    crate::anim_watch::poll_mtimes,
+                    crate::anim_watch::queue_selected,
+                    crate::anim_watch::step_measure_queue,
+                    crate::anim_watch::paint_stale_badge
+                        .run_if(resource_changed::<crate::anim_watch::BenchGeneration>),
                     rebuild_list.run_if(
                         resource_changed::<BenchState>
                             .or_else(resource_changed::<crate::filter::Filters>),
                     ),
-                    rebuild_slots.run_if(resource_changed::<BenchState>),
+                    rebuild_slots.run_if(
+                        resource_changed::<BenchState>
+                            .or_else(resource_changed::<crate::anim_watch::BenchGeneration>),
+                    ),
+                    crate::anim_plots::render_plots.run_if(
+                        resource_changed::<BenchState>
+                            .or_else(resource_changed::<crate::anim_watch::BenchGeneration>),
+                    ),
                     refresh_line,
+                    // The staged figure: spawned per selection, driven exactly like a game
+                    // creature — after attach, before the blend pass writes the player.
+                    crate::anim_stage::drive_bench_stage,
+                    crate::anim_stage::drive_bench_scrub
+                        .in_set(crate::keys::Phase::Act)
+                        .after(emerge_anim::PoseAttachSet)
+                        .before(emerge_anim::PoseBlendSet),
+                    crate::anim_stage::refresh_scrub_ui,
                 ),
             )
-            .add_observer(on_rig_click);
+            .add_observer(on_rig_click)
+            .add_observer(on_jump_click)
+            .add_observer(crate::anim_stage::on_chip_click);
     }
 }
 
@@ -173,10 +241,221 @@ fn load_on_entry(mode: Res<Mode>, project: Res<crate::project::Project>, mut ben
             Ok(rigs) => {
                 bench.status = format!("{} rig(s) in {}", rigs.rigs.len(), path.display());
                 bench.rigs = Some(rigs);
+                bench.text = Some(text);
             }
             Err(e) => bench.status = format!("{}: {e}", path.display()),
         },
         Err(e) => bench.status = format!("cannot read {}: {e}", path.display()),
+    }
+}
+
+/// **The one door to disk.** Parse and validate the candidate text, write it atomically, and only
+/// then adopt it in memory — the `tiles::commit_measured` shape. A failure leaves both the file and
+/// the in-memory state exactly as they were.
+fn commit_text(
+    root: &std::path::Path,
+    bench: &mut BenchState,
+    new_text: String,
+) -> Result<(), String> {
+    let parsed = Rigs::parse(&new_text)?;
+    let path = root.join("assets/emerge/rigs.ron");
+    emerge_core::ron_surgery::save_atomic(&path, &new_text)?;
+    bench.rigs = Some(parsed);
+    bench.text = Some(new_text);
+    Ok(())
+}
+
+/// **Adopt measured values for the selected rig** — the explicit write-back, and the only one.
+///
+/// Measures the asset NOW (hash, clips, checks in one motion, so the provenance stamps exactly the
+/// bytes the numbers came from), rewrites each unkept gait slot's measured fields through
+/// [`emerge_core::rigs_edit::RigDoc`], stamps provenance, and refuses the whole write unless the
+/// edited text parses back to precisely the value it built in memory — `replace_field`'s key search
+/// is textual, and corruption must be refused, never written.
+fn adopt(root: &std::path::Path, bench: &mut BenchState) -> Result<String, String> {
+    let text = bench.text.clone().ok_or("no manifest loaded")?;
+    let name = bench
+        .names()
+        .get(bench.selected)
+        .map(|s| (*s).to_owned())
+        .ok_or("no rig selected")?;
+    let rigs = bench.rigs.as_ref().ok_or("no manifest loaded")?;
+    let rig = rigs
+        .get(&name)
+        .cloned()
+        .ok_or_else(|| format!("no rig named `{name}`"))?;
+    if !rig.has_gaits() {
+        return Err(format!("'{name}' has no gait slots — nothing to adopt"));
+    }
+
+    let path = root.join("assets").join(&rig.mesh);
+    let (glb, hash) = emerge_core::glb::Glb::open_fingerprinted(&path)?;
+    let clip_infos = emerge_core::clips::clips(&glb);
+    let current = emerge_core::rig_check::staleness(&rig, hash)
+        == emerge_core::rig_check::Staleness::Current;
+    let report = emerge_core::rig_check::check_rig(&glb, &rig, current);
+
+    let mut doc = emerge_core::rigs_edit::RigDoc::open(&text, &name)?;
+    // The in-memory expectation the written text must parse back to.
+    let mut trial = rigs.clone();
+    let trial_rig = trial
+        .rigs
+        .get_mut(&name)
+        .ok_or_else(|| format!("no rig named `{name}`"))?;
+
+    let mut wrote = 0usize;
+    let mut kept = 0usize;
+    for (i, slot) in rig.slots.iter().enumerate() {
+        let Playback::Gait {
+            duration: d0,
+            phase_offset: p0,
+            cycle_distance: c0,
+        } = slot.playback
+        else {
+            continue;
+        };
+        if slot.keep.is_some() {
+            kept += 1;
+            continue;
+        }
+        let Some(m) = report.slots.iter().find(|m| m.slot == i) else {
+            continue;
+        };
+        let mut adopted = (d0, p0, c0);
+        let dur = emerge_core::ron_surgery::fmt_f32(m.duration);
+        doc.edit_slot_field(i, "duration", &dur)?;
+        adopted.0 = m.duration;
+        wrote += 1;
+        if let Some(ph) = m.phase_offset {
+            doc.edit_slot_field(i, "phase_offset", &emerge_core::ron_surgery::fmt_f32(ph))?;
+            adopted.1 = ph;
+            wrote += 1;
+        }
+        if let Some(raw) = m.cycle_distance {
+            let world = raw * rig.scale;
+            doc.edit_slot_field(i, "cycle_distance", &emerge_core::ron_surgery::fmt_f32(world))?;
+            adopted.2 = world;
+            wrote += 1;
+        }
+        if let Some(s) = trial_rig.slots.get_mut(i) {
+            s.playback = Playback::Gait {
+                duration: adopted.0,
+                phase_offset: adopted.1,
+                cycle_distance: adopted.2,
+            };
+        }
+    }
+    if wrote == 0 {
+        return Err(if kept > 0 {
+            format!("all of '{name}'s gait slots are kept — nothing to write")
+        } else {
+            format!("nothing measurable on '{name}' — nothing to write")
+        });
+    }
+
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "the system clock is before 1970")?
+        .as_secs();
+    let stamp = emerge_core::rigs::Provenance {
+        glb_fnv1a: emerge_core::rigs::fingerprint_string(hash),
+        clips: clip_infos.len(),
+        clip_names: clip_infos
+            .iter()
+            .map(|c| c.name.clone().unwrap_or_default())
+            .collect(),
+        tool: emerge_core::rigs::BENCH_TOOL_VERSION,
+        date: emerge_core::rig_check::civil_date_utc(secs),
+    };
+    trial_rig.provenance = Some(stamp.clone());
+    doc.set_rig_field(
+        "provenance",
+        &emerge_core::rigs_edit::provenance_value(&stamp),
+    )?;
+
+    let new_text = doc.render();
+    // The parse-back equality guard. `fmt_f32` round-trips exactly, so equality here is exact.
+    let parsed = Rigs::parse(&new_text)?;
+    if parsed != trial {
+        return Err("the edit did not land where intended — refusing to write".to_owned());
+    }
+    commit_text(root, bench, new_text)?;
+    bench.record(text);
+    Ok(format!(
+        "wrote {wrote} value(s) + provenance for '{name}'{}",
+        if kept > 0 { format!(" ({kept} kept)") } else { String::new() }
+    ))
+}
+
+/// Enter, in the Anim context.
+fn adopt_measured(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<crate::keys::Live>,
+    project: Res<crate::project::Project>,
+    mut bench: ResMut<BenchState>,
+    mut reports: ResMut<crate::anim_watch::BenchReports>,
+    mut generation: ResMut<crate::anim_watch::BenchGeneration>,
+) {
+    if !crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::AdoptMeasured) {
+        return;
+    }
+    // A failed write REPLACES the message — an author told "adopted" by a program that could not
+    // write the file has been told something untrue (the `tiles::persist` rule).
+    bench.status = match adopt(&project.root, &mut bench) {
+        Ok(said) => {
+            crate::anim_watch::invalidate(&mut reports, &mut generation);
+            said
+        }
+        Err(e) => format!("NOT WRITTEN: {e}"),
+    };
+}
+
+/// Cmd+Z / Shift+Cmd+Z, in the Anim context. One body for both directions, restored **through**
+/// [`commit_text`] so an undo re-runs the same validation and atomic save as the write it takes
+/// back — and a refused restore pushes the entry back rather than eating it.
+fn bench_history_keys(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<crate::keys::Live>,
+    project: Res<crate::project::Project>,
+    mut bench: ResMut<BenchState>,
+    mut reports: ResMut<crate::anim_watch::BenchReports>,
+    mut generation: ResMut<crate::anim_watch::BenchGeneration>,
+) {
+    let undo = crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::UndoBench);
+    let redo = crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::RedoBench);
+    if !undo && !redo {
+        return;
+    }
+    let popped = if undo { bench.undo.pop() } else { bench.redo.pop() };
+    let Some(target) = popped else {
+        bench.status = format!("nothing to {} on this tab", if undo { "undo" } else { "redo" });
+        return;
+    };
+    let now = bench.text.clone();
+    match commit_text(&project.root, &mut bench, target.clone()) {
+        Ok(()) => {
+            crate::anim_watch::invalidate(&mut reports, &mut generation);
+            if let Some(now) = now {
+                if undo {
+                    bench.redo.push(now);
+                } else {
+                    bench.undo.push(now);
+                }
+            }
+            bench.status = if undo {
+                "undid the last bench write".to_owned()
+            } else {
+                "put the bench write back".to_owned()
+            };
+        }
+        Err(e) => {
+            if undo {
+                bench.undo.push(target);
+            } else {
+                bench.redo.push(target);
+            }
+            bench.status = format!("NOT WRITTEN: {e}");
+        }
     }
 }
 
@@ -205,25 +484,6 @@ fn keep_selection_visible(filters: Res<crate::filter::Filters>, mut bench: ResMu
     }
 }
 
-/// Re-measure when the selection moves.
-fn measure_selected(
-    project: Res<crate::project::Project>,
-    mut bench: ResMut<BenchState>,
-) {
-    if bench.measured == Some(bench.selected) || bench.rigs.is_none() {
-        return;
-    }
-    let names: Vec<String> = bench.names().iter().map(|s| (*s).to_owned()).collect();
-    let Some(name) = names.get(bench.selected).cloned() else {
-        return;
-    };
-    let rig = bench.rigs.as_ref().and_then(|r| r.get(&name)).cloned();
-    let Some(rig) = rig else { return };
-    let found = measure(&project.root, &rig);
-    bench.findings = found;
-    bench.measured = Some(bench.selected);
-}
-
 fn move_selection(
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<crate::keys::Live>,
@@ -241,6 +501,7 @@ fn move_selection(
         return;
     };
     bench.selected = (bench.selected + step) % n;
+    bench.view = View::One;
 }
 
 fn on_rig_click(
@@ -252,6 +513,39 @@ fn on_rig_click(
         return;
     };
     bench.selected = row.0;
+    bench.view = View::One;
+}
+
+/// A summary row click: land on the rig it names.
+fn on_jump_click(
+    activate: On<Activate>,
+    rows: Query<&JumpRow>,
+    mut bench: ResMut<BenchState>,
+) {
+    let Ok(row) = rows.get(activate.entity) else {
+        return;
+    };
+    bench.selected = row.0;
+    bench.view = View::One;
+}
+
+/// C, in the Anim context: measure every rig through the one queue and show the summary. The audit
+/// nobody performs when it costs sixteen clicks costs one key.
+fn check_all_keys(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<crate::keys::Live>,
+    mut bench: ResMut<BenchState>,
+    mut queue: ResMut<crate::anim_watch::MeasureQueue>,
+) {
+    if !crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::CheckAllRigs) {
+        return;
+    }
+    let names: Vec<String> = bench.names().iter().map(|s| (*s).to_owned()).collect();
+    for name in &names {
+        queue.push_back_unique(name);
+    }
+    bench.view = View::All;
+    bench.status = format!("measuring {} rig(s)...", names.len());
 }
 
 fn rebuild_list(
@@ -300,15 +594,110 @@ fn rebuild_list(
 fn rebuild_slots(
     mut commands: Commands,
     bench: Res<BenchState>,
+    reports: Option<Res<crate::anim_watch::BenchReports>>,
+    plots: Option<Res<crate::anim_plots::BenchPlots>>,
     panes: Query<Entity, With<SlotPane>>,
 ) {
     let names = bench.names();
     let rig = names
         .get(bench.selected)
         .and_then(|n| bench.rigs.as_ref().and_then(|r| r.get(n)));
+    // Reports are keyed by rig NAME, so this lookup can never pair a slot table with another
+    // rig's measurements — the race the old per-selection index cache had to guard against.
+    // `None` simply means the queue has not reached this rig yet.
+    let report = names
+        .get(bench.selected)
+        .and_then(|n| reports.as_ref().and_then(|r| r.by_rig.get(*n)));
     for pane in &panes {
         commands.entity(pane).despawn_related::<Children>();
         commands.entity(pane).with_children(|p| {
+            // **The project-wide summary** — every rig's verdict at a glance, worst first in the
+            // reader's eye because only the offenders get a rail. One keystroke reproduces what CI
+            // sees, which is what makes a red build cheap instead of mysterious.
+            if bench.view == View::All {
+                let names = bench.names();
+                let (mut ok, mut note, mut bad, mut pending) = (0usize, 0usize, 0usize, 0usize);
+                for n in &names {
+                    match reports.as_ref().and_then(|r| r.by_rig.get(*n)).map(|r| r.worst) {
+                        None => pending += 1,
+                        Some(Level::Ok) => ok += 1,
+                        Some(Level::Note) => note += 1,
+                        Some(Level::Bad) => bad += 1,
+                    }
+                }
+                p.spawn((
+                    Text::new(format!(
+                        "{bad} bad, {note} with notes, {ok} ok{}",
+                        if pending > 0 {
+                            format!(", {pending} measuring...")
+                        } else {
+                            String::new()
+                        }
+                    )),
+                    TextColor(if bad > 0 { DANGER } else { TEXT }),
+                    TextFont::from_font_size(11.0),
+                ));
+                for (ix, n) in names.iter().enumerate() {
+                    let Some(report) = reports.as_ref().and_then(|r| r.by_rig.get(*n)) else {
+                        continue;
+                    };
+                    if report.worst == Level::Ok {
+                        continue;
+                    }
+                    // The severity-rail shape (`tiles.rs`): a tinted left border, the severity as
+                    // a WORD as well as a hue, and the first finding as the remedy line.
+                    let (word, tint) = match report.worst {
+                        Level::Bad => ("blocking", DANGER),
+                        _ => ("worth checking", LABEL),
+                    };
+                    let first = report
+                        .findings
+                        .iter()
+                        .find(|f| f.level == report.worst)
+                        .map(|f| f.text.clone())
+                        .unwrap_or_default();
+                    p.spawn((
+                        UiButton,
+                        Hovered::default(),
+                        JumpRow(ix),
+                        Node {
+                            flex_direction: FlexDirection::Column,
+                            padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                            border: UiRect::left(Val::Px(3.0)),
+                            margin: UiRect::top(Val::Px(4.0)),
+                            ..default()
+                        },
+                        BorderColor::all(tint),
+                        BackgroundColor(ROW_BG),
+                    ))
+                    .with_children(|row| {
+                        row.spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            column_gap: Val::Px(8.0),
+                            ..default()
+                        })
+                        .with_children(|head| {
+                            head.spawn((
+                                Text::new((*n).to_owned()),
+                                TextColor(TEXT),
+                                TextFont::from_font_size(11.0),
+                            ));
+                            head.spawn((
+                                Text::new(word),
+                                TextColor(tint),
+                                TextFont::from_font_size(9.0),
+                            ));
+                        });
+                        row.spawn((
+                            Text::new(first),
+                            TextColor(LABEL),
+                            TextFont::from_font_size(9.0),
+                        ));
+                    });
+                }
+                return;
+            }
+
             let Some(rig) = rig else {
                 p.spawn((
                     Text::new("no rig selected"),
@@ -322,6 +711,46 @@ fn rebuild_slots(
                 TextColor(ACCENT),
                 TextFont::from_font_size(11.0),
             ));
+            // **The provenance line** — is the recorded measurement about the file on disk? A
+            // standing fact about the rig, so it sits with the mesh path rather than among the
+            // findings, and STALE is the one word here allowed to shout.
+            match report {
+                None => {
+                    p.spawn((
+                        Text::new("measuring..."),
+                        TextColor(DIM),
+                        TextFont::from_font_size(9.0),
+                    ));
+                }
+                Some(report) => {
+                    if let Some(st) = report.staleness {
+                        let date = report.date.as_deref().unwrap_or("an unknown date");
+                        let (line, colour) = match st {
+                            Staleness::NeverMeasured => ("never measured".to_owned(), DIM),
+                            Staleness::Current => (format!("measured {date}, current"), DIM),
+                            Staleness::Stale => {
+                                (format!("STALE: asset changed since {date}"), DANGER)
+                            }
+                        };
+                        p.spawn((
+                            Text::new(line),
+                            TextColor(colour),
+                            TextFont::from_font_size(9.0),
+                        ));
+                        for d in &report.diff {
+                            p.spawn((
+                                Text::new(d.clone()),
+                                TextColor(DANGER),
+                                TextFont::from_font_size(9.0),
+                                Node {
+                                    margin: UiRect::left(Val::Px(12.0)),
+                                    ..default()
+                                },
+                            ));
+                        }
+                    }
+                }
+            }
             for (i, slot) in rig.slots.iter().enumerate() {
                 let (kind, detail) = match slot.playback {
                     Playback::Free { speed } => ("free", format!("x{speed:.2}")),
@@ -332,7 +761,17 @@ fn rebuild_slots(
                         cycle_distance,
                     } => (
                         "gait",
-                        format!("{duration:.3}s  ph {phase_offset:+.3}  {cycle_distance:.3}m"),
+                        match slot.tolerance {
+                            // An explicit tolerance is a decision; it reads beside the number it
+                            // governs.
+                            Some(t) => format!(
+                                "{duration:.3}s  ph {phase_offset:+.3}  {cycle_distance:.3}m +-{:.0}%",
+                                t * 100.0
+                            ),
+                            None => format!(
+                                "{duration:.3}s  ph {phase_offset:+.3}  {cycle_distance:.3}m"
+                            ),
+                        },
                     ),
                 };
                 p.spawn(Node {
@@ -372,6 +811,24 @@ fn rebuild_slots(
                         TextFont::from_font_size(10.0),
                     ));
                 });
+                // The asset's own name for the clip, under the row like the note — never inline in
+                // the index column, where `valkyrie_strafe_r` would squeeze the numbers off the
+                // panel. Beside the LEFTWARD note this is what makes the backwards naming
+                // self-evidencing rather than folklore.
+                let asset_name = report
+                    .and_then(|r| r.clip_names.get(slot.clip))
+                    .and_then(Option::as_deref);
+                if let Some(name) = asset_name {
+                    p.spawn((
+                        Text::new(format!("asset: {name}")),
+                        TextColor(DIM),
+                        TextFont::from_font_size(9.0),
+                        Node {
+                            margin: UiRect::left(Val::Px(84.0)),
+                            ..default()
+                        },
+                    ));
+                }
                 if let Some(note) = &slot.note {
                     p.spawn((
                         Text::new(note.clone()),
@@ -383,33 +840,127 @@ fn rebuild_slots(
                         },
                     ));
                 }
+                // A kept slot says so, with its reason — adopt will skip it, and the reader should
+                // know that is a decision rather than an oversight.
+                if let Some(reason) = &slot.keep {
+                    p.spawn((
+                        Text::new(format!("kept: {reason}")),
+                        TextColor(LABEL),
+                        TextFont::from_font_size(9.0),
+                        Node {
+                            margin: UiRect::left(Val::Px(84.0)),
+                            ..default()
+                        },
+                    ));
+                }
             }
 
             // **Measured against the asset, under the table it is measuring.** A finding with no fix
             // is a finding that gets read once, so each says what to do.
-            if bench.findings.is_empty() {
-                return;
-            }
-            p.spawn((
-                Text::new("MEASURED".to_owned()),
-                TextColor(LABEL),
-                TextFont::from_font_size(10.0),
-                Node {
-                    margin: UiRect::top(Val::Px(8.0)),
-                    ..default()
-                },
-            ));
-            for f in &bench.findings {
+            let findings = report.map(|r| r.findings.as_slice()).unwrap_or_default();
+            if !findings.is_empty() {
                 p.spawn((
-                    Text::new(f.text.clone()),
-                    TextColor(match f.level {
-                        Level::Ok => DIM,
-                        Level::Note => LABEL,
-                        Level::Bad => DANGER,
-                    }),
+                    Text::new("MEASURED".to_owned()),
+                    TextColor(LABEL),
+                    TextFont::from_font_size(10.0),
+                    Node {
+                        margin: UiRect::top(Val::Px(8.0)),
+                        ..default()
+                    },
+                ));
+                for f in findings {
+                    p.spawn((
+                        Text::new(f.text.clone()),
+                        TextColor(match f.level {
+                            Level::Ok => DIM,
+                            Level::Note => LABEL,
+                            Level::Bad => DANGER,
+                        }),
+                        TextFont::from_font_size(9.0),
+                    ));
+                }
+            }
+
+            // **The plots**, under the findings they explain — a scalar verdict says a problem
+            // exists; the curves say where in the cycle it lives. The images are the stable
+            // handles `render_plots` repaints; captions and legends are Text nodes, never pixels,
+            // per the ASCII-only rule.
+            let has_curves = report.is_some_and(|r| !r.curves.is_empty());
+            if let (true, Some(plots)) = (has_curves, plots.as_ref()) {
+                crate::chrome::section(p, "PLOTS");
+                // The legend: which color is which gait slot, labelled by the asset's clip name
+                // when it has one.
+                p.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(8.0),
+                    ..default()
+                })
+                .with_children(|legend| {
+                    let mut rank = 0usize;
+                    for (i, slot) in rig.slots.iter().enumerate() {
+                        if !matches!(slot.playback, Playback::Gait { .. }) {
+                            continue;
+                        }
+                        let label = report
+                            .and_then(|r| r.clip_names.get(slot.clip))
+                            .and_then(Option::as_deref)
+                            .map(|n| format!("{i} {n}"))
+                            .unwrap_or_else(|| format!("{i} clip {}", slot.clip));
+                        legend.spawn((
+                            Text::new(label),
+                            TextColor(crate::anim_plots::slot_ui_color(rank)),
+                            TextFont::from_font_size(9.0),
+                        ));
+                        rank += 1;
+                    }
+                });
+                let charts = [
+                    ("foot height / phase (contact ticks below)", &plots.height),
+                    ("foot speed / phase (m/s; stance should sit flat)", &plots.speed),
+                    ("root drift / phase (m; red line = in-place limit)", &plots.drift),
+                ];
+                for (caption, handle) in charts {
+                    p.spawn((
+                        Text::new(caption),
+                        TextColor(LABEL),
+                        TextFont::from_font_size(9.0),
+                        Node {
+                            margin: UiRect::top(Val::Px(4.0)),
+                            ..default()
+                        },
+                    ));
+                    p.spawn((
+                        ImageNode::new(handle.clone()),
+                        Node {
+                            width: Val::Px(crate::anim_plots::SHOW_W),
+                            height: Val::Px(crate::anim_plots::SHOW_PLOT_H),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                    ));
+                }
+                p.spawn((
+                    Text::new("top-down trace (fwd = up; arrow = declared cycle along measured travel)"),
+                    TextColor(LABEL),
                     TextFont::from_font_size(9.0),
+                    Node {
+                        margin: UiRect::top(Val::Px(4.0)),
+                        ..default()
+                    },
+                ));
+                p.spawn((
+                    ImageNode::new(plots.trace.clone()),
+                    Node {
+                        width: Val::Px(crate::anim_plots::SHOW_W),
+                        height: Val::Px(crate::anim_plots::SHOW_TRACE_H),
+                        flex_shrink: 0.0,
+                        ..default()
+                    },
                 ));
             }
+
+            // The staged figure's controls — weight chips and the scrub line.
+            crate::anim_stage::spawn_chips(p, rig);
         });
     }
 }
@@ -434,112 +985,125 @@ fn refresh_line(bench: Res<BenchState>, mut lines: Query<(&mut Text, &mut TextCo
     }
 }
 
-/// **What the asset says, against what the manifest claims.**
-///
-/// A manifest agreeing with itself proves nothing. This re-measures the GLB with
-/// `emerge_core::clips` — the same functions `crates/emerge-core/tests/rigs_match_assets.rs` runs in
-/// CI — and reports each disagreement with the fix, the rule `tiles.rs` states as *"a warning that
-/// does not say what to do about it is a warning that gets read once."*
-fn measure(root: &std::path::Path, rig: &emerge_core::rigs::Rig) -> Vec<Finding> {
-    let mut out = Vec::new();
-    let path = root.join("assets").join(&rig.mesh);
-    let glb = match emerge_core::glb::Glb::open(&path) {
-        Ok(g) => g,
-        Err(e) => {
-            out.push(Finding::bad(format!("cannot read {}: {e}", rig.mesh)));
-            return out;
-        }
-    };
-    let found = emerge_core::clips::clips(&glb);
-    let root_node = emerge_core::clips::node_index(&glb, "Root");
-    let foot = emerge_core::clips::node_index(&glb, "foot_l");
+/// **The writer, proven against a disposable copy of the real project.** The model is
+/// `tiles::write_library_tests`: a temp dir, the real files copied in, and assertions on the bytes.
+#[cfg(test)]
+mod write_back_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    for (i, slot) in rig.slots.iter().enumerate() {
-        let Some(c) = found.get(slot.clip) else {
-            out.push(Finding::bad(format!(
-                "slot {i} names clip {} but the asset has {} — it was re-exported; re-measure and \
-                 update rigs.ron",
-                slot.clip,
-                found.len()
-            )));
-            continue;
+    fn workspace_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    /// A disposable project root holding copies of the real manifest and the real valkyrie GLB.
+    fn temp_project() -> std::path::PathBuf {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "anim_bench_write_back_{}_{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let ws = workspace_root();
+        std::fs::create_dir_all(dir.join("assets/emerge")).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::create_dir_all(dir.join("assets/characters")).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::copy(
+            ws.join("assets/emerge/rigs.ron"),
+            dir.join("assets/emerge/rigs.ron"),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        std::fs::copy(
+            ws.join("assets/characters/valkyrie.glb"),
+            dir.join("assets/characters/valkyrie.glb"),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        dir
+    }
+
+    fn bench_for(dir: &std::path::Path) -> BenchState {
+        let text = std::fs::read_to_string(dir.join("assets/emerge/rigs.ron"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let rigs = Rigs::parse(&text).unwrap_or_else(|e| panic!("{e}"));
+        let selected = rigs
+            .rigs
+            .keys()
+            .position(|k| k == "valkyrie")
+            .unwrap_or_else(|| panic!("no valkyrie"));
+        let mut bench = BenchState::default();
+        bench.rigs = Some(rigs);
+        bench.text = Some(text);
+        bench.selected = selected;
+        bench.loaded = true;
+        bench
+    }
+
+    #[test]
+    fn adopting_writes_values_and_provenance_and_keeps_every_comment() {
+        let dir = temp_project();
+        let manifest = dir.join("assets/emerge/rigs.ron");
+        let before = std::fs::read_to_string(&manifest).unwrap_or_else(|e| panic!("{e}"));
+        let mut bench = bench_for(&dir);
+
+        let said = adopt(&dir, &mut bench).unwrap_or_else(|e| panic!("{e}"));
+        assert!(said.contains("provenance"), "{said}");
+
+        let after = std::fs::read_to_string(&manifest).unwrap_or_else(|e| panic!("{e}"));
+        assert_ne!(before, after, "an adopt that changes nothing wrote nothing");
+        // Every comment line survives verbatim — the whole reason RigDoc exists.
+        let comments = |t: &str| -> Vec<String> {
+            t.lines()
+                .filter(|l| l.trim_start().starts_with("//"))
+                .map(str::to_owned)
+                .collect()
         };
-        let Playback::Gait {
-            duration,
-            cycle_distance,
-            ..
-        } = slot.playback
-        else {
-            continue;
-        };
-        // One 24 fps frame is the tolerance the phase mapping needs.
-        if (c.duration - duration).abs() >= 1.0 / 24.0 {
-            out.push(Finding::bad(format!(
-                "slot {i} is {:.3}s in the asset, {duration:.3}s here — the shared phase maps onto \
-                 the wrong part of the clip and feet drift",
-                c.duration
-            )));
-        }
-        if let Some(r) = root_node {
-            let m = emerge_core::clips::root_motion(&glb, slot.clip, r);
-            if m.iter().any(|v| *v >= 1.0e-4) {
-                out.push(Finding::bad(format!(
-                    "slot {i} moves Root by {:?} — a gait must be authored in place; the game drives \
-                     the transform itself",
-                    m
-                )));
-            }
-        }
-        if let Some(f) = foot {
-            match emerge_core::clips::cycle_distance(&glb, slot.clip, f) {
-                Some(raw) => {
-                    let measured = raw * FIGURINE_SCALE;
-                    let err = (measured - cycle_distance).abs() / cycle_distance;
-                    if err >= 0.20 {
-                        out.push(Finding::bad(format!(
-                            "slot {i} measures {measured:.3} m/cycle, manifest says \
-                             {cycle_distance:.3} ({:.0}% out) — re-measure",
-                            err * 100.0
-                        )));
-                    } else {
-                        out.push(Finding::ok(format!(
-                            "slot {i} measures {measured:.3} m/cycle vs {cycle_distance:.3} declared"
-                        )));
-                    }
-                }
-                None => out.push(Finding::note(format!(
-                    "slot {i}: no planted-foot stance to measure"
-                ))),
-            }
-        }
+        assert_eq!(comments(&before), comments(&after));
+        // The slot notes — the LEFTWARD one above all — survive too.
+        assert!(after.contains("carries the body LEFTWARD"), "the note died");
+        // The stamp landed, parses, and matches the asset's actual fingerprint.
+        let parsed = Rigs::parse(&after).unwrap_or_else(|e| panic!("{e}"));
+        let stamp = parsed
+            .get("valkyrie")
+            .and_then(|r| r.provenance.as_ref())
+            .unwrap_or_else(|| panic!("no provenance written"));
+        let (_, live) = emerge_core::glb::Glb::open_fingerprinted(
+            &dir.join("assets/characters/valkyrie.glb"),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(stamp.glb_fnv1a, emerge_core::rigs::fingerprint_string(live));
+        assert_eq!(stamp.clips, 20);
+
+        // Undo restores the file byte-identically, through the same commit door.
+        let target = bench.undo.pop().unwrap_or_else(|| panic!("no undo entry recorded"));
+        commit_text(&dir, &mut bench, target).unwrap_or_else(|e| panic!("{e}"));
+        let restored = std::fs::read_to_string(&manifest).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(before, restored);
     }
-    out
-}
 
-/// `squad::FIGURINE_SCALE` — the manifest is in world units, the GLB in its own.
-const FIGURINE_SCALE: f32 = 1.13;
-
-/// One measurement result.
-pub struct Finding {
-    pub text: String,
-    pub level: Level,
-}
-
-#[derive(PartialEq, Eq, Clone, Copy)]
-pub enum Level {
-    Ok,
-    Note,
-    Bad,
-}
-
-impl Finding {
-    fn ok(text: String) -> Finding {
-        Finding { text, level: Level::Ok }
+    #[test]
+    fn a_text_that_does_not_validate_is_refused_and_the_file_untouched() {
+        let dir = temp_project();
+        let manifest = dir.join("assets/emerge/rigs.ron");
+        let before = std::fs::read_to_string(&manifest).unwrap_or_else(|e| panic!("{e}"));
+        let mut bench = bench_for(&dir);
+        let refused = commit_text(&dir, &mut bench, "(version: 99, rigs: {})".to_owned());
+        assert!(refused.is_err());
+        let still = std::fs::read_to_string(&manifest).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(before, still, "a refused write must not touch the file");
+        assert_eq!(bench.text.as_deref(), Some(before.as_str()), "nor the memory");
     }
-    fn note(text: String) -> Finding {
-        Finding { text, level: Level::Note }
-    }
-    fn bad(text: String) -> Finding {
-        Finding { text, level: Level::Bad }
+
+    #[test]
+    fn a_second_adopt_is_stable_where_the_asset_is() {
+        // Adopt twice with nothing changing between: the second write must change only the
+        // provenance date at most — measured values are deterministic, so the numbers hold still.
+        let dir = temp_project();
+        let manifest = dir.join("assets/emerge/rigs.ron");
+        let mut bench = bench_for(&dir);
+        adopt(&dir, &mut bench).unwrap_or_else(|e| panic!("{e}"));
+        let once = std::fs::read_to_string(&manifest).unwrap_or_else(|e| panic!("{e}"));
+        adopt(&dir, &mut bench).unwrap_or_else(|e| panic!("{e}"));
+        let twice = std::fs::read_to_string(&manifest).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(once, twice, "a repeated adopt of an unchanged asset must be a fixpoint");
     }
 }
+

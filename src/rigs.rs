@@ -16,12 +16,8 @@
 //! root, some masked — and the differences that mattered were all data. `build` is that shape; the
 //! per-creature systems now only say which rig they want.
 
-use std::sync::Arc;
-
 use bevy::prelude::*;
-use emerge_core::rigs::{Playback, Rig, Rigs};
-
-use crate::anim;
+use emerge_core::rigs::{Rig, Rigs};
 
 /// Read at runtime like every other file under `assets/` — see `TESTING.md`, "assets/ is read at
 /// RUNTIME".
@@ -55,41 +51,10 @@ pub fn load() -> Result<Rigs, String> {
 
 /// **One rig's slot table, as a graph the blender can drive.**
 ///
-/// Flat by necessity, and the reason is worth keeping: a blend node contributes its own *static*
-/// weight, and per-instance control exists only on leaf clips (`weight = active_animation.weight *
-/// graph_node.weight`), so an intermediate "action layer" node could not be faded per unit. Masking
-/// the action clips individually gets the same layering with none of that problem.
-///
-/// Slot order is the manifest's order, and that order is the contract — the index of a slot is the
-/// handle `anim::blend`'s `SLOT_*` constants name.
-pub fn build(
-    rig: &Rig,
-    assets: &AssetServer,
-    graphs: &mut Assets<AnimationGraph>,
-) -> (Handle<AnimationGraph>, Arc<[anim::Slot]>) {
-    let mut graph = AnimationGraph::new();
-    let root = graph.root;
-    let mut slots = Vec::with_capacity(rig.slots.len());
-    for s in &rig.slots {
-        let clip: Handle<AnimationClip> =
-            assets.load(GltfAssetLabel::Animation(s.clip).from_asset(rig.mesh.clone()));
-        let node = match s.mask {
-            // The manifest stores the mask GROUP; the graph wants the bit.
-            Some(group) => graph.add_clip_with_mask(clip, 1 << group, 1.0, root),
-            None => graph.add_clip(clip, 1.0, root),
-        };
-        slots.push(match s.playback {
-            Playback::Free { speed } => anim::Slot::free(node, speed),
-            Playback::Gait {
-                duration,
-                phase_offset,
-                cycle_distance,
-            } => anim::Slot::gait(node, duration, phase_offset, cycle_distance),
-            Playback::OneShot { speed } => anim::Slot::one_shot(node, speed),
-        });
-    }
-    (graphs.add(graph), Arc::from(slots))
-}
+/// The body lives beside the blender now — `emerge_anim::rigs::build` — so the editor's bench
+/// stages a rig through the same builder the game spawns with, not a copy. Re-exported here so no
+/// call site moved.
+pub use crate::anim::rigs::build;
 
 /// Puts [`RigManifest`] in the world.
 ///

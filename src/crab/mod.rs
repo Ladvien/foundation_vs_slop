@@ -64,23 +64,23 @@ pub(crate) const CRAB_CLUSTER_SEP: f32 = 5.0;
 // config slice (`behavior.crab`, src/behavior_tuning.rs) so they are hand-tunable and searchable by
 // `squad_ai::behavior_genome`. Only the render/collider/body-geometry constants stay here in code.
 
-/// Uniform render scale for the child model (native height ~3.06 → ~0.46 m ≈ 1.5 ft tall, sized to
-/// the ~6 ft squad and 8 ft ceilings). Seat constants below scale with it.
-pub(crate) const CRAB_RENDER_SCALE: f32 = 0.15;
+// The crab's render scale (0.15 — native height ~3.06 → ~0.46 m ≈ 1.5 ft, sized to the ~6 ft squad
+// and 8 ft ceilings) lives in rigs.ron and rides in on `CrabAnim.scale`. The seat constants below
+// were calibrated at that value.
 /// Root body-centre height above the surface, along the surface normal (also seats the collider).
 pub(crate) const CRAB_BODY_CENTER: f32 = 0.125;
 /// Local Y offset of the scaled model under the root so its body rests on the surface (the glb origin
-/// sits near the model's top). Calibrated by eye via devshot, scaled with `CRAB_RENDER_SCALE`.
+/// sits near the model's top). Calibrated by eye via devshot, scaled with the 0.15 render scale.
 pub(crate) const CRAB_MODEL_Y: f32 = 0.275;
 /// Radius of the invisible collider sphere (the laser raycast target); world-size since the root is
 /// unscaled. Sized to hug the *visible* crab (rendered span ≈0.46 → radius ≈0.3) so a bolt only draws
 /// blood on a real hit — a near-miss now passes cleanly instead of registering on an oversized hitbox.
-/// Scales in lockstep with `CRAB_RENDER_SCALE` (2.5× when the model grew 0.06→0.15).
+/// Scales in lockstep with the render scale (2.5× when the model grew 0.06→0.15).
 pub(crate) const CRAB_COLLIDER_R: f32 = 0.30;
 
 /// Where an SCP-150 gestation lump sits on a crab, in the (unscaled) root's local space.
 ///
-/// The model's mesh bounds are local y −2.064..0.887; at `CRAB_RENDER_SCALE` under `CRAB_MODEL_Y` that is
+/// The model's mesh bounds are local y −2.064..0.887; at the render scale under `CRAB_MODEL_Y` that is
 /// world **−0.035..0.408**, so the carapace tops out at 0.408. The shared 0.45 the lump used to sit at
 /// therefore floated it clear of the shell — the gap the player boxed on 2026-08-01. 0.36 seats it just
 /// inside the carapace so the swelling bulges out of the shell instead of hovering over it. Cosmetic;
@@ -261,6 +261,8 @@ pub(crate) struct CrabSpawnSeq(u64);
 pub(crate) struct CrabAnim {
     pub(crate) graph: Handle<AnimationGraph>,
     pub(crate) slots: Arc<[crate::anim::Slot]>,
+    /// The manifest's render scale for the model child (0.15; see rigs.ron).
+    pub(crate) scale: f32,
 }
 
 pub struct CrabPlugin;

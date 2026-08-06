@@ -51,10 +51,9 @@ const SCP150_GLB: &str = "scp150/scp-150.glb";
 /// gameplay knobs and live in `sim::ParasiteTuning`; harborage/huddle spacing is in the huddle-const block.)
 const MANCA_MIN_SPAWN_DIST: f32 = 5.0;
 
-/// Uniform render scale for the child model. The asset body is ≈3.6 long in Blender units; at 0.07 the
-/// juvenile reads ≈0.25 m — a clearly visible scuttler at RTS zoom (a felt second threat, not a speck).
-/// BODY_CENTER and MODEL_Y below are kept proportional to this so the body stays seated. Tuned by devshot.
-const MANCA_RENDER_SCALE: f32 = 0.07;
+// The manca's render scale (0.07 — the ≈3.6-unit body reads ≈0.25 m, a clearly visible scuttler at
+// RTS zoom) lives in rigs.ron and rides in on `MancaAnim.scale`. BODY_CENTER and MODEL_Y below were
+// calibrated proportional to that value. Tuned by devshot.
 /// Root body-centre height above the surface, along the surface normal (also seats the collider). Kept
 /// proportional to RENDER_SCALE so the body rests on the floor instead of floating above it / sinking in.
 const MANCA_BODY_CENTER: f32 = 0.064;
@@ -191,7 +190,7 @@ const WOUND_R: f32 = 0.09;
 ///
 /// The gestation tell ([`InfestationLump`]) used to sit at one shared `(0.0, 0.45, 0.0)` for every host,
 /// described as "a generic spot that reads on both the unit figurine and a crab". Measuring the GLBs says
-/// it read on neither. A squad unit's root carries `squad::FIGURINE_SCALE` (1.13), so local 0.45 lands at
+/// it read on neither. A squad unit's root carries the manifest's 1.13 render scale, so local 0.45 lands at
 /// world **0.51** — thigh height on a figure whose mesh spans world y −0.28..1.85, not the chest a
 /// chestburster wants. A crab's carapace tops out at world **0.408**, so the same 0.45 floated the lump
 /// clear of the shell with a visible gap — which is what the player boxed on 2026-08-01 and read as a
@@ -444,6 +443,8 @@ pub(crate) struct WoundAssets {
 pub(crate) struct MancaAnim {
     graph: Handle<AnimationGraph>,
     slots: std::sync::Arc<[crate::anim::Slot]>,
+    /// The manifest's render scale for the model child (0.07; see rigs.ron).
+    scale: f32,
 }
 
 // --- Plugin ----------------------------------------------------------------------------------------
@@ -594,7 +595,7 @@ fn build_manca_anim(
     // climb and a chomp share no gait, so there is nothing to phase-lock; the manca takes from
     // `crate::anim` only the cross-fade that never rewinds a clip. The eruption is the one `OneShot`.
     let (graph, slots) = crate::rigs::build(rig, &assets, &mut graphs);
-    commands.insert_resource(MancaAnim { graph, slots });
+    commands.insert_resource(MancaAnim { graph, slots, scale: rig.scale });
 }
 
 /// Build the shared wound-disc mesh + dark bloody material once (the chestburster hole stamped onto hosts).
@@ -963,7 +964,7 @@ pub(crate) fn spawn_manca_on_patch(
         WorldAssetRoot(scene.clone()),
         Transform::from_translation(Vec3::Y * MANCA_MODEL_Y)
             .with_rotation(Quat::from_rotation_y(MODEL_FACING))
-            .with_scale(Vec3::splat(MANCA_RENDER_SCALE)),
+            .with_scale(Vec3::splat(manca_anim.scale)),
     ));
     ec.id()
 }

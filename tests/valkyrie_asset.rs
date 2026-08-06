@@ -62,6 +62,30 @@ fn gait_durations() -> Vec<(usize, f32)> {
         .collect()
 }
 
+/// **The manifest's render scale is the one every eyeballed offset was calibrated to.**
+///
+/// The rig exports at 1.61 m native, and 1.61 × 1.13 ≈ 1.82 m is the ~6 ft squaddie that
+/// `health::BAR_Y`, `rig_watch`'s flung-joint radius, the SCP-150 lump seat and every other
+/// hand-tuned offset assume. The scale used to be five separate literals in code; now that
+/// rigs.ron owns it, this is the pin that keeps a manifest edit from silently resizing the squad
+/// out from under those calibrations.
+#[test]
+fn the_manifest_scale_is_the_one_the_offsets_were_calibrated_to() {
+    let text = std::fs::read_to_string("assets/emerge/rigs.ron")
+        .unwrap_or_else(|e| panic!("assets/emerge/rigs.ron: {e}"));
+    let rigs = emerge_core::rigs::Rigs::parse(&text)
+        .unwrap_or_else(|e| panic!("assets/emerge/rigs.ron: {e}"));
+    let rig = rigs
+        .get("valkyrie")
+        .unwrap_or_else(|| panic!("rigs.ron has no `valkyrie`"));
+    assert!(
+        (rig.scale - 1.13).abs() < 1.0e-6,
+        "valkyrie scale is {}, but health::BAR_Y and the other eyeballed offsets are calibrated \
+         to 1.13 (≈1.82 m). Recalibrate them together or put the scale back.",
+        rig.scale
+    );
+}
+
 /// Every bone `squad::LOWER_BODY_BONES` puts in the upper-body mask group.
 const LOWER_BODY_BONES: [&str; 14] = [
     "Root",

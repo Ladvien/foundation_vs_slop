@@ -43,6 +43,7 @@
 //! constants below and in `docs/artist_guide.md`, not in the RL/QD loop.
 
 pub mod blend;
+pub mod rigs;
 
 use std::sync::Arc;
 
@@ -139,6 +140,9 @@ pub struct PoseBlender {
     /// False until the first [`apply_pose_blenders`] pass, which snaps `weight` to `target` instead of
     /// easing from zero — otherwise a freshly streamed-in model shows one frame of bind pose.
     primed: bool,
+    /// True while a scrub is pinning the phase — see [`PoseBlender::hold_phase`]. The runtime never
+    /// sets this; it exists for the editor's bench.
+    held: bool,
 }
 
 impl PoseBlender {
@@ -156,6 +160,7 @@ impl PoseBlender {
             pending_shot: None,
             active_shot: None,
             primed: false,
+            held: false,
         }
     }
 
@@ -237,6 +242,24 @@ impl PoseBlender {
     /// The shared gait phase, `[0, 1)`.
     pub fn phase(&self) -> f32 {
         self.phase
+    }
+
+    /// **Pin the shared phase for scrubbing.** While held, [`apply_pose_blenders`] eases weights
+    /// and writes seek times exactly as ever but does not advance φ.
+    ///
+    /// This exists because pausing cannot be faked through `set_ground_speed(0.0)`:
+    /// [`gait_cycles_per_sec`] clamps to half the nominal cadence at the low end — deliberately,
+    /// with a test — so an unheld blender at zero speed still walks. A bench that wrote seek times
+    /// itself instead would be a second author of the one formula, which is the drift this crate's
+    /// header exists to prevent. The runtime never calls this.
+    pub fn hold_phase(&mut self, phase: f32) {
+        self.phase = wrap01(phase);
+        self.held = true;
+    }
+
+    /// Resume advancing φ from wherever it sits.
+    pub fn release_phase(&mut self) {
+        self.held = false;
     }
 }
 
@@ -463,7 +486,9 @@ pub fn apply_pose_blenders(
             weighted_distance,
             weighted_cadence,
         );
-        blender.phase = wrap01(blender.phase + cps * dt);
+        if !blender.held {
+            blender.phase = wrap01(blender.phase + cps * dt);
+        }
         let phase = blender.phase;
 
         // --- write through ----------------------------------------------------------------------
@@ -731,6 +756,55 @@ mod tests {
             run.seek_time()
         );
         assert!(walk.is_paused() && run.is_paused(), "gait clips must stay paused — we own their time");
+    }
+
+    /// **A held phase freezes while everything else keeps working** — the bench's scrub contract.
+    /// `set_ground_speed(0.0)` cannot pause: the cadence clamp floors at half the nominal rate,
+    /// deliberately. Holding pins φ; weights still ease and the seek times follow the formula.
+    #[test]
+    fn a_held_phase_freezes_while_weights_still_ease() {
+        let (mut app, blender, player_entity) = harness();
+        set(&mut app, blender, &[0.0, 1.0, 0.0, 0.0], 2.0);
+        for _ in 0..30 {
+            tick(&mut app);
+        }
+        app.world_mut()
+            .get_mut::<PoseBlender>(blender)
+            .expect("blender")
+            .hold_phase(0.25);
+        // Retarget while held: the freeze is the phase's alone.
+        for _ in 0..40 {
+            set(&mut app, blender, &[0.0, 0.0, 1.0, 0.0], 2.0);
+            tick(&mut app);
+        }
+        let b = app.world().get::<PoseBlender>(blender).expect("blender");
+        assert!(
+            (b.phase() - 0.25).abs() < 1.0e-6,
+            "held phase drifted to {}",
+            b.phase()
+        );
+        assert!(b.live_weight(2) > 0.9, "weights must keep easing while held");
+        let player = app.world().get::<AnimationPlayer>(player_entity).expect("player");
+        let run = player.animation(AnimationNodeIndex::new(3)).expect("run");
+        assert!(
+            (run.seek_time() - wrap01(0.25 - 0.016) * 0.750).abs() < 1.0e-5,
+            "a held phase still writes seek through the one formula: {}",
+            run.seek_time()
+        );
+
+        // Release resumes the advance from where it sits.
+        app.world_mut()
+            .get_mut::<PoseBlender>(blender)
+            .expect("blender")
+            .release_phase();
+        for _ in 0..10 {
+            tick(&mut app);
+        }
+        let phase = app.world().get::<PoseBlender>(blender).expect("blender").phase();
+        assert!(
+            (phase - 0.25).abs() > 1.0e-4,
+            "a released phase must advance again"
+        );
     }
 
     /// A standing model must not stride in place: with no gait weight the phase holds, and because it

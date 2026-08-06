@@ -253,6 +253,20 @@ fn apply(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+/// FNV-1a over bytes — the asset-content fingerprint.
+///
+/// Hand-rolled with the same constants as the sim's `snapshot_hash` family (offset basis
+/// `0xcbf29ce484222325`, prime `0x100000001b3`): this crate's dependency allowlist has no hashing
+/// crate, and a fingerprint's only job is to change when the bytes do.
+pub fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h
+}
+
 impl Glb {
     /// Parse a `.glb` from bytes.
     pub fn parse(bytes: &[u8]) -> Result<Glb, String> {
@@ -304,6 +318,19 @@ impl Glb {
         let bytes =
             std::fs::read(path).map_err(|e| format!("glb: {}: {e}", path.display()))?;
         Glb::parse(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// Read a `.glb` from disk along with its content fingerprint.
+    ///
+    /// The hash covers the FILE bytes, and this is the only place it can come from: `parse` keeps
+    /// the decoded JSON and the BIN slice but not the container it read them out of, so a caller
+    /// that wants "did this asset change" must hash before parsing — read once, hash, then parse.
+    pub fn open_fingerprinted(path: &std::path::Path) -> Result<(Glb, u64), String> {
+        let bytes =
+            std::fs::read(path).map_err(|e| format!("glb: {}: {e}", path.display()))?;
+        let hash = fnv1a(&bytes);
+        let glb = Glb::parse(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok((glb, hash))
     }
 
     /// **Is this model assembled from parts, rather than authored as one?**

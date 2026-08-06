@@ -215,7 +215,22 @@ fn stage_camera(
             // Close enough that one grid cell fills the view — the tab is about a single tile.
             rig.height = TILE_VIEW_HEIGHT;
         }
-        _ => {
+        // The anim bench's stage. An arm of THIS system rather than a sibling, because two systems
+        // saving/restoring one `MapView` on the same `mode.is_changed()` edge would race over it.
+        Mode::Anim => {
+            if saved.0.is_none() {
+                saved.0 = Some(crate::view::Rig {
+                    focus: rig.focus,
+                    height: rig.height,
+                    yaw: rig.yaw,
+                    goal_yaw: rig.goal_yaw,
+                });
+            }
+            // Chest height on a ~2 m figure, with air around it.
+            rig.focus = crate::anim_stage::BENCH_STAGE + Vec3::Y * 1.0;
+            rig.height = crate::anim_stage::BENCH_VIEW_HEIGHT;
+        }
+        Mode::Map => {
             if let Some(was) = saved.0.take() {
                 rig.focus = was.focus;
                 rig.height = was.height;
@@ -2219,13 +2234,14 @@ pub enum Persist {
     Library,
 }
 
-/// One tab in the strip, carrying the mode it selects.
+/// One tab in the strip, carrying the mode it selects. `pub(crate)` so the anim bench's stale
+/// badge can find its own tab and repaint the label in place.
 #[derive(Component, Clone, Copy)]
-struct Tab(Mode);
+pub(crate) struct Tab(pub(crate) Mode);
 
 /// The tab's name, so the active one can be lit without touching its key.
 #[derive(Component)]
-struct TabLabel;
+pub(crate) struct TabLabel;
 
 /// The tab's shortcut, styled a step quieter than the name.
 #[derive(Component)]

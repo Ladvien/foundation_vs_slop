@@ -76,9 +76,9 @@ const SCP610_GLB: &str = "scp610/scp-610.glb";
 /// This creature's name in `assets/emerge/rigs.ron`.
 pub(crate) const RIG: &str = "scp610";
 
-/// Authored at real human scale — 1.80 × 0.86 × 1.90 m fully grown — so unlike the blob and the crab
-/// this spawns unscaled. `assets/scp610/README.md` §2.
-const RENDER_SCALE: f32 = 1.0;
+// Authored at real human scale — 1.80 × 0.86 × 1.90 m fully grown — so unlike the blob and the crab
+// this spawns unscaled: rigs.ron declares scale 1.0, carried on `Scp610Anim.scale`.
+// `assets/scp610/README.md` §2.
 
 /// Blooms per level. Small on purpose: this is a room-denial hazard, and three of them across a level
 /// is already three rooms the squad has to solve rather than walk through.
@@ -109,6 +109,8 @@ const MUTATION_SECS: f32 = 45.0;
 pub struct Scp610Anim {
     graph: Handle<AnimationGraph>,
     slots: Arc<[crate::anim::Slot]>,
+    /// The manifest's render scale for the model child (1.0; see rigs.ron).
+    scale: f32,
 }
 
 
@@ -271,7 +273,7 @@ fn build_scp610_anim(
     // the blender, which `docs/animation.md` forbids because its `PostUpdate` pass stomps the weights.
     let (graph, slots) = crate::rigs::build(rig, &assets, &mut graphs);
     debug_assert_eq!(slots.len(), SLOT_COUNT, "slot table drifted from the SLOT_* constants");
-    commands.insert_resource(Scp610Anim { graph, slots });
+    commands.insert_resource(Scp610Anim { graph, slots, scale: rig.scale });
 }
 
 /// The one shared builder — used by the seeded spawner and (later) the Research Room F6 palette, so a
@@ -321,7 +323,7 @@ pub fn spawn_scp610_at(
         ))
         .with_child((
             WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(SCP610_GLB))),
-            Transform::from_scale(Vec3::splat(RENDER_SCALE)),
+            Transform::from_scale(Vec3::splat(anim.scale)),
         ))
         .id()
 }

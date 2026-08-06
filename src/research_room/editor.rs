@@ -52,8 +52,8 @@ impl EditorState {
 pub(super) struct EditorRoot;
 
 /// A spawnable prop: a GLB scene shown at a fixed scale / yaw for inspection. `scale`/`yaw` mirror the
-/// gameplay spawn sites so the model reads at its in-game size (e.g. the Valkyrie's `FIGURINE_SCALE` and
-/// 180° yaw, the crab's `CRAB_RENDER_SCALE`).
+/// gameplay spawn sites so the model reads at its in-game size (rig scales come from rigs.ron — e.g.
+/// the Valkyrie's 1.13 and 180° yaw, the crab's 0.15).
 #[derive(Clone, Copy)]
 struct PropSpec {
     label: &'static str,
@@ -72,9 +72,9 @@ const PROPS: &[PropSpec] = &[
     PropSpec { label: "Flashlight", glb: "low_poly_flashlight/low_poly_flashlight.glb", scale: 1.0, yaw: 0.0 },
     PropSpec { label: "Meat Chunks", glb: "meat_chunks/meatpack.glb", scale: 1.0, yaw: 0.0 },
     // The SCP-1048 family. All four are authored at canon 0.33 m and face +Z, so they share the
-    // gameplay spawn's scale 1.0 and 180° yaw (`scp1048::RENDER_SCALE`). At canon size they are TINY
-    // next to the 1.82 m Valkyrie — which is the point of having them in the static palette: this is
-    // the fastest way to eyeball whether `RENDER_SCALE` should stay at 1.0.
+    // gameplay spawn's scale 1.0 and 180° yaw (rigs.ron). At canon size they are TINY next to the
+    // 1.82 m Valkyrie — which is the point of having them in the static palette: this is the
+    // fastest way to eyeball whether the manifest scale should stay at 1.0.
     PropSpec { label: "SCP-1048 (bear)", glb: "scp1048/scp-1048.glb", scale: 1.0, yaw: std::f32::consts::PI },
     PropSpec { label: "SCP-1048-A (ears)", glb: "scp1048a/scp-1048-a.glb", scale: 1.0, yaw: std::f32::consts::PI },
     PropSpec { label: "SCP-1048-B (infant)", glb: "scp1048b/scp-1048-b.glb", scale: 1.0, yaw: std::f32::consts::PI },

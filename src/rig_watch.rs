@@ -39,7 +39,7 @@ use bevy::prelude::*;
 
 /// How far a joint may sit from its rig's root before it is considered flung.
 ///
-/// The valkyrie figurine is ~1.82 m tall (`squad::FIGURINE_SCALE` applied to a 0.7 m base mesh), so
+/// The valkyrie figurine is ~1.82 m tall (the manifest's render scale applied to the base mesh), so
 /// every legitimate joint is within roughly a metre of the root. 8 m is far outside any pose the rig
 /// can reach while still being far below the tens of metres the captured spikes spanned — wide
 /// enough that a novel animation cannot trip it, tight enough to fire before the artifact is
