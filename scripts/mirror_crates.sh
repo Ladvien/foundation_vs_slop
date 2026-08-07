@@ -35,6 +35,7 @@ ORG=Ladvien
 CRATES=(
     bevy_orca
     map_elites
+    bevy_devshot
     emerge-core
     emerge-anim
     emerge-bevy
