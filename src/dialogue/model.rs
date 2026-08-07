@@ -15,31 +15,13 @@ use serde::Deserialize;
 /// Highest valid speaker index (the squad has five members, 0..=4). See `squad::SquadMember`.
 pub const MAX_SPEAKER: usize = 4;
 
-/// Balloon style — drives both the drawn shape and the semantic channel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub enum BubbleKind {
-    /// Spoken aloud: rounded-rect balloon with a pointed tail. Directed dialogue / story beats.
-    Speech,
-    /// Inner voice: soft pill balloon with a trailing dot-tail. Ambient feeling / intent / emotion.
-    Thought,
-}
+/// Balloon style and affect, defined in `bevy_speech_bubbles` and re-exported at the paths this
+/// script's `Deserialize` impls and every consumer already use. They live there because they describe
+/// how a balloon is DRAWN, which is the crate's job; the conversation graph below is this game's.
+pub use bevy_speech_bubbles::{BubbleKind, Emotion};
 
 fn default_speech() -> BubbleKind {
     BubbleKind::Speech
-}
-
-/// Optional affect on a line — tints the balloon and (later) its spawn animation. Grounded in
-/// An et al., *AniBalloons* (arXiv:2408.06294): balloon color/animation reliably conveys emotion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
-pub enum Emotion {
-    #[default]
-    Neutral,
-    Joy,
-    Anger,
-    Sadness,
-    Surprise,
-    Fear,
-    Calm,
 }
 
 /// One selectable option in a [`Node::Choice`]: its label and the node id it jumps to.

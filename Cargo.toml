@@ -5,7 +5,7 @@ members = [
     "crates/emerge-core", "crates/emerge-anim", "crates/emerge-bevy", "crates/emerge-mapper",
     "crates/fvs",
     "crates/bevy_orca", "crates/map_elites", "crates/bevy_devshot",
-    "crates/bevy_stigmergy", "crates/bevy_light_grid",
+    "crates/bevy_stigmergy", "crates/bevy_light_grid", "crates/bevy_speech_bubbles",
 ]
 # Stated rather than inherited. The root package is edition 2024, so "3" is already what Cargo picks —
 # writing it down means a future edition bump cannot move the resolver as a side effect, and it says
@@ -80,6 +80,9 @@ bevy_stigmergy = { path = "crates/bevy_stigmergy" }
 # The CPU illuminance grid creatures read (NOT a renderer — the GPU never sees it). `light.rs` is the
 # facade that hands it the dungeon's world<->cell mapping and `line_of_sight`.
 bevy_light_grid = { path = "crates/bevy_light_grid" }
+# World-space speech/thought balloons: the CPU text raster and the billboard. The font path stays in
+# `dialogue::bubble`, because that is the one thing a library must not assume.
+bevy_speech_bubbles = { path = "crates/bevy_speech_bubbles" }
 avian3d = "0.7.0"
 # `jpeg`: the SCP_Characters glTFs (e.g. VALKYRIE, the squad body) embed their PBR textures as JPEG to
 # keep the .glb small; Bevy's default image features cover PNG but NOT JPEG, so without this the whole

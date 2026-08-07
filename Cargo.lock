@@ -1594,6 +1594,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_speech_bubbles"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "bevy",
+ "serde",
+]
+
+[[package]]
 name = "bevy_sprite"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3015,6 +3024,7 @@ dependencies = [
  "bevy_devshot",
  "bevy_light_grid",
  "bevy_orca",
+ "bevy_speech_bubbles",
  "bevy_stigmergy",
  "bincode",
  "clap",

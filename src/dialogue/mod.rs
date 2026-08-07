@@ -106,7 +106,11 @@ impl Plugin for DialoguePlugin {
                 // only in the windowed build. It anchors the leader-facing choice bubbles.
                 (
                     crate::squad::ensure_leader,
-                    bubble::track_bubbles,
+                    // The camera is named POSITIVELY: `Single<..>` silently skips its system on a
+                    // non-unique match, so a `With<Camera3d>` filter would stop tracking the moment a
+                    // second 3D camera existed, with nothing to report it. The crate is generic
+                    // precisely so it cannot express that filter on our behalf.
+                    bubble::track_bubbles::<crate::MainCamera>,
                     bubble::expire_bubbles,
                 ),
             );

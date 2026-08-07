@@ -38,6 +38,7 @@ CRATES=(
     bevy_devshot
     bevy_stigmergy
     bevy_light_grid
+    bevy_speech_bubbles
     emerge-core
     emerge-anim
     emerge-bevy
