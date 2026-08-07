@@ -25,19 +25,19 @@ emerge-anim = { path = "../emerge-anim" }
 # `bevy_dev_tools` is what carries `infinite_grid` — verified in the vendored source at
 # `bevy_dev_tools-0.19.0/src/infinite_grid.rs`, reached as `bevy::dev_tools::infinite_grid`.
 # `jpeg` because the shipped kits embed PBR textures as JPEG and Bevy's defaults cover only PNG.
-bevy = { version = "0.19.0", features = ["jpeg", "bevy_dev_tools"] }
-ron = "0.12.2"
-serde = { version = "1.0.228", features = ["derive"] }
+bevy = { workspace = true, features = ["jpeg", "bevy_dev_tools"] }
+ron.workspace = true
+serde.workspace = true
 # The VLM labeler's transport (`vlm.rs`): one blocking OpenAI-style POST, made from a task-pool
 # thread, never the UI thread. The editor is dev-only tooling, so a network client here does not
 # leak toward the game — the game keeps zero HTTP deps (`docs/llm_rule_authoring.md`: the LLM
 # authors metadata, it never runs in the sim).
 ureq = { version = "3", features = ["json"] }
-serde_json = "1"
+serde_json.workspace = true
 # Base64 data-URI image parts for the chat request; `image` encodes the booth's RGBA readback to
 # PNG. Both already in the build graph (serde_json via emerge-core, base64/image via bevy).
 base64 = "0.22"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image.workspace = true
 # Cmd+C on the detail pane — the pane's text into the system clipboard, so an author can hand a
 # piece's facts to an agent. Text only; the image-data feature would drag image deps in twice.
 arboard = { version = "3", default-features = false }

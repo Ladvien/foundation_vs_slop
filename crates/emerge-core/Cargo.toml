@@ -12,11 +12,11 @@ description = "Engine-free world-building core: constraint IR, solvers, WFC, det
 # Adding a `bevy` dependency here is a design change, not a convenience — see
 # `docs/2026-08-03-emerge-mapper-plan.md`.
 [dependencies]
-serde = { version = "1.0.228", features = ["derive"] }
-ron = "0.12.2"
+serde.workspace = true
+ron.workspace = true
 # Reading a `.glb`'s JSON chunk (`glb.rs`). Data only — no engine, no renderer. The reader is
 # hand-rolled rather than pulling a glTF crate, for the reason `tests/common/mod.rs` gives: it would
 # be "a second, differently-behaved reader of an asset the engine already parses its own way".
-serde_json = "1.0"
-rand = "0.10"
-rand_chacha = "0.10"
+serde_json.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true

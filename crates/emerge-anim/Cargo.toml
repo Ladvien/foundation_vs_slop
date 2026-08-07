@@ -16,5 +16,10 @@ description = "Clip-weight blending on a skinned rig's AnimationPlayer — no tr
 # already enable full bevy and features unify. `bevy_log` because this crate's own code says
 # `error!`: it always did, and only workspace feature unification ever made that compile — a solo
 # `cargo check -p emerge-anim` was broken until the feature was declared where it is used.
+#
+# **The one manifest that does NOT use `bevy.workspace = true`**, deliberately: this crate needs
+# `default-features = false`, and Cargo ignores a member-level `default-features` when the dependency
+# is inherited — so writing `{ workspace = true, default-features = false }` would silently keep the
+# defaults on. The version is the workspace's; keep them in step by hand when bumping.
 bevy = { version = "0.19.0", default-features = false, features = ["bevy_animation", "bevy_scene", "bevy_gltf", "bevy_log"] }
 emerge-core = { path = "../emerge-core" }
