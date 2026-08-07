@@ -37,6 +37,7 @@ CRATES=(
     map_elites
     bevy_devshot
     bevy_stigmergy
+    bevy_light_grid
     emerge-core
     emerge-anim
     emerge-bevy

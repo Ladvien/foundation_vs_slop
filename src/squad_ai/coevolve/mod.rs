@@ -56,7 +56,8 @@ use crate::squad_ai::role::{RoleBrains, RoleId};
 
 use crate::squad_ai::evaluate::rollout;
 use crate::squad_ai::genome::{decode, encode, is_feasible, is_feasible_creature, mutate, Genome};
-use crate::squad_ai::qd::{BehaviorDescriptor, MapElitesArchive};
+// `MapElitesArchive` left with `population.rs`; only the descriptor is still named here.
+use crate::squad_ai::qd::BehaviorDescriptor;
 use crate::squad_ai::surprise::{
     fitness, minimal_criterion, EpisodeOutcome, EpisodeTrace, ModePrior,
 };

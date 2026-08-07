@@ -1179,6 +1179,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_light_grid"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "bevy_math",
+]
+
+[[package]]
 name = "bevy_log"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3005,6 +3013,7 @@ dependencies = [
  "avian3d",
  "bevy",
  "bevy_devshot",
+ "bevy_light_grid",
  "bevy_orca",
  "bevy_stigmergy",
  "bincode",

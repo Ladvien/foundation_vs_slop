@@ -28,7 +28,6 @@ use serde::{Deserialize, Serialize};
 use crate::config::GameConfig;
 use crate::dungeon::Dungeon;
 use crate::placement::{ir::RegionId, PlacedIn};
-use crate::util::{in_grid, row_major};
 
 /// The `lighting:` slice of `assets/config/config.ron` — every light knob, one source of truth
 /// (see [`GameConfig`]). Read by both [`crate::world`] (environment fill) and [`LightingPlugin`]
@@ -328,205 +327,99 @@ pub struct LightFieldWritten;
 /// gradient does photophobic taxis (local descent of the illuminance gradient) — a light-avoidance
 /// direction consistent with Nakagaki et al.'s Physarum photoavoidance (PRL 2007), but not their
 /// minimum-risk routing (a global path integral between two fixed endpoints, not local gradient descent).
+/// A thin **facade** over `bevy_light_grid::LightGrid`.
+///
+/// The grid and its two passes live in that crate, which works in CELL space and takes occlusion as a
+/// closure. This type gives them the game's vocabulary back: it owns the `Dungeon` (world<->cell, the
+/// floor set, `line_of_sight`) and keeps the exact method signatures the 18 modules reading `light`
+/// already use, so the extraction moved no caller. Same argument as `ai::field`'s `Stig`.
+///
+/// **`dirty` stays here, not in the crate.** It is bake-gating shell state — "has a fixture changed
+/// since the last bake" is a question about this game's fixtures, and a grid that tracked it would be
+/// guessing at a schedule it does not own.
 #[derive(Resource)]
 pub struct LightField {
-    width: usize,
-    height: usize,
-    /// **Static baseline** — the cached furniture bake, row-major. Recomputed only when `dirty` (a
-    /// fixture changed), the same event-driven bake as before. "Bake the many": the expensive
-    /// O(fixtures × range²) pass runs rarely.
-    base: Vec<f32>,
-    /// **Final** illuminance the whole game reads (`sample`/`gradient`), row-major: `base` plus the
-    /// per-tick dynamic cones (the Researcher's flashlight). Recomposed every tick by
-    /// [`apply_dynamic_lights`] — cheap, since only the moving cones are added on top of the cached base.
-    cells: Vec<f32>,
-    /// Recompute pending for `base`. True at startup (bake once fixtures exist) and whenever a fixture
-    /// changes state (Phase 4), gated like `fog::FogGrid::dirty`. Does NOT gate the per-tick dynamic pass,
-    /// which always runs (a moving light can never be dirty-gated).
+    core: bevy_light_grid::LightGrid,
+    /// Recompute pending for the static base. True at startup (bake once fixtures exist) and whenever a
+    /// fixture changes state, gated like `fog::FogGrid::dirty`. Does NOT gate the per-tick dynamic pass,
+    /// which always runs — a moving light can never be dirty-gated.
     dirty: bool,
-    /// Peak cell illuminance of `cells` after the last compose — lets callers normalise to 0..1.
-    peak: f32,
-    /// Row-major indices of the dungeon's floor cells, precomputed once (the `ai::field::Stig`
-    /// floor-cells idiom). Both writers (`bake`, `compose`) gate on `is_floor`, so rock cells hold
-    /// exactly 0.0 forever — the per-tick peak fold and `apply_mold_dim` scan only this list, which is
-    /// bit-identical to the full-grid scan, not an approximation (`fold_fingerprint` still folds the
-    /// WHOLE grid, so the field golden pins the rocks-are-zero invariant itself). Ref: Chilimbi, Hill &
-    /// Larus, "Cache-Conscious Structure Layout" (PLDI 1999) — restrict hot scans to the data that can
-    /// actually change.
-    floor_idx: Vec<usize>,
 }
 
 impl LightField {
     /// Empty field sized to the dungeon; starts `dirty` so the first `FixedUpdate` bakes the static base.
     pub fn new(dungeon: &Dungeon) -> Self {
-        let (width, height) = (dungeon.width, dungeon.height);
-        let n = width * height;
-        let floor_idx = dungeon.floor_cells().map(|c| row_major(c, width)).collect();
-        Self { width, height, base: vec![0.0; n], cells: vec![0.0; n], dirty: true, peak: 0.0, floor_idx }
-    }
-
-    /// Point read at a world position (query). Off-grid reads as 0 — the same contract as `Stig::sample`.
-    pub fn sample(&self, dungeon: &Dungeon, pos: Vec3) -> f32 {
-        let c = dungeon.world_to_cell(pos);
-        if in_grid(c, self.width, self.height) {
-            self.cells[row_major(c, self.width)]
-        } else {
-            0.0
+        Self {
+            core: bevy_light_grid::LightGrid::new(dungeon.width, dungeon.height, dungeon.floor_cells()),
+            dirty: true,
         }
     }
 
-    /// World-XZ direction of *increasing* illuminance (central differences), magnitude ≈ the local slope
-    /// — copied from `Stig::gradient`. A photophobic creature steers along `-gradient` (toward the dark),
-    /// a phototropic/-philic one along `+gradient`.
+    /// Point read at a world position (query). Off-grid reads as 0 — the same contract as `Stig::sample`.
+    #[inline]
+    pub fn sample(&self, dungeon: &Dungeon, pos: Vec3) -> f32 {
+        self.core.sample_cell(dungeon.world_to_cell(pos))
+    }
+
+    /// World-XZ direction of *increasing* illuminance (central differences), magnitude ≈ the local slope.
+    /// A photophobic creature steers along `-gradient` (toward the dark), a phototropic/-philic one
+    /// along `+gradient`.
+    #[inline]
     pub fn gradient(&self, dungeon: &Dungeon, pos: Vec3) -> Vec2 {
-        let c = dungeon.world_to_cell(pos);
-        let at = |dx: i32, dy: i32| -> f32 {
-            let n = c + IVec2::new(dx, dy);
-            if in_grid(n, self.width, self.height) {
-                self.cells[row_major(n, self.width)]
-            } else {
-                0.0
-            }
-        };
-        Vec2::new(at(1, 0) - at(-1, 0), at(0, 1) - at(0, -1))
+        self.core.gradient_cell(dungeon.world_to_cell(pos))
     }
 
     /// Peak illuminance from the last bake (0 before the first bake).
     pub fn peak(&self) -> f32 {
-        self.peak
+        self.core.peak()
     }
 
-    /// Recompute every cell from the fixture list — the bake. Each fixture is `(cell, intensity, range)`
-    /// in cells; a cell within `range` of a fixture with an unobstructed `line_of_sight` to it gains
-    /// `intensity * (1 - dist/range)`. Walls cast shadow (no LOS ⇒ no light). **Determinism:** `fixtures`
-    /// must arrive in a stable order (the caller sorts by cell) so the per-cell float sum is reproducible
-    /// — the discipline `Stig`'s sorted deposits use (float add is non-associative).
+    /// Recompute every cell from the fixture list — the bake. Walls cast shadow via
+    /// `Dungeon::line_of_sight`, handed to the crate as a closure.
     fn bake(&mut self, dungeon: &Dungeon, fixtures: &[(IVec2, f32, f32)]) {
-        for v in self.base.iter_mut() {
-            *v = 0.0;
-        }
-        for &(fcell, intensity, range) in fixtures {
-            if range <= 0.0 {
-                continue;
-            }
-            let r = range.ceil() as i32;
-            for dy in -r..=r {
-                for dx in -r..=r {
-                    let cell = fcell + IVec2::new(dx, dy);
-                    if !in_grid(cell, self.width, self.height) || !dungeon.is_floor(cell) {
-                        continue;
-                    }
-                    let dist = ((dx * dx + dy * dy) as f32).sqrt();
-                    if dist > range {
-                        continue;
-                    }
-                    // Walls block light: only cells the fixture can "see" are lit (cheap leak-suppression).
-                    if !dungeon.line_of_sight(fcell, cell) {
-                        continue;
-                    }
-                    self.base[row_major(cell, self.width)] += intensity * (1.0 - dist / range);
-                }
-            }
-        }
+        self.core.bake(fixtures, |a, b| dungeon.line_of_sight(a, b));
         self.dirty = false;
     }
 
-    /// Recompose `cells = base + Σ dynamic cones`, then recompute `peak`. Runs EVERY tick (the base is
-    /// cached; only the moving cones are re-added), so a walking flashlight's beam sweeps live. Each cone
-    /// is a directional emitter: within `range`, wall-occluded (`line_of_sight`) and radially attenuated
-    /// like a fixture, but additionally gated by a **cone factor** — a soft-edged wedge around `forward`
-    /// (world-XZ, unit length). **Determinism:** `cones` must arrive sorted (caller sorts by source cell),
-    /// mirroring `bake`'s float-sum discipline, so the per-cell sum folded into the replay hash is stable.
-    /// Ref: Björk & Michelsen, FDG 2014 — the flashlight cone as a moving vision/deterrent field.
+    /// Recompose `cells = base + Σ dynamic cones`, then recompute `peak`. Runs EVERY tick, so a walking
+    /// flashlight's beam sweeps live.
     fn compose(&mut self, dungeon: &Dungeon, cones: &[FlashlightCone]) {
-        self.cells.copy_from_slice(&self.base);
-        for cone in cones {
-            if cone.range <= 0.0 || cone.intensity <= 0.0 {
-                continue;
-            }
-            let r = cone.range.ceil() as i32;
-            for dy in -r..=r {
-                for dx in -r..=r {
-                    let cell = cone.source + IVec2::new(dx, dy);
-                    if !in_grid(cell, self.width, self.height) || !dungeon.is_floor(cell) {
-                        continue;
-                    }
-                    let dist = ((dx * dx + dy * dy) as f32).sqrt();
-                    if dist > cone.range {
-                        continue;
-                    }
-                    if !dungeon.line_of_sight(cone.source, cell) {
-                        continue;
-                    }
-                    // Cone factor: 1 at the source cell (its own footprint), else a soft-edged wedge —
-                    // `cos θ` between the cell direction and `forward`, ramped from 0 at the beam rim
-                    // (`cone_cos`) to 1 by `edge_softness` further in. Soft so the gradient creatures read
-                    // stays smooth (no hard illuminance cliff at the rim).
-                    let cone_factor = if dx == 0 && dy == 0 {
-                        1.0
-                    } else {
-                        let dir = Vec2::new(dx as f32, dy as f32) / dist;
-                        let c = dir.dot(cone.forward);
-                        ((c - cone.cone_cos) / cone.edge_softness.max(1.0e-4)).clamp(0.0, 1.0)
-                    };
-                    if cone_factor <= 0.0 {
-                        continue;
-                    }
-                    self.cells[row_major(cell, self.width)] +=
-                        cone.intensity * (1.0 - dist / cone.range) * cone_factor;
-                }
-            }
-        }
-        // Peak over floor cells only: rock cells are invariantly 0.0 and every cell is >= 0, so a max
-        // seeded at 0.0 cannot see them — bit-identical to the full-grid fold it replaces.
-        self.peak = self.floor_idx.iter().map(|&i| self.cells[i]).fold(0.0f32, f32::max);
+        self.core.compose(cones, |a, b| dungeon.line_of_sight(a, b));
     }
 
-    /// Mark the field for recompute (Phase 4: a fixture switched on/off/failing).
+    /// Mark the field for recompute (a fixture switched on/off/failing).
     #[allow(dead_code)]
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
-    /// Attenuate the composed illuminance by the gameplay mold: a moldy cell (`biomass` toward 1) darkens
-    /// toward `1 - dim_light`. Called each tick AFTER `compose` (so it never accumulates — `compose`
-    /// recopies the un-dimmed base+cones first), inside the `LightFieldWritten` set so every light reader
-    /// (crab photophobia, the mold's own recoil) sees the darkened field. `biomass` is the row-major
-    /// `MoldField` grid, same layout as `cells`. This is the mold→light half of the mold↔light feedback
-    /// loop: mold self-shades (persisting in its own dark), and the squad's flashlight — strong enough to
-    /// overpower the dimming — pushes it back (the recoil half lives in `mold::mold_update`).
+    /// Attenuate the composed illuminance by the gameplay mold: a moldy cell (`biomass` toward 1)
+    /// darkens toward `1 - dim_light`. Called each tick AFTER `compose` (so it never accumulates), inside
+    /// the `LightFieldWritten` set so every light reader sees the darkened field. This is the mold→light
+    /// half of the mold↔light feedback loop: mold self-shades, and the squad's flashlight — strong enough
+    /// to overpower the dimming — pushes it back (the recoil half lives in `mold::mold_update`).
     pub fn apply_mold_dim(&mut self, biomass: &[f32], dim_light: f32) {
-        if dim_light <= 0.0 {
-            return;
-        }
-        // Floor cells only (see `floor_idx`): dimming a rock cell is `0.0 * x == 0.0` and the peak fold
-        // ignores zeros, so skipping the ~50-60% rock cells is bit-identical to the full-grid pass.
-        let mut peak = 0.0f32;
-        let Self { cells, floor_idx, .. } = self;
-        for &i in floor_idx.iter() {
-            let b = biomass.get(i).copied().unwrap_or(0.0);
-            let cell = &mut cells[i];
-            *cell *= (1.0 - dim_light * b).clamp(0.0, 1.0);
-            peak = peak.max(*cell);
-        }
-        self.peak = peak;
+        self.core.apply_mold_dim(biomass, dim_light);
     }
 
-    /// FNV-1a-fold every **composed** cell's bit pattern into `hash` — the determinism oracle for the whole
-    /// field, mirroring `Stig::fold_fingerprint`. A broken bake/occlusion that shifts a crab would change
-    /// the replay hash; this pins the field itself too. Test-only.
+    /// The composed grid, for the tests below that compare two bakes cell-for-cell.
+    #[cfg(test)]
+    pub fn cells(&self) -> &[f32] {
+        self.core.cells()
+    }
+
+    /// FNV-1a-fold every **composed** cell's bit pattern into `hash` — the determinism oracle for the
+    /// whole field, mirroring `Stig::fold_fingerprint`.
     ///
-    /// **Folds `cells` (base + cones), not just `base`.** `cells` includes the Researcher's dynamic
-    /// flashlight cone. This once folded `base` alone, because the cone's beam direction was derived from
-    /// the unit's slerped `Transform.rotation` — glam quaternion/`slerp` transcendentals that are NOT
-    /// bit-identical across architectures — so an ARM-pinned cone-inclusive golden failed on x86 CI (issue
-    /// #46). Now `apply_dynamic_lights` builds the cone `forward` from the unit's deterministic gameplay
-    /// state (FacingOverride/AimTarget/velocity) with arch-stable ops (subtract + `normalize_or`), never
-    /// from `rotation`, so `cells` is a cross-arch-stable oracle again — and folding it (not just `base`)
-    /// restores the moving cone to the field golden's coverage.
+    /// **Folds `cells` (base + cones), not just `base`.** This once folded `base` alone, because the
+    /// cone's beam direction was derived from the unit's slerped `Transform.rotation` — glam quaternion
+    /// transcendentals that are NOT bit-identical across architectures — so an ARM-pinned cone-inclusive
+    /// golden failed on x86 CI (issue #46). Now `apply_dynamic_lights` builds the cone `forward` from
+    /// deterministic gameplay state (FacingOverride/AimTarget/velocity) with arch-stable ops (subtract +
+    /// `normalize_or`), never from `rotation`, so `cells` is a cross-arch-stable oracle again.
     #[cfg(feature = "test-harness")]
     pub fn fold_fingerprint(&self, hash: &mut u64) {
-        for &v in &self.cells {
+        for &v in self.core.cells() {
             for &b in &v.to_bits().to_le_bytes() {
                 *hash ^= b as u64;
                 *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
@@ -535,17 +428,11 @@ impl LightField {
     }
 }
 
-/// One moving directional light contributed to the [`LightField`] each tick — the Researcher's flashlight.
-/// `source` is its dungeon cell, `forward` the world-XZ beam direction (unit length), the rest the beam's
-/// reach/brightness/shape (see [`LightingConfig`]). Sorted by `source` before compose for determinism.
-pub(crate) struct FlashlightCone {
-    source: IVec2,
-    forward: Vec2,
-    intensity: f32,
-    range: f32,
-    cone_cos: f32,
-    edge_softness: f32,
-}
+/// One moving directional light contributed to the [`LightField`] each tick — the Researcher's
+/// flashlight. `source` is its dungeon cell, `forward` the world-XZ beam direction (unit length), the
+/// rest the beam's reach/brightness/shape (see [`LightingConfig`]). Sorted by `source` before compose
+/// for determinism. Defined in `bevy_light_grid`.
+pub use bevy_light_grid::FlashlightCone;
 
 /// Bake the STATIC base when dirty: collect [`LightEmitter`] fixture cells (stable-sorted for a
 /// deterministic float sum), then recompute [`LightField::base`]. Runs on `FixedUpdate` in
@@ -834,47 +721,35 @@ const SCREEN_FLICKER_HZ: f32 = 11.0;
 // two fixed endpoints, which this local gradient step is not).
 // ---------------------------------------------------------------------------------------------------
 
-/// Avoids light: the creature steers **down** the [`LightField`] gradient (toward the dark), strength
-/// `lighting.photophobic_gain`. Carried by crabs — they pool in shadow and cede the lit rooms.
-#[derive(Component)]
-pub struct Photophobic;
+/// The light-response toolkit, defined in `bevy_light_grid` and re-exported at the paths every
+/// consumer already uses.
+///
+/// * `Photophobic` — steers **down** the gradient (toward the dark), strength
+///   `lighting.photophobic_gain`. Carried by crabs, which pool in shadow and cede the lit rooms.
+/// * `Photophilic` — steers **up** it, strength `lighting.photophilic_gain`. The ready toolkit
+///   component for a light-seeking creature; the same push, opposite sign.
+/// * `Phototropic` — grows or orients toward light, a *tropism* rather than steering. Carried by
+///   mushroom fruit bodies, where light both enlarges the cap and leans it toward the brightest
+///   neighbour; its consumer lives in `mycelia::fruit`.
+pub use bevy_light_grid::{Photophilic, Photophobic, Phototropic};
 
-/// Drawn to light: the creature steers **up** the [`LightField`] gradient (toward the light), strength
-/// `lighting.photophilic_gain`. A ready toolkit component for the light-seeking "other creatures" a
-/// designer adds; the generic push supports it identically to [`Photophobic`], opposite sign.
-#[derive(Component)]
-pub struct Photophilic;
-
-/// Grows/orients **toward** light — a *tropism*, not steering. Carried by mushroom fruit bodies (Phase 3),
-/// where light both enlarges the cap and leans it toward the brightest neighbour. Defined here with the
-/// other light-response markers; its consumer lives in `mycelia::fruit`.
-#[derive(Component)]
-pub struct Phototropic;
-
-/// World-XZ steering push a light-response creature feels at `pos`: `signed_gain · ∇illuminance`. A
-/// photophobic creature passes `-photophobic_gain` (descends toward the dark), a photophilic one
-/// `+photophilic_gain` (climbs toward the light). Zero where the field is flat (deep dark or the middle of
-/// a uniform pool), so a creature far from any light gradient is unbiased — the graceful "no cost off in
-/// the dark" property. Pure: the caller projects the result onto the locomotion surface and scales by `dt`
-/// (see `crab::crab_locomotion`).
+/// World-XZ steering push a light-response creature feels at `pos`: `signed_gain · ∇illuminance`.
+///
+/// A photophobic creature passes `-photophobic_gain` (descends toward the dark), a photophilic one
+/// `+photophilic_gain` (climbs toward the light). Zero where the field is flat (deep dark, or the middle
+/// of a uniform pool), so a creature far from any light gradient is unbiased — the graceful "no cost off
+/// in the dark" property. Pure: the caller projects the result onto the locomotion surface and scales by
+/// `dt` (see `crab::crab_locomotion`). This wrapper is what supplies the world→cell conversion.
 pub fn light_push(field: &LightField, dungeon: &Dungeon, pos: Vec3, signed_gain: f32) -> Vec3 {
-    if signed_gain == 0.0 {
-        return Vec3::ZERO;
-    }
-    let g = field.gradient(dungeon, pos);
-    Vec3::new(g.x, 0.0, g.y) * signed_gain
+    bevy_light_grid::light_push_at(&field.core, dungeon.world_to_cell(pos), signed_gain)
 }
 
 /// The next rendered scale for a [`Phototropic`] fruit body easing toward its light-scaled target size
-/// `base·(1 + bonus·light01)`, approached from `current` by at most `max_step` this tick — rate-limited so
-/// the enlargement stays sub-perceptual (the mold's speed-limit ethos). `light01` is the illuminance
-/// normalised to the field peak (`0` = dark ⇒ target is just `base`; `1` = brightest ⇒ full bonus). Pure,
-/// so `mycelia::grow_fruit_bodies` stays a thin caller and the growth math is unit-tested here.
-/// Photomorphogenesis — fungal fruiting is light-gated (Zhang et al., PLoS ONE 10:e0123025, 2015).
-pub fn phototropic_scale(base: f32, current: f32, light01: f32, bonus: f32, max_step: f32) -> f32 {
-    let target = base * (1.0 + bonus * light01.clamp(0.0, 1.0));
-    (current + (target - current).clamp(-max_step, max_step)).max(0.0)
-}
+/// `base·(1 + bonus·light01)`, approached from `current` by at most `max_step` this tick — rate-limited
+/// so the enlargement stays sub-perceptual (the mold's speed-limit ethos). `light01` is the illuminance
+/// normalised to the field peak. Photomorphogenesis — fungal fruiting is light-gated (Zhang et al.,
+/// PLoS ONE 10:e0123025, 2015).
+pub use bevy_light_grid::phototropic_scale;
 
 /// Windowed-game lighting: real fixture lights. **Never** registered in the headless harness
 /// (GPU/cosmetic only — the deterministic core must not depend on it).
@@ -1362,7 +1237,7 @@ mod tests {
         let mut b = LightField::new(&d);
         bake_static(&mut a, &d, &fixtures);
         bake_static(&mut b, &d, &fixtures);
-        assert_eq!(a.cells, b.cells, "same (sorted) input → bit-identical field");
+        assert_eq!(a.cells(), b.cells(), "same (sorted) input → bit-identical field");
     }
 
     #[test]
@@ -1419,7 +1294,7 @@ mod tests {
         b.bake(&d, &[(IVec2::new(0, 0), 1.0, 3.0)]);
         a.compose(&d, &[cone()]);
         b.compose(&d, &[cone()]);
-        assert_eq!(a.cells, b.cells, "same base + same cone → bit-identical composed field");
+        assert_eq!(a.cells(), b.cells(), "same base + same cone → bit-identical composed field");
     }
 
     #[test]

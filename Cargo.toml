@@ -5,7 +5,7 @@ members = [
     "crates/emerge-core", "crates/emerge-anim", "crates/emerge-bevy", "crates/emerge-mapper",
     "crates/fvs",
     "crates/bevy_orca", "crates/map_elites", "crates/bevy_devshot",
-    "crates/bevy_stigmergy",
+    "crates/bevy_stigmergy", "crates/bevy_light_grid",
 ]
 # Stated rather than inherited. The root package is edition 2024, so "3" is already what Cargo picks —
 # writing it down means a future edition bump cannot move the resolver as a side effect, and it says
@@ -77,6 +77,9 @@ bevy_devshot = { path = "crates/bevy_devshot" }
 # The stigmergy substrate — N scalar influence channels plus the vectorial rally pheromone, in cell
 # space. `ai::field` is the facade that gives it the dungeon's world<->cell mapping back.
 bevy_stigmergy = { path = "crates/bevy_stigmergy" }
+# The CPU illuminance grid creatures read (NOT a renderer — the GPU never sees it). `light.rs` is the
+# facade that hands it the dungeon's world<->cell mapping and `line_of_sight`.
+bevy_light_grid = { path = "crates/bevy_light_grid" }
 avian3d = "0.7.0"
 # `jpeg`: the SCP_Characters glTFs (e.g. VALKYRIE, the squad body) embed their PBR textures as JPEG to
 # keep the .glb small; Bevy's default image features cover PNG but NOT JPEG, so without this the whole
