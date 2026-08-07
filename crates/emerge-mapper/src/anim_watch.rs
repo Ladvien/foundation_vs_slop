@@ -105,7 +105,8 @@ impl MeasureQueue {
 }
 
 /// Everything one measuring pass said about one rig — what the pane renders.
-#[derive(Clone, PartialEq)]
+/// Serde because `anim_cache` persists reports between sessions.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RigReport {
     /// The file fingerprint the findings describe. `None` when the GLB could not be read.
     pub fingerprint: Option<u64>,
@@ -121,6 +122,12 @@ pub struct RigReport {
     /// Phase-gridded curves per gait slot `(slot index, curves)` — the plots' input, a by-product
     /// of the FK the checks already ran. Empty for a rig with no gaits (or no contact joint).
     pub curves: Vec<(usize, emerge_core::clips::GaitCurves)>,
+    /// The measured numbers per gait slot, straight from `check_rig` — what the ghost stages, the
+    /// plots overlay, and the measured sub-line prints. Used to be dropped on the floor here while
+    /// `adopt` re-measured from scratch.
+    pub slots: Vec<emerge_core::rig_check::SlotMeasure>,
+    /// The skate arithmetic per gait slot — empty when the rig declares no `drive_speed`.
+    pub skates: Vec<emerge_core::rig_check::SkateReport>,
     /// The most severe finding level, for summaries and the badge.
     pub worst: Level,
 }
@@ -163,6 +170,8 @@ pub(crate) fn measure_rig(root: &std::path::Path, rig: &emerge_core::rigs::Rig) 
                 date: rig.provenance.as_ref().map(|p| p.date.clone()),
                 diff: Vec::new(),
                 curves: Vec::new(),
+                slots: Vec::new(),
+                skates: Vec::new(),
                 worst,
             };
         }
@@ -180,13 +189,35 @@ pub(crate) fn measure_rig(root: &std::path::Path, rig: &emerge_core::rigs::Rig) 
     let worst = emerge_core::rig_check::worst(&report.findings);
     // The plots' curves — same FK, same anchors, gathered while the file is open.
     let mut curves = Vec::new();
-    if let Some(foot) = emerge_core::clips::node_index(&glb, rig.contact_joint()) {
-        let root = emerge_core::clips::node_index(&glb, rig.root_node());
+    if rig.has_gaits() {
+        if let Some(foot) = emerge_core::clips::node_index(&glb, rig.contact_joint()) {
+            let root = emerge_core::clips::node_index(&glb, rig.root_node());
+            for (i, slot) in rig.slots.iter().enumerate() {
+                if !matches!(slot.playback, emerge_core::rigs::Playback::Gait { .. }) {
+                    continue;
+                }
+                if let Some(c) =
+                    emerge_core::clips::gait_curves(&glb, slot.clip, foot, root, rig.contact_eps)
+                {
+                    curves.push((i, c));
+                }
+            }
+        }
+    } else {
+        // A gait-less rig still deserves curves — height and speed of its most foot-like joint,
+        // with no contact claim. One ordered selection rule: the conventional contact joint when
+        // the asset has it, else the best measured candidate, else no curve.
         for (i, slot) in rig.slots.iter().enumerate() {
-            if !matches!(slot.playback, emerge_core::rigs::Playback::Gait { .. }) {
+            if !matches!(slot.playback, emerge_core::rigs::Playback::Free { .. }) {
                 continue;
             }
-            if let Some(c) = emerge_core::clips::gait_curves(&glb, slot.clip, foot, root) {
+            let joint = emerge_core::clips::node_index(&glb, rig.contact_joint()).or_else(|| {
+                emerge_core::clips::contact_candidates(&glb, slot.clip)
+                    .first()
+                    .and_then(|(name, _)| emerge_core::clips::node_index(&glb, name))
+            });
+            let Some(joint) = joint else { continue };
+            if let Some(c) = emerge_core::clips::joint_curves(&glb, slot.clip, joint) {
                 curves.push((i, c));
             }
         }
@@ -199,6 +230,8 @@ pub(crate) fn measure_rig(root: &std::path::Path, rig: &emerge_core::rigs::Rig) 
         date: rig.provenance.as_ref().map(|p| p.date.clone()),
         diff,
         curves,
+        slots: report.slots,
+        skates: report.skates,
         worst,
     }
 }

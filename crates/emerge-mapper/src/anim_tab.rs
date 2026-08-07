@@ -97,6 +97,61 @@ struct JumpRow(usize);
 #[derive(Component)]
 struct RigList;
 
+/// **Transient per-slot adopt exclusion** — "adopt everything except slot 3, this once". The
+/// durable opt-out is `keep:` in rigs.ron (a recorded decision with a why); this is the trial
+/// form, living only until the next manifest write. Its own resource, never a `BenchState` field:
+/// the adopt path holds `BenchState` mutably. Keyed by rig NAME so a selection change cannot leak
+/// one rig's excludes onto another.
+#[derive(Resource, Default)]
+pub struct AdoptExclude {
+    pub rig: Option<String>,
+    pub slots: std::collections::BTreeSet<usize>,
+}
+
+impl AdoptExclude {
+    /// The exclusion set for `name` — empty unless the key matches.
+    pub fn for_rig(&self, name: &str) -> std::collections::BTreeSet<usize> {
+        if self.rig.as_deref() == Some(name) {
+            self.slots.clone()
+        } else {
+            std::collections::BTreeSet::new()
+        }
+    }
+
+    fn clear(&mut self) {
+        self.rig = None;
+        self.slots.clear();
+    }
+}
+
+/// The per-gait-slot `[skip]` chip, carrying its slot index.
+#[derive(Component, Clone, Copy)]
+pub(crate) struct SkipChip(pub usize);
+
+/// A skip-chip click toggles the slot in the transient exclude set. NOT mod-click on the row —
+/// mod-click already means "mix in/out" on the stage chips, and one gesture with two meanings in
+/// one panel is how muscle memory betrays people.
+pub(crate) fn on_skip_click(
+    activate: On<bevy::ui_widgets::Activate>,
+    chips: Query<&SkipChip>,
+    bench: Res<BenchState>,
+    mut exclude: ResMut<AdoptExclude>,
+) {
+    let Ok(chip) = chips.get(activate.entity) else {
+        return;
+    };
+    let Some(name) = bench.names().get(bench.selected).map(|s| (*s).to_owned()) else {
+        return;
+    };
+    if exclude.rig.as_deref() != Some(name.as_str()) {
+        exclude.rig = Some(name);
+        exclude.slots.clear();
+    }
+    if !exclude.slots.remove(&chip.0) {
+        exclude.slots.insert(chip.0);
+    }
+}
+
 /// The node the selected rig's slot table is rebuilt into.
 #[derive(Component)]
 struct SlotPane;
@@ -115,10 +170,24 @@ impl Plugin for AnimTabPlugin {
             .init_resource::<crate::anim_watch::BenchReports>()
             .init_resource::<crate::anim_watch::BenchGeneration>()
             .init_resource::<crate::anim_stage::BenchScrub>()
+            .init_resource::<crate::anim_stage::BenchAb>()
+            .init_resource::<AdoptExclude>()
+            .init_resource::<crate::anim_cache::BenchCache>()
+            .init_resource::<crate::anim_stage::BenchCamera>()
             // The editor registers the game's blend pass once, here — the staged figure is driven
             // by the REAL machinery, which is the whole reason emerge-anim is a crate.
             .add_plugins(emerge_anim::PoseBlendPlugin)
-            .add_systems(Startup, (spawn_panels, crate::anim_plots::create_plot_images))
+            .add_systems(
+                Startup,
+                (
+                    spawn_panels,
+                    crate::anim_plots::create_plot_images,
+                    crate::anim_stage::create_ghost_material,
+                    // The persisted cache warms the reports before the first frame, so the STALE
+                    // badge is truthful at startup rather than after the tab's first audit.
+                    crate::anim_cache::load_bench_cache,
+                ),
+            )
             .add_systems(
                 Update,
                 (
@@ -138,32 +207,46 @@ impl Plugin for AnimTabPlugin {
                     crate::anim_watch::step_measure_queue,
                     crate::anim_watch::paint_stale_badge
                         .run_if(resource_changed::<crate::anim_watch::BenchGeneration>),
+                    crate::anim_cache::save_bench_cache
+                        .run_if(resource_changed::<crate::anim_watch::BenchGeneration>),
                     rebuild_list.run_if(
                         resource_changed::<BenchState>
                             .or_else(resource_changed::<crate::filter::Filters>),
                     ),
                     rebuild_slots.run_if(
                         resource_changed::<BenchState>
-                            .or_else(resource_changed::<crate::anim_watch::BenchGeneration>),
+                            .or_else(resource_changed::<crate::anim_watch::BenchGeneration>)
+                            .or_else(resource_changed::<AdoptExclude>),
                     ),
                     crate::anim_plots::render_plots.run_if(
                         resource_changed::<BenchState>
-                            .or_else(resource_changed::<crate::anim_watch::BenchGeneration>),
+                            .or_else(resource_changed::<crate::anim_watch::BenchGeneration>)
+                            .or_else(resource_changed::<crate::anim_stage::BenchAb>),
                     ),
                     refresh_line,
                     // The staged figure: spawned per selection, driven exactly like a game
                     // creature — after attach, before the blend pass writes the player.
-                    crate::anim_stage::drive_bench_stage,
-                    crate::anim_stage::drive_bench_scrub
-                        .in_set(crate::keys::Phase::Act)
-                        .after(emerge_anim::PoseAttachSet)
-                        .before(emerge_anim::PoseBlendSet),
-                    crate::anim_stage::refresh_scrub_ui,
+                    // Nested: a flat `add_systems` tuple caps at 20 entries, the same
+                    // `all_tuples!` ceiling as `add_plugins`' 15.
+                    (
+                        crate::anim_stage::drive_bench_stage,
+                        crate::anim_stage::drive_bench_ghost,
+                        crate::anim_stage::toggle_ghost_key.in_set(crate::keys::Phase::Act),
+                        crate::anim_stage::cycle_cam_preset.in_set(crate::keys::Phase::Act),
+                        crate::anim_stage::drive_bench_scrub
+                            .in_set(crate::keys::Phase::Act)
+                            .after(emerge_anim::PoseAttachSet)
+                            .before(emerge_anim::PoseBlendSet),
+                        crate::anim_stage::refresh_scrub_ui,
+                        crate::anim_plots::drive_plot_hover,
+                    ),
                 ),
             )
             .add_observer(on_rig_click)
             .add_observer(on_jump_click)
-            .add_observer(crate::anim_stage::on_chip_click);
+            .add_observer(crate::anim_stage::on_chip_click)
+            .add_observer(crate::anim_stage::on_ghost_chip_click)
+            .add_observer(on_skip_click);
     }
 }
 
@@ -290,13 +373,18 @@ fn commit_text(
 /// [`emerge_core::rigs_edit::RigDoc`], stamps provenance, and refuses the whole write unless the
 /// edited text parses back to precisely the value it built in memory — `replace_field`'s key search
 /// is textual, and corruption must be refused, never written.
-fn adopt(root: &std::path::Path, bench: &mut BenchState) -> Result<String, String> {
+fn adopt(
+    root: &std::path::Path,
+    bench: &mut BenchState,
+    exclude: &AdoptExclude,
+) -> Result<String, String> {
     let text = bench.text.clone().ok_or("no manifest loaded")?;
     let name = bench
         .names()
         .get(bench.selected)
         .map(|s| (*s).to_owned())
         .ok_or("no rig selected")?;
+    let excluded = exclude.for_rig(&name);
     let rigs = bench.rigs.as_ref().ok_or("no manifest loaded")?;
     let rig = rigs
         .get(&name)
@@ -323,6 +411,7 @@ fn adopt(root: &std::path::Path, bench: &mut BenchState) -> Result<String, Strin
 
     let mut wrote = 0usize;
     let mut kept = 0usize;
+    let mut skipped = 0usize;
     for (i, slot) in rig.slots.iter().enumerate() {
         let Playback::Gait {
             duration: d0,
@@ -334,6 +423,11 @@ fn adopt(root: &std::path::Path, bench: &mut BenchState) -> Result<String, Strin
         };
         if slot.keep.is_some() {
             kept += 1;
+            continue;
+        }
+        // The transient exclude: skipped exactly like a kept slot, but only for this write.
+        if excluded.contains(&i) {
+            skipped += 1;
             continue;
         }
         let Some(m) = report.slots.iter().find(|m| m.slot == i) else {
@@ -364,8 +458,11 @@ fn adopt(root: &std::path::Path, bench: &mut BenchState) -> Result<String, Strin
         }
     }
     if wrote == 0 {
-        return Err(if kept > 0 {
-            format!("all of '{name}'s gait slots are kept — nothing to write")
+        return Err(if kept + skipped > 0 {
+            format!(
+                "all of '{name}'s gait slots are kept or skipped ({kept} kept, {skipped} \
+                 skipped) — nothing to write"
+            )
         } else {
             format!("nothing measurable on '{name}' — nothing to write")
         });
@@ -399,9 +496,16 @@ fn adopt(root: &std::path::Path, bench: &mut BenchState) -> Result<String, Strin
     }
     commit_text(root, bench, new_text)?;
     bench.record(text);
+    let mut held = Vec::new();
+    if kept > 0 {
+        held.push(format!("{kept} kept"));
+    }
+    if skipped > 0 {
+        held.push(format!("{skipped} skipped"));
+    }
     Ok(format!(
         "wrote {wrote} value(s) + provenance for '{name}'{}",
-        if kept > 0 { format!(" ({kept} kept)") } else { String::new() }
+        if held.is_empty() { String::new() } else { format!(" ({})", held.join(", ")) }
     ))
 }
 
@@ -411,6 +515,7 @@ fn adopt_measured(
     live: Res<crate::keys::Live>,
     project: Res<crate::project::Project>,
     mut bench: ResMut<BenchState>,
+    mut exclude: ResMut<AdoptExclude>,
     mut reports: ResMut<crate::anim_watch::BenchReports>,
     mut generation: ResMut<crate::anim_watch::BenchGeneration>,
 ) {
@@ -419,9 +524,12 @@ fn adopt_measured(
     }
     // A failed write REPLACES the message — an author told "adopted" by a program that could not
     // write the file has been told something untrue (the `tiles::persist` rule).
-    bench.status = match adopt(&project.root, &mut bench) {
+    bench.status = match adopt(&project.root, &mut bench, &exclude) {
         Ok(said) => {
             crate::anim_watch::invalidate(&mut reports, &mut generation);
+            // The excludes were about the text that just changed; a stale set silently shaping
+            // the NEXT adopt would be the two-paths bug in miniature.
+            exclude.clear();
             said
         }
         Err(e) => format!("NOT WRITTEN: {e}"),
@@ -436,6 +544,7 @@ fn bench_history_keys(
     live: Res<crate::keys::Live>,
     project: Res<crate::project::Project>,
     mut bench: ResMut<BenchState>,
+    mut exclude: ResMut<AdoptExclude>,
     mut reports: ResMut<crate::anim_watch::BenchReports>,
     mut generation: ResMut<crate::anim_watch::BenchGeneration>,
 ) {
@@ -453,6 +562,8 @@ fn bench_history_keys(
     match commit_text(&project.root, &mut bench, target.clone()) {
         Ok(()) => {
             crate::anim_watch::invalidate(&mut reports, &mut generation);
+            // The manifest text changed under the excludes — same rule as adopt.
+            exclude.clear();
             if let Some(now) = now {
                 if undo {
                     bench.redo.push(now);
@@ -505,16 +616,33 @@ fn keep_selection_visible(filters: Res<crate::filter::Filters>, mut bench: ResMu
 fn move_selection(
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<crate::keys::Live>,
+    time: Res<Time>,
+    mut repeat: ResMut<crate::keys::Repeat>,
     mut bench: ResMut<BenchState>,
 ) {
     let n = bench.names().len();
     if n == 0 {
         return;
     }
-    let step = if crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::NextRig) {
+    // Held arrows walk the list at the shared [`crate::keys::REPEAT_SECS`] cadence — the same
+    // helper the aim keys ride, so every held key in the editor has one rhythm. Shift is the long
+    // stride, five at a time, the same bargain the tiles lists strike.
+    let dt = time.delta_secs();
+    // Clamped below the list's length: this list wraps, and on a short list a stride of exactly
+    // `n` is the identity wearing a jump's clothes.
+    let stride = if crate::keys::SHIFT_KEYS.iter().any(|k| keyboard.pressed(*k)) {
+        5.min(n.saturating_sub(1)).max(1)
+    } else {
         1
-    } else if crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::PrevRig) {
-        n - 1
+    };
+    let step = if crate::keys::repeating(
+        &keyboard, live.0, crate::keys::Action::NextRig, &mut repeat, dt,
+    ) {
+        stride
+    } else if crate::keys::repeating(
+        &keyboard, live.0, crate::keys::Action::PrevRig, &mut repeat, dt,
+    ) {
+        n - stride
     } else {
         return;
     };
@@ -621,17 +749,52 @@ fn rebuild_list(
 }
 
 /// The selected rig's slot table: what the manifest declares, slot by slot.
+/// The measured half of a gait slot's row — `measured: 1.402s  ph +0.020  1.386m`, mirroring the
+/// declared detail column so the pair reads as declared-above-measured. Distances arrive in FILE
+/// units on `SlotMeasure`; the rig's scale converts them to the world units the manifest declares.
+/// A field that could not be measured is simply absent rather than printed as a guess. The one
+/// extension point for per-slot measured data — the skate summary rides here too.
+fn slot_measured_line(
+    m: &emerge_core::rig_check::SlotMeasure,
+    skate: Option<&emerge_core::rig_check::SkateReport>,
+    scale: f32,
+) -> String {
+    let mut line = format!("measured: {:.3}s", m.duration);
+    if let Some(ph) = m.phase_offset {
+        line.push_str(&format!("  ph {ph:+.3}"));
+    }
+    if let Some(cd) = m.cycle_distance {
+        line.push_str(&format!("  {:.3}m", cd * scale));
+    }
+    if let Some(sk) = skate {
+        if sk.max_skate > emerge_core::rig_check::SKATE_FLOOR {
+            line.push_str(&format!(
+                "  skate up to {:.2} u/s over {:.0}% of drive",
+                sk.max_skate,
+                sk.skating_ratio * 100.0
+            ));
+        }
+    }
+    line
+}
+
 fn rebuild_slots(
     mut commands: Commands,
     bench: Res<BenchState>,
     reports: Option<Res<crate::anim_watch::BenchReports>>,
     plots: Option<Res<crate::anim_plots::BenchPlots>>,
+    exclude: Option<Res<AdoptExclude>>,
     panes: Query<Entity, With<SlotPane>>,
 ) {
     let names = bench.names();
     let rig = names
         .get(bench.selected)
         .and_then(|n| bench.rigs.as_ref().and_then(|r| r.get(n)));
+    let excluded = names
+        .get(bench.selected)
+        .zip(exclude.as_ref())
+        .map(|(n, e)| e.for_rig(n))
+        .unwrap_or_default();
     // Reports are keyed by rig NAME, so this lookup can never pair a slot table with another
     // rig's measurements — the race the old per-selection index cache had to guard against.
     // `None` simply means the queue has not reached this rig yet.
@@ -840,6 +1003,31 @@ fn rebuild_slots(
                         TextColor(TEXT),
                         TextFont::from_font_size(10.0),
                     ));
+                    // The transient adopt-exclude chip — gaits only, since adopt writes nothing
+                    // else. The durable form is `keep:` in the manifest; this is "not this once".
+                    if matches!(slot.playback, Playback::Gait { .. }) {
+                        row.spawn((
+                            UiButton,
+                            Hovered::default(),
+                            SkipChip(i),
+                            Node {
+                                padding: UiRect::axes(Val::Px(4.0), Val::Px(1.0)),
+                                ..default()
+                            },
+                            BackgroundColor(if excluded.contains(&i) {
+                                ROW_SELECTED
+                            } else {
+                                ROW_BG
+                            }),
+                        ))
+                        .with_children(|chip| {
+                            chip.spawn((
+                                Text::new("skip"),
+                                TextColor(if excluded.contains(&i) { TEXT } else { DIM }),
+                                TextFont::from_font_size(9.0),
+                            ));
+                        });
+                    }
                 });
                 // **One sub-line per slot, not three.** The note, the asset's own clip name
                 // (which is what makes the LEFTWARD mismatch self-evidencing rather than
@@ -869,6 +1057,28 @@ fn rebuild_slots(
                             ..default()
                         },
                     ));
+                }
+                // **Declared above, measured below** — the module's own promise, kept structurally
+                // rather than buried in finding prose. Only gaits carry measured numbers.
+                if matches!(slot.playback, Playback::Gait { .. }) {
+                    if let Some(r) = report {
+                        if let Some(m) = r.slots.iter().find(|m| m.slot == i) {
+                            let skate = r.skates.iter().find(|s| s.slot == i);
+                            let mut line = slot_measured_line(m, skate, rig.scale);
+                            if excluded.contains(&i) {
+                                line.push_str(" | excluded from adopt");
+                            }
+                            p.spawn((
+                                Text::new(line),
+                                TextColor(DIM),
+                                TextFont::from_font_size(9.0),
+                                Node {
+                                    margin: UiRect::left(Val::Px(84.0)),
+                                    ..default()
+                                },
+                            ));
+                        }
+                    }
                 }
             }
 
@@ -922,9 +1132,16 @@ fn rebuild_slots(
                     ..default()
                 })
                 .with_children(|legend| {
+                    // The same rank walk `render_plots` colors by: gait slots when the rig has
+                    // any, else every free slot — lockstep or the legend lies.
                     let mut rank = 0usize;
                     for (i, slot) in rig.slots.iter().enumerate() {
-                        if !matches!(slot.playback, Playback::Gait { .. }) {
+                        let plotted = match slot.playback {
+                            Playback::Gait { .. } => true,
+                            Playback::Free { .. } => !rig.has_gaits(),
+                            _ => false,
+                        };
+                        if !plotted {
                             continue;
                         }
                         let label = report
@@ -941,8 +1158,8 @@ fn rebuild_slots(
                     }
                 });
                 let charts = [
-                    ("foot height / phase (contact ticks below)", &plots.height),
-                    ("foot speed / phase (m/s; stance should sit flat)", &plots.speed),
+                    ("foot height / phase (contact ticks below; dim = measured, G)", &plots.height),
+                    ("foot speed / phase (m/s; stance should sit flat; dim = measured, G)", &plots.speed),
                     ("root drift / phase (m; red line = in-place limit)", &plots.drift),
                 ];
                 for (caption, handle) in charts {
@@ -955,18 +1172,51 @@ fn rebuild_slots(
                             ..default()
                         },
                     ));
-                    p.spawn((
-                        ImageNode::new(handle.clone()),
-                        Node {
-                            width: Val::Px(crate::anim_plots::SHOW_W),
-                            height: Val::Px(crate::anim_plots::SHOW_PLOT_H),
-                            flex_shrink: 0.0,
-                            ..default()
-                        },
-                    ));
+                    // The plot in a relative wrapper, so the shared hover overlay can sit exactly
+                    // on top of it; the cursor is read off the plot node itself.
+                    p.spawn(Node {
+                        width: Val::Px(crate::anim_plots::SHOW_W),
+                        height: Val::Px(crate::anim_plots::SHOW_PLOT_H),
+                        flex_shrink: 0.0,
+                        ..default()
+                    })
+                    .with_children(|wrap| {
+                        wrap.spawn((
+                            ImageNode::new(handle.clone()),
+                            Node {
+                                width: Val::Px(crate::anim_plots::SHOW_W),
+                                height: Val::Px(crate::anim_plots::SHOW_PLOT_H),
+                                ..default()
+                            },
+                            bevy::ui::RelativeCursorPosition::default(),
+                            bevy::picking::hover::Hovered::default(),
+                            crate::anim_plots::PhasePlotNode,
+                        ));
+                        wrap.spawn((
+                            ImageNode::new(plots.hover.clone()),
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: Val::Px(0.0),
+                                top: Val::Px(0.0),
+                                width: Val::Px(crate::anim_plots::SHOW_W),
+                                height: Val::Px(crate::anim_plots::SHOW_PLOT_H),
+                                ..default()
+                            },
+                            // The overlay must not eat the cursor from the plot beneath it.
+                            bevy::picking::Pickable::IGNORE,
+                        ));
+                    });
                 }
+                // The hover readout — per-slot values at the cursor's phase, written by
+                // `drive_plot_hover`.
                 p.spawn((
-                    Text::new("top-down trace (fwd = up; arrow = declared cycle along measured travel)"),
+                    Text::new(String::new()),
+                    TextColor(DIM),
+                    TextFont::from_font_size(9.0),
+                    crate::anim_plots::PlotReadout,
+                ));
+                p.spawn((
+                    Text::new("top-down trace (fwd = up; arrow = declared cycle along measured travel; dim arrow = measured, G)"),
                     TextColor(LABEL),
                     TextFont::from_font_size(9.0),
                     Node {
@@ -1013,6 +1263,40 @@ fn refresh_line(bench: Res<BenchState>, mut lines: Query<(&mut Text, &mut TextCo
 
 /// **The writer, proven against a disposable copy of the real project.** The model is
 /// `tiles::write_library_tests`: a temp dir, the real files copied in, and assertions on the bytes.
+#[cfg(test)]
+mod measured_line_tests {
+    use super::*;
+
+    #[test]
+    fn the_measured_line_scales_distances_and_omits_what_could_not_be_measured() {
+        let full = emerge_core::rig_check::SlotMeasure {
+            slot: 2,
+            duration: 1.402,
+            cycle_distance: Some(1.227),
+            phase_offset: Some(0.02),
+        };
+        // 1.227 file units × 1.13 scale = 1.387 world units, the manifest's own frame.
+        let line = slot_measured_line(&full, None, 1.13);
+        assert_eq!(line, "measured: 1.402s  ph +0.020  1.387m");
+
+        let bare = emerge_core::rig_check::SlotMeasure {
+            slot: 0,
+            duration: 0.75,
+            cycle_distance: None,
+            phase_offset: None,
+        };
+        assert_eq!(slot_measured_line(&bare, None, 1.13), "measured: 0.750s");
+
+        // A skating slot says so on the same line; a skate-free one stays quiet.
+        let skating = emerge_core::rig_check::skate_report(2, 1.402, 1.387, (0.9, 6.0));
+        let line = slot_measured_line(&full, Some(&skating), 1.13);
+        assert!(line.contains("skate up to"), "{line}");
+        let quiet = emerge_core::rig_check::skate_report(2, 1.402, 1.387, (0.9, 1.2));
+        let line = slot_measured_line(&full, Some(&quiet), 1.13);
+        assert!(!line.contains("skate"), "{line}");
+    }
+}
+
 #[cfg(test)]
 mod write_back_tests {
     use super::*;
@@ -1070,7 +1354,7 @@ mod write_back_tests {
         let before = std::fs::read_to_string(&manifest).unwrap_or_else(|e| panic!("{e}"));
         let mut bench = bench_for(&dir);
 
-        let said = adopt(&dir, &mut bench).unwrap_or_else(|e| panic!("{e}"));
+        let said = adopt(&dir, &mut bench, &AdoptExclude::default()).unwrap_or_else(|e| panic!("{e}"));
         assert!(said.contains("provenance"), "{said}");
 
         let after = std::fs::read_to_string(&manifest).unwrap_or_else(|e| panic!("{e}"));
@@ -1118,6 +1402,51 @@ mod write_back_tests {
         assert_eq!(bench.text.as_deref(), Some(before.as_str()), "nor the memory");
     }
 
+    /// The transient exclude holds one slot's bytes still while its siblings adopt — and
+    /// excluding everything refuses to write at all.
+    #[test]
+    fn an_excluded_slot_keeps_its_bytes_while_siblings_adopt() {
+        let dir = temp_project();
+        let manifest = dir.join("assets/emerge/rigs.ron");
+        let before = std::fs::read_to_string(&manifest).unwrap_or_else(|e| panic!("{e}"));
+        let mut bench = bench_for(&dir);
+        // Slot 2 is the walk — the phase reference, and the line we hold still.
+        let walk_line = |t: &str| -> String {
+            t.lines()
+                .find(|l| l.contains("the phase reference"))
+                .map(str::to_owned)
+                .unwrap_or_else(|| panic!("no walk line"))
+        };
+        let mut exclude = AdoptExclude::default();
+        exclude.rig = Some("valkyrie".to_owned());
+        exclude.slots.insert(2);
+        let said = adopt(&dir, &mut bench, &exclude).unwrap_or_else(|e| panic!("{e}"));
+        assert!(said.contains("1 skipped"), "{said}");
+        let after = std::fs::read_to_string(&manifest).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            walk_line(&before),
+            walk_line(&after),
+            "the excluded slot's numbers must be byte-identical"
+        );
+        assert_ne!(before, after, "the siblings still adopted");
+
+        // A mismatched rig key means nothing is excluded — the set cannot leak across rigs.
+        let mut bench = bench_for(&dir);
+        let mut foreign = AdoptExclude::default();
+        foreign.rig = Some("crab".to_owned());
+        foreign.slots.insert(2);
+        let said = adopt(&dir, &mut bench, &foreign).unwrap_or_else(|e| panic!("{e}"));
+        assert!(!said.contains("skipped"), "{said}");
+
+        // Excluding every gait slot refuses the write outright.
+        let mut bench = bench_for(&dir);
+        let mut all = AdoptExclude::default();
+        all.rig = Some("valkyrie".to_owned());
+        all.slots.extend([2usize, 3, 4, 5, 6, 7]);
+        let refused = adopt(&dir, &mut bench, &all);
+        assert!(refused.is_err(), "{refused:?}");
+    }
+
     #[test]
     fn a_second_adopt_is_stable_where_the_asset_is() {
         // Adopt twice with nothing changing between: the second write must change only the
@@ -1125,9 +1454,9 @@ mod write_back_tests {
         let dir = temp_project();
         let manifest = dir.join("assets/emerge/rigs.ron");
         let mut bench = bench_for(&dir);
-        adopt(&dir, &mut bench).unwrap_or_else(|e| panic!("{e}"));
+        adopt(&dir, &mut bench, &AdoptExclude::default()).unwrap_or_else(|e| panic!("{e}"));
         let once = std::fs::read_to_string(&manifest).unwrap_or_else(|e| panic!("{e}"));
-        adopt(&dir, &mut bench).unwrap_or_else(|e| panic!("{e}"));
+        adopt(&dir, &mut bench, &AdoptExclude::default()).unwrap_or_else(|e| panic!("{e}"));
         let twice = std::fs::read_to_string(&manifest).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(once, twice, "a repeated adopt of an unchanged asset must be a fixpoint");
     }

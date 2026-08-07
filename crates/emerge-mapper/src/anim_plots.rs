@@ -14,6 +14,12 @@
 //! CPU-rasterized into stable [`Image`] handles (the `thumbs` idiom: handles never change identity,
 //! data is rewritten), shown as `ImageNode`s in the pane. The raster arithmetic lives engine-free in
 //! `emerge_core::plot`; this module owns only sizes, colors, and the phase convention.
+//!
+//! **Why not more than 128 bins**: `PHASE_BINS` is the *measurement* grid — contact labels,
+//! stance fractions and phase offsets are all born bin-quantized in `emerge_core::clips` — so a
+//! render-only densification has nothing denser to draw, and raising the core constant changes
+//! measurement semantics (a `BENCH_TOOL_VERSION` bump orphaning every provenance stamp). The
+//! display is not the bottleneck: 128 bins across 712 raster px is over 5 px per bin.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::Image;
@@ -70,7 +76,7 @@ pub(crate) fn slot_ui_color(k: usize) -> Color {
     Color::srgb_u8(r, g, b)
 }
 
-/// The four plot images. Handles are created once at `Startup` and NEVER replaced — the pane's
+/// The plot images. Handles are created once at `Startup` and NEVER replaced — the pane's
 /// `ImageNode`s bind them by identity, and only the pixel data moves (the `Thumbnails` idiom).
 #[derive(Resource)]
 pub struct BenchPlots {
@@ -78,12 +84,18 @@ pub struct BenchPlots {
     pub speed: Handle<Image>,
     pub drift: Handle<Image>,
     pub trace: Handle<Image>,
+    /// **One shared hover overlay** for the three phase plots — a transparent image carrying just
+    /// the cursor line. Shared on purpose: the plots share the phase axis, so one vertical cursor
+    /// across the stack is a feature, and one image is one repaint.
+    pub hover: Handle<Image>,
+    /// The bin the cursor sits on, if any — the repaint-only-on-change latch.
+    pub hovered_bin: Option<usize>,
     /// Which rig the pixels currently describe; `None` = blank.
     pub plotted: Option<String>,
 }
 
-fn blank(images: &mut Assets<Image>, w: u32, h: u32) -> Handle<Image> {
-    let raster = Raster::new(w as usize, h as usize, BG);
+fn blank(images: &mut Assets<Image>, w: u32, h: u32, fill: [u8; 4]) -> Handle<Image> {
+    let raster = Raster::new(w as usize, h as usize, fill);
     images.add(Image::new(
         Extent3d {
             width: w,
@@ -99,12 +111,120 @@ fn blank(images: &mut Assets<Image>, w: u32, h: u32) -> Handle<Image> {
 
 pub(crate) fn create_plot_images(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.insert_resource(BenchPlots {
-        height: blank(&mut images, PLOT_W, PLOT_H),
-        speed: blank(&mut images, PLOT_W, PLOT_H),
-        drift: blank(&mut images, PLOT_W, PLOT_H),
-        trace: blank(&mut images, TRACE_W, TRACE_H),
+        height: blank(&mut images, PLOT_W, PLOT_H, BG),
+        speed: blank(&mut images, PLOT_W, PLOT_H, BG),
+        drift: blank(&mut images, PLOT_W, PLOT_H, BG),
+        trace: blank(&mut images, TRACE_W, TRACE_H, BG),
+        hover: blank(&mut images, PLOT_W, PLOT_H, [0, 0, 0, 0]),
+        hovered_bin: None,
         plotted: None,
     });
+}
+
+/// Marker on the three phase-plot `ImageNode`s — the hover surfaces. The trace is deliberately
+/// not one: its axes are spatial, and a phase cursor over it would be a lie. Public for the
+/// headless wiring test.
+#[derive(Component)]
+pub struct PhasePlotNode;
+
+/// Marker on the readout `Text` under the plots. Public for the headless wiring test.
+#[derive(Component)]
+pub struct PlotReadout;
+
+/// The centered cursor x ([`bevy::ui::RelativeCursorPosition`]'s convention: 0 at the node's
+/// middle, ±0.5 at its edges) as a phase bin.
+pub(crate) fn hover_bin(centered_x: f32) -> Option<usize> {
+    let frac = centered_x + 0.5;
+    if !(0.0..=1.0).contains(&frac) {
+        return None;
+    }
+    let bins = emerge_core::clips::PHASE_BINS;
+    Some(((frac * bins as f32) as usize).min(bins - 1))
+}
+
+/// **Hover-to-inspect.** Ungated — it early-outs to nothing every frame the bin is unchanged, so
+/// the repaint-on-change idiom holds: moving within one bin costs two query reads.
+pub(crate) fn drive_plot_hover(
+    bench: Option<Res<BenchState>>,
+    reports: Option<Res<BenchReports>>,
+    plots: Option<ResMut<BenchPlots>>,
+    images: Option<ResMut<Assets<Image>>>,
+    nodes: Query<&bevy::ui::RelativeCursorPosition, With<PhasePlotNode>>,
+    mut readouts: Query<&mut Text, With<PlotReadout>>,
+) {
+    let (Some(bench), Some(reports), Some(mut plots), Some(mut images)) =
+        (bench, reports, plots, images)
+    else {
+        return;
+    };
+    let bin = nodes
+        .iter()
+        .find(|r| r.cursor_over)
+        .and_then(|r| r.normalized)
+        .and_then(|n| hover_bin(n.x));
+    if bin == plots.hovered_bin {
+        return;
+    }
+    plots.hovered_bin = bin;
+
+    // The overlay: transparent but for one vertical cursor line.
+    let mut r = Raster::new(PLOT_W as usize, PLOT_H as usize, [0, 0, 0, 0]);
+    if let Some(b) = bin {
+        let bins = emerge_core::clips::PHASE_BINS;
+        let x = (b * PLOT_W as usize / bins).min(PLOT_W as usize - 1);
+        r.vspan(x, 0, PLOT_H as usize - 1, GRID);
+    }
+    commit(&plots.hover, r, &mut images);
+
+    // The readout: each plotted slot's height and speed at the hovered phase, world units, read
+    // through the same declared-offset resample the raster draws.
+    let text = match bin {
+        None => String::new(),
+        Some(b) => {
+            let names = bench.names();
+            let selected = names.get(bench.selected).copied();
+            let rig = selected.and_then(|n| bench.rigs.as_ref().and_then(|r| r.get(n)));
+            let report = selected.and_then(|n| reports.by_rig.get(n));
+            match (rig, report) {
+                (Some(rig), Some(report)) => {
+                    let bins = emerge_core::clips::PHASE_BINS;
+                    let mut heights = Vec::new();
+                    let mut speeds = Vec::new();
+                    for (i, slot) in rig.slots.iter().enumerate() {
+                        let offset = match slot.playback {
+                            Playback::Gait { phase_offset, .. } => phase_offset,
+                            _ => 0.0,
+                        };
+                        let Some((_, c)) = report.curves.iter().find(|(s, _)| *s == i) else {
+                            continue;
+                        };
+                        // The seek formula, one sample: value at wrap01(phi + offset).
+                        let at = ((b as f32 / bins as f32 + offset).rem_euclid(1.0)
+                            * bins as f32) as usize
+                            % bins;
+                        if let (Some(h), Some(v)) =
+                            (c.foot_height.get(at), c.ground_speed.get(at))
+                        {
+                            heights.push(format!("{:.2}", h * rig.scale));
+                            speeds.push(format!("{:.2}", v * rig.scale));
+                        }
+                    }
+                    format!(
+                        "phase {:.3} | h {} | v {}",
+                        b as f32 / bins as f32,
+                        heights.join("/"),
+                        speeds.join("/")
+                    )
+                }
+                _ => String::new(),
+            }
+        }
+    };
+    for mut t in &mut readouts {
+        if t.0 != text {
+            t.0 = text.clone();
+        }
+    }
 }
 
 /// A curve resampled onto the SHARED phase axis: displayed value at φ is the clip's value at
@@ -139,6 +259,19 @@ struct SlotCurves {
     contact: Vec<bool>,
     trace: Vec<[f32; 2]>,
     body_velocity: [f32; 2],
+    /// The same curves at the MEASURED phase offset (and the measured cycle distance) — the plots'
+    /// half of the A/B ghost, drawn dimmed under the declared curves when the toggle is on.
+    /// `None` when nothing was measured or measured equals declared to the grid: a rotation of the
+    /// same bins would overdraw itself invisibly.
+    measured: Option<MeasuredShift>,
+}
+
+/// See [`SlotCurves::measured`].
+struct MeasuredShift {
+    cycle: f32,
+    height: Vec<f32>,
+    speed: Vec<f32>,
+    drift: Vec<f32>,
 }
 
 /// **Repaint the plots for the selected rig.** Runs on the same dirt as the pane rebuild; a rig
@@ -146,6 +279,7 @@ struct SlotCurves {
 pub(crate) fn render_plots(
     bench: Option<Res<BenchState>>,
     reports: Option<Res<BenchReports>>,
+    ab: Option<Res<crate::anim_stage::BenchAb>>,
     plots: Option<ResMut<BenchPlots>>,
     images: Option<ResMut<Assets<Image>>>,
 ) {
@@ -154,6 +288,7 @@ pub(crate) fn render_plots(
     else {
         return;
     };
+    let ab_on = ab.is_some_and(|a| a.0);
     let names = bench.names();
     let selected = names.get(bench.selected).map(|s| (*s).to_owned());
     let rig = selected
@@ -161,22 +296,33 @@ pub(crate) fn render_plots(
         .and_then(|n| bench.rigs.as_ref().and_then(|r| r.get(n)));
     let report = selected.as_deref().and_then(|n| reports.by_rig.get(n));
 
-    // Gather the gait slots' curves in world units, on the shared phase axis.
+    // Gather the plotted slots' curves in world units, on the shared phase axis: the gait slots
+    // when the rig has any, else every free slot the measurer found a joint for (offset 0 and no
+    // cycle — nothing was declared, so nothing declared is drawn).
     let mut slots: Vec<SlotCurves> = Vec::new();
     if let (Some(rig), Some(report)) = (rig, report) {
         let scale = rig.scale;
         let mut rank = 0usize;
         for (i, slot) in rig.slots.iter().enumerate() {
-            let Playback::Gait {
-                phase_offset,
-                cycle_distance,
-                ..
-            } = slot.playback
-            else {
-                continue;
+            let (phase_offset, cycle_distance) = match slot.playback {
+                Playback::Gait {
+                    phase_offset,
+                    cycle_distance,
+                    ..
+                } => (phase_offset, cycle_distance),
+                Playback::Free { .. } if !rig.has_gaits() => (0.0, 0.0),
+                _ => continue,
             };
             if let Some((_, c)) = report.curves.iter().find(|(s, _)| *s == i) {
-                slots.push(world_curves(rank, phase_offset, cycle_distance, c, scale));
+                let measure = report.slots.iter().find(|m| m.slot == i);
+                slots.push(world_curves(
+                    rank,
+                    phase_offset,
+                    cycle_distance,
+                    c,
+                    scale,
+                    measure,
+                ));
             }
             rank += 1;
         }
@@ -189,10 +335,10 @@ pub(crate) fn render_plots(
     } else {
         selected.clone()
     };
-    paint_height(&plots.height, &slots, &mut images);
-    paint_speed(&plots.speed, &slots, &mut images);
-    paint_drift(&plots.drift, &slots, rig.map_or(1.0, |r| r.scale), &mut images);
-    paint_trace(&plots.trace, &slots, &mut images);
+    paint_height(&plots.height, &slots, ab_on, &mut images);
+    paint_speed(&plots.speed, &slots, ab_on, &mut images);
+    paint_drift(&plots.drift, &slots, rig.map_or(1.0, |r| r.scale), ab_on, &mut images);
+    paint_trace(&plots.trace, &slots, ab_on, &mut images);
     plots.plotted = plotted;
 }
 
@@ -202,7 +348,35 @@ fn world_curves(
     declared_cycle: f32,
     c: &GaitCurves,
     scale: f32,
+    measure: Option<&emerge_core::rig_check::SlotMeasure>,
 ) -> SlotCurves {
+    // The measured variant: the SAME bins rotated to the measured offset, and the measured cycle
+    // distance for the trace arrow. Built only when it would draw something the declared curves do
+    // not — a shift under half a bin rounds to the same rotation.
+    let measured = measure.and_then(|m| {
+        let m_offset = m.phase_offset?;
+        let half_bin = 0.5 / c.foot_height.len().max(1) as f32;
+        let offset_differs =
+            emerge_core::clips::signed_offset((m_offset - declared_offset).rem_euclid(1.0)).abs()
+                >= half_bin;
+        let m_cycle = m.cycle_distance.map(|d| d * scale).unwrap_or(declared_cycle);
+        let cycle_differs = (m_cycle - declared_cycle).abs() > 0.01 * declared_cycle.max(1.0e-3);
+        (offset_differs || cycle_differs).then(|| MeasuredShift {
+            cycle: m_cycle,
+            height: shifted(&c.foot_height, m_offset)
+                .into_iter()
+                .map(|v| v * scale)
+                .collect(),
+            speed: shifted(&c.ground_speed, m_offset)
+                .into_iter()
+                .map(|v| v * scale)
+                .collect(),
+            drift: shifted(&c.root_drift, m_offset)
+                .into_iter()
+                .map(|v| v * scale)
+                .collect(),
+        })
+    });
     SlotCurves {
         rank,
         declared_cycle,
@@ -221,6 +395,31 @@ fn world_curves(
         contact: shifted_contact(&c.contact, declared_offset),
         trace: c.trace.iter().map(|p| [p[0] * scale, p[1] * scale]).collect(),
         body_velocity: [c.body_velocity[0] * scale, c.body_velocity[1] * scale],
+        measured,
+    }
+}
+
+/// The A/B under-curve ink: the slot's color at a third strength — the trace's swing-dim idiom.
+fn dim_ink(rank: usize) -> [u8; 4] {
+    let ink = slot_color(rank);
+    [ink[0] / 3, ink[1] / 3, ink[2] / 3, 255]
+}
+
+#[cfg(test)]
+mod hover_tests {
+    use super::*;
+
+    #[test]
+    fn hover_bins_cover_the_node_and_refuse_the_outside() {
+        let bins = emerge_core::clips::PHASE_BINS;
+        // The node's left edge is centered -0.5, its right edge +0.5.
+        assert_eq!(hover_bin(-0.5), Some(0));
+        assert_eq!(hover_bin(0.0), Some(bins / 2));
+        assert_eq!(hover_bin(0.499), Some(bins - 1));
+        // The right edge itself still lands on the last bin, never past it.
+        assert_eq!(hover_bin(0.5), Some(bins - 1));
+        assert_eq!(hover_bin(0.51), None);
+        assert_eq!(hover_bin(-0.51), None);
     }
 }
 
@@ -253,11 +452,18 @@ fn range(slots: &[SlotCurves], pick: impl Fn(&SlotCurves) -> &[f32]) -> (f32, f3
 
 /// Foot height vs phase, with a per-slot contact tick row along the bottom — stance is the flat
 /// part, and the ticks say where each clip believes its feet are down.
-fn paint_height(handle: &Handle<Image>, slots: &[SlotCurves], images: &mut Assets<Image>) {
+fn paint_height(handle: &Handle<Image>, slots: &[SlotCurves], ab: bool, images: &mut Assets<Image>) {
     let mut r = Raster::new(PLOT_W as usize, PLOT_H as usize, BG);
+    // The measured variant is a rotation of the same bins, so it never widens the range.
     let (lo, hi) = range(slots, |s| &s.height);
     r.hline(PLOT_H as usize - 1, GRID);
     for s in slots {
+        // Dim = at the measured offset, under the declared curve — the plots' half of the ghost.
+        if ab {
+            if let Some(m) = &s.measured {
+                r.curve(&m.height, lo, hi, dim_ink(s.rank));
+            }
+        }
         r.curve(&s.height, lo, hi, slot_color(s.rank));
         // Contact ticks: one two-pixel row per slot, stacked up from the bottom edge.
         let y = (PLOT_H as usize).saturating_sub(2 + 2 * s.rank);
@@ -277,11 +483,16 @@ fn paint_height(handle: &Handle<Image>, slots: &[SlotCurves], images: &mut Asset
 
 /// Foot ground speed vs phase. During stance this should sit at the body's speed — deviation
 /// inside the stance IS foot skate, visible as a wobble where a plateau should be.
-fn paint_speed(handle: &Handle<Image>, slots: &[SlotCurves], images: &mut Assets<Image>) {
+fn paint_speed(handle: &Handle<Image>, slots: &[SlotCurves], ab: bool, images: &mut Assets<Image>) {
     let mut r = Raster::new(PLOT_W as usize, PLOT_H as usize, BG);
     let (_, hi) = range(slots, |s| &s.speed);
     r.hline(PLOT_H as usize - 1, GRID);
     for s in slots {
+        if ab {
+            if let Some(m) = &s.measured {
+                r.curve(&m.speed, 0.0, hi.max(1.0e-3), dim_ink(s.rank));
+            }
+        }
         r.curve(&s.speed, 0.0, hi.max(1.0e-3), slot_color(s.rank));
     }
     commit(handle, r, images);
@@ -293,6 +504,7 @@ fn paint_drift(
     handle: &Handle<Image>,
     slots: &[SlotCurves],
     scale: f32,
+    ab: bool,
     images: &mut Assets<Image>,
 ) {
     let mut r = Raster::new(PLOT_W as usize, PLOT_H as usize, BG);
@@ -302,6 +514,11 @@ fn paint_drift(
     let threshold_row = ((1.0 - threshold / hi) * (PLOT_H - 1) as f32) as usize;
     r.hline(threshold_row.min(PLOT_H as usize - 1), DANGER_INK);
     for s in slots {
+        if ab {
+            if let Some(m) = &s.measured {
+                r.curve(&m.drift, 0.0, hi, dim_ink(s.rank));
+            }
+        }
         r.curve(&s.drift, 0.0, hi, slot_color(s.rank));
     }
     commit(handle, r, images);
@@ -312,7 +529,7 @@ fn paint_drift(
 /// the measured body travel, drawn at the DECLARED cycle distance — so a declared number that
 /// disagrees with the measured direction or magnitude is visible as an arrow that does not fit its
 /// own footprints. The grid is spaced at the reference slot's declared cycle distance.
-fn paint_trace(handle: &Handle<Image>, slots: &[SlotCurves], images: &mut Assets<Image>) {
+fn paint_trace(handle: &Handle<Image>, slots: &[SlotCurves], ab: bool, images: &mut Assets<Image>) {
     let (w, h) = (TRACE_W as usize, TRACE_H as usize);
     let mut r = Raster::new(w, h, BG);
     if slots.is_empty() {
@@ -329,6 +546,11 @@ fn paint_trace(handle: &Handle<Image>, slots: &[SlotCurves], images: &mut Assets
         let v = (s.body_velocity[0].powi(2) + s.body_velocity[1].powi(2)).sqrt();
         if v > 1.0e-6 {
             reach = reach.max(s.declared_cycle);
+            if ab {
+                if let Some(m) = &s.measured {
+                    reach = reach.max(m.cycle);
+                }
+            }
         }
     }
     let margin = 24.0;
@@ -372,6 +594,14 @@ fn paint_trace(handle: &Handle<Image>, slots: &[SlotCurves], images: &mut Assets
         let v = (s.body_velocity[0].powi(2) + s.body_velocity[1].powi(2)).sqrt();
         if v > 1.0e-6 {
             let dir = [s.body_velocity[0] / v, s.body_velocity[1] / v];
+            // The A/B: a dimmed second arrow at the MEASURED cycle distance — the declared arrow
+            // keeps full ink, so which number fits the footprints is a glance.
+            if ab {
+                if let Some(m) = &s.measured {
+                    let m_tip = [dir[0] * m.cycle, dir[1] * m.cycle];
+                    r.line(to_px([0.0, 0.0]), to_px(m_tip), dim);
+                }
+            }
             let tip = [dir[0] * s.declared_cycle, dir[1] * s.declared_cycle];
             let (a, b) = (to_px([0.0, 0.0]), to_px(tip));
             r.line(a, b, ink);
