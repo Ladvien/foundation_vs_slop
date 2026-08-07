@@ -3,6 +3,11 @@ name = "emerge-anim"
 version = "0.1.0"
 edition = "2024"
 description = "Clip-weight blending on a skinned rig's AnimationPlayer — no transitions, one shared gait phase."
+# GPL-3.0, same as the game this was carved out of — these are mirrors of the parent repo's history,
+# not independently-licensed libraries. (The crates extracted as general-purpose libraries —
+# bevy_orca, map_elites, bevy_devshot — are MIT OR Apache-2.0 instead, so they can be adopted.)
+license = "GPL-3.0-only"
+repository = "https://github.com/Ladvien/emerge-anim"
 
 # **Its own crate so the editor can drive the REAL blender.** It lived in the game crate, which made it
 # unreachable from `emerge-mapper` — and an animation tab previewing a *copy* of the blend would be the

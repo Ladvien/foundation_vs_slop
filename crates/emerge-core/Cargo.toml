@@ -3,6 +3,11 @@ name = "emerge-core"
 version = "0.1.0"
 edition = "2024"
 description = "Engine-free world-building core: constraint IR, solvers, WFC, deterministic RNG."
+# GPL-3.0, same as the game this was carved out of — these are mirrors of the parent repo's history,
+# not independently-licensed libraries. (The crates extracted as general-purpose libraries —
+# bevy_orca, map_elites, bevy_devshot — are MIT OR Apache-2.0 instead, so they can be adopted.)
+license = "GPL-3.0-only"
+repository = "https://github.com/Ladvien/emerge-core"
 
 # **No `bevy`, and that is the point of the crate.** Everything here is plain data and arithmetic, so
 # it can be consumed by the game, by the headless search, and by a standalone editor without any of

@@ -3,6 +3,11 @@ name = "emerge-bevy"
 version = "0.1.0"
 edition = "2024"
 description = "The runtime half of emerge: load a library and a map, and put it in a Bevy world."
+# GPL-3.0, same as the game this was carved out of — these are mirrors of the parent repo's history,
+# not independently-licensed libraries. (The crates extracted as general-purpose libraries —
+# bevy_orca, map_elites, bevy_devshot — are MIT OR Apache-2.0 instead, so they can be adopted.)
+license = "GPL-3.0-only"
+repository = "https://github.com/Ladvien/emerge-bevy"
 
 # **The only crate in the set that knows what a renderer is on purpose.** `emerge-core` is the schema
 # and the solvers and has no engine (`crates/emerge-core/tests/engine_free.rs` fails the build if that
