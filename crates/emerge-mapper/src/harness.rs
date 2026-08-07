@@ -77,6 +77,9 @@ pub fn build_headless(root: &Path, map: &str, kit: Option<&str>) -> Result<App, 
     let project = crate::project::Project::open(root, map, kit)?;
     let mut app = App::new();
 
+    // Absolute, for the same reason `main.rs` canonicalizes: a relative `file_path` resolves
+    // against `CARGO_MANIFEST_DIR` (the CRATE dir under `cargo test -p`), not the workspace.
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     app.add_plugins(
         DefaultPlugins
             .set(AssetPlugin {
@@ -127,6 +130,6 @@ pub fn build_headless(root: &Path, map: &str, kit: Option<&str>) -> Result<App, 
     }
 
     add_editor_plugins(&mut app);
-    install_font(&mut app, root)?;
+    install_font(&mut app, &root)?;
     Ok(app)
 }

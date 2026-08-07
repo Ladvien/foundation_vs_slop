@@ -32,6 +32,13 @@ fn main() {
     let root = PathBuf::from(
         positional.first().cloned().unwrap_or_else(|| ".".to_owned()),
     );
+    // **Absolute, before anything derives from it.** The asset root below is handed to Bevy's
+    // `AssetPlugin.file_path`, which resolves RELATIVE paths against `BEVY_ASSET_ROOT` or
+    // `CARGO_MANIFEST_DIR` — and under `cargo run -p emerge-mapper` the manifest dir is the CRATE,
+    // so `./assets` landed on `crates/emerge-mapper/assets` and every mesh 404'd. An absolute
+    // path replaces whatever base Bevy picked (`Path::join`'s contract), so the editor works the
+    // same from `cargo run`, the bare binary, or any cwd — no env var required.
+    let root = std::fs::canonicalize(&root).unwrap_or(root);
     // A NAME, not a filename — `emerge-mapper . site_67` opens assets/emerge/site_67.map.ron.
     let map_name = positional
         .get(1)
