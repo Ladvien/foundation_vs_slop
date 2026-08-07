@@ -50,6 +50,11 @@ use std::path::{Path, PathBuf};
 const FORBIDDEN: &str = "AppState";
 
 /// Every file the simulation half of the squad owns.
+///
+/// The QD kernel (`crates/map_elites`) left this tree and is deliberately **not** re-added: it cannot
+/// depend on `bevy`, so it cannot name `AppState` — enforced at the manifest by that crate's own
+/// `tests/engine_free.rs`, which fails on the dependency rather than on a substring. A stronger guard,
+/// not a missing one.
 fn squad_sources() -> Result<Vec<PathBuf>, String> {
     let mut out = vec![PathBuf::from("src/squad.rs")];
     collect_rs(Path::new("src/squad_ai"), &mut out)?;

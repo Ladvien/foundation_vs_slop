@@ -31,6 +31,8 @@
 
 use std::path::Path;
 
+mod common;
+
 /// Terms that name the deprecated antagonist theming.
 ///
 /// Deliberately narrow: these are proper nouns and coined phrases, not ordinary words. A broad match on
@@ -89,22 +91,14 @@ fn scan(path: &Path, hits: &mut Vec<String>) {
     }
 }
 
-fn walk(dir: &Path, hits: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            walk(&path, hits);
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            scan(&path, hits);
-        }
-    }
-}
 
 #[test]
 fn no_shipped_copy_presents_the_deprecated_theming_as_canon() {
     let mut hits = Vec::new();
-    walk(Path::new("src"), &mut hits);
+    // Not just `src/` — see `common::source_roots` for why the extracted crates are in the walk.
+    for path in common::source_roots::scanned_sources() {
+        scan(&path, &mut hits);
+    }
     scan(Path::new("assets/config/config.ron"), &mut hits);
     scan(Path::new("README.md"), &mut hits);
 

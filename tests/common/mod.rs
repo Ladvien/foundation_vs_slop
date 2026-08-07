@@ -11,6 +11,7 @@
 //! hence the file-wide `dead_code` allowance.
 #![allow(dead_code)]
 
+pub mod source_roots;
 pub mod source_scan;
 
 pub struct Glb {

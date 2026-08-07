@@ -42,31 +42,15 @@
 //! An unannotated raw sort or pick fails this test. That is the point: the author must state which case
 //! they are in, and "I did not think about it" is not one of the three.
 
-use std::path::{Path, PathBuf};
-
 mod common;
 
 /// `util.rs` defines the sanctioned helpers, so its own `sort_unstable_by_key` calls ARE the primitives.
 const EXEMPT_FILES: &[&str] = &["src/util.rs"];
 
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for e in entries.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            rust_files(&p, out);
-        } else if p.extension().is_some_and(|x| x == "rs") {
-            out.push(p);
-        }
-    }
-}
-
 #[test]
 fn every_sort_declares_its_determinism_contract() {
-    let mut files = Vec::new();
-    rust_files(Path::new("src"), &mut files);
-    files.sort();
-    assert!(!files.is_empty(), "found no sources under src/ — is the test's working dir the crate root?");
+    // Not just `src/` — see `common::source_roots` for why the extracted crates are in the walk.
+    let files = common::source_roots::scanned_sources();
 
     let mut offenders: Vec<String> = Vec::new();
     for path in &files {

@@ -32,7 +32,7 @@
 //!
 //! Everything else — the whole simulation — is in the budget.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
@@ -68,17 +68,6 @@ const EXEMPT: &[&str] = &["src/sim_harness.rs", "src/bin/train.rs"];
 // Site with holes in it and no indication why. Loud at startup beats invisible at runtime.
 const BUDGET: usize = 28;
 
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for e in entries.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            rust_files(&p, out);
-        } else if p.extension().is_some_and(|x| x == "rs") {
-            out.push(p);
-        }
-    }
-}
 
 /// Is this a test-only file? The module splits put most test code in its own file, so this catches the
 /// bulk of it without any parsing.
@@ -159,10 +148,8 @@ fn count_panics(line: &str) -> usize {
 
 #[test]
 fn the_panic_budget_does_not_grow() {
-    let mut files = Vec::new();
-    rust_files(Path::new("src"), &mut files);
-    files.sort();
-    assert!(!files.is_empty(), "found no sources under src/ — is the working dir the crate root?");
+    // Not just `src/` — see `common::source_roots` for why the extracted crates are in the walk.
+    let files = common::source_roots::scanned_sources();
 
     let mut total = 0usize;
     let mut worst: Vec<(usize, String)> = Vec::new();
