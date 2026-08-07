@@ -24,6 +24,10 @@ screenshot.request
 fx*.png
 # Ctrl+P debug region captures (see src/region_capture.rs). Ephemeral; the folder's CLAUDE.md is kept.
 debug_screenshots/*.png
+# The note box written beside each capture. Ignored with its PNG, for the same reason: the pair is
+# machine-written per capture. A finding worth keeping gets rewritten as a dated, titled note next to
+# them — those are committed, and this pattern is narrow enough not to catch one.
+debug_screenshots/region_*.md
 # Spatial FPS probe output (src/perf_probe.rs) — machine-written every run, pure measurement.
 debug_screenshots/fps_trace.csv
 debug_screenshots/fps_hotspots.md
