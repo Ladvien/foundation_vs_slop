@@ -71,3 +71,6 @@ assets/emerge/*.map.ron
 # path the game does. Without a committed map, a schema change could break every authored map with
 # nothing failing. Scratch maps stay ignored; this one is checked in on purpose.
 !assets/emerge/break_room.map.ron
+
+# The VLM labeler's endpoint config — carries the API key, never committed.
+.env

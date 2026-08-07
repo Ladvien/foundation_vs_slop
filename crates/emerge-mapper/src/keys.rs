@@ -83,6 +83,20 @@ pub enum Action {
     /// Turn the placement under the cursor, as opposed to the brush.
     TurnPieceLeft,
     TurnPieceRight,
+    /// Cycle which piece of the stack under the cursor the piece-verbs act on — coincident
+    /// pieces made "the placement under the cursor" ambiguous, and a nudge aimed at a header
+    /// moved the wall under it. Each press names the next piece, bottom to top; Esc releases.
+    CycleTarget,
+    /// A quarter turn tipping the piece under the cursor about the map's X axis — set dressing;
+    /// see `Placed::tip` for why quarter turns and why a hosting piece refuses.
+    TipX,
+    /// The same quarter turn about Z.
+    TipZ,
+    /// Raise the piece under the cursor by one subgrid unit (`grid::SNAP / divisions`) — the
+    /// authored `Placed::lift`, layered over the resolved height so stacking still follows.
+    LiftUp,
+    /// And back down.
+    LiftDown,
     Fill,
     Remove,
     /// Arm the move tool: click a piece to pick it up, click again to put it down.
@@ -108,6 +122,13 @@ pub enum Action {
     Accept,
     Rescan,
     RemoveTile,
+    /// Send a library entry back to the candidate list, stripped — it re-enters as a freshly
+    /// measured candidate with no tags, note or mount. Destructive, so it takes two presses:
+    /// the first arms with a warning, the second sends.
+    DemoteTile,
+    /// Arm the clone tool: drag a box to take a copy of every placement inside it, then click to
+    /// stamp the whole set somewhere else — as many times as it is held.
+    CloneMode,
     /// The Tiles tab's own history. Separate from [`Action::Undo`] because the two stacks are
     /// separate — see `ImportState::undo`.
     UndoTile,
@@ -133,8 +154,21 @@ pub enum Action {
     RotateMeshZ,
     /// Point the arrows at the candidate list.
     FocusCandidates,
+    /// Copy the detail pane's text — top to bottom, as it reads — into the system clipboard.
+    CopyInfo,
     /// Point them at the library list.
     FocusLibrary,
+    /// Photograph the focused piece and ask the VLM for labels.
+    SuggestLabels,
+    /// Walk every piece missing judgement fields through the labeler — or cancel a running walk.
+    SuggestAll,
+    /// Apply the pending suggestion to the focused piece, through the ordinary edit path.
+    ApplySuggestion,
+    /// Drop the pending suggestion.
+    DiscardSuggestion,
+    /// Drop EVERY pending suggestion, cancel the batch, and abandon in-flight requests — the
+    /// one-key way out of a labeling run that went wrong.
+    DiscardAllSuggestions,
     // ── Anim ─────────────────────────────────────────────────────────────────
     PrevRig,
     NextRig,
@@ -145,6 +179,10 @@ pub enum Action {
     ScrubFwd,
     PlayPause,
     CheckAllRigs,
+    /// Stage a translucent second figure playing the MEASURED gait numbers over the declared one.
+    ToggleGhost,
+    /// The stage camera's framing: figure / feet / side / ground.
+    CycleCamPreset,
 }
 
 /// One binding: the key, when it is live, and how to say it.
@@ -254,18 +292,36 @@ pub const BINDINGS: &[Binding] = &[
     // One ROW, deliberately: a shared `does` collapses the pair the way `W, A, S, D` collapses, and
     // the Map context is at its twelve-row ceiling (see the vocabulary test) with the removal mode's
     // `Esc` now in it. The label carries the direction so nothing is lost by sharing the line.
-    b(Action::AimLeft, KeyCode::KeyZ, false, Context::Map, "Z", "aim left / right"),
-    b(Action::AimRight, KeyCode::KeyC, false, Context::Map, "C", "aim left / right"),
-    b(Action::AimReset, KeyCode::KeyV, false, Context::Map, "V", "aim straight again"),
-    // **A separate pair, on purpose.** `[`/`]` turn the BRUSH and must keep doing only that: binding
-    // them to the selection is what made rotation feel broken before, because placing selects, so the
-    // next `]` turned the piece just put down while the ghost — the only thing on screen showing a
-    // facing — sat still. These turn what is under the cursor, which is the other half nobody had.
-    // Distinct `does` strings so the pair does NOT collapse into one row: the collapsed chord is
-    // comma-joined, and a chord that IS a comma cannot survive that — which is why this is R/T rather
-    // than the `<`/`>` a rotate usually wants.
-    b(Action::TurnPieceLeft, KeyCode::KeyR, false, Context::Map, "R", "turn this left"),
-    b(Action::TurnPieceRight, KeyCode::KeyT, false, Context::Map, "T", "turn this right"),
+    // One row for all three aim keys — the shared `does` collapse that bought the target row
+    // below inside the twelve-row ceiling.
+    b(Action::AimLeft, KeyCode::KeyZ, false, Context::Map, "Z", "aim / straight again"),
+    b(Action::AimRight, KeyCode::KeyC, false, Context::Map, "C", "aim / straight again"),
+    b(Action::AimReset, KeyCode::KeyV, false, Context::Map, "V", "aim / straight again"),
+    // **`H` picks WHICH piece of a stack the piece-verbs mean.** A floor tile, a wall and its
+    // header legally share a cell (different layers), and "the placement under the cursor" cannot
+    // name one of three. Each press steps up the stack, the status names the target, and the
+    // verbs above act on it until the cursor leaves the cell or Esc releases.
+    b(Action::CycleTarget, KeyCode::KeyH, false, Context::Map, "H", "target the stack"),
+    // **A separate cluster from the aim keys, on purpose.** `Z`/`C` turn the BRUSH and must keep
+    // doing only that: binding them to the selection is what made rotation feel broken before,
+    // because placing selects, so the next press turned the piece just put down while the ghost —
+    // the only thing on screen showing a facing — sat still. These turn what is under the cursor,
+    // which is the other half nobody had.
+    //
+    // **One row, four chords, reading left to right on the keyboard**: `R T` yaw the piece the way
+    // they always did, `Y U` tip it over — a quarter turn about X and about Z per press
+    // (`Placed::tip`). Sharing a `does` collapses them the way `W, A, S, D` collapses, which is what
+    // buys the lift row below inside the twelve-row ceiling.
+    b(Action::TurnPieceLeft, KeyCode::KeyR, false, Context::Map, "R", "turn / tip this"),
+    b(Action::TurnPieceRight, KeyCode::KeyT, false, Context::Map, "T", "turn / tip this"),
+    b(Action::TipX, KeyCode::KeyY, false, Context::Map, "Y", "turn / tip this"),
+    b(Action::TipZ, KeyCode::KeyU, false, Context::Map, "U", "turn / tip this"),
+    // **The brackets lift.** Free in this context (the Tiles tab's layer pair is never live with
+    // the Map), and vertically suggestive in a way no letter is. One subgrid unit per press, held
+    // repeat for a long ride up; the authored offset is `Placed::lift`, the one amendment to
+    // "height is never the author's".
+    b(Action::LiftDown, KeyCode::BracketLeft, false, Context::Map, "[", "lift / lower this"),
+    b(Action::LiftUp, KeyCode::BracketRight, false, Context::Map, "]", "lift / lower this"),
     b(Action::Fill, KeyCode::KeyF, false, Context::Map, "F", "flood fill"),
     b(Action::Remove, KeyCode::KeyX, false, Context::Map, "X", "removal mode"),
     // **`B` is the last free key under the left hand.** The cluster an author's hand already rests on
@@ -274,9 +330,11 @@ pub const BINDINGS: &[Binding] = &[
     // which is legal and is exactly the case `Context` exists to model: the two tabs are never live
     // together.
     //
-    // **This puts the Map context at its twelve-row ceiling.** There is no headroom left; the next
-    // verb here has to share a `does` with a neighbour or take something else's key.
-    b(Action::MoveMode, KeyCode::KeyB, false, Context::Map, "B", "move mode"),
+    // **The Map context is at its twelve-row ceiling.** There is no headroom left; the next verb
+    // here has to share a `does` with a neighbour or take something else's key — which is exactly
+    // what the clone tool does: the Cmd+Z shape, one key, the shifted form for the sibling verb.
+    bs(Action::MoveMode, KeyCode::KeyB, false, false, Context::Map, "B", "move / Shift: clone a set"),
+    bs(Action::CloneMode, KeyCode::KeyB, false, true, Context::Map, "B", "move / Shift: clone a set"),
     // **One key for "not that"**, stepping back out one layer per press: a piece in hand, then the
     // armed tool, then the armed piece. One binding rather than one per state — an author pressing
     // `Esc` does not first work out which of the three they are in.
@@ -300,16 +358,18 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::TurnViewLeft, KeyCode::KeyQ, false, Context::Global, "Q", "turn view"),
     b(Action::TurnViewRight, KeyCode::KeyE, false, Context::Global, "E", "turn view"),
 
-    // **One row for the cluster.** These were "previous" and "next" on two lines — two rows saying
-    // one idea, which is what `rows` collapses and what freed the row the history pair below needs.
-    b(Action::PrevCandidate, KeyCode::ArrowUp, false, Context::Tiles, "up", "move in the list"),
-    b(Action::NextCandidate, KeyCode::ArrowDown, false, Context::Tiles, "down", "move in the list"),
-    // **Left and right switch which list the arrows walk.** Up/Down already meant "move in a list";
-    // the tab has two of them and only one was reachable, so an author could edit a candidate's
-    // lattice by keyboard but had to reach for the mouse to edit a library tile's. One row, and no
-    // new idea to learn — the arrow cluster keeps meaning "move around the lists".
-    b(Action::FocusCandidates, KeyCode::ArrowLeft, false, Context::Tiles, "left", "which list"),
-    b(Action::FocusLibrary, KeyCode::ArrowRight, false, Context::Tiles, "right", "which list"),
+    // **One row for the whole arrow cluster** — up/down walk, left/right switch which list, and
+    // holding Shift jumps five at a time. Four bindings sharing one `does` collapse the way
+    // `W, A, S, D` collapses, which is what bought the copy row below inside the twelve-row
+    // ceiling.
+    b(Action::PrevCandidate, KeyCode::ArrowUp, false, Context::Tiles, "up", "walk the lists / Shift: x5"),
+    b(Action::NextCandidate, KeyCode::ArrowDown, false, Context::Tiles, "down", "walk the lists / Shift: x5"),
+    b(Action::FocusCandidates, KeyCode::ArrowLeft, false, Context::Tiles, "left", "walk the lists / Shift: x5"),
+    b(Action::FocusLibrary, KeyCode::ArrowRight, false, Context::Tiles, "right", "walk the lists / Shift: x5"),
+    // **Cmd+C copies the detail pane** — its text, top to bottom, into the system clipboard.
+    // bevy_ui has no selectable text, and an author who wants a piece's facts in a message should
+    // not have to retype what is already on screen.
+    b(Action::CopyInfo, KeyCode::KeyC, true, Context::Tiles, "C", "copy the pane's text"),
     b(Action::TypeId, KeyCode::KeyI, false, Context::Tiles, "I", "type an id"),
     // **"mount", not "layer".** It cycles `Descriptor::mount` — what the piece stands on — and the
     // subgrid below has its own `layer y` picker for the lattice slice. One panel said "layer" twice
@@ -317,16 +377,19 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::CycleMount, KeyCode::KeyM, false, Context::Tiles, "M", "mount"),
     b(Action::Accept, KeyCode::Enter, false, Context::Tiles, "Enter", "add to library"),
     b(Action::Rescan, KeyCode::KeyR, false, Context::Tiles, "R", "rescan"),
-    b(Action::RemoveTile, REMOVE_KEY, false, Context::Tiles, REMOVE_NAME, "remove from library"),
+    // The Cmd+Z shape again: one key, the shifted form for the reversible-but-destructive sibling.
+    // Shift+Delete DEMOTES — back to the candidates, stripped — where bare Delete removes outright.
+    bs(Action::RemoveTile, REMOVE_KEY, false, false, Context::Tiles, REMOVE_NAME, "remove / Shift: back to candidates"),
+    bs(Action::DemoteTile, REMOVE_KEY, false, true, Context::Tiles, REMOVE_NAME, "remove / Shift: back to candidates"),
     // **This tab's own history**, on the same chords and for the reason `keys.rs`'s undo comment
     // records: an undo you cannot see the effect of is not an undo, so the map's stack is not reachable
     // from here and this one is not reachable from there. Neither is cleared by changing tabs.
     bs(Action::UndoTile, KeyCode::KeyZ, true, false, Context::Tiles, "Z", "undo / redo"),
     bs(Action::RedoTile, KeyCode::KeyZ, true, true, Context::Tiles, "Z", "undo / redo"),
 
-    // **The lattice, by keyboard.** Three rows, which is what the twelve-row ceiling leaves once the
-    // seven above are counted — so each group shares one `does` and reads its chords in order, the
-    // same shape as `W, A, S, D  pan`.
+    // **The lattice, by keyboard.** Two rows, which is what the twelve-row ceiling leaves once the
+    // seven above and the labels row are counted — the cursor and the layer share one row (they are
+    // one idea: where in the lattice), each reading its chords in order, the `W, A, S, D  pan` shape.
     //
     // **`T F G H` is an inverted T, one column left of the usual one.** The cursor cannot have
     // `W A S D` (the camera's, on every tab), nor the arrows (they walk the two lists), nor `H J K L`
@@ -334,12 +397,12 @@ pub const BINDINGS: &[Binding] = &[
     // T above, F left, G below, H right — and shape is what the hand remembers.
     // `Z, X, C, V` is the run under the left hand, free here because they are Map bindings and the
     // two tabs are never live together, which is the case `Context` exists to model.
-    b(Action::CellForward, KeyCode::KeyT, false, Context::Tiles, "T", "move the cell cursor"),
-    b(Action::CellLeft, KeyCode::KeyF, false, Context::Tiles, "F", "move the cell cursor"),
-    b(Action::CellBack, KeyCode::KeyG, false, Context::Tiles, "G", "move the cell cursor"),
-    b(Action::CellRight, KeyCode::KeyH, false, Context::Tiles, "H", "move the cell cursor"),
-    b(Action::LayerDown, KeyCode::BracketLeft, false, Context::Tiles, "[", "layer down / up"),
-    b(Action::LayerUp, KeyCode::BracketRight, false, Context::Tiles, "]", "layer down / up"),
+    b(Action::CellForward, KeyCode::KeyT, false, Context::Tiles, "T", "cell cursor / layer"),
+    b(Action::CellLeft, KeyCode::KeyF, false, Context::Tiles, "F", "cell cursor / layer"),
+    b(Action::CellBack, KeyCode::KeyG, false, Context::Tiles, "G", "cell cursor / layer"),
+    b(Action::CellRight, KeyCode::KeyH, false, Context::Tiles, "H", "cell cursor / layer"),
+    b(Action::LayerDown, KeyCode::BracketLeft, false, Context::Tiles, "[", "cell cursor / layer"),
+    b(Action::LayerUp, KeyCode::BracketRight, false, Context::Tiles, "]", "cell cursor / layer"),
     b(Action::CellSolid, KeyCode::KeyZ, false, Context::Tiles, "Z", "solid / edge / anchor / clear"),
     b(Action::CellEdge, KeyCode::KeyX, false, Context::Tiles, "X", "solid / edge / anchor / clear"),
     b(Action::CellAnchor, KeyCode::KeyC, false, Context::Tiles, "C", "solid / edge / anchor / clear"),
@@ -349,10 +412,21 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::RotateMeshY, KeyCode::KeyO, false, Context::Tiles, "O", "from the mesh: rescan solid / turn x y z"),
     b(Action::RotateMeshZ, KeyCode::KeyP, false, Context::Tiles, "P", "from the mesh: rescan solid / turn x y z"),
 
+    // **The VLM labeler's cluster** — one row, four verbs. `L` photographs the focused piece and
+    // asks the model; `Shift+L` walks everything missing judgement fields (and cancels a running
+    // walk); `U` applies the proposed labels through the ordinary edit path; `Y` discards them.
+    // `L`/`U`/`Y` are unbound in Tiles and Global; the L pair is the Cmd+Z shape — one key, the
+    // shifted form for the bigger sweep.
+    bs(Action::SuggestLabels, KeyCode::KeyL, false, false, Context::Tiles, "L", "labels: suggest / all / apply / discard / clear all"),
+    bs(Action::SuggestAll, KeyCode::KeyL, false, true, Context::Tiles, "L", "labels: suggest / all / apply / discard / clear all"),
+    b(Action::ApplySuggestion, KeyCode::KeyU, false, Context::Tiles, "U", "labels: suggest / all / apply / discard / clear all"),
+    bs(Action::DiscardSuggestion, KeyCode::KeyY, false, false, Context::Tiles, "Y", "labels: suggest / all / apply / discard / clear all"),
+    bs(Action::DiscardAllSuggestions, KeyCode::KeyY, false, true, Context::Tiles, "Y", "labels: suggest / all / apply / discard / clear all"),
+
     // The arrows are the Tiles tab's too. Legal, and the reason the census models context at all:
     // the two tabs are never live together, so the same key means one thing in each.
-    b(Action::PrevRig, KeyCode::ArrowUp, false, Context::Anim, "up", "previous rig"),
-    b(Action::NextRig, KeyCode::ArrowDown, false, Context::Anim, "down", "next rig"),
+    b(Action::PrevRig, KeyCode::ArrowUp, false, Context::Anim, "up", "walk the rigs / Shift: x5"),
+    b(Action::NextRig, KeyCode::ArrowDown, false, Context::Anim, "down", "walk the rigs / Shift: x5"),
 
     // Enter is the Tiles tab's Accept too — same legal cross-context share as the arrows above.
     b(Action::AdoptMeasured, KeyCode::Enter, false, Context::Anim, "Enter", "adopt measured values into rigs.ron"),
@@ -367,6 +441,10 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::ScrubFwd, KeyCode::ArrowRight, false, Context::Anim, "right", "scrub phase (Shift: fine)"),
     b(Action::PlayPause, KeyCode::Space, false, Context::Anim, "Space", "play / scrub"),
     b(Action::CheckAllRigs, KeyCode::KeyC, false, Context::Anim, "C", "check all rigs"),
+    // G is the Map tab's Generate and a Tiles cell-cursor key — the same legal cross-context
+    // share as the arrows above. V is the Map tab's AimReset and a Tiles lattice key.
+    b(Action::ToggleGhost, KeyCode::KeyG, false, Context::Anim, "G", "ghost: measured over declared"),
+    b(Action::CycleCamPreset, KeyCode::KeyV, false, Context::Anim, "V", "view: figure / feet / side / ground"),
 ];
 
 const fn b(
@@ -705,23 +783,27 @@ mod tests {
             Action::NextTab, Action::MapTab, Action::TilesTab, Action::AnimTab,
             Action::Save, Action::Undo, Action::Redo, Action::Shortcuts, Action::EditTile,
             Action::AimLeft, Action::AimRight, Action::AimReset, Action::Cancel,
-            Action::Fill, Action::Remove, Action::MoveMode, Action::RenameMap,
+            Action::Fill, Action::Remove, Action::MoveMode, Action::CloneMode, Action::RenameMap,
             Action::OwnToggle, Action::Generate,
             Action::PanForward, Action::PanBack, Action::PanLeft, Action::PanRight,
             Action::TurnViewLeft, Action::TurnViewRight,
             Action::PrevCandidate, Action::NextCandidate, Action::TypeId, Action::CycleMount,
-            Action::Accept, Action::Rescan, Action::RemoveTile,
+            Action::Accept, Action::Rescan, Action::RemoveTile, Action::DemoteTile,
             Action::UndoTile, Action::RedoTile,
             Action::CellLeft, Action::CellRight, Action::CellForward, Action::CellBack,
             Action::LayerDown, Action::LayerUp,
             Action::CellSolid, Action::CellEdge, Action::CellAnchor, Action::CellClear,
             Action::ScanMesh,
             Action::RotateMeshX, Action::RotateMeshY, Action::RotateMeshZ,
-            Action::FocusCandidates, Action::FocusLibrary,
+            Action::FocusCandidates, Action::FocusLibrary, Action::CopyInfo,
+            Action::SuggestLabels, Action::SuggestAll,
+            Action::ApplySuggestion, Action::DiscardSuggestion, Action::DiscardAllSuggestions,
             Action::PrevRig, Action::NextRig,
             Action::AdoptMeasured, Action::UndoBench, Action::RedoBench,
             Action::ScrubBack, Action::ScrubFwd, Action::PlayPause, Action::CheckAllRigs,
+            Action::ToggleGhost, Action::CycleCamPreset,
             Action::TurnPieceLeft, Action::TurnPieceRight,
+            Action::TipX, Action::TipZ, Action::LiftUp, Action::LiftDown, Action::CycleTarget,
         ];
         assert_eq!(
             actions.len(),
@@ -846,19 +928,28 @@ mod tests {
             .unwrap_or_else(|| panic!("no turn row"));
         assert_eq!(turn.chord, "Q, E");
 
+        // All three aim keys on one row — the merge that bought the target-lock row its slot.
         let aim = map
             .iter()
-            .find(|r| r.does == "aim left / right")
+            .find(|r| r.does == "aim / straight again")
             .unwrap_or_else(|| panic!("no aim row"));
-        assert_eq!(aim.chord, "Z, C");
+        assert_eq!(aim.chord, "Z, C, V");
 
         // The lattice cursor is its own cluster, and must not be the camera's — an author reaches
-        // for `W A S D` to move the view on every tab.
+        // for `W A S D` to move the view on every tab. The layer keys share its row: one idea,
+        // "where in the lattice", merged when the labels row needed the twelfth slot.
         let cursor = rows(Context::Tiles)
             .into_iter()
-            .find(|r| r.does == "move the cell cursor")
+            .find(|r| r.does == "cell cursor / layer")
             .unwrap_or_else(|| panic!("no cursor row"));
-        assert_eq!(cursor.chord, "T, F, G, H");
+        assert_eq!(cursor.chord, "T, F, G, H, [, ]");
+
+        // The labeler's five verbs read as one row, the shifted forms rendered as such.
+        let labels = rows(Context::Tiles)
+            .into_iter()
+            .find(|r| r.does == "labels: suggest / all / apply / discard / clear all")
+            .unwrap_or_else(|| panic!("no labels row"));
+        assert_eq!(labels.chord, "L, Shift+L, U, Y, Shift+Y");
     }
 
     /// **The overlay key is held, not tapped.** `pressed` must answer for it while it is down —

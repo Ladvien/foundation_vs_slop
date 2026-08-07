@@ -351,7 +351,9 @@ impl Vocabularies {
 ///
 /// Bounded at a third of the token's length: suggesting `light` for `worktop` would be noise, and a
 /// wrong hint is worse than none because it sends the reader to the wrong table.
-fn nearest<'a>(v: &'a Vocabulary, bad: &str) -> Option<&'a str> {
+/// Public because the editor's VLM labeler reuses the same did-you-mean in its early gate — one
+/// spelling of the hint, whether the bad token came from a hand or a model.
+pub fn nearest<'a>(v: &'a Vocabulary, bad: &str) -> Option<&'a str> {
     if bad.is_empty() {
         return None;
     }

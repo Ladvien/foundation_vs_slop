@@ -129,12 +129,62 @@ Region-level `Constraint`s in `ir.rs` scope over **candidate indices** (`Scope::
 
 ## Tooling
 
-- **Models (local, on `bmb`, per the global CLAUDE.md service doc):** `gpt-oss-20b` or `qwen3-32b` for the
-  text reasoning (steps 2–6); `qwen3-vl-30b` for the render look (step 1). Resolve `bmb`'s IP and API key as
-  documented there; the service is LAN-only and API-key gated.
-- **Harness:** a dev-only driver (`src/bin/` or a script) walks the catalogue, runs steps 1–6 per entry, and
-  writes a candidate `config.ron` fragment for review. Dev-only — stripped from release, like `devshot`.
+**The in-editor labeler (shipped 2026-08-06) is the harness for the asset half of this playbook.**
+It lives in the mapper's Tiles tab — the mapper is dev-only and never ships, which is what
+"stripped from release" means here — and it implements steps 1–3 plus the mount/surface half of
+step 4 end to end:
+
+- **Keys:** `L` photographs the focused piece (two 640 px booth renders, front and rear
+  three-quarter) and asks the model; `Shift+L` walks everything missing judgement fields (press
+  again to cancel); `U` applies the pending proposal through the ordinary edit path and commit
+  door; `Y` discards it. Proposals render in the `SUGGEST` slate on the detail pane — chips
+  ghost-lit, mount and note as `proposed:` lines — and the Tiles tab strip counts them.
+- **Config:** the project root's **`.env` file** (gitignored — it carries the key), loaded on
+  start, with the process environment overriding it for one-off runs. Variables:
+  `EMERGE_VLM_KEY` (required), `EMERGE_VLM_URL`
+  (default `http://127.0.0.1:9292/v1/chat/completions`), `EMERGE_VLM_MODEL`
+  (default `qwen3-vl-30b`), `EMERGE_VLM_TIMEOUT_SECS` (120). For the local bmb model:
+  `ssh -fN -L 9292:127.0.0.1:9292 bmb` then
+  `echo EMERGE_VLM_KEY=$(ssh -n bmb 'cat ~/llm/.api-key') >> .env`. Ollama Cloud is a pure
+  config flip: `EMERGE_VLM_URL=https://ollama.com/v1/chat/completions
+  EMERGE_VLM_MODEL=qwen3-vl:235b EMERGE_VLM_KEY=$OLLAMA_API_KEY`. One endpoint per run; no
+  fallback chain.
+- **Script driving:** `echo <library_id> > labels.request` labels that entry through the exact
+  production path; `echo clear > labels.request` empties the labeler (proposals, queues,
+  in-flight, disk cache) — the devshot sentinel pattern, since captures cannot run headless.
+- **Orientation is judged too:** the model proposes the item's `front` face (the camera geometry
+  is stated in the prompt: image 1 shows the +X/+Z faces) — applied to `align.front` like any
+  judgement — and flags a lying-down asset with the righting axis (`needs_turn`). A suggestion
+  carrying `needs_turn` changes what `U` does: it performs the quarter turn through the same
+  `tiles::rotate_mesh` the N/P keys run (its own undo entry, its own authored-cells guard),
+  **discards the suggestion, and re-photographs** — the labels were judged from a sideways
+  render, so applying them would bake the error in. The upright piece gets fresh labels; the
+  human still presses every key.
+- **The guardrails hold by construction:** the prompt is generated from the live `vocab.ron`
+  (token names + notes), so the model is shown only the closed vocabulary; a suggestion carrying
+  an unknown token is rejected WHOLE at arrival, naming the axis (with one automatic
+  reprompt-on-rejection — see the research grounding below); out-of-vocab ideas exit only as
+  flagged rows in `slop/llm/vocab_proposals.ron`, which nothing loads; applying goes through the
+  same snapshot/record/persist idiom and `commit_measured` vocabulary gate as any hand edit; and
+  suggestions persist in `target/vlm_suggestions.ron`, invalidated by re-export, manifest edit,
+  or vocab retirement. Code: `crates/emerge-mapper/src/{vlm,label_booth,labels}.rs`.
 - **Reference for LLM roles in games:** Gallotta et al. (2024), `10.48550/arXiv.2402.18659`.
+
+## Research grounding for the labeler (measured choices — change them against the papers)
+
+- **One automatic reprompt on rejection.** OVAL-Prompt (Tong et al. 2024) measured direct VLM
+  affordance judgment as near-random (F 0.011), an LLM reasoning step at 0.392, and a
+  reprompt-on-failure loop at 0.711 — competitive with supervised baselines. The labeler feeds the
+  gate's rejection (axis + did-you-mean + the legal token list) back exactly once; the second
+  verdict is final. Their second finding — VLMs stumble on uncommon class names — is why the token
+  *strings* in `vocab.ron` should stay common words, with nuance in the notes.
+- **Prompt-only JSON, no grammar constraint.** Format restriction helps closed-set classification
+  (our axes) and hurts open reasoning (Tam et al., "Let Me Speak Freely?", EMNLP-Industry 2024);
+  grammar-constrained decoding's advantage shrinks or inverts for ≥14B models given examples
+  (Raspanti et al., ACL 2025, vs Geng et al., EMNLP 2023). **Revisit with llama-server GBNF only
+  if the observed reject rate is high** — it would delete the malformed-JSON failure class.
+- **`what` is the first schema key, deliberately.** Reasoning-first output orders avoid the
+  accuracy drop answer-first ones suffer (Tam et al. 2024). Do not reorder the schema.
 
 ---
 

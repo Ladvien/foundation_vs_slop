@@ -183,6 +183,7 @@ fn stage_camera(
     mode: Res<Mode>,
     state: Res<ImportState>,
     project: Res<Project>,
+    preset: Option<Res<crate::anim_stage::BenchCamera>>,
     mut rig: ResMut<crate::view::Rig>,
     mut saved: ResMut<MapView>,
     mut staged: ResMut<StagedLift>,
@@ -195,7 +196,10 @@ fn stage_camera(
     // here would take panning away on this tab. A lift is a discrete event, exactly like a tab change.
     let want_lift = state.placed(&project).map(stage_lift).unwrap_or(0.0);
     let lift_moved = *mode == Mode::Tiles && (staged.0 - want_lift).abs() > 1e-4;
-    if !mode.is_changed() && !lift_moved {
+    // A preset cycle is a discrete event on the Anim tab, exactly like a lift on the Tiles tab.
+    let preset_moved =
+        *mode == Mode::Anim && preset.as_ref().is_some_and(|p| p.is_changed());
+    if !mode.is_changed() && !lift_moved && !preset_moved {
         return;
     }
     if lift_moved {
@@ -209,11 +213,14 @@ fn stage_camera(
                     height: rig.height,
                     yaw: rig.yaw,
                     goal_yaw: rig.goal_yaw,
+                    elevation: rig.elevation,
                 });
             }
             rig.focus = STAGE + Vec3::new(0.0, want_lift, 0.0);
             // Close enough that one grid cell fills the view — the tab is about a single tile.
             rig.height = TILE_VIEW_HEIGHT;
+            // Canonical iso framing — the author may arrive from a ground-level anim preset.
+            rig.elevation = crate::view::ISO_ELEVATION;
         }
         // The anim bench's stage. An arm of THIS system rather than a sibling, because two systems
         // saving/restoring one `MapView` on the same `mode.is_changed()` edge would race over it.
@@ -224,11 +231,22 @@ fn stage_camera(
                     height: rig.height,
                     yaw: rig.yaw,
                     goal_yaw: rig.goal_yaw,
+                    elevation: rig.elevation,
                 });
             }
-            // Chest height on a ~2 m figure, with air around it.
-            rig.focus = crate::anim_stage::BENCH_STAGE + Vec3::Y * 1.0;
-            rig.height = crate::anim_stage::BENCH_VIEW_HEIGHT;
+            let (focus_y, height, elevation, yaw_snap) = preset
+                .as_deref()
+                .copied()
+                .unwrap_or_default()
+                .0
+                .framing();
+            rig.focus = crate::anim_stage::BENCH_STAGE + Vec3::Y * focus_y;
+            rig.height = height;
+            rig.elevation = elevation;
+            if let Some(yaw) = yaw_snap {
+                rig.yaw = yaw;
+                rig.goal_yaw = yaw;
+            }
         }
         Mode::Map => {
             if let Some(was) = saved.0.take() {
@@ -236,6 +254,7 @@ fn stage_camera(
                 rig.height = was.height;
                 rig.yaw = was.yaw;
                 rig.goal_yaw = was.goal_yaw;
+                rig.elevation = was.elevation;
             }
         }
     }
@@ -1117,14 +1136,17 @@ impl RotateAxis {
 /// against a height do not describe a width. So a piece with authored cells refuses, names the count,
 /// and says what `force` would do. `force` then clears them and reports how many, which is the
 /// author's call to make explicitly rather than something to do to them quietly.
-fn rotate_mesh(axis: RotateAxis, force: bool, project: &mut Project, state: &mut ImportState) {
+/// Returns whether the piece actually turned — the labeler's apply chains a re-photograph on a
+/// successful righting turn, and a refusal (the authored-cells guard, an unopenable GLB) must
+/// not trigger one.
+fn rotate_mesh(axis: RotateAxis, force: bool, project: &mut Project, state: &mut ImportState) -> bool {
     let Some(d) = state.editing(&project.measured) else {
         state.status = "no tile is selected".to_owned();
-        return;
+        return false;
     };
     let Some(mesh) = d.mesh.clone() else {
         state.status = format!("`{}` has no mesh to turn", d.id);
-        return;
+        return false;
     };
     let authored_cells = d.subgrid.as_ref().map_or(0, |g| g.cells.len());
     if axis != RotateAxis::Y && authored_cells > 0 && !force {
@@ -1134,7 +1156,7 @@ fn rotate_mesh(axis: RotateAxis, force: bool, project: &mut Project, state: &mut
             d.id,
             axis.label()
         );
-        return;
+        return false;
     }
     // **Before the extent moves.** A Y turn maps the cells onto the turned piece, and the mapping
     // reads the divisions they were authored against.
@@ -1144,14 +1166,14 @@ fn rotate_mesh(axis: RotateAxis, force: bool, project: &mut Project, state: &mut
         Ok(glb) => glb,
         Err(why) => {
             state.status = format!("{mesh}: {why}");
-            return;
+            return false;
         }
     };
 
     // Taken before the write — the only moment the old value still exists.
     let history_before = state.snapshot(&project);
     let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
-        return;
+        return false;
     };
     let want = axis.bumped(d.align.rotate.unwrap_or((0, 0, 0)));
     let before = d.align.rotate;
@@ -1161,7 +1183,7 @@ fn rotate_mesh(axis: RotateAxis, force: bool, project: &mut Project, state: &mut
     if let Err(why) = emerge_core::import::remeasure_rotated(d, &glb, before) {
         d.align.rotate = before;
         state.status = why;
-        return;
+        return false;
     }
     // The lattice, moved or dropped. Both halves of a Y turn together — the cells and the divisions —
     // because a lattice read off one without the other is the wrong shape; `rotate_div` is not called
@@ -1189,6 +1211,7 @@ fn rotate_mesh(axis: RotateAxis, force: bool, project: &mut Project, state: &mut
     );
     state.record(history_before);
     state.status = persist(project, where_to, said);
+    true
 }
 
 /// The chip.
@@ -2326,7 +2349,7 @@ struct DetailPane;
 
 /// The candidate standing on the grid, so an author can see what they are about to accept.
 #[derive(Component)]
-struct Preview;
+pub struct Preview;
 
 /// Which descriptor the live preview shows, so it is rebuilt only when the focus actually moves —
 /// respawning a GLB every frame would thrash the asset server and never finish loading.
@@ -2342,7 +2365,7 @@ struct Preview;
 /// A mesh path is unique across both halves of the focus: `import::scan` skips any mesh the library
 /// already has, so a candidate and a library entry can never name the same file.
 #[derive(Component)]
-struct PreviewOf(String);
+pub struct PreviewOf(pub String);
 
 /// The persistent line saying what the scan found.
 #[derive(Component)]
@@ -2377,6 +2400,7 @@ impl Plugin for TilesPlugin {
             .init_resource::<ScaleEdit>()
             .init_resource::<HeightEdit>()
             .init_resource::<StagedLift>()
+            .init_resource::<DemoteArm>()
             .add_systems(Startup, (spawn_tab_strip, spawn_tiles_panel))
             .add_systems(
                 Update,
@@ -2410,6 +2434,7 @@ impl Plugin for TilesPlugin {
                         keep_candidate_selection_visible.run_if(in_tiles_mode),
                     ),
                     cycle_mount.in_set(crate::keys::Phase::Act),
+                    suggestion_keys.in_set(crate::keys::Phase::Act),
                     commit_candidate.in_set(crate::keys::Phase::Act),
                     remove_tile.in_set(crate::keys::Phase::Act),
                     tab_shortcuts.in_set(crate::keys::Phase::Act),
@@ -2425,7 +2450,10 @@ impl Plugin for TilesPlugin {
                     rebuild_candidates.run_if(resource_changed::<ImportState>.or_else(resource_changed::<crate::filter::Filters>)),
                     // **Structure only.** The selection and the carets are repainted in place by
                     // `refresh_cells`; rebuilding the pane for them is the bounce.
-                    rebuild_detail.run_if(resource_changed::<ImportState>),
+                    rebuild_detail.run_if(
+                        resource_changed::<ImportState>
+                            .or_else(resource_changed::<crate::labels::LabelGeneration>),
+                    ),
                     refresh_lines,
                     drive_preview,
                 ),
@@ -2439,6 +2467,9 @@ impl Plugin for TilesPlugin {
                     scale_keys.in_set(crate::keys::Phase::Text),
                     mount_height_keys.in_set(crate::keys::Phase::Text),
                     tile_history_keys.in_set(crate::keys::Phase::Act),
+                    demote_tile.in_set(crate::keys::Phase::Act),
+                    disarm_demote.run_if(resource_changed::<ImportState>),
+                    copy_info.in_set(crate::keys::Phase::Act),
                     refresh_cells,
                 ),
             )
@@ -2714,10 +2745,29 @@ fn toggle_mode(
     }
 }
 
-fn scan(project: &Project, state: &mut ImportState) {
+pub(crate) fn scan(project: &Project, state: &mut ImportState) {
     let root = project.root.join("assets");
     match import::scan(&root, &root, &project.library) {
         Ok(found) => {
+            // **On the first look, untouched packs start folded.** A pack the library holds nothing
+            // from is a kit nobody has started on, and a dozen of them open is an alphabet to
+            // scroll past on the way to the work in progress. Packs with even one import stay
+            // open. Only the FIRST scan seeds this — a rescan mid-session must not stomp the
+            // folds the author has since toggled by hand.
+            if !state.scanned {
+                let imported: std::collections::HashSet<&str> = project
+                    .library
+                    .descriptors
+                    .iter()
+                    .filter_map(|d| d.mesh.as_deref())
+                    .map(|m| m.rsplit_once('/').map_or(".", |(dir, _)| dir))
+                    .collect();
+                state.folded_packs = packs(&found)
+                    .into_iter()
+                    .map(|(pack, _)| pack)
+                    .filter(|pack| !imported.contains(pack.as_str()))
+                    .collect();
+            }
             let blocked = found.iter().filter(|c| c.blocked()).count();
             let warned = found
                 .iter()
@@ -2728,7 +2778,22 @@ fn scan(project: &Project, state: &mut ImportState) {
                 found.len()
             );
             state.candidates = found;
+            // **The default selection must be a row the author can SEE.** Index 0 may sit inside a
+            // folded pack — which put the highlight nowhere and a mesh on the stage that no
+            // visible row claimed, reported as "it doesn't load the default selection". The head
+            // of the first OPEN pack is the row the eye starts on; when every pack starts folded,
+            // the first one opens to provide it — a tab must never open with its selection hidden.
             state.selected = 0;
+            let grouped = packs(&state.candidates);
+            match grouped.iter().find(|(pack, _)| !state.folded_packs.contains(pack)) {
+                Some((_, members)) => state.selected = members.first().copied().unwrap_or(0),
+                None => {
+                    if let Some((pack, members)) = grouped.first() {
+                        state.folded_packs.remove(pack);
+                        state.selected = members.first().copied().unwrap_or(0);
+                    }
+                }
+            }
             state.scanned = true;
         }
         Err(e) => {
@@ -2888,6 +2953,98 @@ fn cycle_mount(
     state.status = persist(&mut project, where_to, said);
 }
 
+/// **`U` applies / `Y` discards the VLM's pending proposal** — the review verbs, through the
+/// ordinary edit path: snapshot, mutate at the captured target, record, persist. For a library
+/// entry that persist IS `commit_measured`, so the vocabulary gate rules on the exact bytes
+/// written; for a candidate the change stays in memory until the author's Enter — the existing
+/// doors, no new writer. The suggestion is consumed on success and kept when the write was
+/// refused, so a `NOT WRITTEN` never eats a proposal.
+fn suggestion_keys(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<crate::keys::Live>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<ImportState>,
+    mut suggestions: ResMut<crate::labels::Suggestions>,
+    mut generation: ResMut<crate::labels::LabelGeneration>,
+    mut label_queue: ResMut<crate::labels::LabelQueue>,
+    mut label_tasks: ResMut<crate::labels::LabelTasks>,
+    mut rig: ResMut<crate::label_booth::ShotRig>,
+) {
+    // `Shift+Y`: the whole labeler emptied at once — proposals, batch, booth queue, in-flight.
+    if keys::just_pressed(&keyboard, live.0, Action::DiscardAllSuggestions) {
+        state.status = crate::labels::clear_all_labels(
+            &mut suggestions,
+            &mut generation,
+            &mut label_queue,
+            &mut label_tasks,
+            &mut rig,
+        );
+        return;
+    }
+    let apply = keys::just_pressed(&keyboard, live.0, Action::ApplySuggestion);
+    let discard = keys::just_pressed(&keyboard, live.0, Action::DiscardSuggestion);
+    if !apply && !discard {
+        return;
+    }
+    let Some(target) = state.target() else {
+        state.status = "nothing focused".to_owned();
+        return;
+    };
+    let name = crate::labels::name_of(&target).to_owned();
+    if discard {
+        if suggestions.remove(&target).is_some() {
+            generation.0 = generation.0.wrapping_add(1);
+            state.status = format!("discarded the proposed labels for `{name}`");
+        } else {
+            state.status = "no proposed labels here".to_owned();
+        }
+        return;
+    }
+    let Some(entry) = suggestions.get(&target).cloned() else {
+        state.status = "no proposed labels here — L asks the model".to_owned();
+        return;
+    };
+    // **A lying-down piece is righted FIRST, and the labels are re-asked** — the model judged a
+    // sideways render, so its `front` (and the footprint it was told) describe the wrong
+    // orientation; applying them would bake the error in. `U` therefore performs the quarter
+    // turn through the same `rotate_mesh` the N/P keys run (its own undo entry, its own
+    // authored-cells guard — a refusal keeps the suggestion and says why), discards the stale
+    // suggestion, and re-photographs the upright piece for fresh labels.
+    if let Some(turn) = &entry.suggestion.needs_turn {
+        let axis = if turn.axis == "x" { RotateAxis::X } else { RotateAxis::Z };
+        if rotate_mesh(axis, false, &mut project, &mut state) {
+            suggestions.remove(&target);
+            generation.0 = generation.0.wrapping_add(1);
+            let Some(d) = state.placed_at_target(&target, &project).cloned() else {
+                return;
+            };
+            let said = crate::labels::request_photos(target, &d, &label_tasks, &mut rig);
+            state.status = format!("righted about {} — {said}", turn.axis.to_uppercase());
+        }
+        return;
+    }
+    let project = &mut *project;
+    let history_before = state.snapshot(project);
+    let Some((d, where_to)) = state.at_target(&target, &mut project.measured) else {
+        state.status = "not applied — that piece is gone".to_owned();
+        return;
+    };
+    if d.mesh.as_deref() != Some(entry.mesh.as_str()) {
+        state.status = "not applied — the mesh changed under the proposal".to_owned();
+        return;
+    }
+    crate::labels::apply_fields(d, &entry.suggestion);
+    state.record(history_before);
+    let said = persist(project, where_to, format!("applied proposed labels to `{name}`"));
+    // `persist`'s refusal contract: a failed library write REPLACES the message with
+    // `NOT WRITTEN: ...`. A refused write keeps the proposal staged for another try.
+    if !said.starts_with("NOT WRITTEN") {
+        suggestions.remove(&target);
+        generation.0 = generation.0.wrapping_add(1);
+    }
+    state.status = said;
+}
+
 /// **Accept a candidate into the library.**
 ///
 /// Validated first, and refused rather than repaired: a descriptor that fails the vocabulary is one
@@ -2986,34 +3143,8 @@ fn remove_tile(
         state.status = "select a library tile to remove it".to_owned();
         return;
     };
-
-    let used = project
-        .map
-        .placements
-        .iter()
-        .filter(|p| p.descriptor == id)
-        .count();
-    if used > 0 {
-        state.status = format!(
-            "`{id}` is used by {used} placement(s) in this map — remove those first"
-        );
-        return;
-    }
-
-    // **Out of `measured`**, for the reason `commit_candidate` writes into it: the derived layer is
-    // rebuilt from the measurements on every write, so removing a piece from it removed nothing.
-    // Ids survive layering — `Policy::apply` patches entries, it does not rename them — so the piece
-    // named by the palette is the piece named here.
-    let Some(at) = project.measured.descriptors.iter().position(|d| d.id == id) else {
-        return;
-    };
-    let mut trial = project.measured.clone();
-    trial.descriptors.remove(at);
-    // `commit_measured` re-validates, which is what catches the interesting failure: removing a piece
-    // can strand another that rested on a surface only it offered, and it can leave a policy patch
-    // matching nothing.
     let before = state.snapshot(&project);
-    match commit_measured(&mut project, trial) {
+    match take_out_of_library(&id, &mut project) {
         Ok(path) => {
             state.selected_library_id = None;
             state.record(before);
@@ -3021,6 +3152,216 @@ fn remove_tile(
             info!("removed `{id}` from {}", path.display());
         }
         Err(e) => state.status = format!("not removed: {e}"),
+    }
+}
+
+/// The shared core of Delete and Shift+Delete: take `id` out of the measured layer, through the one
+/// write door.
+///
+/// It refuses while the open map still places the piece. An orphaned placement is not an error the
+/// map can carry — it names a descriptor nothing defines, so the piece silently fails to appear and
+/// the author finds out by counting crates. Saying "12 placements use this" is the answer; deleting
+/// them on their behalf is not.
+///
+/// **Out of `measured`**, for the reason `commit_candidate` writes into it: the derived layer is
+/// rebuilt from the measurements on every write, so removing a piece from it removed nothing. Ids
+/// survive layering — `Policy::apply` patches entries, it does not rename them — so the piece named
+/// by the palette is the piece named here. `commit_measured` re-validates, which is what catches the
+/// interesting failure: removing a piece can strand another that rested on a surface only it
+/// offered, and it can leave a policy patch matching nothing.
+fn take_out_of_library(id: &str, project: &mut Project) -> Result<std::path::PathBuf, String> {
+    let used = project
+        .map
+        .placements
+        .iter()
+        .filter(|p| p.descriptor == id)
+        .count();
+    if used > 0 {
+        return Err(format!(
+            "`{id}` is used by {used} placement(s) in this map — remove those first"
+        ));
+    }
+    let Some(at) = project.measured.descriptors.iter().position(|d| d.id == id) else {
+        return Err(format!("`{id}` is not in the measured layer"));
+    };
+    let mut trial = project.measured.clone();
+    trial.descriptors.remove(at);
+    commit_measured(project, trial)
+}
+
+/// Which library entry `Shift+Delete` has armed for demotion — the first press's answer, waiting
+/// for the second.
+#[derive(Resource, Default)]
+struct DemoteArm(Option<String>);
+
+/// **Send a library entry back to the candidate list, stripped.**
+///
+/// "Redo this one from scratch" is a different intent from Delete's "this was a mistake": the piece
+/// leaves the library through the same door, but its GLB is still on disk, so the rescan measures it
+/// fresh and it re-enters the candidate list carrying exactly what the importer can see — footprint
+/// and height, no tags, no note, no mount.
+///
+/// Two presses, because the strip is the point and the point is destructive: the first press arms
+/// with a warning naming what is lost, the second press on the same piece sends it. Moving the
+/// focus disarms (`disarm_demote`) — the confirmation is for THIS piece, not whichever one is
+/// focused when the key lands next. One undo step covers the whole trip, `Snapshot` holding both
+/// halves by design.
+fn demote_tile(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<crate::keys::Live>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<ImportState>,
+    mut arm: ResMut<DemoteArm>,
+    mut suggestions: ResMut<crate::labels::Suggestions>,
+    mut generation: ResMut<crate::labels::LabelGeneration>,
+) {
+    if !keys::just_pressed(&keyboard, live.0, Action::DemoteTile) {
+        return;
+    }
+    let Some(id) = state.selected_library_id.clone() else {
+        state.status = "select a library tile to send it back".to_owned();
+        return;
+    };
+    if arm.0.as_deref() != Some(id.as_str()) {
+        arm.0 = Some(id.clone());
+        state.status = format!(
+            "sending `{id}` back to the candidates loses its tags, note and mount — \
+             Shift+{} again sends it",
+            crate::keys::REMOVE_NAME
+        );
+        return;
+    }
+    arm.0 = None;
+    // The mesh path is the reborn candidate's name — captured before the entry is gone. An entry
+    // with no mesh has nothing to come back as; sending it "back" would just be Delete wearing a
+    // costume, so it refuses and names the honest key.
+    let Some(mesh) = project
+        .measured
+        .descriptors
+        .iter()
+        .find(|d| d.id == id)
+        .and_then(|d| d.mesh.clone())
+    else {
+        state.status = format!(
+            "`{id}` has no mesh — nothing to send back ({} removes it outright)",
+            crate::keys::REMOVE_NAME
+        );
+        return;
+    };
+    let before = state.snapshot(&project);
+    match take_out_of_library(&id, &mut project) {
+        Ok(path) => {
+            // The rescan IS the strip: `import::scan` measures the GLB fresh, so the candidate
+            // re-enters with the importer's facts and none of the author's judgements.
+            scan(&project, &mut state);
+            if let Some(at) = state.candidates.iter().position(|c| c.mesh == mesh) {
+                state.selected = at;
+            }
+            state.selected_library_id = None;
+            // Proposed labels under either identity judged the piece as it was configured —
+            // stale by definition now.
+            let dropped = suggestions.remove(&EditTarget::Library(id.clone())).is_some()
+                | suggestions.remove(&EditTarget::Candidate(mesh.clone())).is_some();
+            if dropped {
+                generation.0 = generation.0.wrapping_add(1);
+            }
+            state.record(before);
+            state.status =
+                format!("sent `{id}` back to the candidates — measured fresh, stripped");
+            info!("demoted `{id}` out of {}", path.display());
+        }
+        Err(e) => state.status = format!("not sent back: {e}"),
+    }
+}
+
+/// The arm is for ONE piece: focus moving off it disarms, so a `Shift+Delete` aimed at the lamp can
+/// never fire the confirmation the sofa armed. Silent — writing a status here would itself change
+/// `ImportState` and re-run the gate.
+fn disarm_demote(state: Res<ImportState>, mut arm: ResMut<DemoteArm>) {
+    let Some(armed) = arm.0.clone() else {
+        return;
+    };
+    if state.selected_library_id.as_deref() != Some(armed.as_str()) {
+        arm.0 = None;
+    }
+}
+
+/// **`Cmd+C` puts the detail pane on the clipboard** — its text, top to bottom, as it reads.
+///
+/// bevy_ui has no selectable text, and an author who wants a piece's facts in a message — to an
+/// agent, a teammate, a bug report — should not have to retype what is already on screen. The copy
+/// IS the pane: the text is collected from the pane's own nodes in hierarchy order, so there is no
+/// second formatter to drift from what the eye just read.
+///
+/// `NonSendMarker` pins the system to the main thread — macOS's pasteboard is not promised to
+/// tolerate any other, and a clipboard that works four times in five is worse than none.
+fn copy_info(
+    _main_thread: bevy::ecs::system::NonSendMarker,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<crate::keys::Live>,
+    panes: Query<Entity, With<DetailPane>>,
+    children: Query<&Children>,
+    texts: Query<&Text>,
+    mut state: ResMut<ImportState>,
+) {
+    if !keys::just_pressed(&keyboard, live.0, Action::CopyInfo) {
+        return;
+    }
+    let mut lines = Vec::new();
+    for pane in &panes {
+        collect_text(pane, &children, &texts, &mut lines);
+    }
+    // The two lines the pane does NOT hold and the author is usually chasing: the scan summary and
+    // the status line. The error message lives in the status — a copy that gets everything but the
+    // error got everything but what was wanted.
+    if !state.summary.is_empty() {
+        lines.push(format!("summary: {}", state.summary));
+    }
+    if !state.status.is_empty() {
+        lines.push(format!("status: {}", state.status));
+    }
+    if lines.is_empty() {
+        state.status = "nothing on the pane to copy".to_owned();
+        return;
+    }
+    let text = lines.join("\n");
+    match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
+        Ok(()) => state.status = format!("copied the pane — {} line(s)", lines.len()),
+        Err(e) => state.status = format!("could not reach the clipboard: {e}"),
+    }
+}
+
+/// Does anything under this entity carry a drawable mesh? The watchdog's one question.
+fn holds_a_mesh(
+    root: Entity,
+    children: &Query<&Children>,
+    meshes: &Query<(), With<Mesh3d>>,
+) -> bool {
+    if meshes.get(root).is_ok() {
+        return true;
+    }
+    children
+        .get(root)
+        .map(|kids| kids.iter().any(|k| holds_a_mesh(k, children, meshes)))
+        .unwrap_or(false)
+}
+
+/// Depth-first text harvest under one UI node, in child order — which is the order the pane reads.
+fn collect_text(
+    root: Entity,
+    children: &Query<&Children>,
+    texts: &Query<&Text>,
+    out: &mut Vec<String>,
+) {
+    if let Ok(t) = texts.get(root) {
+        if !t.0.trim().is_empty() {
+            out.push(t.0.clone());
+        }
+    }
+    if let Ok(kids) = children.get(root) {
+        for kid in kids {
+            collect_text(*kid, children, texts, out);
+        }
     }
 }
 
@@ -3078,6 +3419,8 @@ fn on_tag_chip(
 fn move_selection(
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<crate::keys::Live>,
+    time: Res<Time>,
+    mut repeat: ResMut<crate::keys::Repeat>,
     project: Res<Project>,
     // The arrows walk what is on screen, which is what the filter decides.
     filters: Res<crate::filter::Filters>,
@@ -3086,8 +3429,11 @@ fn move_selection(
     // **Read the keys before touching the focus.** Clearing `selected_library_id` unconditionally
     // would steal the focus back on the very next frame after a library row was clicked — the system
     // runs every frame, not only when an arrow arrives.
-    let down = keys::just_pressed(&keyboard, live.0, Action::NextCandidate);
-    let up = keys::just_pressed(&keyboard, live.0, Action::PrevCandidate);
+    // Held arrows repeat at the shared [`crate::keys::REPEAT_SECS`] cadence, like the aim keys —
+    // walking a 300-candidate scan one tap at a time is not a job.
+    let dt = time.delta_secs();
+    let down = keys::repeating(&keyboard, live.0, Action::NextCandidate, &mut repeat, dt);
+    let up = keys::repeating(&keyboard, live.0, Action::PrevCandidate, &mut repeat, dt);
     let to_library = keys::just_pressed(&keyboard, live.0, Action::FocusLibrary);
     let to_candidates = keys::just_pressed(&keyboard, live.0, Action::FocusCandidates);
 
@@ -3111,6 +3457,9 @@ fn move_selection(
     if !down && !up {
         return;
     }
+    // Shift is the long stride: five rows per step, same key, same direction — a 300-candidate
+    // scan at one row a step is a scroll wheel pretending to be a cursor.
+    let stride = if held_shift(&keyboard) { 5 } else { 1 };
 
     // Walk whichever list has the focus. Two lists, one pair of keys — the alternative was a second
     // pair nobody would remember, on a tab already carrying ten rows of its twelve.
@@ -3120,7 +3469,7 @@ fn move_selection(
             let Some(at) = ids.iter().position(|d| *d == id) else {
                 return;
             };
-            let want = if down { at + 1 } else { at.saturating_sub(1) };
+            let want = if down { at + stride } else { at.saturating_sub(stride) };
             if let Some(next) = ids.get(want.min(ids.len().saturating_sub(1))) {
                 state.selected_library_id = Some(next.clone());
                 state.status = format!("`{next}` selected — {} removes it", keys::binding(Action::RemoveTile).chord);
@@ -3144,7 +3493,7 @@ fn move_selection(
                     return;
                 }
             };
-            let want = if down { at + 1 } else { at.saturating_sub(1) };
+            let want = if down { at + stride } else { at.saturating_sub(stride) };
             if let Some(&next) = rows.get(want.min(rows.len().saturating_sub(1))) {
                 state.selected = next;
             }
@@ -3394,10 +3743,23 @@ fn drive_preview(
     mut commands: Commands,
     mode: Res<Mode>,
     assets: Res<AssetServer>,
-    state: Res<ImportState>,
+    mut state: ResMut<ImportState>,
     project: Res<Project>,
     previews: Query<(Entity, &PreviewOf, &Children), With<Preview>>,
     mut transforms: Query<&mut Transform>,
+    child_lists: Query<&Children>,
+    mesh_nodes: Query<(), With<Mesh3d>>,
+    // Ground truth for "is the scene here": the asset store itself. The server's load-state
+    // bookkeeping can answer "not loaded" FOREVER for a labeled sub-asset (`…#Scene0`) that is
+    // sitting in memory — which kept the watchdog disarmed while the author stared at an empty
+    // stage. `contains` is the same check the engine's own spawner gates on.
+    worlds: Res<Assets<WorldAsset>>,
+    // What this system last said about which mesh's load, so each phase is spoken once.
+    mut said: Local<Option<(String, &'static str)>>,
+    // The watchdog's memory: which mesh, how long it has been loaded-but-empty, how many
+    // respawns it has spent, and whether the materialized instance has been settled. See the
+    // HEAL block below.
+    mut heal: Local<Option<(String, u32, u8, bool)>>,
 ) {
     let clear = |commands: &mut Commands| {
         for (e, _, _) in &previews {
@@ -3408,50 +3770,164 @@ fn drive_preview(
         clear(&mut commands);
         return;
     }
-    let Some(d) = state.editing(&project.measured) else {
-        clear(&mut commands);
-        return;
-    };
-    // A blocked candidate has no trustworthy alignment, so a preview of it would be a picture of a
-    // guess. The findings say why; an empty grid is the honest illustration. A library entry was
-    // measured when it was accepted, so it has no such doubt.
-    if state.selected_library_id.is_none() && state.current().is_some_and(|c| c.blocked()) {
-        clear(&mut commands);
-        return;
-    }
-
-    // The key, and the reason there is nothing to show without one: a descriptor with no mesh has
-    // no preview, and leaving the previous one up would caption it with the wrong piece.
-    let Some(mesh) = d.mesh.as_ref() else {
-        clear(&mut commands);
-        return;
+    // Everything the descriptor decides comes out OWNED in one block, because the status writes
+    // below need the state mutably and `editing` borrows it.
+    let (mesh, want, want_rot) = {
+        let Some(d) = state.editing(&project.measured) else {
+            clear(&mut commands);
+            return;
+        };
+        // A blocked candidate has no trustworthy alignment, so a preview of it would be a picture
+        // of a guess. The findings say why; an empty grid is the honest illustration. A library
+        // entry was measured when it was accepted, so it has no such doubt.
+        if state.selected_library_id.is_none() && state.current().is_some_and(|c| c.blocked()) {
+            clear(&mut commands);
+            return;
+        }
+        // The key, and the reason there is nothing to show without one: a descriptor with no mesh
+        // has no preview, and leaving the previous one up would caption it with the wrong piece.
+        let Some(mesh) = d.mesh.clone() else {
+            clear(&mut commands);
+            return;
+        };
+        let a = &d.align;
+        // The pivot shifts the model so its bounding-box centre lands on the placement point,
+        // which is what makes the symmetric footprint an accurate reservation rather than an
+        // approximation.
+        let pivot = a.pivot.unwrap_or((0.0, 0.0));
+        // **The transform a real placement applies**, which is `(scale, scale * stretch_y, scale)`
+        // — see `emerge_bevy::spawn_descriptor`.
+        let want = Transform::from_xyz(
+            STAGE.x - pivot.0,
+            // **The mount's height, then the mesh's own correction on top** — the same order
+            // `stack::datum` applies them in, so the staged piece stands where a placed one will.
+            STAGE.y + stage_lift(d) + a.y_offset.unwrap_or(0.0),
+            STAGE.z - pivot.1,
+        )
+        .with_scale(Vec3::new(
+            a.scale.unwrap_or(1.0),
+            a.scale.unwrap_or(1.0) * a.stretch_y.unwrap_or(1.0),
+            a.scale.unwrap_or(1.0),
+        ));
+        (mesh, want, emerge_bevy::mesh_rotation(d))
     };
 
     for (e, of, _) in &previews {
-        if &of.0 != mesh {
+        if of.0 != mesh {
             commands.entity(e).despawn();
         }
     }
 
-    let a = &d.align;
-    // The pivot shifts the model so its bounding-box centre lands on the placement point, which is
-    // what makes the symmetric footprint an accurate reservation rather than an approximation.
-    let pivot = a.pivot.unwrap_or((0.0, 0.0));
-    // **The transform a real placement applies**, which is `(scale, scale * stretch_y, scale)` — see
-    // `emerge_bevy::spawn_descriptor`.
-    let want = Transform::from_xyz(
-        STAGE.x - pivot.0,
-        // **The mount's height, then the mesh's own correction on top** — the same order
-        // `stack::datum` applies them in, so the staged piece stands where a placed one will.
-        STAGE.y + stage_lift(d) + a.y_offset.unwrap_or(0.0),
-        STAGE.z - pivot.1,
-    )
-    .with_scale(Vec3::new(
-        a.scale.unwrap_or(1.0),
-        a.scale.unwrap_or(1.0) * a.stretch_y.unwrap_or(1.0),
-        a.scale.unwrap_or(1.0),
-    ));
-    let want_rot = emerge_bevy::mesh_rotation(d);
+    // **The stage says what the file is doing.** A large conversion takes real seconds to decode
+    // and a failed texture left the stage silently empty — indistinguishable from broken, which is
+    // exactly how it got reported. Each phase is spoken once per mesh, and the ready line only
+    // replaces this system's OWN loading line, so nobody else's status is stomped.
+    let scene: Handle<WorldAsset> = assets.load(GltfAssetLabel::Scene(0).from_asset(mesh.clone()));
+    use bevy::asset::{LoadState, RecursiveDependencyLoadState as Deps};
+    let loading_line = format!("loading {} …", leaf(&mesh));
+    let phase = match (
+        assets.get_load_state(scene.id()),
+        assets.get_recursive_dependency_load_state(scene.id()),
+    ) {
+        (Some(LoadState::Failed(e)), _) => Err(e.to_string()),
+        (_, Some(Deps::Failed(e))) => Err(e.to_string()),
+        _ if worlds.contains(scene.id()) => Ok(true),
+        _ => Ok(false),
+    };
+    let ready = matches!(&phase, Ok(true));
+    match phase {
+        Err(e) => {
+            if said.as_ref() != Some(&(mesh.clone(), "failed")) {
+                *said = Some((mesh.clone(), "failed"));
+                state.status = format!("NOT DRAWN — {}: {e}", leaf(&mesh));
+                error!("preview of {mesh}: {e}");
+            }
+        }
+        Ok(false) => {
+            if said.as_ref() != Some(&(mesh.clone(), "loading")) {
+                *said = Some((mesh.clone(), "loading"));
+                state.status = loading_line.clone();
+            }
+        }
+        Ok(true) => {
+            if said.as_ref() != Some(&(mesh.clone(), "ready")) {
+                let was_loading = said.as_ref() == Some(&(mesh.clone(), "loading"));
+                *said = Some((mesh.clone(), "ready"));
+                if was_loading && state.status == loading_line {
+                    state.status = format!("{} staged", leaf(&mesh));
+                }
+            }
+        }
+    }
+
+    // **The watchdog.** A cold-loaded scene sometimes reports loaded while nothing drawable ever
+    // materializes under the stage — the state the author heals by clicking off and back, every
+    // time, for every first-viewed mesh. This performs that exact gesture: loaded + staged +
+    // meshless past a grace period respawns the preview, WARNS to the terminal so the engine-side
+    // loss stays on the record, and gives up loudly after three attempts rather than looping.
+    const HEAL_GRACE_FRAMES: u32 = 30;
+    const HEAL_ATTEMPTS: u8 = 3;
+    let existing = previews.iter().find(|(_, of, _)| of.0 == mesh).map(|(e, _, _)| e);
+    if heal.as_ref().is_none_or(|(m, _, _, _)| *m != mesh) {
+        *heal = Some((mesh.clone(), 0, 0, false));
+    }
+    let mut respawn_now = false;
+    if let (Some(e), Some((_, frames, tries, settled))) = (existing, heal.as_mut()) {
+        if holds_a_mesh(e, &child_lists, &mesh_nodes) {
+            *frames = 0;
+            *tries = 0;
+            // **Settle the instance the moment it materializes.** The scene's entities are
+            // re-parented under the stage AFTER they spawn, and transform propagation misses
+            // that re-parenting: measured live, every mesh sat at GlobalTransform (0,0,0) —
+            // the world origin, four kilometres from the camera aimed at the stage, culled to
+            // "0 tris drawn" — while the file said staged. Touching the ROOT alone measured as
+            // not enough; every Transform in the subtree is marked, so per-entity change
+            // detection cannot skip any of them on the next propagation pass.
+            if !*settled {
+                *settled = true;
+                let mut queue = vec![e];
+                while let Some(node) = queue.pop() {
+                    if let Ok(mut tf) = transforms.get_mut(node) {
+                        tf.set_changed();
+                    }
+                    if let Ok(kids) = child_lists.get(node) {
+                        queue.extend(kids.iter());
+                    }
+                }
+            }
+        } else {
+            *settled = false;
+            if ready {
+                *frames += 1;
+                if *frames > HEAL_GRACE_FRAMES {
+                    if *tries < HEAL_ATTEMPTS {
+                        *tries += 1;
+                        *frames = 0;
+                        warn!(
+                            "staged preview of {mesh} loaded but never materialized — \
+                             respawning (attempt {tries})"
+                        );
+                        respawn_now = true;
+                    } else if *frames == HEAL_GRACE_FRAMES + 1 {
+                        state.status = format!(
+                            "NOT DRAWN — {}: loaded, but no mesh materialized after \
+                             {HEAL_ATTEMPTS} respawns",
+                            leaf(&mesh)
+                        );
+                    }
+                }
+            } else {
+                *frames = 0;
+            }
+        }
+    }
+    if respawn_now {
+        if let Some(e) = existing {
+            commands.entity(e).despawn();
+        }
+        // Falls through to the spawn below: a fresh root against the now-warm asset — the
+        // author's own off-and-back, performed for them.
+    }
 
     // **Re-applied every frame, not written once at spawn.**
     //
@@ -3464,23 +3940,24 @@ fn drive_preview(
     //
     // Written only when it differs, because a `Transform` marked changed every frame re-propagates
     // the whole hierarchy.
-    if let Some((e, _, children)) = previews.iter().find(|(_, of, _)| &of.0 == mesh) {
-        if let Ok(mut tf) = transforms.get_mut(e) {
-            if *tf != want {
-                *tf = want;
-            }
-        }
-        for child in children.iter() {
-            if let Ok(mut tf) = transforms.get_mut(child) {
-                if tf.rotation != want_rot {
-                    tf.rotation = want_rot;
+    if !respawn_now {
+        if let Some((e, _, children)) = previews.iter().find(|(_, of, _)| of.0 == mesh) {
+            if let Ok(mut tf) = transforms.get_mut(e) {
+                if *tf != want {
+                    *tf = want;
                 }
             }
+            for child in children.iter() {
+                if let Ok(mut tf) = transforms.get_mut(child) {
+                    if tf.rotation != want_rot {
+                        tf.rotation = want_rot;
+                    }
+                }
+            }
+            return;
         }
-        return;
     }
 
-    let scene: Handle<WorldAsset> = assets.load(GltfAssetLabel::Scene(0).from_asset(mesh.clone()));
     commands
         .spawn((
             Preview,
@@ -3799,8 +4276,15 @@ fn rebuild_candidates(
                         TextColor(LABEL),
                         TextFont::from_font_size(10.0),
                     ));
+                    // A folded pack says what it is hiding. A bare count on a thin row reads as
+                    // absence when 145 rows just left the screen — the word is what makes "folded"
+                    // and "gone" impossible to confuse.
                     row.spawn((
-                        Text::new(format!("{}", members.len())),
+                        Text::new(if folded {
+                            format!("{} hidden — click to open", members.len())
+                        } else {
+                            format!("{}", members.len())
+                        }),
                         TextColor(LABEL),
                         TextFont::from_font_size(10.0),
                     ));
@@ -3875,6 +4359,7 @@ fn rebuild_detail(
     note_edit: Res<NoteEdit>,
     scale_edit: Res<ScaleEdit>,
     height_edit: Res<HeightEdit>,
+    suggestions: Option<Res<crate::labels::Suggestions>>,
     project: Res<Project>,
     panes: Query<Entity, With<DetailPane>>,
 ) {
@@ -3903,6 +4388,12 @@ fn rebuild_detail(
                 Some(_) => None,
                 None => state.current(),
             };
+            // The VLM's pending proposal for this piece, if one exists AND still describes this
+            // mesh — a re-import under the same id must not wear another mesh's labels.
+            let proposal = state.target().and_then(|t| {
+                let entry = suggestions.as_ref()?.get(&t)?;
+                (d.mesh.as_deref() == Some(entry.mesh.as_str())).then(|| entry.clone())
+            });
 
             // The id, showing what is being typed when it is being typed — with a caret, so an
             // empty field reads as "waiting for you" rather than as the id having been wiped.
@@ -3959,6 +4450,87 @@ fn rebuild_detail(
                     NoteReadout,
                 ));
             });
+
+            // **The proposal header** — machine-proposed, human-unconfirmed, and it says so with
+            // its provenance and its verbs. Everything below in `SUGGEST` is part of this question.
+            if let Some(entry) = &proposal {
+                let s = &entry.suggestion;
+                let p_ = &entry.provenance;
+                let attempts = if p_.attempts > 1 {
+                    format!(", {} attempts", p_.attempts)
+                } else {
+                    String::new()
+                };
+                p.spawn((
+                    Text::new(format!(
+                        "PROPOSED by {} ({}{attempts}, confidence {:?}) - U apply, Y discard",
+                        p_.model, p_.date, s.confidence
+                    )),
+                    TextColor(crate::chrome::SUGGEST),
+                    TextFont::from_font_size(10.0),
+                ));
+                // The model's identification — the reasoning its answers hang off, and the line a
+                // reviewer sanity-checks first.
+                p.spawn((
+                    Text::new(s.what.clone()),
+                    TextColor(TEXT),
+                    TextFont::from_font_size(10.0),
+                ));
+                // The proposed note as a ghost line — never in the editable buffer.
+                if let Some(note) = &s.note {
+                    if d.note.as_deref() != Some(note.as_str()) {
+                        p.spawn((
+                            Text::new(format!("proposed: {note}")),
+                            TextColor(crate::chrome::SUGGEST),
+                            TextFont::from_font_size(9.0),
+                        ));
+                    }
+                }
+                // The proposed front face, when it differs from what stands.
+                if let Some(front) = s.front {
+                    if d.align.front != Some(front) {
+                        p.spawn((
+                            Text::new(format!(
+                                "front {} -> proposed: {front:?}",
+                                match d.align.front {
+                                    Some(f) => format!("{f:?}"),
+                                    None => "unset".to_owned(),
+                                }
+                            )),
+                            TextColor(crate::chrome::SUGGEST),
+                            TextFont::from_font_size(9.0),
+                        ));
+                    }
+                }
+                // A righting turn changes what U does: it turns the piece (the same re-measure
+                // the N/P keys run) and re-asks the model, because labels judged from a sideways
+                // render describe the wrong orientation.
+                if let Some(turn) = &s.needs_turn {
+                    let key = if turn.axis == "x" { "N" } else { "P" };
+                    p.spawn((
+                        Text::new(format!(
+                            "appears to lie down - U rights it about {} and re-asks the model \
+                             (hand turn: key {key}): {}",
+                            turn.axis.to_uppercase(),
+                            turn.why
+                        )),
+                        TextColor(crate::chrome::SUGGEST),
+                        TextFont::from_font_size(9.0),
+                    ));
+                }
+                // Vocabulary the model wanted and could not have — a human's decision, elsewhere.
+                for t in &s.token_proposals {
+                    p.spawn((
+                        Text::new(format!(
+                            "wants `{}` on {} ({}) - needs a human vocab edit; see \
+                             slop/llm/vocab_proposals.ron",
+                            t.token, t.axis, t.why
+                        )),
+                        TextColor(DIM),
+                        TextFont::from_font_size(9.0),
+                    ));
+                }
+            }
 
             if let Some((c, m)) = cand.and_then(|c| c.measured.map(|m| (c, m))) {
                 // Measured facts, not controls. Given their own heading so the eye can skip them
@@ -4122,6 +4694,16 @@ fn rebuild_detail(
                     TextColor(if d.mount.is_some() { TEXT } else { ACCENT }),
                     TextFont::from_font_size(11.0),
                 ));
+                // The proposed mount rides the same row, when it differs — one line, one fact.
+                if let Some(m) = proposal.as_ref().and_then(|e| e.suggestion.mount.as_ref()) {
+                    if d.mount.as_ref() != Some(m) {
+                        row.spawn((
+                            Text::new(format!("  -> proposed: {}", mount_label(Some(m)))),
+                            TextColor(crate::chrome::SUGGEST),
+                            TextFont::from_font_size(10.0),
+                        ));
+                    }
+                }
             });
 
             // **How far up, for the two mounts that have an up.**
@@ -4463,6 +5045,16 @@ fn rebuild_detail(
                     Axis::Look => d.look.clone(),
                     Axis::Surfaces => d.offers.surfaces.clone(),
                 };
+                // The model's proposed set for this axis — the chips' third state.
+                let proposed: Vec<String> = proposal
+                    .as_ref()
+                    .map(|e| match axis {
+                        Axis::Kind => e.suggestion.kind.clone(),
+                        Axis::Effects => e.suggestion.effects.clone(),
+                        Axis::Look => e.suggestion.look.clone(),
+                        Axis::Surfaces => e.suggestion.offers_surfaces.clone(),
+                    })
+                    .unwrap_or_default();
                 crate::chrome::section(p, axis.label());
                 p.spawn(Node {
                     flex_direction: FlexDirection::Row,
@@ -4474,6 +5066,10 @@ fn rebuild_detail(
                 .with_children(|chips| {
                     for (ix, name) in vocab.names().enumerate() {
                         let on = held.iter().any(|h| h == name);
+                        // Proposed-but-not-held: ghost-lit in SUGGEST with a hairline border —
+                        // visibly a question, not a selection. A token both held and proposed is
+                        // simply held; agreement is not news.
+                        let ghost = !on && proposed.iter().any(|t| t == name);
                         chips
                             .spawn((
                                 UiButton,
@@ -4483,20 +5079,88 @@ fn rebuild_detail(
                                     // A chip is a click target, and 1 px of vertical padding made a
                                     // row of them a solid bar of text rather than a row of things.
                                     padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
+                                    border: if ghost {
+                                        UiRect::all(Val::Px(1.0))
+                                    } else {
+                                        UiRect::ZERO
+                                    },
                                     ..default()
                                 },
+                                BorderColor::all(crate::chrome::SUGGEST),
                                 BackgroundColor(if on { ROW_SELECTED } else { ROW_BG }),
                             ))
                             .with_children(|chip| {
                                 chip.spawn((
                                     Text::new(name.to_owned()),
-                                    TextColor(if on { TEXT } else { LABEL }),
+                                    TextColor(if on {
+                                        TEXT
+                                    } else if ghost {
+                                        crate::chrome::SUGGEST
+                                    } else {
+                                        LABEL
+                                    }),
                                     TextFont::from_font_size(10.0),
                                     TextLayout::new(Justify::Left, LineBreak::NoWrap),
                                 ));
                             });
                     }
                 });
+            }
+
+            // **Rooms and group** — the first UI these placement fields have ever had. Read-only:
+            // apply writes them, and hand-editing free text stays a `library.ron` edit, as today.
+            {
+                let p_rooms = proposal
+                    .as_ref()
+                    .map(|e| e.suggestion.rooms.clone())
+                    .unwrap_or_default();
+                let p_group = proposal.as_ref().and_then(|e| e.suggestion.group.clone());
+                let show_rooms = !d.placement.rooms.is_empty() || !p_rooms.is_empty();
+                let show_group = d.placement.group.is_some() || p_group.is_some();
+                if show_rooms || show_group {
+                    crate::chrome::section(p, "PLACEMENT");
+                }
+                let mut line = |label: &str, now: String, prop: Option<String>| {
+                    p.spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        row.spawn((
+                            Node {
+                                width: Val::Px(48.0),
+                                flex_shrink: 0.0,
+                                ..default()
+                            },
+                            Text::new(label.to_owned()),
+                            TextColor(LABEL),
+                            TextFont::from_font_size(10.0),
+                        ));
+                        row.spawn((
+                            Text::new(if now.is_empty() { "-".to_owned() } else { now }),
+                            TextColor(TEXT),
+                            TextFont::from_font_size(10.0),
+                        ));
+                        if let Some(prop) = prop {
+                            row.spawn((
+                                Text::new(format!("  -> proposed: {prop}")),
+                                TextColor(crate::chrome::SUGGEST),
+                                TextFont::from_font_size(10.0),
+                            ));
+                        }
+                    });
+                };
+                if show_rooms {
+                    let now = d.placement.rooms.join(", ");
+                    let prop = (!p_rooms.is_empty() && p_rooms != d.placement.rooms)
+                        .then(|| p_rooms.join(", "));
+                    line("rooms", now, prop);
+                }
+                if show_group {
+                    let now = d.placement.group.clone().unwrap_or_default();
+                    let prop = p_group.filter(|g| Some(g) != d.placement.group.as_ref());
+                    line("group", now, prop);
+                }
             }
 
             // **What the importer noticed**, one block per finding.
