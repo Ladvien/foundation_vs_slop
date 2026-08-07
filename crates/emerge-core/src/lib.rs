@@ -33,6 +33,7 @@ pub mod adjacency;
 pub mod clips;
 pub mod convert;
 pub mod descriptor;
+pub mod gait;
 pub mod geom;
 pub mod glb;
 pub mod grammar;

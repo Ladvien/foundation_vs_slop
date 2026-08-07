@@ -245,9 +245,15 @@ editor's ANIM tab. It samples the GLB's animation channels, runs forward kinemat
 to get each foot's world position over the cycle, resamples onto a 128-bin phase grid, and reports:
 
 - **contact** = per-bin stance labels by GANimator's velocity condition restated in the ground frame
-  (`‖v − v_stance‖ < 0.35·‖v_stance‖`; Li et al. 2022, 10.1145/3528223.3530094) — the in-place clip's
+  (`‖v − v_stance‖ < ε·‖v_stance‖`; Li et al. 2022, 10.1145/3528223.3530094) — the in-place clip's
   planted foot slides backward at exactly body speed, so `-v_stance` is also the body's travel
-  **vector**, which is what measures a mis-named strafe rather than annotating it;
+  **vector**, which is what measures a mis-named strafe rather than annotating it. The threshold ε
+  is **derived per clip** (Otsu's split over the log of the normalized distances — Otsu 1979,
+  10.1109/TSMC.1979.4310076) so the next gaited rig is not measured with one rig's tuning; a rig
+  can overrule with `contact_eps:` in the manifest, and the valkyrie declares its hand-validated
+  `0.35` because run_back's transition-heavy histogram derives a misplaced split (the measured
+  table lives on `clips::otsu_threshold`). Every finding names the ε it used and whether it was
+  derived or declared;
 - **cycle_distance** = the planted foot's median speed over the contact bins × the clip duration,
   × the rig's manifest `scale` (rigs.ron owns it since v2; the per-module literals are gone);
 - **phase_offset** = the negative of the lag that best cross-correlates the two clips' foot-height
@@ -273,6 +279,27 @@ with `keep:` (stays loose — its numbers are deliberately not the asset's) or p
 `tolerance:`. The policy lives once, in `rig_check::cycle_tolerance`, and CI computes the same
 staleness the editor does — they tighten together or not at all. The reference gaits in `clips.rs`
 stay pinned at 3%.
+
+**The clip is also checked against the GAME, not just against itself** (round two, 2026-08). Every
+gait implies an authored speed — `cycle_distance / duration` — and the manifest's per-rig
+`drive_speed: (min, max)` declares the world-speed range the game actually drives the rig at
+(pinned to `config.ron` by `src/rigs.rs`'s agreement test). Outside `authored ×
+PHASE_RATE_CLAMP` the cadence clamp pins the legs while the body keeps the sim's speed, and the
+feet slide: `rig_check::skate_report` computes the skate magnitude (cm/frame at 60 Hz — mocap's
+own floor is ≈0.10, Ling et al. arXiv:2103.14274) and the skating ratio (Duolando,
+arXiv:2403.18811) per gait slot, plus a set-level "no gait covers the top of the drive range"
+note that holds regardless of blend. The clamp itself lives once, engine-free, in
+`emerge_core::gait` — the bench predicts cadence with the exact function the runtime runs.
+**An authored speed is a design constraint**: "this clip is authored for 0.98 u/s" is the sentence
+a gameplay programmer needs when picking a movement speed.
+
+**The gait-less fifteen rigs get checks too**: loop closure on every `Free` slot (first-vs-last
+pose per rotation channel, antipodal-safe — an open loop pops once per cycle forever; tolerance
+2 deg, from the measured all-rig histogram on `rig_check::LOOP_TOL_DEG`), keying density per
+`Free`/`OneShot` slot (`keys per rendered frame at 60 Hz` — the number that says when a sped-up
+scuttle strobes; display-only, the team picks the floor), and every one-shot's **end state against
+the idle** (slot 0's first frame is the idle convention; a clip ending far from it pops when its
+weight fades back — deliberately terminal clips like sit_down carry a permanent, truthful Note).
 
 Mask groups (which bones the upper-body layer excludes) are matched **by name** against the live
 skeleton, never a precomputed path, so a re-export that renames a bone surfaces as a missing name rather
@@ -317,6 +344,19 @@ adopts.**
 - **C checks all sixteen rigs** through the same queue and shows worst-first jump-to-detail rows —
   the audit that never happened when it cost sixteen clicks, and the same code path CI runs, so a
   red build reproduces locally as the same words.
+- **G stages the ghost** (round two): a second, translucent figure playing the MEASURED numbers
+  over the declared one, pinned to the same shared phase — judging an adopt becomes *look, then
+  write* instead of adopt-and-undo. The phase plots draw the measured curves dimmed under the
+  declared ones and the trace gains a dimmed measured-cycle arrow, so the A/B is on the plots
+  too. A per-slot `[skip]` chip excludes a slot from the next adopt transiently (the durable
+  form stays `keep:` in the manifest), and the ghost tracks the exclusion live.
+- **V cycles the camera** through figure / feet / side / ground framings — judging foot contact
+  requires seeing feet, and the view rig grew an `elevation` for exactly this (the map view is
+  saved and restored whole). Hovering a phase plot drops a shared cursor line across the stack
+  and reads out each slot's values at that phase.
+- **Measurements persist** (`anim_cache`): a RON cache under the project's `target/`, keyed by
+  the manifest entry and the GLB's byte fingerprint, warms the reports at startup — the STALE
+  badge is truthful before the tab is ever opened, and an unchanged session re-measures nothing.
 
 Anchors are per-rig data: `root_node:` / `contact_joints:` in the manifest (defaults `Root` /
 `foot_l`), and a gait rig missing them is a loud finding that lists measured contact-joint
