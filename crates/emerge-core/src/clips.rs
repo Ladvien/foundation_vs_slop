@@ -129,6 +129,203 @@ pub fn root_motion(glb: &Glb, clip: usize, node: usize) -> [f32; 3] {
     [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]]
 }
 
+// ── the all-rig checks: loop closure, source rate, one-shot end state ────────────────────────────
+
+/// The angle between two unit quaternions, degrees — `2·acos(|a·b|)`, the absolute dot making it
+/// antipodal-safe (q and −q are the same rotation).
+fn quat_angle_deg(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    2.0 * dot.abs().min(1.0).acos().to_degrees()
+}
+
+/// The display name of a node, for findings.
+fn node_name(glb: &Glb, index: usize) -> String {
+    glb.json["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.get(index))
+        .and_then(|n| n["name"].as_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("node {index}"))
+}
+
+/// **How far a looping clip's last pose sits from its first** — the most common looping defect: a
+/// loop whose ends do not meet pops once per cycle, forever.
+///
+/// Per rotation channel, first key vs last key, antipodal-safe; the worst joint is named so the
+/// finding is actionable. Translation channels are compared whole (euclidean first-vs-last): Unity's
+/// loop-pose rule matches rotation and root Y but deliberately not root XZ — here in-place authoring
+/// already forces the root's XZ to zero, so a translation mismatch anywhere is real.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoopClosure {
+    /// How many rotation channels were compared.
+    pub joints: usize,
+    /// The rotation channel with the largest first-vs-last angle.
+    pub worst_joint: String,
+    pub max_angle_deg: f32,
+    /// The largest first-vs-last translation delta, file units, and its joint.
+    pub max_translation: f32,
+    pub worst_translation_joint: Option<String>,
+}
+
+/// See [`LoopClosure`]. `None` when the clip does not exist or drives no rotation channel.
+pub fn loop_closure(glb: &Glb, clip: usize) -> Option<LoopClosure> {
+    let anim = glb.json["animations"].as_array()?.get(clip)?;
+    let channels = anim["channels"].as_array()?;
+    let samplers = anim["samplers"].as_array()?;
+    let mut joints = 0usize;
+    let mut worst_joint = String::new();
+    let mut max_angle_deg = 0.0f32;
+    let mut max_translation = 0.0f32;
+    let mut worst_translation_joint = None;
+    for ch in channels {
+        let path = ch["target"]["path"].as_str().unwrap_or("");
+        let node = ch["target"]["node"].as_u64().map(|n| n as usize);
+        let (Some(node), true) = (node, path == "rotation" || path == "translation") else {
+            continue;
+        };
+        let Some(s) = samplers.get(ch["sampler"].as_u64().unwrap_or(u64::MAX) as usize) else {
+            continue;
+        };
+        let width = if path == "rotation" { 4 } else { 3 };
+        let Some(values) = s["output"]
+            .as_u64()
+            .and_then(|ix| floats(glb, ix as usize, width))
+        else {
+            continue;
+        };
+        let (Some(first), Some(last)) = (values.first(), values.last()) else {
+            continue;
+        };
+        if path == "rotation" {
+            joints += 1;
+            let angle = quat_angle_deg(first, last);
+            if angle > max_angle_deg {
+                max_angle_deg = angle;
+                worst_joint = node_name(glb, node);
+            }
+        } else {
+            let d = first
+                .iter()
+                .zip(last)
+                .map(|(a, b)| (a - b) * (a - b))
+                .sum::<f32>()
+                .sqrt();
+            if d > max_translation {
+                max_translation = d;
+                worst_translation_joint = Some(node_name(glb, node));
+            }
+        }
+    }
+    (joints > 0).then_some(LoopClosure {
+        joints,
+        worst_joint,
+        max_angle_deg,
+        max_translation,
+        worst_translation_joint,
+    })
+}
+
+/// **How densely a clip was actually keyed** — its densest channel's key count and rate.
+///
+/// The rate is `1 / median inter-key interval` (median, not mean: robust against a single long hold
+/// key). What a playback speed does to it is the caller's arithmetic — the bench surfaces
+/// `fps × speed / 60` as authored keys per rendered frame at 60 Hz, the number that says when a
+/// sped-up clip starts strobing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SourceRate {
+    pub keys: usize,
+    pub fps: f32,
+}
+
+/// See [`SourceRate`]. `None` when the clip does not exist or no channel has two keys.
+pub fn source_rate(glb: &Glb, clip: usize) -> Option<SourceRate> {
+    let anim = glb.json["animations"].as_array()?.get(clip)?;
+    let channels = anim["channels"].as_array()?;
+    let samplers = anim["samplers"].as_array()?;
+    let mut best: Option<Vec<f32>> = None;
+    for ch in channels {
+        let Some(s) = samplers.get(ch["sampler"].as_u64().unwrap_or(u64::MAX) as usize) else {
+            continue;
+        };
+        let Some(times) = s["input"].as_u64().and_then(|ix| scalars(glb, ix as usize)) else {
+            continue;
+        };
+        if times.len() > best.as_ref().map_or(0, Vec::len) {
+            best = Some(times);
+        }
+    }
+    let times = best.filter(|t| t.len() >= 2)?;
+    let mut gaps: Vec<f32> = times.windows(2).map(|w| w[1] - w[0]).collect();
+    gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = gaps[gaps.len() / 2];
+    (median > 0.0).then_some(SourceRate {
+        keys: times.len(),
+        fps: 1.0 / median,
+    })
+}
+
+/// **Where a one-shot leaves the skeleton, against the pose it will fade back into.**
+///
+/// Final-key rotations of the joints `clip` drives, vs `reference_clip` sampled at its start
+/// (rest pose where the reference does not drive a joint). Driven-joints-only makes it
+/// mask-correct for free: the valkyrie's fire compares only the upper body it actually moves.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PoseDelta {
+    /// How many rotation channels were compared.
+    pub joints: usize,
+    pub worst_joint: String,
+    pub max_angle_deg: f32,
+}
+
+/// See [`PoseDelta`]. `None` when either clip does not exist or `clip` drives no rotation channel.
+pub fn end_pose_delta(glb: &Glb, clip: usize, reference_clip: usize) -> Option<PoseDelta> {
+    let anims = glb.json["animations"].as_array()?;
+    let anim = anims.get(clip)?;
+    anims.get(reference_clip)?;
+    let channels = anim["channels"].as_array()?;
+    let samplers = anim["samplers"].as_array()?;
+    let mut joints = 0usize;
+    let mut worst_joint = String::new();
+    let mut max_angle_deg = 0.0f32;
+    for ch in channels {
+        if ch["target"]["path"].as_str() != Some("rotation") {
+            continue;
+        }
+        let Some(node) = ch["target"]["node"].as_u64().map(|n| n as usize) else {
+            continue;
+        };
+        let Some(s) = samplers.get(ch["sampler"].as_u64().unwrap_or(u64::MAX) as usize) else {
+            continue;
+        };
+        let Some(values) = s["output"]
+            .as_u64()
+            .and_then(|ix| floats(glb, ix as usize, 4))
+        else {
+            continue;
+        };
+        let Some(end) = values.last() else { continue };
+        // The pose the skeleton fades back into: the reference's first key for this joint, or the
+        // rig's rest rotation where the reference leaves the joint alone.
+        let reference = track_raw(glb, reference_clip, node, "rotation")
+            .and_then(|(_, vals)| vals.into_iter().next())
+            .unwrap_or_else(|| {
+                let (_, r, _) = rest(glb, node);
+                r.to_vec()
+            });
+        joints += 1;
+        let angle = quat_angle_deg(end, &reference);
+        if angle > max_angle_deg {
+            max_angle_deg = angle;
+            worst_joint = node_name(glb, node);
+        }
+    }
+    (joints > 0).then_some(PoseDelta {
+        joints,
+        worst_joint,
+        max_angle_deg,
+    })
+}
+
 /// One channel's keyframe times and values, as raw floats (3 wide for TRS translation/scale, 4 for a
 /// rotation quaternion).
 fn track_raw(glb: &Glb, clip: usize, node: usize, path: &str) -> Option<(Vec<f32>, Vec<Vec<f32>>)> {
@@ -401,16 +598,14 @@ pub fn world_track(glb: &Glb, clip: usize, node: usize) -> Option<(Vec<f32>, Vec
 /// which is also the resolution of a measured phase offset.
 pub const PHASE_BINS: usize = 128;
 
-/// Contact threshold, as a fraction of the clip's own stance speed. **Relative on purpose**: an
-/// absolute epsilon breaks across rigs with different file units, and a rig-height-relative one
-/// needs geometry the measurement never otherwise touches.
-///
-/// 0.35 was chosen by measuring all six Valkyrie gaits at 0.35 / 0.5 / 0.7: the tight threshold
-/// keeps every cycle distance within 9.2% of the declared table, while 0.5 admits enough
-/// touchdown/lift-off bins to drag `run_back`'s median to 22% out — past the drift guard on a
-/// shipped asset. The cost is honest: the two roughest clips (`run_back`, `strafe_r`) label only
-/// ~9–15% of their cycle as clean stance, and `contact_fractions_stay_plausible` pins exactly that.
-pub const CONTACT_EPS: f32 = 0.35;
+/// The minimum Otsu separability (`η = σ²_between / σ²_total`, in log space) for a derived contact
+/// threshold to count as a measurement. Below it the stance and swing velocity modes do not
+/// separate, and the honest answer is `None` — the caller's loud "no planted-foot stance" path,
+/// whose remedy is the rig-level `contact_eps:` declaration. The six valkyrie gaits measure η
+/// 0.73–0.88 (table on [`otsu_threshold`]); a genuinely unimodal distribution scores far below
+/// 0.5, so 0.5 is a sanity bound, not a quality ranking — the valkyrie's own run_back derives a
+/// *misplaced* threshold at a healthy η, which is why that rig declares its `contact_eps`.
+pub const CONTACT_SEPARABILITY_MIN: f32 = 0.5;
 
 /// A joint must read as planted for at least this fraction of a cycle before
 /// [`contact_candidates`] will name it.
@@ -486,6 +681,10 @@ pub struct ContactTrack {
     pub stance_fraction: f32,
     /// The clip's duration, seconds.
     pub duration: f32,
+    /// The contact threshold actually used, as a fraction of the stance speed — derived per clip
+    /// ([`otsu_threshold`]) unless the rig declared one. Surfaced so a finding can say
+    /// "(contact eps 0.31x stance, derived)" and a human can overrule a bad derivation.
+    pub threshold: f32,
 }
 
 impl ContactTrack {
@@ -517,7 +716,72 @@ impl ContactTrack {
     }
 }
 
-fn contact_core(r: &Resampled) -> Option<ContactTrack> {
+/// **The derived contact threshold**: Otsu's method over the **log** of the normalized
+/// ground-frame distances — the exact sweep maximizing between-class variance (N. Otsu, "A
+/// Threshold Selection Method from Gray-Level Histograms", IEEE Trans. SMC 9(1), 1979,
+/// 10.1109/TSMC.1979.4310076). Contact frames cluster near the stance velocity, swing frames far
+/// from it; the threshold belongs in the gap between the modes, and Otsu finds the gap from the
+/// clip's own histogram instead of assuming one rig's tuning generalizes.
+///
+/// **Log space, from measurement, not taste.** The distances are a ratio quantity with a heavy
+/// swing tail; raw-space Otsu splits inside the tail (checkpoint sweep, 2026-08-06: thresholds
+/// 1.2–1.6× stance, walk's cycle 7.6% off the hand-validated table — past the 3% reference pin).
+/// In log space the split lands in the multiplicative valley: walk thr 0.31/err 0.5%, run
+/// 0.29/2.0%, walk_back 0.44/9.2% (the declared number is itself rough), strafe_l 0.40/4.5%,
+/// strafe_r 0.80/0.4%. The one clip log-Otsu still mismeasures is run_back (thr 0.83, err 22.3% —
+/// its transition-heavy histogram has its valley past the cliff the retired fixed `0.35` sweep
+/// documented), at a mid-pack η of 0.76 no floor can single out; that is what the rig-level
+/// `contact_eps:` declaration is for, and the shipped valkyrie declares one.
+///
+/// Returns `(threshold, separability)` in normalized-distance units; `None` when the values do
+/// not separate (η < [`CONTACT_SEPARABILITY_MIN`], degenerate classes, or too few positive
+/// distances) — never a guessed constant.
+fn otsu_threshold(values: &[f32]) -> Option<(f32, f32)> {
+    let mut sorted: Vec<f32> = values
+        .iter()
+        .filter(|v| **v > 0.0)
+        .map(|v| v.ln())
+        .collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = sorted.len();
+    if n < 4 {
+        return None;
+    }
+    let total_mean = sorted.iter().sum::<f32>() / n as f32;
+    let total_var = sorted.iter().map(|v| (v - total_mean).powi(2)).sum::<f32>() / n as f32;
+    if total_var <= 1.0e-12 {
+        return None;
+    }
+    let mut best_split = 0usize;
+    let mut best_between = 0.0f32;
+    let mut lead_sum = 0.0f32;
+    let total_sum: f32 = sorted.iter().sum();
+    for k in 1..n {
+        lead_sum += sorted[k - 1];
+        let (w0, w1) = (k as f32 / n as f32, (n - k) as f32 / n as f32);
+        let mu0 = lead_sum / k as f32;
+        let mu1 = (total_sum - lead_sum) / (n - k) as f32;
+        let between = w0 * w1 * (mu0 - mu1) * (mu0 - mu1);
+        if between > best_between {
+            best_between = between;
+            best_split = k;
+        }
+    }
+    if best_split == 0 {
+        return None;
+    }
+    let separability = best_between / total_var;
+    if separability < CONTACT_SEPARABILITY_MIN {
+        return None;
+    }
+    // The threshold sits in the middle of the inter-class gap, back in linear units.
+    let threshold = (0.5 * (sorted[best_split - 1] + sorted[best_split])).exp();
+    Some((threshold, separability))
+}
+
+/// `eps`: a declared threshold (fraction of stance speed) overriding the derived one — the
+/// explicit-decision path, from `Rig::contact_eps`.
+fn contact_core(r: &Resampled, eps: Option<f32>) -> Option<ContactTrack> {
     let bins = PHASE_BINS;
     // Velocity per bin, wrapping the seam: a gait clip loops, so the pose at phase 1 is the pose at
     // phase 0 and the last bin's step is as real as any other.
@@ -543,15 +807,22 @@ fn contact_core(r: &Resampled) -> Option<ContactTrack> {
         // No resolvable slide — "I cannot tell", never a zero that reads as "covers no ground".
         return None;
     }
-    let contact: Vec<bool> = vel
+    // Distance from the stance cluster, in stance-speed units — the quantity the threshold cuts.
+    let dist: Vec<f32> = vel
         .iter()
         .map(|v| {
             let (dx, dz) = (v[0] - vx, v[1] - vz);
-            (dx * dx + dz * dz).sqrt() < CONTACT_EPS * stance
+            (dx * dx + dz * dz).sqrt() / stance
         })
         .collect();
+    let threshold = match eps {
+        Some(e) => e,
+        None => otsu_threshold(&dist)?.0,
+    };
+    let contact: Vec<bool> = dist.iter().map(|d| *d < threshold).collect();
     let planted = contact.iter().filter(|&&c| c).count();
-    if planted == 0 {
+    if planted == 0 || planted == bins {
+        // All-planted is as unmeasurable as none: there is no swing to separate from.
         return None;
     }
     let speed: Vec<f32> = vel.iter().map(|v| (v[0] * v[0] + v[1] * v[1]).sqrt()).collect();
@@ -562,25 +833,36 @@ fn contact_core(r: &Resampled) -> Option<ContactTrack> {
         body_velocity: [-vx, -vz],
         stance_fraction: planted as f32 / bins as f32,
         duration: r.duration,
+        threshold,
     })
 }
 
-/// See [`ContactTrack`].
-pub fn contact_track(glb: &Glb, clip: usize, foot: usize) -> Option<ContactTrack> {
-    contact_core(&resampled(glb, clip, foot)?)
+/// See [`ContactTrack`]. `eps` as on [`contact_core`]: `None` derives the threshold per clip.
+pub fn contact_track(glb: &Glb, clip: usize, foot: usize, eps: Option<f32>) -> Option<ContactTrack> {
+    contact_core(&resampled(glb, clip, foot)?, eps)
 }
 
 /// The planted foot's horizontal speed, in file units per second.
-pub fn stance_speed(glb: &Glb, clip: usize, foot: usize) -> Option<f32> {
-    Some(contact_track(glb, clip, foot)?.stance_speed())
+pub fn stance_speed(glb: &Glb, clip: usize, foot: usize, eps: Option<f32>) -> Option<f32> {
+    Some(contact_track(glb, clip, foot, eps)?.stance_speed())
 }
 
 /// **How far the body travels in one cycle of this clip**, in the file's own units.
 ///
 /// Returns `None` when the foot has no resolvable motion — an answer of "I cannot tell" rather than
 /// a zero that would read as "this clip covers no ground".
-pub fn cycle_distance(glb: &Glb, clip: usize, foot: usize) -> Option<f32> {
-    Some(contact_track(glb, clip, foot)?.cycle_distance())
+pub fn cycle_distance(glb: &Glb, clip: usize, foot: usize, eps: Option<f32>) -> Option<f32> {
+    Some(contact_track(glb, clip, foot, eps)?.cycle_distance())
+}
+
+/// **The phase bins where a stance begins** — the wrap-aware `false → true` transitions of the
+/// contact labels. These are the clip's sync markers in the Unreal sense: two gaits agree in phase
+/// when their footstrikes land together.
+pub fn stance_onsets(track: &ContactTrack) -> Vec<usize> {
+    let n = track.contact.len();
+    (0..n)
+        .filter(|&i| track.contact[i] && !track.contact[(i + n - 1) % n])
+        .collect()
 }
 
 /// A phase alignment between two clips' contact trains.
@@ -600,12 +882,23 @@ pub struct PhaseMatch {
 /// cycle where the height curve reproduces the guide's validated −0.141. A square wave keeps *where*
 /// the stance falls but loses the pose shape that locates the alignment.
 ///
+/// The single-joint form of [`phase_match_joints`] — the same scorer, one path.
+pub fn phase_match(glb: &Glb, a: usize, b: usize, foot: usize) -> Option<PhaseMatch> {
+    phase_match_joints(glb, a, b, &[foot])
+}
+
+/// [`phase_match`] over a SET of contact joints: the score at each lag is the sum of the per-joint
+/// height correlations, joint identity preserved — `a`'s left foot correlates with `b`'s left
+/// foot, never its right. This is the sync-marker intersection posture (Unreal's sync groups align
+/// on the markers common to every clip in the group): a left/right pair breaks the half-cycle
+/// ambiguity a single symmetric gait leaves, because only the true lag lines BOTH feet up at once.
+///
 /// Deterministic tie-break: an exactly tied score resolves to the lag with the smallest signed
 /// offset, then the smaller lag.
-pub fn phase_match(glb: &Glb, a: usize, b: usize, foot: usize) -> Option<PhaseMatch> {
+pub fn phase_match_joints(glb: &Glb, a: usize, b: usize, joints: &[usize]) -> Option<PhaseMatch> {
     let bins = PHASE_BINS;
-    let curve = |clip: usize| -> Option<Vec<f32>> {
-        let r = resampled(glb, clip, foot)?;
+    let curve = |clip: usize, joint: usize| -> Option<Vec<f32>> {
+        let r = resampled(glb, clip, joint)?;
         let mut out: Vec<f32> = r.pos.iter().map(|p| p[1]).collect();
         // Zero-mean, so the correlation compares SHAPE rather than which foot sits higher.
         let mean = out.iter().sum::<f32>() / out.len() as f32;
@@ -614,7 +907,15 @@ pub fn phase_match(glb: &Glb, a: usize, b: usize, foot: usize) -> Option<PhaseMa
         }
         Some(out)
     };
-    let (ca, cb) = (curve(a)?, curve(b)?);
+    // Every joint must resolve in BOTH clips — a pair that half-resolves would silently become a
+    // single-joint answer wearing a multi-joint label.
+    let mut pairs: Vec<(Vec<f32>, Vec<f32>)> = Vec::new();
+    for &j in joints {
+        pairs.push((curve(a, j)?, curve(b, j)?));
+    }
+    if pairs.is_empty() {
+        return None;
+    }
     let offset_of = |lag: usize| -> f32 {
         // Negated: the offset is what `b` must be shifted BY to line up with `a`, which is the
         // sign `anim::Playback::Gait` wants and the sign the artist guide's table is written in.
@@ -622,7 +923,12 @@ pub fn phase_match(glb: &Glb, a: usize, b: usize, foot: usize) -> Option<PhaseMa
         if f == 0.0 { 0.0 } else { 1.0 - f }
     };
     let scores: Vec<f32> = (0..bins)
-        .map(|lag| (0..bins).map(|i| ca[i] * cb[(i + lag) % bins]).sum())
+        .map(|lag| {
+            pairs
+                .iter()
+                .map(|(ca, cb)| (0..bins).map(|i| ca[i] * cb[(i + lag) % bins]).sum::<f32>())
+                .sum()
+        })
         .collect();
     let mut best = 0usize;
     for lag in 1..bins {
@@ -690,7 +996,9 @@ pub fn contact_candidates(glb: &Glb, clip: usize) -> Vec<(String, f32)> {
         let Some(name) = n["name"].as_str() else {
             continue;
         };
-        if let Some(t) = contact_core(&r) {
+        // Candidates always derive their threshold: the suggestion list exists precisely when the
+        // configuration is in doubt, so a declared override has nothing to say here.
+        if let Some(t) = contact_core(&r, None) {
             if t.stance_fraction >= MIN_STANCE_FRACTION {
                 named.push((name.to_owned(), t.stance_fraction, low));
             }
@@ -716,7 +1024,8 @@ pub fn contact_candidates(glb: &Glb, clip: usize) -> Vec<(String, f32)> {
 
 /// **Everything the bench plots for one gait slot**, resampled onto the shared phase grid.
 /// Positions and speeds are in FILE units — the caller applies the rig's scale.
-#[derive(Clone, Debug, PartialEq)]
+/// Serde because the editor's measurement cache persists these between sessions.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GaitCurves {
     /// [`PHASE_BINS`].
     pub bins: usize,
@@ -737,10 +1046,17 @@ pub struct GaitCurves {
     pub body_velocity: [f32; 2],
 }
 
-/// See [`GaitCurves`]. The curves are a by-product of the FK the checks already run.
-pub fn gait_curves(glb: &Glb, clip: usize, foot: usize, root: Option<usize>) -> Option<GaitCurves> {
+/// See [`GaitCurves`]. The curves are a by-product of the FK the checks already run. `eps` as on
+/// [`contact_core`]: `None` derives the contact threshold per clip.
+pub fn gait_curves(
+    glb: &Glb,
+    clip: usize,
+    foot: usize,
+    root: Option<usize>,
+    eps: Option<f32>,
+) -> Option<GaitCurves> {
     let r = resampled(glb, clip, foot)?;
-    let c = contact_core(&r)?;
+    let c = contact_core(&r, eps)?;
     let root_drift = match root.and_then(|n| resampled(glb, clip, n)) {
         Some(rr) => {
             let o = rr.pos[0];
@@ -765,6 +1081,31 @@ pub fn gait_curves(glb: &Glb, clip: usize, foot: usize, root: Option<usize>) -> 
         trace: r.pos.iter().map(|p| [p[0], p[2]]).collect(),
         contact: c.contact.clone(),
         body_velocity: c.body_velocity,
+    })
+}
+
+/// **A joint's curves without a contact claim** — what the bench plots for a rig with no gaits.
+/// The same [`GaitCurves`] shape (one curve type, one raster path), with `contact` all-false and
+/// `root_drift`/`body_velocity` zeroed: no contact was measured, so no travel or stance is
+/// claimed — honest empties, not defaults standing in for measurements.
+pub fn joint_curves(glb: &Glb, clip: usize, node: usize) -> Option<GaitCurves> {
+    let r = resampled(glb, clip, node)?;
+    Some(GaitCurves {
+        bins: PHASE_BINS,
+        duration: r.duration,
+        foot_height: r.pos.iter().map(|p| p[1]).collect(),
+        ground_speed: (0..PHASE_BINS)
+            .map(|i| {
+                let p = r.pos[i];
+                let q = r.pos[(i + 1) % PHASE_BINS];
+                let (dx, dz) = ((q[0] - p[0]) / r.dt, (q[2] - p[2]) / r.dt);
+                (dx * dx + dz * dz).sqrt()
+            })
+            .collect(),
+        root_drift: vec![0.0; PHASE_BINS],
+        trace: r.pos.iter().map(|p| [p[0], p[2]]).collect(),
+        contact: vec![false; PHASE_BINS],
+        body_velocity: [0.0, 0.0],
     })
 }
 
@@ -846,7 +1187,7 @@ mod tests {
         let glb = valkyrie();
         let foot = node_index(&glb, "foot_l").unwrap_or_else(|| panic!("no foot_l node"));
         for (ix, name, _, want) in TABLE.iter().take(2) {
-            let raw = cycle_distance(&glb, *ix, foot)
+            let raw = cycle_distance(&glb, *ix, foot, None)
                 .unwrap_or_else(|| panic!("clip {ix} ({name}): no measurable stance"));
             let got = raw * figurine_scale();
             let err = (got - want).abs() / want;
@@ -884,18 +1225,38 @@ mod tests {
         assert!(glb.is_some(), "an empty buffer is not a GLB");
     }
 
-    /// **The contact labels stay plausible across the whole gait set.**
+    /// **The contact labels stay plausible across the whole gait set**, under both threshold
+    /// paths.
     ///
-    /// Bounds measured at `CONTACT_EPS = 0.35` (see the const's comment for the 0.5/0.7
-    /// sensitivity experiment): the four clean gaits label 0.41–0.45 of the cycle as stance; the
-    /// two roughest clips (`run_back` 0.148, `strafe_r` 0.086) genuinely carry that little clean
-    /// stance, and pinning the truth beats pinning a wish. A re-export that changes these
-    /// materially changed the clips.
+    /// Derived (`None`, log-Otsu — see [`otsu_threshold`]'s table): every gait lands at 0.39–0.49
+    /// stance, the biomechanically plausible band for a single foot. Declared 0.35 (the
+    /// valkyrie's own `contact_eps:`): the four clean gaits label 0.41–0.45, and the two roughest
+    /// clips (`run_back` 0.148, `strafe_r` 0.086) genuinely carry that little clean stance —
+    /// pinning the truth beats pinning a wish. A re-export that changes these materially changed
+    /// the clips.
     #[test]
     fn contact_fractions_stay_plausible() {
         let glb = valkyrie();
         let foot = node_index(&glb, "foot_l").unwrap_or_else(|| panic!("no foot_l node"));
-        let bounds = [
+        let derived = [
+            (5, "walk", 0.30, 0.60),
+            (11, "run", 0.30, 0.60),
+            (8, "walk_back", 0.30, 0.60),
+            (12, "run_back", 0.30, 0.60),
+            (13, "strafe_l", 0.30, 0.60),
+            (14, "strafe_r", 0.30, 0.60),
+        ];
+        for (ix, name, lo, hi) in derived {
+            let t = contact_track(&glb, ix, foot, None)
+                .unwrap_or_else(|| panic!("clip {ix} ({name}): no contact track"));
+            assert!(
+                (lo..=hi).contains(&t.stance_fraction),
+                "clip {ix} ({name}) labels {:.3} of the cycle as stance (derived), expected \
+                 {lo}..{hi}",
+                t.stance_fraction
+            );
+        }
+        let declared = [
             (5, "walk", 0.30, 0.60),
             (11, "run", 0.30, 0.60),
             (8, "walk_back", 0.30, 0.60),
@@ -903,12 +1264,13 @@ mod tests {
             (13, "strafe_l", 0.30, 0.60),
             (14, "strafe_r", 0.05, 0.35),
         ];
-        for (ix, name, lo, hi) in bounds {
-            let t = contact_track(&glb, ix, foot)
+        for (ix, name, lo, hi) in declared {
+            let t = contact_track(&glb, ix, foot, Some(0.35))
                 .unwrap_or_else(|| panic!("clip {ix} ({name}): no contact track"));
             assert!(
                 (lo..=hi).contains(&t.stance_fraction),
-                "clip {ix} ({name}) labels {:.3} of the cycle as stance, expected {lo}..{hi}",
+                "clip {ix} ({name}) labels {:.3} of the cycle as stance (at 0.35), expected \
+                 {lo}..{hi}",
                 t.stance_fraction
             );
         }
@@ -922,7 +1284,7 @@ mod tests {
         let glb = valkyrie();
         let foot = node_index(&glb, "foot_l").unwrap_or_else(|| panic!("no foot_l node"));
         let vx = |clip: usize| {
-            contact_track(&glb, clip, foot)
+            contact_track(&glb, clip, foot, None)
                 .unwrap_or_else(|| panic!("clip {clip}: no contact track"))
                 .body_velocity[0]
         };
@@ -937,5 +1299,143 @@ mod tests {
         assert_eq!(signed_offset(0.5), 0.5);
         assert!((signed_offset(0.859) - -0.141).abs() < 1.0e-6);
         assert!((signed_offset(0.25) - 0.25).abs() < 1.0e-6);
+    }
+
+    // ── the all-rig measurements, on a synthetic fixture with real accessor bytes ────────────────
+
+    /// Append `rows` as a FLOAT accessor backed by `bin`; returns the accessor index.
+    fn push_accessor(
+        accessors: &mut Vec<serde_json::Value>,
+        views: &mut Vec<serde_json::Value>,
+        bin: &mut Vec<u8>,
+        rows: &[Vec<f32>],
+    ) -> usize {
+        use serde_json::json;
+        let offset = bin.len();
+        for row in rows {
+            for v in row {
+                bin.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let width = rows.first().map_or(1, Vec::len);
+        views.push(json!({ "byteOffset": offset, "byteLength": rows.len() * width * 4 }));
+        let max: Vec<f32> = (0..width)
+            .map(|c| rows.iter().map(|r| r[c]).fold(f32::MIN, f32::max))
+            .collect();
+        accessors.push(json!({
+            "bufferView": views.len() - 1,
+            "componentType": 5126,
+            "count": rows.len(),
+            "max": max,
+        }));
+        accessors.len() - 1
+    }
+
+    /// A quaternion `deg` about +Y.
+    fn qy(deg: f32) -> Vec<f32> {
+        let h = deg.to_radians() / 2.0;
+        vec![0.0, h.sin(), 0.0, h.cos()]
+    }
+
+    /// Two clips over one joint (`hips`), keyed with real bytes: `loopy` (clip 0) closes its
+    /// rotation loop on irregular key times; `open` (clip 1) ends 40 deg away from both its own
+    /// start and `loopy`'s first frame.
+    fn pose_fixture() -> Glb {
+        use serde_json::json;
+        let mut bin = Vec::new();
+        let mut accessors = Vec::new();
+        let mut views = Vec::new();
+        // Irregular keys: median gap is 1/24 s despite the long final hold.
+        let times = vec![
+            vec![0.0f32],
+            vec![1.0 / 24.0],
+            vec![2.0 / 24.0],
+            vec![3.0 / 24.0],
+            vec![1.0],
+        ];
+        let t = push_accessor(&mut accessors, &mut views, &mut bin, &times);
+        let closed = vec![qy(0.0), qy(20.0), qy(-15.0), qy(10.0), qy(0.0)];
+        let closed_out = push_accessor(&mut accessors, &mut views, &mut bin, &closed);
+        let open = vec![qy(0.0), qy(15.0), qy(30.0), qy(35.0), qy(40.0)];
+        let open_out = push_accessor(&mut accessors, &mut views, &mut bin, &open);
+        Glb {
+            json: json!({
+                "nodes": [{ "name": "hips" }],
+                "animations": [
+                    {
+                        "name": "loopy",
+                        "channels": [{ "sampler": 0, "target": { "node": 0, "path": "rotation" } }],
+                        "samplers": [{ "input": t, "output": closed_out }],
+                    },
+                    {
+                        "name": "open",
+                        "channels": [{ "sampler": 0, "target": { "node": 0, "path": "rotation" } }],
+                        "samplers": [{ "input": t, "output": open_out }],
+                    },
+                ],
+                "accessors": accessors,
+                "bufferViews": views,
+            }),
+            bin,
+        }
+    }
+
+    #[test]
+    fn a_closed_loop_passes_and_an_open_one_names_the_worst_joint() {
+        let glb = pose_fixture();
+        let closed = loop_closure(&glb, 0).unwrap_or_else(|| panic!("no closure for loopy"));
+        assert_eq!(closed.joints, 1);
+        assert!(closed.max_angle_deg < 0.01, "{}", closed.max_angle_deg);
+        let open = loop_closure(&glb, 1).unwrap_or_else(|| panic!("no closure for open"));
+        assert_eq!(open.worst_joint, "hips");
+        assert!(
+            (open.max_angle_deg - 40.0).abs() < 0.1,
+            "{}",
+            open.max_angle_deg
+        );
+        // A clip index past the asset is a refusal, not a guess.
+        assert!(loop_closure(&glb, 9).is_none());
+    }
+
+    #[test]
+    fn a_one_shot_ending_off_the_reference_idle_is_measured() {
+        let glb = pose_fixture();
+        // `open` ends 40 deg from `loopy`'s first frame.
+        let pd = end_pose_delta(&glb, 1, 0).unwrap_or_else(|| panic!("no delta"));
+        assert_eq!(pd.joints, 1);
+        assert_eq!(pd.worst_joint, "hips");
+        assert!((pd.max_angle_deg - 40.0).abs() < 0.1, "{}", pd.max_angle_deg);
+        // `loopy` ends exactly on it.
+        let pd = end_pose_delta(&glb, 0, 0).unwrap_or_else(|| panic!("no delta"));
+        assert!(pd.max_angle_deg < 0.01, "{}", pd.max_angle_deg);
+    }
+
+    #[test]
+    fn source_rate_uses_the_median_of_irregular_keys() {
+        let glb = pose_fixture();
+        let sr = source_rate(&glb, 0).unwrap_or_else(|| panic!("no rate"));
+        assert_eq!(sr.keys, 5);
+        // The long final hold must not drag the rate down — median, not mean.
+        assert!((sr.fps - 24.0).abs() < 0.01, "{}", sr.fps);
+    }
+
+    /// The gait-less plotting path: real bins, real heights, and NO claims — contact all-false,
+    /// zero drift, zero travel.
+    #[test]
+    fn joint_curves_carry_shape_without_contact_claims() {
+        let glb = valkyrie();
+        let foot = node_index(&glb, "foot_l").unwrap_or_else(|| panic!("no foot_l"));
+        // Clip 0 is the idle — exactly the free-slot case this exists for.
+        let c = joint_curves(&glb, 0, foot).unwrap_or_else(|| panic!("no curves"));
+        assert_eq!(c.bins, PHASE_BINS);
+        assert_eq!(c.foot_height.len(), PHASE_BINS);
+        assert!(c.duration > 0.0);
+        assert!(c.contact.iter().all(|planted| !planted), "no contact was measured");
+        assert!(c.root_drift.iter().all(|d| *d == 0.0));
+        assert_eq!(c.body_velocity, [0.0, 0.0]);
+        // The heights are a real curve, not a constant — the idle breathes.
+        let lo = c.foot_height.iter().fold(f32::MAX, |a, &b| a.min(b));
+        let hi = c.foot_height.iter().fold(f32::MIN, |a, &b| a.max(b));
+        assert!(hi > lo, "a flat line would mean the resample read nothing");
     }
 }
