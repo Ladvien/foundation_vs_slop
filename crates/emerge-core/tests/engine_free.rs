@@ -159,7 +159,11 @@ fn the_dependency_list_stays_closed() {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let Some(name) = line.split(['=', ' ']).next() else {
+        // `.` is a separator too, so an inherited dependency written as the dotted key
+        // `serde.workspace = true` reads as `serde` rather than as a crate called
+        // `serde.workspace`. A crate name cannot contain a dot, so nothing real is truncated —
+        // and the check keeps biting on the part that matters, the name before it.
+        let Some(name) = line.split(['=', ' ', '.']).next() else {
             continue;
         };
         assert!(
