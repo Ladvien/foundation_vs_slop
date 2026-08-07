@@ -220,6 +220,22 @@ pub fn placed_height(d: &Descriptor) -> Option<f32> {
     Some(h * d.align.stretch_y.unwrap_or(1.0))
 }
 
+/// The placed **(width, height, depth)** after a placement's tip — a pure axis permutation, which is
+/// the whole reason [`crate::map::Placed::tip`] is quarter turns: any other angle has no
+/// axis-aligned box to answer with.
+///
+/// Order matches the drawn rotation (about X first, then Z): an odd X tip lays height along depth,
+/// an odd Z tip then lays what is upright along width. Even turns (180°) change which face is down
+/// but not the box. `None` when the piece is unmeasured — same rule as [`placed_footprint`]:
+/// unknown is not flat.
+pub fn tipped_extents(d: &Descriptor, tip: (u8, u8)) -> Option<(f32, f32, f32)> {
+    let (w, depth) = placed_footprint(d)?;
+    let h = placed_height(d)?;
+    let (w, h, depth) = if tip.0 % 2 == 1 { (w, depth, h) } else { (w, h, depth) };
+    let (w, h, depth) = if tip.1 % 2 == 1 { (h, w, depth) } else { (w, h, depth) };
+    Some((w, h, depth))
+}
+
 /// The divisions after `quarter` 90° turns about +Y — x and z swap on every odd turn.
 ///
 /// Separate from [`Subgrid::rotated`] because the lattice no longer carries its own divisions: a

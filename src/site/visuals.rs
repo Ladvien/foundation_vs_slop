@@ -35,7 +35,9 @@ use crate::ui::state::AppState;
 /// the same width as the dungeon's.
 const AVATAR_HALF: f32 = 0.25;
 /// Metres per second. A shade brisker than the expedition walk — nobody wants to trudge a hub.
-const AVATAR_SPEED: f32 = 3.2;
+/// `pub(crate)` because the rigs.ron agreement test (`src/rigs.rs`) asserts the valkyrie's declared
+/// `drive_speed` range covers it — the avatar drives the same rig as the squad.
+pub(crate) const AVATAR_SPEED: f32 = 3.2;
 /// How close counts as arrived, so an avatar does not jitter on its target.
 const ARRIVE_EPS: f32 = 0.15;
 /// Time constant for smoothing an operative's measured speed before it drives the blend. Matches the

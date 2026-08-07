@@ -120,6 +120,16 @@ impl Default for Map {
     }
 }
 
+/// serde's `skip_serializing_if` needs a function, and these two say the only thing they exist to
+/// say: an absent field and its default are the same fact, so a default is not written.
+fn lift_is_zero(v: &f32) -> bool {
+    *v == 0.0
+}
+
+fn tip_is_zero(v: &(u8, u8)) -> bool {
+    *v == (0, 0)
+}
+
 /// A new map's size before anyone has said otherwise: 32 m square and one storey, so an author opens
 /// on 16 m of workable ground in every direction.
 ///
@@ -141,9 +151,36 @@ pub struct Placed {
     pub descriptor: String,
     /// Position in map space, metres. **The floor plan only** — the height comes from the
     /// descriptor's [`crate::descriptor::Mount`], never from the author, so a lamp cannot be authored
-    /// hovering 3 cm above the table it is meant to be standing on.
+    /// hovering 3 cm above the table it is meant to be standing on. ([`Self::lift`] is the one
+    /// deliberate amendment.)
     pub at: (f32, f32),
     pub yaw: f32,
+    /// **Authored vertical offset, metres, layered on top of the resolved height.**
+    ///
+    /// The deliberate amendment to the rule on [`Self::at`]: `stack::resolve_y` still decides the
+    /// datum — floor, wall height, the host's surface, so a lamp still follows its table — and this
+    /// nudges the result afterwards. The editor's lift keys step it by one subgrid unit
+    /// (`grid::SNAP / divisions`); it is stored in metres so the file keeps meaning if the project
+    /// ever re-divides.
+    ///
+    /// Zero in every file written before the field existed, and skipped when zero so those files
+    /// stay byte-identical. A build from before the field refuses a map that carries it
+    /// (`deny_unknown_fields`) — loud, which is [`MAP_VERSION`]'s own rule.
+    #[serde(default, skip_serializing_if = "lift_is_zero")]
+    pub lift: f32,
+    /// **Quarter turns tipping the piece over: (about X, about Z), each `0..=3`.**
+    ///
+    /// Set dressing — a tipped crate, a fallen chair. Quarter turns rather than free angles because
+    /// a footprint stays answerable under axis swaps and under nothing else (`fill::cell_extents`
+    /// records the lesson: a 30°-tipped rectangle has no honest cell). Applied in the piece's own
+    /// frame *before* [`Self::yaw`] turns it, and the spawner re-seats the tipped bounds on the
+    /// resolved height so tipping never buries a mesh.
+    ///
+    /// A tipped piece offers no surface — `stack::host_under` skips it, and the editor refuses to
+    /// tip a piece while something rests on it — because "where is the tabletop of a table lying on
+    /// its side" has no answer worth inventing.
+    #[serde(default, skip_serializing_if = "tip_is_zero")]
+    pub tip: (u8, u8),
     /// The [`Self::id`] of the placement this one **rests on**, for a descriptor that mounts
     /// `OnSurface`.
     ///
@@ -368,6 +405,18 @@ impl Map {
                 ));
             }
             seen.push(&p.id);
+            if !p.lift.is_finite() {
+                return Err(format!(
+                    "map: placement `{}` has lift {} — a non-finite offset places it nowhere",
+                    p.id, p.lift
+                ));
+            }
+            if p.tip.0 > 3 || p.tip.1 > 3 {
+                return Err(format!(
+                    "map: placement `{}` has tip {:?} — quarter turns are 0..=3 per axis",
+                    p.id, p.tip
+                ));
+            }
             // An owned placement without a reason is the bool-instead-of-reason shape this schema
             // refuses on purpose.
             if p.owned && p.owned_because.as_ref().is_none_or(|r| r.trim().is_empty()) {
@@ -497,22 +546,14 @@ mod tests {
                     descriptor: "mess_table".into(),
                     at: (4.0, 4.0),
                     yaw: 0.0,
-                    on: None,
-                    owned: false,
-                    owned_because: None,
-                    patch: None,
-                    note: None,
+                    ..Placed::default()
                 },
                 Placed {
                     id: "stool_1".into(),
                     descriptor: "stool".into(),
                     at: (4.0, 3.0),
                     yaw: 180.0,
-                    on: None,
-                    owned: false,
-                    owned_because: None,
-                    patch: None,
-                    note: None,
+                    ..Placed::default()
                 },
             ],
             locations: vec![Location {

@@ -46,6 +46,11 @@ pub const KEY: Color = Color::srgb(0.74, 0.71, 0.66);
 pub const LABEL: Color = Color::srgb(0.46, 0.44, 0.42);
 /// A refusal, a blocking finding, an expensive number.
 pub const DANGER: Color = Color::srgb(0.86, 0.36, 0.30);
+
+/// **Machine-proposed, human-unconfirmed** — the VLM labeler's third state. A cool slate,
+/// deliberately neither [`ACCENT`] (amber = a live edit, yours) nor [`DANGER`] (red = wrong):
+/// a proposal is a question, and it must not read as either an answer or an alarm.
+pub const SUGGEST: Color = Color::srgb(0.42, 0.58, 0.66);
 /// Empty preview tile, so an un-baked row reads as "not yet" rather than as a hole in the panel.
 /// `thumbs.rs` carries a third copy of this value as `BACKDROP`, for the booth's own background.
 pub const SLOT_BG: Color = Color::srgb(0.14, 0.135, 0.125);

@@ -35,6 +35,15 @@ pub struct MainCamera;
 /// Where the camera sits relative to what it is looking at, before yaw. The game's own iso offset.
 const ISO_OFFSET: Vec3 = Vec3::new(12.0, 12.0, 12.0);
 
+/// [`ISO_OFFSET`]'s elevation above the ground plane: `atan(12 / hypot(12, 12)) = atan(1/sqrt 2)`.
+/// The default for [`Rig::elevation`], so the map view is bit-close to what it always was.
+pub const ISO_ELEVATION: f32 = 0.615_479_7;
+
+/// [`ISO_OFFSET`]'s length — the camera's distance from its focus. Constant across elevation:
+/// an orthographic camera's image does not depend on distance, only on direction and the
+/// viewport height, so one length serves every preset.
+const ISO_DISTANCE: f32 = 20.784_609; // |(12, 12, 12)| = 12 * sqrt 3
+
 /// Quarter turns, so the grid stays square to the screen at every detent.
 const ROTATION_STEPS: u32 = 4;
 
@@ -53,6 +62,10 @@ pub struct Rig {
     /// Current eased yaw, and the detent it is heading for.
     pub yaw: f32,
     pub goal_yaw: f32,
+    /// Radians above the ground plane. [`ISO_ELEVATION`] everywhere but the anim bench's camera
+    /// presets — judging foot contact needs a near-ground line of sight, and yaw alone cannot
+    /// lower the eye.
+    pub elevation: f32,
 }
 
 impl Default for Rig {
@@ -62,7 +75,19 @@ impl Default for Rig {
             height: 18.0,
             yaw: 0.0,
             goal_yaw: 0.0,
+            elevation: ISO_ELEVATION,
         }
+    }
+}
+
+impl Rig {
+    /// Where the camera sits relative to its focus: [`ISO_DISTANCE`] out along the rig's yaw and
+    /// elevation. At the default elevation this is exactly `RotY(yaw) * ISO_OFFSET`, which is
+    /// what `offset_matches_the_iso_constant_at_default_elevation` pins.
+    pub fn offset(&self) -> Vec3 {
+        let horizontal = self.elevation.cos() * std::f32::consts::FRAC_1_SQRT_2;
+        let before_yaw = Vec3::new(horizontal, self.elevation.sin(), horizontal) * ISO_DISTANCE;
+        Quat::from_rotation_y(self.yaw) * before_yaw
     }
 }
 
@@ -177,7 +202,7 @@ fn drive(
     }
     // Where the camera sits this frame. Needed by the pan basis below as well as by the transform at
     // the end, so it is computed once here rather than derived twice from the same two values.
-    let iso = Quat::from_rotation_y(rig.yaw) * ISO_OFFSET;
+    let iso = rig.offset();
     if wish != Vec2::ZERO {
         let screen = pan_direction(wish, rig.yaw);
         // **Constant speed, like the game.** This used to scale by `rig.height / 18.0`, on the
@@ -304,6 +329,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The elevation extension changes nothing at the default: `offset()` reproduces the shipped
+    /// `RotY(yaw) * ISO_OFFSET` bit-close at every detent, and elevation 0 lies in the ground
+    /// plane at the same yaw — the anim presets' ground-level view is a pure rotation of the eye,
+    /// never a different distance or focus.
+    #[test]
+    fn the_default_elevation_reproduces_the_iso_offset_exactly() {
+        for step in 0..4 {
+            let yaw = step as f32 * std::f32::consts::FRAC_PI_2;
+            let rig = Rig { yaw, ..Rig::default() };
+            let old = Quat::from_rotation_y(yaw) * ISO_OFFSET;
+            assert!(
+                rig.offset().distance(old) < 1.0e-3,
+                "yaw {yaw}: {:?} vs {:?}",
+                rig.offset(),
+                old
+            );
+        }
+        let grounded = Rig { elevation: 0.0, ..Rig::default() };
+        assert!(grounded.offset().y.abs() < 1.0e-4, "elevation 0 must lie in the ground plane");
+        assert!(
+            (grounded.offset().length() - ISO_DISTANCE).abs() < 1.0e-3,
+            "the distance is constant across elevation"
+        );
     }
 
     /// **The regression, named.** The old basis was the world axes turned by yaw; at the shipped

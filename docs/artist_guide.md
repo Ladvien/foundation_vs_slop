@@ -156,7 +156,21 @@ anyone re-authoring these clips:
 > slot's own drift margin, and `note:` remains free prose. `provenance:` is tool-owned — never
 > hand-edit it. The per-rig `scale:` is also authored in `rigs.ron` now (the game reads it at spawn;
 > the old per-module constants are deleted), as are the measurement anchors `root_node:` /
-> `contact_joints:` for rigs whose exporters do not use the conventional `Root`/`foot_l` names.
+> `contact_joints:` for rigs whose exporters do not use the conventional `Root`/`foot_l` names,
+> a `contact_eps:` override for a clip whose stance the derived threshold mislabels, and — round
+> two — `drive_speed: (min, max)`: the world-speed range the game drives the rig at, so the bench
+> can say where the feet start to slide. Press **G** in the bench to stage a translucent ghost
+> playing the measured numbers over the declared ones before adopting; **V** cycles the camera
+> down to a ground-level, feet-first framing.
+>
+> **Authoring rules the bench now checks on every rig** (not just gaited ones): a looping clip's
+> last pose must meet its first (an open loop pops once per cycle — worst joint is named in the
+> finding); a one-shot should end on the idle pose it will fade back into, unless the state is
+> deliberately terminal (sit_down, death — those carry a standing note and that is fine); and
+> **a gait's authored speed (`cycle_distance / duration`) is a design constraint** — author the
+> gait for the speed the game will drive, or the cadence clamp (×0.5–×2.0) runs out and the feet
+> skate. The valkyrie's own numbers: walk 0.98 u/s, run 2.85 u/s, against a drive range of
+> 0.9–6.0 u/s — everything above ~5.7 u/s skates today, which the bench reports as a Note.
 
 | glTF index | Name | Slot | Authored speed |
 |---|---|---|---|

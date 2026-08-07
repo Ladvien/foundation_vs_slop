@@ -99,7 +99,9 @@ pub fn host_under<'a>(
         let (Some(d), Some(&py)) = (library.get(&p.descriptor), y.get(i)) else {
             continue;
         };
-        if !offers_for(d, guest) || !covers(d, p.at, p.yaw, probe) {
+        // A tipped piece offers no surface: "where is the tabletop of a table on its side" has no
+        // answer worth inventing, and its recorded footprint no longer describes what it covers.
+        if p.tip != (0, 0) || !offers_for(d, guest) || !covers(d, p.at, p.yaw, probe) {
             continue;
         }
         let Some(top) = placed_height(d).map(|h| py + h) else {
@@ -197,7 +199,10 @@ fn resolve_one(
         _ => None,
     };
 
-    out[i] = datum(map, d, host_top, &p.id)?;
+    // The authored lift rides on top of whatever the layer decided — and because it lands in
+    // `out`, a guest resolving through its host inherits the host's lift for free: raise the
+    // table and the lamp comes with it.
+    out[i] = datum(map, d, host_top, &p.id)? + p.lift;
     done[i] = true;
     Ok(out[i])
 }
@@ -289,6 +294,104 @@ pub fn placement_at<'a>(
     }
     let at = datum(map, d, host.map(|(_, top)| top), &d.id)?;
     Ok((at, host.map(|(p, _)| p)))
+}
+
+/// **How deep two footprints must interpenetrate before they are "overlapping"**, metres.
+///
+/// Not zero, and the size is the point: kitbashing wants pieces laid *flush* — wall segment against
+/// wall segment, exactly end to end — and flush pieces touch. An exact test would refuse the very
+/// gesture the overlap rule exists to protect, and float noise would refuse it intermittently,
+/// which is worse. A centimetre of tolerated lap is invisible at authoring scale and makes
+/// touching unambiguous.
+pub const OVERLAP_EPS: f32 = 0.01;
+
+/// A placed piece's plan rectangle: centre, its two axis directions at this yaw, and half-extents —
+/// tips folded in via [`crate::descriptor::tipped_extents`], so a wall lying on its side reserves
+/// the long low box it actually fills. `None` when unmeasured, on [`covers`]' own rule: unknown is
+/// not flat, and unknown is not everywhere either.
+fn plan_box(d: &Descriptor, at: (f32, f32), yaw: f32, tip: (u8, u8)) -> Option<((f32, f32), [(f32, f32); 2], (f32, f32))> {
+    let (w, _h, depth) = crate::descriptor::tipped_extents(d, tip)?;
+    let (s, c) = yaw.to_radians().sin_cos();
+    Some((at, [(c, -s), (s, c)], (w * 0.5, depth * 0.5)))
+}
+
+/// Do two plan rectangles interpenetrate by more than [`OVERLAP_EPS`]?
+///
+/// Separating-axis test over the four face normals — exact for any yaw, which matters because yaw
+/// is free degrees here, not the quarter turns a fill rounds to.
+fn plans_overlap(
+    a: ((f32, f32), [(f32, f32); 2], (f32, f32)),
+    b: ((f32, f32), [(f32, f32); 2], (f32, f32)),
+) -> bool {
+    let (ac, aa, ah) = a;
+    let (bc, ba, bh) = b;
+    let d = (bc.0 - ac.0, bc.1 - ac.1);
+    let dot = |u: (f32, f32), v: (f32, f32)| u.0 * v.0 + u.1 * v.1;
+    for n in [aa[0], aa[1], ba[0], ba[1]] {
+        let dist = dot(d, n).abs();
+        let ra = ah.0 * dot(aa[0], n).abs() + ah.1 * dot(aa[1], n).abs();
+        let rb = bh.0 * dot(ba[0], n).abs() + bh.1 * dot(ba[1], n).abs();
+        if dist >= ra + rb - OVERLAP_EPS {
+            return false;
+        }
+    }
+    true
+}
+
+/// Do two pieces contest the same space at all?
+///
+/// The layers are the schema's own, not judgement: two floor-standing pieces share the floor; two
+/// wall pieces share a wall only at the same height; two surface pieces contest only the same host
+/// (`on`); [`Mount::Tiled`] is its own stratum, which is what keeps a floor tile from "blocking"
+/// the crate standing on it — laying floor under a dressed room is `box_fill`'s documented
+/// ordinary case. `Overlay` never participates: *"claims no volume"* is its own doc's promise.
+fn same_layer(a: &Descriptor, a_on: Option<&str>, b: &Descriptor, b_on: Option<&str>) -> bool {
+    use Mount::*;
+    match (a.mount.as_ref(), b.mount.as_ref()) {
+        (None | Some(OnFloor), None | Some(OnFloor)) => true,
+        (Some(Tiled), Some(Tiled)) => true,
+        (Some(OnCeiling), Some(OnCeiling)) => true,
+        (Some(InOpening { .. }), Some(InOpening { .. })) => true,
+        (Some(OnWall { height: h1 }), Some(OnWall { height: h2 })) => (h1 - h2).abs() < 1e-3,
+        (Some(OnSurface { .. }), Some(OnSurface { .. })) => match (a_on, b_on) {
+            (Some(x), Some(y)) => x == y,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// **The placement already occupying the space `d` would take at `at`** — the overlap rule.
+///
+/// A placement is refused, not layered, when its plan rectangle interpenetrates an existing
+/// placement's on the same layer: kitbashing wants pieces flush, and a mesh hidden inside another
+/// is the kind of authoring accident that is only found by counting draw calls. Flush is legal by
+/// [`OVERLAP_EPS`]; different layers pass each other by [`same_layer`]'s table.
+///
+/// The first blocker **in map order** is returned — file order, stable for a status line. `on` is
+/// the host the new piece would rest on, so two lamps contest one table but not two tables.
+pub fn blocking<'a>(
+    map: &'a Map,
+    library: &Library,
+    d: &Descriptor,
+    at: (f32, f32),
+    yaw: f32,
+    tip: (u8, u8),
+    on: Option<&str>,
+) -> Option<&'a Placed> {
+    let guest = plan_box(d, at, yaw, tip)?;
+    map.placements.iter().find(|p| {
+        let Some(pd) = library.get(&p.descriptor) else {
+            return false;
+        };
+        if !same_layer(d, on, pd, p.on.as_deref()) {
+            return false;
+        }
+        match plan_box(pd, p.at, p.yaw, p.tip) {
+            Some(b) => plans_overlap(guest, b),
+            None => false,
+        }
+    })
 }
 
 /// What a move changed, so the caller can respawn exactly those entities and undo exactly that edit.
@@ -916,5 +1019,81 @@ mod tests {
         let itself = map(vec![at("a", "lamp", Some("a"))]);
         let err = itself.validate().err().unwrap_or_default();
         assert!(err.contains("rests on itself"), "{err}");
+    }
+
+    /// **Flush is legal; inside is not.** The overlap rule's whole bargain: kitbashing lays wall
+    /// segments exactly end to end, so touching must pass while interpenetration refuses.
+    #[test]
+    fn flush_passes_and_overlap_blocks() {
+        let (m, l) = (map(vec![at("t1", "table", None)]), lib(vec![table(), lamp()]));
+        // The table is 1.6 wide at (0,0): a second table exactly flush starts at x = 1.6.
+        assert!(
+            blocking(&m, &l, &table(), (1.6, 0.0), 0.0, (0, 0), None).is_none(),
+            "flush end-to-end must not read as overlap"
+        );
+        let hit = blocking(&m, &l, &table(), (1.0, 0.0), 0.0, (0, 0), None);
+        assert_eq!(hit.map(|p| p.id.as_str()), Some("t1"), "a lapped table is blocked");
+        // And the test is yaw-honest: turned 90 the second table presents 0.8 along X, so at
+        // x = 1.3 its near edge (0.9) clears the first's far edge (0.8).
+        assert!(
+            blocking(&m, &l, &table(), (1.3, 0.0), 90.0, (0, 0), None).is_none(),
+            "the turned footprint is the one that counts"
+        );
+    }
+
+    /// Layers pass each other: the floor tile a crate stands on is not in its way, two lamps
+    /// contest one table but not two tables, and a decal claims no volume at all.
+    #[test]
+    fn other_layers_do_not_block() {
+        let tiled = Descriptor {
+            id: "floor_tile".into(),
+            extent: Extent {
+                footprint: Some((0.5, 0.5)),
+                height: Some(0.05),
+            },
+            mount: Some(Mount::Tiled),
+            ..Descriptor::default()
+        };
+        let l = lib(vec![table(), lamp(), tiled.clone()]);
+        let m = map(vec![at("f1", "floor_tile", None), at("t1", "table", None)]);
+        // A floor-standing table over a Tiled tile: different strata.
+        assert!(blocking(&m, &l, &table(), (0.0, 0.0), 0.0, (0, 0), None).is_some());
+        assert!(blocking(&m, &l, &tiled, (1.6, 0.0), 0.0, (0, 0), None).is_none());
+
+        // Two lamps on the same host contest it; on different hosts they never meet.
+        let stacked = map(vec![
+            at("t1", "table", None),
+            at("l1", "lamp", Some("t1")),
+        ]);
+        assert!(
+            blocking(&stacked, &l, &lamp(), (0.0, 0.0), 0.0, (0, 0), Some("t1")).is_some(),
+            "two lamps on one table at one spot is an overlap"
+        );
+        assert!(
+            blocking(&stacked, &l, &lamp(), (0.0, 0.0), 0.0, (0, 0), Some("t2")).is_none(),
+            "a different host is a different layer"
+        );
+    }
+
+    /// A tipped piece reserves the box it actually fills: a 0.8 m-tall table tipped about X lies
+    /// 0.8 m deep in plan, so a probe its upright depth would have cleared now collides.
+    #[test]
+    fn a_tip_swaps_the_reserved_footprint() {
+        let l = lib(vec![table(), lamp()]);
+        let mut m = map(vec![at("t1", "table", None)]);
+        m.placements[0].tip = (1, 0); // height (0.8) now lies along depth
+        // Upright depth is 0.8 (half 0.4); at z = 0.7 a 0.8-deep guest (near edge 0.3) clears an
+        // upright table but laps a tipped one only if the tip really swapped nothing... it does
+        // not change depth here (0.8 == 0.8), so test the OTHER tip: about Z, width becomes 0.8.
+        m.placements[0].tip = (0, 1); // width (1.6) -> height; height (0.8) -> width
+        assert!(
+            blocking(&m, &l, &table(), (1.2, 0.0), 0.0, (0, 0), None).is_none(),
+            "tipped about Z the table is only 0.8 wide, so x = 1.2 clears it"
+        );
+        m.placements[0].tip = (0, 0);
+        assert!(
+            blocking(&m, &l, &table(), (1.2, 0.0), 0.0, (0, 0), None).is_some(),
+            "upright it is 1.6 wide again and x = 1.2 laps it"
+        );
     }
 }

@@ -168,16 +168,42 @@ fn collect_glb(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
+/// The id a fresh candidate proposes: the file's stem in the project's one spelling, **qualified
+/// by its set** — the first segment of the mesh's relative path, `site/wall`'s shape.
+///
+/// Two sets may both ship a `chair.glb`, and a bare `chair` makes the second import a collision
+/// the author has to hand-fix. The FIRST segment rather than the immediate parent, because the
+/// parent is usually a format folder (`glb/`, `GLB format/`) that is the same in every set and so
+/// qualifies nothing. A mesh at the asset root has no set and proposes its stem alone.
+pub fn proposed_id(rel: &str, stem: &str) -> String {
+    let file = naming::to_snake_case(stem);
+    let set = rel
+        .rsplit_once('/')
+        .map(|(dir, _)| dir)
+        .and_then(|dir| dir.split('/').next())
+        .map(naming::to_snake_case)
+        .filter(|s| !s.is_empty());
+    match set {
+        Some(set) => format!("{set}/{file}"),
+        None => file,
+    }
+}
+
 /// Measure one mesh and propose a descriptor for it.
 pub fn measure(path: &Path, rel: &str, library: &Library) -> Candidate {
     let mut findings = Vec::new();
-    // An id is a starting point, not a decision: the file name in the project's one spelling.
+    // An id is a starting point, not a decision: the file name in the project's one spelling —
+    // **qualified by its set**. Two sets may both ship a `chair.glb`, and a bare `chair` makes the
+    // second import a collision the author has to hand-fix; the FIRST path segment is the set, the
+    // same shape the site kit already uses (`site/wall`). The first segment rather than the
+    // immediate parent, because the parent is usually a format folder (`glb/`, `GLB format/`) that
+    // is the same in every set and so qualifies nothing.
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let id = naming::to_snake_case(&stem);
-    if id.is_empty() {
+    let id = proposed_id(rel, &stem);
+    if naming::to_snake_case(&stem).is_empty() {
         findings.push(Finding::warn(
             format!("`{stem}` leaves nothing usable as an id"),
             "type one before committing",
@@ -728,6 +754,28 @@ mod tests {
 
     fn messages(f: &[Finding]) -> String {
         f.iter().map(|f| f.message.clone()).collect::<Vec<_>>().join(" | ")
+    }
+
+    /// **The set qualifies the name.** Two sets may both ship `chair.glb`; the proposed ids must
+    /// not collide, and the qualifier is the SET (first path segment), never the format folder
+    /// beside the file.
+    #[test]
+    fn a_proposed_id_carries_its_set() {
+        assert_eq!(
+            proposed_id("low_poly_furniture/glb/Chair.glb", "Chair"),
+            "low_poly_furniture/chair"
+        );
+        assert_eq!(
+            proposed_id("ozea/glb/Chair.glb", "Chair"),
+            "ozea/chair",
+            "same file name, different set, different id"
+        );
+        assert_eq!(
+            proposed_id("kenney_prototype-kit/Models/GLB format/Wall Corner.glb", "Wall Corner"),
+            "kenney_prototype_kit/wall_corner",
+            "the set is the FIRST segment, not the `GLB format` folder beside the file"
+        );
+        assert_eq!(proposed_id("chair.glb", "chair"), "chair", "no set at the asset root");
     }
 
     #[test]

@@ -504,6 +504,268 @@ mod stepped {
         assert_eq!(measured.align.stretch_y, None, "the policy layer must not be in the file");
     }
 
+    /// **The id counter starts past everything the file already names.** It used to start at zero
+    /// every session, so reopening a saved map re-minted its own `wall@1`, `wall@2`, … — and undo,
+    /// which despawns by id match, then swept the originals off the screen along with the fill it
+    /// was taking back. The counter must clear the largest `@n` in the file, whatever shape the
+    /// other ids take.
+    #[test]
+    fn minted_ids_start_past_what_the_map_already_names() {
+        let mut map = emerge_core::map::Map::default();
+        for id in ["wall@7", "crate@12", "records_desk", "oddly@named@3", "x@notanumber"] {
+            map.placements.push(emerge_core::map::Placed {
+                id: id.into(),
+                descriptor: "wall".into(),
+                ..emerge_core::map::Placed::default()
+            });
+        }
+        assert_eq!(emerge_mapper::editor::next_id_after(&map), 12);
+        assert_eq!(
+            emerge_mapper::editor::next_id_after(&emerge_core::map::Map::default()),
+            0,
+            "an empty map seeds nothing"
+        );
+    }
+
+    /// And the seed really lands in the booted editor: the site map's placements are on file, so
+    /// the state's next mint must clear every `@n` among them.
+    #[test]
+    fn the_booted_editor_seeds_its_id_counter_from_the_file() {
+        let mut app = harness::build_headless(&root(), "untitled_map", Some("site"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        app.update();
+        let project = app
+            .world()
+            .get_resource::<emerge_mapper::project::Project>()
+            .unwrap_or_else(|| panic!("no project"));
+        let want = emerge_mapper::editor::next_id_after(&project.map);
+        let state = app
+            .world()
+            .get_resource::<emerge_mapper::editor::EditorState>()
+            .unwrap_or_else(|| panic!("no editor state"));
+        assert_eq!(state.minted(), want, "the counter must start where the file stops");
+    }
+
+    /// **Folding a pack must not lose it.** The first scan folds packs the library holds nothing
+    /// from — but a folded pack is a HEADER with a `>`, never an absence. Every pack directory the
+    /// scan found must appear as a text node in the candidate list, folded or not.
+    #[test]
+    fn untouched_packs_start_folded_and_keep_their_headers() {
+        let mut app = harness::build_headless(&root(), "untitled_map", Some("site"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        app.update();
+
+        // Enter the Tiles tab the way the author does: the Tab key, which is also what triggers
+        // the first scan. As a real input MESSAGE, not a hand-set `ButtonInput` — the input plugin
+        // clears `just_pressed` at the top of every frame, so a hand-set press is wiped before any
+        // editor system can read it.
+        let tap = |app: &mut App, state: bevy::input::ButtonState| {
+            app.world_mut().write_message(bevy::input::keyboard::KeyboardInput {
+                key_code: KeyCode::Tab,
+                logical_key: bevy::input::keyboard::Key::Tab,
+                state,
+                text: None,
+                repeat: false,
+                window: Entity::PLACEHOLDER,
+            });
+            app.update();
+        };
+        tap(&mut app, bevy::input::ButtonState::Pressed);
+        tap(&mut app, bevy::input::ButtonState::Released);
+        for _ in 0..3 {
+            app.update();
+        }
+
+        let state = app
+            .world()
+            .get_resource::<emerge_mapper::tiles::ImportState>()
+            .unwrap_or_else(|| panic!("no import state"));
+        assert!(state.scanned, "entering the tab must have scanned");
+        assert!(!state.candidates.is_empty(), "this repo has unimported meshes");
+        // Recompute the pack directories the way the list groups them.
+        let mut dirs: Vec<String> = Vec::new();
+        for c in &state.candidates {
+            let dir = c.mesh.rsplit_once('/').map_or(".", |(d, _)| d).to_owned();
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+        assert!(
+            !state.folded_packs.is_empty(),
+            "a site-kit project imports nothing from the candidate packs, so they start folded"
+        );
+        let folded = state.folded_packs.clone();
+
+        // Every pack — folded or not — must be visible as a header row's text.
+        let mut texts: Vec<String> = Vec::new();
+        let mut query = app.world_mut().query::<&bevy::ui::widget::Text>();
+        for t in query.iter(app.world()) {
+            texts.push(t.0.clone());
+        }
+        for dir in &dirs {
+            assert!(
+                texts.iter().any(|t| t == dir),
+                "pack `{dir}` has no header in the UI — a folded pack must still be a row.\n\
+                 folded: {folded:?}"
+            );
+        }
+        let chevrons = texts.iter().filter(|t| t.as_str() == ">").count();
+        assert!(
+            chevrons >= folded.len().min(dirs.len()),
+            "{} folded pack(s) but only {chevrons} `>` chevron(s) rendered",
+            folded.len().min(dirs.len())
+        );
+        // And a folded pack SAYS it is hiding rows — the word is what keeps "folded" from
+        // reading as "gone".
+        assert!(
+            texts.iter().any(|t| t.contains("hidden — click to open")),
+            "a folded header must say what it hides"
+        );
+
+        // The default selection is VISIBLE: its pack is open, even when every pack started
+        // folded — a tab must never open with its selection hidden inside a fold.
+        let state = app
+            .world()
+            .get_resource::<emerge_mapper::tiles::ImportState>()
+            .unwrap_or_else(|| panic!("no import state"));
+        let sel_dir = state
+            .candidates
+            .get(state.selected)
+            .map(|c| c.mesh.rsplit_once('/').map_or(".", |(d, _)| d).to_owned())
+            .unwrap_or_else(|| panic!("the default selection points at nothing"));
+        assert!(
+            !state.folded_packs.contains(&sel_dir),
+            "the selected candidate's pack `{sel_dir}` must be open"
+        );
+    }
+
+    /// The other direction of the fold default: on the furniture kit — whose library IS imported
+    /// from the candidate packs — a pack with even one import stays open.
+    #[test]
+    fn packs_the_library_draws_from_stay_open() {
+        let mut app = harness::build_headless(&root(), "untitled_map", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        app.update();
+        let tap = |app: &mut App, state: bevy::input::ButtonState| {
+            app.world_mut().write_message(bevy::input::keyboard::KeyboardInput {
+                key_code: KeyCode::Tab,
+                logical_key: bevy::input::keyboard::Key::Tab,
+                state,
+                text: None,
+                repeat: false,
+                window: Entity::PLACEHOLDER,
+            });
+            app.update();
+        };
+        tap(&mut app, bevy::input::ButtonState::Pressed);
+        tap(&mut app, bevy::input::ButtonState::Released);
+        app.update();
+
+        let project = app
+            .world()
+            .get_resource::<emerge_mapper::project::Project>()
+            .unwrap_or_else(|| panic!("no project"));
+        let imported: std::collections::HashSet<String> = project
+            .library
+            .descriptors
+            .iter()
+            .filter_map(|d| d.mesh.as_deref())
+            .map(|m| m.rsplit_once('/').map_or(".", |(dir, _)| dir).to_owned())
+            .collect();
+        let state = app
+            .world()
+            .get_resource::<emerge_mapper::tiles::ImportState>()
+            .unwrap_or_else(|| panic!("no import state"));
+        assert!(state.scanned, "entering the tab must have scanned");
+        assert!(
+            !state.candidates.is_empty(),
+            "the furniture kit has unimported meshes; summary says: {}",
+            state.summary
+        );
+        for dir in &imported {
+            assert!(
+                !state.folded_packs.contains(dir),
+                "`{dir}` has imports and must start open; folded: {:?}",
+                state.folded_packs
+            );
+        }
+    }
+
+    /// **The first candidate an author clicks stages, like every later one.** Reported live:
+    /// "the first mesh I click on doesn't load — I have to click another, then back." The click
+    /// path is `on_candidate_click` writing `ImportState::selected`; this drives that exact write
+    /// for first-click, second-click and back-again, and asserts the staged preview follows.
+    #[test]
+    fn the_first_clicked_candidate_stages_like_any_other() {
+        let mut app = harness::build_headless(&root(), "untitled_map", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        app.update();
+        let tap = |app: &mut App, state: bevy::input::ButtonState| {
+            app.world_mut().write_message(bevy::input::keyboard::KeyboardInput {
+                key_code: KeyCode::Tab,
+                logical_key: bevy::input::keyboard::Key::Tab,
+                state,
+                text: None,
+                repeat: false,
+                window: Entity::PLACEHOLDER,
+            });
+            app.update();
+        };
+        tap(&mut app, bevy::input::ButtonState::Pressed);
+        tap(&mut app, bevy::input::ButtonState::Released);
+        for _ in 0..3 {
+            app.update();
+        }
+
+        // Two unblocked candidates to bounce between, by index.
+        let (a, b, mesh_a, mesh_b) = {
+            let state = app
+                .world()
+                .get_resource::<emerge_mapper::tiles::ImportState>()
+                .unwrap_or_else(|| panic!("no import state"));
+            let mut picks = state
+                .candidates
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| !c.blocked())
+                .map(|(i, c)| (i, c.mesh.clone()));
+            let (a, mesh_a) = picks.next().unwrap_or_else(|| panic!("no unblocked candidates"));
+            let (b, mesh_b) = picks.next().unwrap_or_else(|| panic!("only one candidate"));
+            (a, b, mesh_a, mesh_b)
+        };
+
+        let click = |app: &mut App, ix: usize| {
+            let mut state = app
+                .world_mut()
+                .resource_mut::<emerge_mapper::tiles::ImportState>();
+            // Exactly what `on_candidate_click` writes.
+            state.selected = ix;
+            state.selected_library_id = None;
+            for _ in 0..3 {
+                app.update();
+            }
+        };
+        let staged_mesh = |app: &mut App| -> Option<String> {
+            let mut q = app
+                .world_mut()
+                .query::<&emerge_mapper::tiles::PreviewOf>();
+            let metas: Vec<String> = q.iter(app.world()).map(|p| p.0.clone()).collect();
+            assert!(metas.len() <= 1, "two staged previews at once: {metas:?}");
+            metas.into_iter().next()
+        };
+
+        click(&mut app, a);
+        assert_eq!(
+            staged_mesh(&mut app).as_deref(),
+            Some(mesh_a.as_str()),
+            "the FIRST clicked candidate must stage"
+        );
+        click(&mut app, b);
+        assert_eq!(staged_mesh(&mut app).as_deref(), Some(mesh_b.as_str()));
+        click(&mut app, a);
+        assert_eq!(staged_mesh(&mut app).as_deref(), Some(mesh_a.as_str()));
+    }
+
     /// **A missing project is refused, not opened empty.** `Project::open`'s own rule, checked
     /// through the harness because that is the path the binary takes.
     #[test]

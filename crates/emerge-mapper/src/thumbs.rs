@@ -63,8 +63,9 @@ const BACKDROP: Color = Color::srgb(0.14, 0.135, 0.125);
 pub struct ThumbnailCamera;
 
 /// The staged subject, carrying its scene handle so [`bake`] can ask whether it is ready to draw.
+/// `pub(crate)`: the label booth stages subjects through the same machinery.
 #[derive(Component)]
-struct Subject(Handle<WorldAsset>);
+pub(crate) struct Subject(pub(crate) Handle<WorldAsset>);
 
 #[derive(Resource)]
 pub struct Thumbnails {
@@ -198,16 +199,17 @@ fn unfinished(thumbs: Option<Res<Thumbnails>>, project: Option<Res<Project>>) ->
     }
 }
 
-/// **Stand the booth up.** Called whenever there is a portrait to take and no booth standing — at
-/// startup, and again after a piece is imported, which is the case the old one-shot `ensure` could
-/// not serve.
-fn erect_booth(commands: &mut Commands) -> Entity {
+/// **Stand a booth up at `at`.** Called whenever there is a portrait to take and no booth standing
+/// — at startup, and again after a piece is imported, which is the case the old one-shot `ensure`
+/// could not serve. `pub(crate)` + positioned: the label booth raises the same three lights at its
+/// own corner, so there is exactly one lighting recipe to keep true.
+pub(crate) fn erect_booth(commands: &mut Commands, at: Vec3) -> Entity {
     // Point lights, so nothing outside their range is touched, and no shadows — a 128 px portrait
     // cannot show one and every shadow map costs a pass.
     let booth = commands
         .spawn((
-            Name::new("thumbnail booth"),
-            Transform::from_translation(BOOTH),
+            Name::new("photo booth"),
+            Transform::from_translation(at),
             Visibility::Inherited,
         ))
         .with_children(|b| {
@@ -264,7 +266,7 @@ fn bake(
         }
     }
     if thumbs.booth.is_none() {
-        thumbs.booth = Some(erect_booth(&mut commands));
+        thumbs.booth = Some(erect_booth(&mut commands, BOOTH));
     }
 
     // **The staged model must be the pending piece's, or it goes.** `pending` can switch subjects
@@ -380,8 +382,9 @@ fn bake(
 ///
 /// `None` when nothing under it has an `Aabb` yet, which the caller treats as "fall back to what the
 /// descriptor says" — that path is reachable only in the frames before the mesh exists, and the
-/// readiness gate above means the bake does not aim then.
-fn subject_bounds(
+/// readiness gate above means the bake does not aim then. `pub(crate)`: the label booth frames from
+/// the same measured bounds, so the two booths cannot drift apart on what "framed" means.
+pub(crate) fn subject_bounds(
     root: Entity,
     children: &Query<&Children>,
     bounds: &Query<(&Aabb, &GlobalTransform)>,
@@ -435,21 +438,36 @@ fn stage(
     d: &emerge_core::descriptor::Descriptor,
 ) -> Option<Entity> {
     let mesh = d.mesh.as_ref()?;
-    let scene: Handle<WorldAsset> = assets.load(GltfAssetLabel::Scene(0).from_asset(mesh.clone()));
-    Some(
-        commands
-            .spawn((
-                Name::new("thumbnail subject"),
-                Subject(scene.clone()),
-                // The same scale a real placement applies, so the portrait shows the piece at the
-                // size it will actually be rather than at whatever the artist exported.
-                Transform::from_translation(BOOTH)
-                    .with_scale(Vec3::splat(d.align.scale.unwrap_or(1.0))),
-                Visibility::Inherited,
-            ))
-            .with_child((WorldAssetRoot(scene), Transform::default()))
-            .id(),
-    )
+    Some(stage_mesh(
+        commands,
+        assets,
+        mesh,
+        d.align.scale.unwrap_or(1.0),
+        BOOTH,
+    ))
+}
+
+/// Stage one mesh at `at`, at the scale a real placement applies — so any booth photographs the
+/// piece at the size it will actually be rather than at whatever the artist exported.
+/// `pub(crate)`: the label booth stages through this.
+pub(crate) fn stage_mesh(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    mesh: &str,
+    scale: f32,
+    at: Vec3,
+) -> Entity {
+    let scene: Handle<WorldAsset> =
+        assets.load(GltfAssetLabel::Scene(0).from_asset(mesh.to_owned()));
+    commands
+        .spawn((
+            Name::new("booth subject"),
+            Subject(scene.clone()),
+            Transform::from_translation(at).with_scale(Vec3::splat(scale)),
+            Visibility::Inherited,
+        ))
+        .with_child((WorldAssetRoot(scene), Transform::default()))
+        .id()
 }
 
 fn spawn_camera(commands: &mut Commands, first_target: &Handle<Image>) -> Entity {
@@ -486,7 +504,13 @@ fn spawn_camera(commands: &mut Commands, first_target: &Handle<Image>) -> Entity
         .id()
 }
 
-fn has_mesh(root: Entity, children: &Query<&Children>, meshes: &Query<(), With<Mesh3d>>) -> bool {
+/// `pub(crate)`: the label booth gates readiness on the same two signals (see the module note on
+/// why `Mesh3d` alone is not a drawable mesh).
+pub(crate) fn has_mesh(
+    root: Entity,
+    children: &Query<&Children>,
+    meshes: &Query<(), With<Mesh3d>>,
+) -> bool {
     let mut queue = vec![root];
     while let Some(e) = queue.pop() {
         if meshes.get(e).is_ok() {

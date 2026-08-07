@@ -202,6 +202,46 @@ pub fn draw_yaw(d: &Descriptor, authored: f32) -> f32 {
     authored + d.align.front.map_or(0.0, |f| f.yaw_degrees())
 }
 
+/// The world rotation of a placement's tip: about X first, then Z — the same order
+/// [`mesh_rotation`] documents, so "which axis first" has one answer in the whole codebase.
+pub fn tip_quat(tip: (u8, u8)) -> Quat {
+    Quat::from_rotation_z((tip.1 as f32 * 90.0).to_radians())
+        * Quat::from_rotation_x((tip.0 as f32 * 90.0).to_radians())
+}
+
+/// How far a tipped piece must rise so its bounds rest **on** the resolved height instead of
+/// through it.
+///
+/// A mesh is authored foot-at-origin (the importer's contract), so its placed box is
+/// `x ∈ ±w/2, y ∈ 0..h, z ∈ ±depth/2` — and a quarter turn about that origin swings half the box
+/// below the floor. The seat is the exact counter-lift: rotate the eight corners, take the lowest,
+/// come back up by that much. Quarter turns make it exact, not approximate.
+///
+/// Zero for an untipped piece, and zero for an unmeasured one — the editor refuses to tip what it
+/// cannot seat, which is the loud half of this bargain.
+pub fn tip_seat(d: &Descriptor, tip: (u8, u8)) -> f32 {
+    if tip == (0, 0) {
+        return 0.0;
+    }
+    let (Some((w, depth)), Some(h)) = (
+        emerge_core::descriptor::placed_footprint(d),
+        emerge_core::descriptor::placed_height(d),
+    ) else {
+        return 0.0;
+    };
+    let q = tip_quat(tip);
+    let mut min_y = f32::MAX;
+    for sx in [-0.5_f32, 0.5] {
+        for sy in [0.0_f32, 1.0] {
+            for sz in [-0.5_f32, 0.5] {
+                let corner = Vec3::new(sx * w, sy * h, sz * depth);
+                min_y = min_y.min((q * corner).y);
+            }
+        }
+    }
+    -min_y
+}
+
 /// Put one descriptor in the world.
 ///
 /// Returns `None` for a descriptor with no mesh — which is not an error: a descriptor may exist to
@@ -213,6 +253,7 @@ pub fn spawn_descriptor(
     masks: Masks,
     at: (f32, f32),
     yaw: f32,
+    tip: (u8, u8),
     map_origin: (f32, f32, f32),
     y: f32,
 ) -> Option<Entity> {
@@ -226,8 +267,12 @@ pub fn spawn_descriptor(
                 Name::new(d.id.clone()),
                 OfDescriptor(d.id.clone()),
                 Tags(masks),
-                Transform::from_translation(origin_of(at, map_origin, y))
-                    .with_rotation(Quat::from_rotation_y(draw_yaw(d, yaw).to_radians()))
+                // The tip turns the piece in its own frame, the yaw turns the tipped piece, and the
+                // seat keeps the result standing on `y` — see [`tip_seat`].
+                Transform::from_translation(origin_of(at, map_origin, y + tip_seat(d, tip)))
+                    .with_rotation(
+                        Quat::from_rotation_y(draw_yaw(d, yaw).to_radians()) * tip_quat(tip),
+                    )
                     // Y is scaled separately: `stretch_y` is a project's architecture policy layered
                     // over the mesh's measured height, not an art correction.
                     .with_scale(Vec3::new(scale, scale * stretch, scale)),
@@ -285,7 +330,9 @@ fn spawn_world(mut commands: Commands, assets: Res<AssetServer>, world: Res<Emer
             continue;
         };
         let Some(&y) = world.y.get(i) else { continue };
-        if let Some(e) = spawn_descriptor(&mut commands, &assets, d, masks, p.at, p.yaw, origin, y) {
+        if let Some(e) =
+            spawn_descriptor(&mut commands, &assets, d, masks, p.at, p.yaw, p.tip, origin, y)
+        {
             commands.entity(e).insert(Placement(p.id.clone()));
             by_id.push((p.id.as_str(), e));
             spawned += 1;

@@ -576,4 +576,5 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(f.placements.len(), 8, "2x1 m at 0.5 m cells");
     }
+
 }

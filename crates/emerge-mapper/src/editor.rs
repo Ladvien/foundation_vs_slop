@@ -43,6 +43,13 @@ const BOUNDS_LINE: Color = Color::srgb(0.42, 0.38, 0.30);
 /// The removal marker. Red because it is the one destructive tool here, and translucent because the
 /// thing it covers is the thing being asked about — an opaque marker would hide the answer.
 const REMOVE_TINT: Color = Color::srgba(0.86, 0.20, 0.16, 0.38);
+
+/// The clone tool's marker tint — cool where removal is hot, because the two rectangles make
+/// opposite promises and an author reads the colour before the status line.
+const CLONE_TINT: Color = Color::srgba(0.20, 0.55, 0.86, 0.32);
+
+/// The target lock's tint — gold: neither removal's threat nor clone's copy, just "this one".
+const TARGET_TINT: Color = Color::srgba(0.90, 0.72, 0.20, 0.35);
 /// How far the marker floats above the floor, metres. Enough to beat z-fighting against a floor tile
 /// it is lying exactly on top of, small enough to still read as flat on the ground.
 const MARKER_LIFT: f32 = 0.02;
@@ -129,6 +136,12 @@ impl EditorState {
         self.undo.push(op);
         self.redo.clear();
     }
+
+    /// Where the id mint stands — read-only, so the harness can check [`next_id_after`]'s seed
+    /// really landed.
+    pub fn minted(&self) -> u32 {
+        self.next_id
+    }
 }
 
 /// **What a click on the map does.** Exactly one of these at a time.
@@ -145,6 +158,9 @@ pub enum Tool {
     Remove,
     /// Click a piece to pick it up, click again to put it down. See [`MoveDrag`].
     Move,
+    /// Drag a box to take a copy of everything inside it; click to stamp the set — as many times
+    /// as it is held. See [`CloneDrag`].
+    Clone,
 }
 
 impl Tool {
@@ -154,6 +170,7 @@ impl Tool {
             Tool::Place => "placing",
             Tool::Remove => "removal mode",
             Tool::Move => "move mode",
+            Tool::Clone => "clone mode",
         }
     }
 }
@@ -194,6 +211,80 @@ pub struct MoveDrag {
 #[derive(Component)]
 struct RemovalTile;
 
+/// The clone tool's marker — the box being dragged out, then the held set's bounds riding the
+/// cursor. Its own component so the two tools' rectangles can never claim each other's colour.
+#[derive(Component)]
+struct CloneTile;
+
+/// One piece of a held clone set, stored **relative to the set's anchor** so the set's internal
+/// geometry — every flush edge, every offset a lamp keeps from its table's centre — survives the
+/// trip exactly. Everything authored rides along: yaw, tip, lift, note, even the pin, because a
+/// copied barricade is still a barricade.
+#[derive(Clone)]
+struct ClonePiece {
+    descriptor: String,
+    offset: (f32, f32),
+    yaw: f32,
+    tip: (u8, u8),
+    lift: f32,
+    note: Option<String>,
+    owned: bool,
+    owned_because: Option<String>,
+    on: CloneHost,
+}
+
+/// What a cloned piece rests on — resolved at capture, applied at stamp.
+#[derive(Clone)]
+enum CloneHost {
+    /// Its own layer: floor, wall, ceiling — the map answers, nothing to carry.
+    Layer,
+    /// Its host was caught in the same box, by index into the set — repointed to the host's fresh
+    /// id at stamp, so the cloned lamp stands on the cloned table.
+    InSet(usize),
+    /// Its host stayed behind, so each stamp re-seats it on whatever offers the surface at the new
+    /// spot — `host_under`'s answer, and a stamp with no answer refuses whole.
+    Outside,
+}
+
+/// The set in hand, plus the bounds the marker shows: centre offset from the anchor and
+/// half-extents, both from the pieces' own footprints at capture.
+struct CloneSet {
+    pieces: Vec<ClonePiece>,
+    centre_off: (f32, f32),
+    half: (f32, f32),
+}
+
+/// The clone tool's state: the box being dragged, or the set in hand. Its own resource for the
+/// reason [`RemovalDrag`] gives — written at drag rate, and `rebuild_palette` watches
+/// `EditorState`.
+#[derive(Resource, Default)]
+pub struct CloneDrag {
+    from: Option<(f32, f32)>,
+    held: Option<CloneSet>,
+}
+
+/// **Which piece of a stack the piece-verbs mean** — `H`'s answer, held as `(placement id, the
+/// snapped cell it was taken on)`.
+///
+/// A floor tile, a wall and its header legally share a cell (different layers pass the overlap
+/// rule), and "the placement under the cursor" cannot name one of three — a nudge aimed at the
+/// header moved the wall. The id, never an index, for `MoveDrag`'s reason; the cell, so the lock
+/// lapses the moment the cursor walks away rather than following it around the map.
+#[derive(Resource, Default)]
+pub struct TargetLock(Option<(String, (f32, f32))>);
+
+/// The locked target's highlight — a third marker quad beside removal's red and clone's blue,
+/// because three tools making three different promises must not share a colour.
+#[derive(Component)]
+struct TargetTile;
+
+impl CloneDrag {
+    /// Whether a set is in hand — the one question `keys` asks (for `Esc`'s layering).
+    fn holding(&self) -> bool {
+        self.held.is_some()
+    }
+}
+
 /// One reversible edit.
 ///
 /// Only placements, and deliberately: the map's *size* and *name* are settings rather than edits, and
@@ -229,6 +320,11 @@ enum Undo {
     RemoveAt { indices: Vec<usize> },
     /// Put a placement's yaw back. Its own inverse, carrying the other angle.
     Turned { index: usize, yaw: f32 },
+    /// Put a placement's authored lift back. Its own inverse, carrying the other offset — and its
+    /// apply redraws the piece's dependents too, because raising a table moves the lamp.
+    Lifted { index: usize, lift: f32 },
+    /// Put a placement's tip back. Its own inverse, carrying the other quarter turns.
+    Tipped { index: usize, tip: (u8, u8) },
     /// **Several reversals that are one act** — applied in order, inverted by reversing.
     ///
     /// `generate` needs it: undoing a `G` press must strip the solver rows AND put the removed sketch
@@ -411,6 +507,8 @@ impl Plugin for EditorPlugin {
             // Registered in the same commit as `drive_move` and `keys` read it — a missing `ResMut`
             // panics its system in Bevy 0.19 rather than skipping it (`CLAUDE.md`).
             .init_resource::<MoveDrag>()
+            .init_resource::<CloneDrag>()
+            .init_resource::<TargetLock>()
             .init_resource::<FineAnchor>()
             .init_resource::<PlaceDrag>()
             // **This plugin reads it, so this plugin registers it** (CLAUDE.md's rule, and the
@@ -447,6 +545,8 @@ impl Plugin for EditorPlugin {
                     spawn_palette_panel,
                     spawn_cost_readout,
                     spawn_removal_tile,
+                    spawn_clone_tile,
+                    spawn_target_tile,
                     spawn_existing,
                 )
                     .chain(),
@@ -470,6 +570,8 @@ impl Plugin for EditorPlugin {
                     drive_place.run_if(not_typing).run_if(in_map_mode),
                     drive_removal.run_if(not_typing).run_if(in_map_mode),
                     drive_move.run_if(not_typing).run_if(in_map_mode),
+                    drive_clone.run_if(not_typing).run_if(in_map_mode),
+                    drive_target_marker.run_if(in_map_mode),
                     hide_carried.run_if(in_map_mode),
                     drive_ghost.run_if(in_map_mode),
                     fade_ghost,
@@ -1609,6 +1711,309 @@ fn box_fill_between(
     };
 }
 
+/// The clone tool's marker quad — [`spawn_removal_tile`]'s twin in the clone tint, and spawned
+/// once for the same leak-shaped reason.
+fn spawn_clone_tile(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.spawn((
+        CloneTile,
+        Mesh3d(meshes.add(Rectangle::new(1.0, 1.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: CLONE_TINT,
+            unlit: true,
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        })),
+        Transform::default(),
+        Visibility::Hidden,
+    ));
+}
+
+/// **The clone tool** — [`drive_removal`]'s shape with the opposite payload: the box takes a COPY
+/// of everything whose centre it contains, and every later click stamps the whole set at the
+/// cursor, fresh ids and all.
+///
+/// Preview and commit in one system for the reason `drive_removal` gives: the rectangle drawn IS
+/// the rectangle captured, because they are the same numbers.
+#[allow(clippy::too_many_arguments)]
+fn drive_clone(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    hovered_ui: Query<&Hovered>,
+    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    mut marker: Query<(&mut Transform, &mut Visibility), With<CloneTile>>,
+    mut drag: ResMut<CloneDrag>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<EditorState>,
+) {
+    // Read, never write, unless something happened — `rebuild_palette` watches `state`.
+    if state.tool != Tool::Clone {
+        if drag.from.is_some() || drag.held.is_some() {
+            drag.from = None;
+            drag.held = None;
+        }
+        for (_, mut vis) in &mut marker {
+            if *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+            }
+        }
+        return;
+    }
+
+    let (Some(window), Some(camera)) = (window, camera) else {
+        return;
+    };
+    let (cam, cam_tf) = *camera;
+    let hit = cursor_ground(&window, cam, cam_tf).filter(|_| !hovered_ui.iter().any(|h| h.0));
+    let Some(hit) = hit else {
+        // A release off the world ends the drag — the defect `drive_removal` records.
+        if mouse.just_released(MouseButton::Left) {
+            drag.from = None;
+        }
+        for (_, mut vis) in &mut marker {
+            *vis = Visibility::Hidden;
+        }
+        return;
+    };
+    let at = project.map.to_map_space((hit.x, hit.z));
+
+    if mouse.just_pressed(MouseButton::Left) && drag.held.is_none() {
+        drag.from = Some(at);
+    }
+
+    // What the marker shows: the held set's bounds riding the (snapped) cursor, else the box being
+    // dragged out.
+    let rect = if let Some(set) = &drag.held {
+        let target = (snap(at.0), snap(at.1));
+        let c = (target.0 + set.centre_off.0, target.1 + set.centre_off.1);
+        Some((c.0 - set.half.0, c.1 - set.half.1, c.0 + set.half.0, c.1 + set.half.1))
+    } else {
+        drag.from.map(|from| {
+            (from.0.min(at.0), from.1.min(at.1), from.0.max(at.0), from.1.max(at.1))
+        })
+    };
+    for (mut tf, mut vis) in &mut marker {
+        match rect {
+            Some((x0, z0, x1, z1)) => {
+                *vis = Visibility::Visible;
+                *tf = Transform::from_xyz(
+                    project.map.origin.0 + (x0 + x1) * 0.5,
+                    project.map.origin.1 + MARKER_LIFT,
+                    project.map.origin.2 + (z0 + z1) * 0.5,
+                )
+                .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
+                .with_scale(Vec3::new((x1 - x0).max(0.05), (z1 - z0).max(0.05), 1.0));
+            }
+            None => *vis = Visibility::Hidden,
+        }
+    }
+
+    if !mouse.just_released(MouseButton::Left) {
+        return;
+    }
+
+    // **A set in hand stamps on every click.** The drag that took it is long finished, so the
+    // release IS the gesture.
+    if drag.held.is_some() {
+        let Some(set) = drag.held.take() else {
+            return;
+        };
+        stamp_set(&mut commands, &assets, &mut project, &mut state, &set, (snap(at.0), snap(at.1)));
+        // Back in hand whatever happened: a refusal's fix is usually "two cells to the left".
+        drag.held = Some(set);
+        return;
+    }
+
+    let Some(from) = drag.from.take() else {
+        return;
+    };
+    if (from.0 - at.0).abs() <= CLICK_EPS && (from.1 - at.1).abs() <= CLICK_EPS {
+        state.status = "drag a box to take a copy of what is inside it".to_owned();
+        return;
+    }
+
+    // **Capture.** Centre-in-box, the same containment the removal box applies, so the two box
+    // gestures agree about what a rectangle contains.
+    let (x0, z0) = (from.0.min(at.0), from.1.min(at.1));
+    let (x1, z1) = (from.0.max(at.0), from.1.max(at.1));
+    let caught: Vec<usize> = project
+        .map
+        .placements
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.at.0 >= x0 && p.at.0 <= x1 && p.at.1 >= z0 && p.at.1 <= z1)
+        .map(|(i, _)| i)
+        .collect();
+    if caught.is_empty() {
+        state.status = "nothing in that box to clone".to_owned();
+        return;
+    }
+
+    // The anchor is the snapped centroid, so the set rides centred under the hand and stamps land
+    // on the grid while every internal offset stays exact.
+    let n = caught.len() as f32;
+    let cx: f32 = caught.iter().map(|&i| project.map.placements[i].at.0).sum::<f32>() / n;
+    let cz: f32 = caught.iter().map(|&i| project.map.placements[i].at.1).sum::<f32>() / n;
+    let anchor = (snap(cx), snap(cz));
+
+    let mut pieces = Vec::with_capacity(caught.len());
+    let (mut bx0, mut bz0, mut bx1, mut bz1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for &i in &caught {
+        let p = &project.map.placements[i];
+        let on = match &p.on {
+            None => CloneHost::Layer,
+            Some(host) => caught
+                .iter()
+                .position(|&j| project.map.placements[j].id == *host)
+                .map(CloneHost::InSet)
+                .unwrap_or(CloneHost::Outside),
+        };
+        let offset = (p.at.0 - anchor.0, p.at.1 - anchor.1);
+        // Bounds from the real footprints, so the marker claims what the stamp will occupy.
+        let (w, depth) = project
+            .library
+            .get(&p.descriptor)
+            .map(|d| crate::fill::cell_extents(d, p.yaw))
+            .unwrap_or((crate::fill::MIN_CELL, crate::fill::MIN_CELL));
+        bx0 = bx0.min(offset.0 - w * 0.5);
+        bz0 = bz0.min(offset.1 - depth * 0.5);
+        bx1 = bx1.max(offset.0 + w * 0.5);
+        bz1 = bz1.max(offset.1 + depth * 0.5);
+        pieces.push(ClonePiece {
+            descriptor: p.descriptor.clone(),
+            offset,
+            yaw: p.yaw,
+            tip: p.tip,
+            lift: p.lift,
+            note: p.note.clone(),
+            owned: p.owned,
+            owned_because: p.owned_because.clone(),
+            on,
+        });
+    }
+    let count = pieces.len();
+    drag.held = Some(CloneSet {
+        pieces,
+        centre_off: ((bx0 + bx1) * 0.5, (bz0 + bz1) * 0.5),
+        half: ((bx1 - bx0) * 0.5, (bz1 - bz0) * 0.5),
+    });
+    state.status =
+        format!("{count} piece(s) in hand — click stamps the set, Esc puts it away");
+}
+
+/// **Stamp the held set at `target`** — all of it, or none of it, the rule `move_placement` states.
+///
+/// Fresh ids in set order; in-set hosts repointed to the fresh ids; outside hosts re-found under
+/// each new position. Every piece answers the overlap rule against the standing map, and the
+/// finished trial re-resolves before anything is committed — one refusal anywhere and the map has
+/// not changed.
+fn stamp_set(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    project: &mut Project,
+    state: &mut EditorState,
+    set: &CloneSet,
+    target: (f32, f32),
+) {
+    let ys = match heights(project) {
+        Ok(ys) => ys,
+        Err(e) => {
+            state.status = e;
+            return;
+        }
+    };
+    let mut n = state.next_id;
+    let new_ids: Vec<String> = set
+        .pieces
+        .iter()
+        .map(|piece| {
+            n += 1;
+            format!("{}@{}", short_id(&piece.descriptor), n)
+        })
+        .collect();
+
+    let mut rows: Vec<Placed> = Vec::with_capacity(set.pieces.len());
+    for (i, piece) in set.pieces.iter().enumerate() {
+        let at = (target.0 + piece.offset.0, target.1 + piece.offset.1);
+        let Some(d) = project.library.get(&piece.descriptor) else {
+            state.status = format!(
+                "stamp refused: `{}` is not in the library any more",
+                piece.descriptor
+            );
+            return;
+        };
+        let on = match &piece.on {
+            CloneHost::Layer => None,
+            CloneHost::InSet(h) => Some(new_ids[*h].clone()),
+            CloneHost::Outside => {
+                match emerge_core::stack::host_under(&project.map, &project.library, &ys, d, at) {
+                    Some((host, _)) => Some(host.id.clone()),
+                    None => {
+                        state.status = format!(
+                            "stamp refused: `{}` needs a surface and nothing offers one where it \
+                             would land",
+                            new_ids[i]
+                        );
+                        return;
+                    }
+                }
+            }
+        };
+        if let Some(block) = emerge_core::stack::blocking(
+            &project.map,
+            &project.library,
+            d,
+            at,
+            piece.yaw,
+            piece.tip,
+            on.as_deref(),
+        ) {
+            state.status = format!(
+                "stamp refused: `{}` already covers where `{}` would land",
+                block.id, new_ids[i]
+            );
+            return;
+        }
+        rows.push(Placed {
+            id: new_ids[i].clone(),
+            descriptor: piece.descriptor.clone(),
+            at,
+            yaw: piece.yaw,
+            lift: piece.lift,
+            tip: piece.tip,
+            on,
+            owned: piece.owned,
+            owned_because: piece.owned_because.clone(),
+            patch: None,
+            note: piece.note.clone(),
+        });
+    }
+
+    // The finished trial is the last door — it catches whatever the per-piece checks missed, and
+    // nothing has been committed when it refuses.
+    let mut trial = project.map.clone();
+    trial.placements.extend(rows.iter().cloned());
+    if let Err(e) = emerge_core::stack::resolve_y(&trial, &project.library) {
+        state.status = format!("stamp refused: {e}");
+        return;
+    }
+
+    let count = rows.len();
+    let first = project.map.placements.len();
+    state.next_id = n;
+    project.map.placements.extend(rows);
+    spawn_range(commands, assets, project, state, first);
+    project.dirty = true;
+    // One entry for the whole set: one act the author performed is one act to take back.
+    state.record(Undo::Added { count });
+    state.status = format!("stamped {count} piece(s) — click again stamps another");
+}
+
 /// **The cell fine placement is confined to** — captured when the platform modifier goes down.
 ///
 /// Its own resource, and written only on the two frames the modifier changes state, so it does not
@@ -1674,6 +2079,7 @@ fn spawn_piece(
     d: &emerge_core::descriptor::Descriptor,
     at: (f32, f32),
     yaw: f32,
+    tip: (u8, u8),
     origin: (f32, f32, f32),
     y: f32,
 ) -> Option<Entity> {
@@ -1686,6 +2092,7 @@ fn spawn_piece(
         emerge_core::vocab::Masks::default(),
         at,
         yaw,
+        tip,
         // The editor authors in the map's own space, so the origin it draws at is the map's own.
         origin,
         y,
@@ -1724,7 +2131,7 @@ fn spawn_range(
         let (Some(d), Some(&y)) = (project.library.get(&p.descriptor), ys.get(i)) else {
             continue;
         };
-        if let Some(e) = spawn_piece(commands, assets, d, p.at, p.yaw, project.map.origin, y) {
+        if let Some(e) = spawn_piece(commands, assets, d, p.at, p.yaw, p.tip, project.map.origin, y) {
             commands.entity(e).insert(Placement(p.id.clone()));
         }
     }
@@ -1921,7 +2328,30 @@ fn drive_removal(
 }
 
 /// Bring up whatever the map already holds.
-fn spawn_existing(mut commands: Commands, assets: Res<AssetServer>, project: Res<Project>) {
+/// The first id counter value that cannot collide with anything the loaded map already names.
+///
+/// Every id this editor mints is `{short}@{n}`, and the counter used to start at ZERO in every
+/// session — so reopening a saved map re-minted the exact `wall@1`, `wall@2`, … the file already
+/// carried. The map held two placements with one name, and **undo despawns by id match**: taking
+/// back one fill swept every same-named entity off the screen, the originals included. The rows
+/// were all still in the file — the screen and the map disagreeing, the exact failure the one-path
+/// rule exists to prevent. Seeding past the largest `@n` in the file makes minted ids unique by
+/// construction; ids with no `@n` tail (hand-authored names) cannot collide with minted ones.
+pub fn next_id_after(map: &emerge_core::map::Map) -> u32 {
+    map.placements
+        .iter()
+        .filter_map(|p| p.id.rsplit_once('@').and_then(|(_, n)| n.parse::<u32>().ok()))
+        .max()
+        .unwrap_or(0)
+}
+
+fn spawn_existing(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    project: Res<Project>,
+    mut state: ResMut<EditorState>,
+) {
+    state.next_id = next_id_after(&project.map);
     let ys = match heights(&project) {
         Ok(ys) => ys,
         Err(e) => {
@@ -1940,7 +2370,7 @@ fn spawn_existing(mut commands: Commands, assets: Res<AssetServer>, project: Res
             continue;
         };
         let Some(&y) = ys.get(i) else { continue };
-        if let Some(e) = spawn_piece(&mut commands, &assets, d, p.at, p.yaw, project.map.origin, y) {
+        if let Some(e) = spawn_piece(&mut commands, &assets, d, p.at, p.yaw, p.tip, project.map.origin, y) {
             commands.entity(e).insert(Placement(p.id.clone()));
         }
     }
@@ -2097,6 +2527,26 @@ fn drive_place(
         };
     let on = host.map(|h| h.id.clone());
 
+    // **Occupied space refuses, and names its occupant.** Flush is fine — kitbashing lays pieces
+    // end to end, and `stack::OVERLAP_EPS` is what keeps "touching" from reading as "overlapping" —
+    // but a piece INSIDE another is an accident that otherwise surfaces as a doubled draw call
+    // nobody can see. Same-layer only: the floor a crate stands on is not in its way.
+    if let Some(block) = emerge_core::stack::blocking(
+        &project.map,
+        &project.library,
+        &d,
+        at,
+        state.brush_yaw,
+        (0, 0),
+        on.as_deref(),
+    ) {
+        state.status = format!(
+            "blocked: `{}` already covers that spot — remove it or place beside it",
+            block.id
+        );
+        return;
+    }
+
     state.next_id += 1;
     let id = format!("{}@{}", short_id(&d.id), state.next_id);
 
@@ -2118,6 +2568,7 @@ fn drive_place(
         &d,
         at,
         state.brush_yaw,
+        (0, 0),
         project.map.origin,
         y,
     ) {
@@ -2158,12 +2609,15 @@ fn keys(
     // a missing `Res<T>` panics its system in Bevy 0.19 rather than skipping it.
     time: Res<Time>,
     mut repeat: ResMut<keys::Repeat>,
-    mut move_drag: ResMut<MoveDrag>,
+    // One tuple param, three tools: a Bevy system takes at most sixteen parameters, and this
+    // one is full — a tuple of params counts as one.
+    mut tools: (ResMut<MoveDrag>, ResMut<CloneDrag>, ResMut<TargetLock>),
     // The Tiles tab's state, written by exactly one action here — `EditTile`. See `send_to_tiles`.
     mut mode: ResMut<crate::tiles::Mode>,
     mut import: ResMut<crate::tiles::ImportState>,
 ) {
 
+    let (move_drag, clone_drag, target) = &mut tools;
     // One clock for every key that repeats while held — see `keys::repeating`.
     let dt = time.delta_secs();
 
@@ -2227,6 +2681,26 @@ fn keys(
             "move mode off".to_owned()
         };
         move_drag.held = None;
+        clone_drag.held = None;
+        return;
+    }
+
+    // **The clone tool.** The move key's shifted sibling: drag a box to take a copy of everything
+    // inside, click to stamp the set — as many times as it is held.
+    if keys::just_pressed(&keyboard, live.0, Action::CloneMode) {
+        state.tool = if state.tool == Tool::Clone {
+            Tool::Place
+        } else {
+            Tool::Clone
+        };
+        state.status = if state.tool == Tool::Clone {
+            "clone mode: drag a box to take a copy of what is inside, click to stamp it. Esc to stop."
+                .to_owned()
+        } else {
+            "clone mode off".to_owned()
+        };
+        move_drag.held = None;
+        clone_drag.held = None;
         return;
     }
 
@@ -2240,6 +2714,16 @@ fn keys(
         if move_drag.held.is_some() {
             move_drag.held = None;
             state.status = "put back".to_owned();
+            return;
+        }
+        if clone_drag.holding() {
+            clone_drag.held = None;
+            state.status = "set put away — the originals never moved".to_owned();
+            return;
+        }
+        if target.0.is_some() {
+            target.0 = None;
+            state.status = "target released".to_owned();
             return;
         }
         if state.tool != Tool::Place {
@@ -2296,7 +2780,57 @@ fn keys(
                 &mut project,
                 &mut state,
                 &placed,
+                target.as_mut(),
                 step,
+            );
+            return;
+        }
+    }
+
+    // **`H` targets the stack** — see `cycle_target`; the verbs below act on its pick.
+    if keys::just_pressed(&keyboard, live.0, Action::CycleTarget)
+        && !hovered_ui.iter().any(|h| h.0)
+    {
+        cycle_target(window, camera, &project, &mut state, target.as_mut());
+        return;
+    }
+
+    // **`Y` and `U` tip the piece under the cursor** — a quarter turn about X or Z per press.
+    // Deliberately `just_pressed` where the yaw keys repeat: each axis has four states, and a held
+    // key cycling them at repeat pace reads as flicker, not control.
+    for (action, about_x) in [(Action::TipX, true), (Action::TipZ, false)] {
+        if keys::just_pressed(&keyboard, live.0, action) && !hovered_ui.iter().any(|h| h.0) {
+            tip_under_cursor(
+                &mut commands,
+                &assets,
+                window,
+                camera,
+                &mut project,
+                &mut state,
+                &placed,
+                target.as_mut(),
+                about_x,
+            );
+            return;
+        }
+    }
+
+    // **The brackets lift** — one subgrid unit per press, held like the turn keys because a piece
+    // three metres up is a long tap-tap-tap otherwise.
+    for (action, sign) in [(Action::LiftUp, 1.0), (Action::LiftDown, -1.0)] {
+        if keys::repeating(&keyboard, live.0, action, &mut repeat, dt)
+            && !hovered_ui.iter().any(|h| h.0)
+        {
+            lift_under_cursor(
+                &mut commands,
+                &assets,
+                window,
+                camera,
+                &mut project,
+                &mut state,
+                &placed,
+                target.as_mut(),
+                sign,
             );
             return;
         }
@@ -2304,7 +2838,7 @@ fn keys(
 
     // **O pins or unpins the piece under the cursor.** A pin is what the solver routes around.
     if keys::just_pressed(&keyboard, live.0, Action::OwnToggle) && !hovered_ui.iter().any(|h| h.0) {
-        toggle_pin(window, camera, &mut project, &mut state);
+        toggle_pin(window, camera, &mut project, &mut state, target.as_mut());
         return;
     }
 
@@ -2511,14 +3045,14 @@ fn apply(
                         let Some(p) = project.map.placements.get(*i) else {
                             continue;
                         };
-                        let (id, at, yaw) = (p.id.clone(), p.at, p.yaw);
+                        let (id, at, yaw, tip) = (p.id.clone(), p.at, p.yaw, p.tip);
                         let (Some(d), Some(&y)) =
                             (project.library.get(&p.descriptor).cloned(), ys.get(*i))
                         else {
                             continue;
                         };
                         if let Some(e) =
-                            spawn_piece(commands, assets, &d, at, yaw, project.map.origin, y)
+                            spawn_piece(commands, assets, &d, at, yaw, tip, project.map.origin, y)
                         {
                             commands.entity(e).insert(Placement(id));
                         }
@@ -2557,14 +3091,14 @@ fn apply(
                         let Some(p) = project.map.placements.get(at) else {
                             continue;
                         };
-                        let (id, pat, pyaw) = (p.id.clone(), p.at, p.yaw);
+                        let (id, pat, pyaw, ptip) = (p.id.clone(), p.at, p.yaw, p.tip);
                         let (Some(d), Some(&y)) =
                             (project.library.get(&p.descriptor).cloned(), ys.get(at))
                         else {
                             continue;
                         };
                         if let Some(e) =
-                            spawn_piece(commands, assets, &d, pat, pyaw, project.map.origin, y)
+                            spawn_piece(commands, assets, &d, pat, pyaw, ptip, project.map.origin, y)
                         {
                             commands.entity(e).insert(Placement(id));
                         }
@@ -2607,7 +3141,7 @@ fn apply(
                 return None;
             };
             let was = std::mem::replace(&mut p.yaw, yaw);
-            let (id, at, descriptor) = (p.id.clone(), p.at, p.descriptor.clone());
+            let (id, at, tip, descriptor) = (p.id.clone(), p.at, p.tip, p.descriptor.clone());
             for (entity, marker) in placed {
                 if marker.0 == id {
                     commands.entity(entity).despawn();
@@ -2623,7 +3157,7 @@ fn apply(
                         (project.library.get(&descriptor).cloned(), ys.get(index))
                     {
                         if let Some(e) =
-                            spawn_piece(commands, assets, &d, at, yaw, project.map.origin, y)
+                            spawn_piece(commands, assets, &d, at, yaw, tip, project.map.origin, y)
                         {
                             commands.entity(e).insert(Placement(id.clone()));
                         }
@@ -2636,6 +3170,51 @@ fn apply(
                 }
             }
             Undo::Turned { index, yaw: was }
+        }
+        Undo::Lifted { index, lift } => {
+            let Some(p) = project.map.placements.get_mut(index) else {
+                return None;
+            };
+            let was = std::mem::replace(&mut p.lift, lift);
+            let id = p.id.clone();
+            // The whole ride: everything resting on this piece moved with the lift, so it all
+            // comes back down (or up) together.
+            let group = with_dependents(&project.map, index);
+            match redraw_placements(commands, assets, project, placed, &group) {
+                Ok(()) => {
+                    state.status = if lift == 0.0 {
+                        format!("{id} back on its datum")
+                    } else {
+                        format!("{id} back to {lift:+.2} m of lift")
+                    };
+                }
+                Err(e) => {
+                    state.status = format!("lifted {id} back but cannot draw it: {e}");
+                    error!("{e}");
+                }
+            }
+            Undo::Lifted { index, lift: was }
+        }
+        Undo::Tipped { index, tip } => {
+            let Some(p) = project.map.placements.get_mut(index) else {
+                return None;
+            };
+            let was = std::mem::replace(&mut p.tip, tip);
+            let id = p.id.clone();
+            match redraw_placements(commands, assets, project, placed, &[index]) {
+                Ok(()) => {
+                    state.status = if tip == (0, 0) {
+                        format!("{id} upright again")
+                    } else {
+                        format!("{id} back to {}/4 about X, {}/4 about Z", tip.0, tip.1)
+                    };
+                }
+                Err(e) => {
+                    state.status = format!("tipped {id} back but cannot draw it: {e}");
+                    error!("{e}");
+                }
+            }
+            Undo::Tipped { index, tip: was }
         }
         Undo::Group { ops } => {
             // Applied in order; the inverse is the sub-inverses REVERSED — the composition rule, and
@@ -2688,8 +3267,9 @@ fn toggle_pin(
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     project: &mut Project,
     state: &mut EditorState,
+    lock: &mut TargetLock,
 ) {
-    let Some(index) = nearest_placement(window, camera, project) else {
+    let Some(index) = under_cursor_target(lock, window, camera, project) else {
         state.status = "nothing here to pin".to_owned();
         return;
     };
@@ -2728,9 +3308,10 @@ fn turn_under_cursor(
     project: &mut Project,
     state: &mut EditorState,
     placed: &Query<(Entity, &Placement)>,
+    lock: &mut TargetLock,
     step: f32,
 ) {
-    let Some(index) = nearest_placement(window, camera, project) else {
+    let Some(index) = under_cursor_target(lock, window, camera, project) else {
         state.status = "nothing here to turn".to_owned();
         return;
     };
@@ -2740,7 +3321,7 @@ fn turn_under_cursor(
     // Recorded before it moves — the entry carries the angle to go back to.
     let was_yaw = p.yaw;
     p.yaw = (p.yaw + step).rem_euclid(360.0);
-    let (id, at, yaw, descriptor) = (p.id.clone(), p.at, p.yaw, p.descriptor.clone());
+    let (id, at, yaw, tip, descriptor) = (p.id.clone(), p.at, p.yaw, p.tip, p.descriptor.clone());
     project.dirty = true;
     state.record(Undo::Turned {
         index,
@@ -2756,7 +3337,7 @@ fn turn_under_cursor(
     match heights(project) {
         Ok(ys) => {
             if let (Some(d), Some(&y)) = (project.library.get(&descriptor).cloned(), ys.get(index)) {
-                if let Some(e) = spawn_piece(commands, assets, &d, at, yaw, project.map.origin, y) {
+                if let Some(e) = spawn_piece(commands, assets, &d, at, yaw, tip, project.map.origin, y) {
                     commands.entity(e).insert(Placement(id.clone()));
                 }
             }
@@ -2768,6 +3349,202 @@ fn turn_under_cursor(
         }
     }
     state.status = format!("{id} now at {yaw:.0} deg");
+}
+
+/// Despawn and redraw the placements at `indices` from the finished map — the shared tail of the
+/// lift and tip paths, where a change to one piece can move what rides on it. Heights are resolved
+/// once, over the whole map, for the reason `spawn_range` gives.
+fn redraw_placements(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    project: &Project,
+    placed: &Query<(Entity, &Placement)>,
+    indices: &[usize],
+) -> Result<(), String> {
+    let ids: Vec<String> = indices
+        .iter()
+        .filter_map(|i| project.map.placements.get(*i).map(|p| p.id.clone()))
+        .collect();
+    for (entity, marker) in placed {
+        if ids.iter().any(|id| id == &marker.0) {
+            commands.entity(entity).despawn();
+        }
+    }
+    let ys = heights(project)?;
+    for &i in indices {
+        let Some(p) = project.map.placements.get(i) else {
+            continue;
+        };
+        let (Some(d), Some(&y)) = (project.library.get(&p.descriptor), ys.get(i)) else {
+            continue;
+        };
+        if let Some(e) =
+            spawn_piece(commands, assets, d, p.at, p.yaw, p.tip, project.map.origin, y)
+        {
+            commands.entity(e).insert(Placement(p.id.clone()));
+        }
+    }
+    Ok(())
+}
+
+/// `root` and everything that (transitively) rests on it, as indices into the placement list —
+/// what a lift must redraw, because raising the table moves the lamp, and the candle on the lamp.
+fn with_dependents(map: &emerge_core::map::Map, root: usize) -> Vec<usize> {
+    let mut out = vec![root];
+    let mut ids: Vec<&str> = map
+        .placements
+        .get(root)
+        .map(|p| vec![p.id.as_str()])
+        .unwrap_or_default();
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for (i, p) in map.placements.iter().enumerate() {
+            if out.contains(&i) {
+                continue;
+            }
+            if p.on.as_deref().is_some_and(|on| ids.contains(&on)) {
+                out.push(i);
+                ids.push(p.id.as_str());
+                grew = true;
+            }
+        }
+    }
+    out
+}
+
+/// One subgrid unit of authored lift — the same subdivision the lattice uses, so "up one notch"
+/// means the same distance everywhere in the project.
+fn lift_step(project: &Project) -> f32 {
+    emerge_core::grid::SNAP / project.policy.divisions.max(1) as f32
+}
+
+/// **Raise or lower the placement under the cursor by one subgrid unit.**
+///
+/// This writes [`emerge_core::map::Placed::lift`] — the one deliberate amendment to "the height
+/// comes from the mount, never from the author". The datum still comes from `stack::resolve_y`,
+/// which is why everything resting on this piece is redrawn with it: the lamp follows the table.
+#[allow(clippy::too_many_arguments)]
+fn lift_under_cursor(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    project: &mut Project,
+    state: &mut EditorState,
+    placed: &Query<(Entity, &Placement)>,
+    lock: &mut TargetLock,
+    sign: f32,
+) {
+    let Some(index) = under_cursor_target(lock, window, camera, project) else {
+        state.status = "nothing here to lift".to_owned();
+        return;
+    };
+    let step = lift_step(project);
+    let Some(p) = project.map.placements.get_mut(index) else {
+        return;
+    };
+    let was = p.lift;
+    let mut want = p.lift + sign * step;
+    // Snap the float noise out of zero so a piece brought home is exactly home and the file drops
+    // the field — `Placed::lift` skips a zero on write.
+    if want.abs() < step * 1e-3 {
+        want = 0.0;
+    }
+    p.lift = want;
+    let id = p.id.clone();
+    project.dirty = true;
+    state.record(Undo::Lifted { index, lift: was });
+    let group = with_dependents(&project.map, index);
+    match redraw_placements(commands, assets, project, placed, &group) {
+        Ok(()) => {
+            state.status = if want == 0.0 {
+                format!("{id} back on its datum")
+            } else {
+                format!("{id} lifted {want:+.2} m")
+            };
+        }
+        Err(e) => {
+            state.status = format!("lifted {id} but cannot draw it: {e}");
+            error!("{e}");
+        }
+    }
+}
+
+/// **Tip the placement under the cursor a quarter turn** — about X on `Y`, about Z on `U`.
+///
+/// Set dressing, with two refusals that are the schema's own rather than this function's taste:
+/// a piece something rests on cannot tip (its guests' heights name a surface that would no longer
+/// exist — `stack::host_under` skips tipped hosts for the same reason), and an unmeasured piece
+/// cannot tip (`emerge_bevy::tip_seat` cannot seat bounds it does not know, so the mesh would sink
+/// through the floor).
+#[allow(clippy::too_many_arguments)]
+fn tip_under_cursor(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    project: &mut Project,
+    state: &mut EditorState,
+    placed: &Query<(Entity, &Placement)>,
+    lock: &mut TargetLock,
+    about_x: bool,
+) {
+    let Some(index) = under_cursor_target(lock, window, camera, project) else {
+        state.status = "nothing here to tip".to_owned();
+        return;
+    };
+    let Some(p) = project.map.placements.get(index) else {
+        return;
+    };
+    let resting = project
+        .map
+        .placements
+        .iter()
+        .filter(|q| q.on.as_deref() == Some(p.id.as_str()))
+        .count();
+    if resting > 0 {
+        state.status = format!(
+            "`{}` holds {resting} piece(s) up — a tipped surface holds nothing; move them first",
+            p.id
+        );
+        return;
+    }
+    let want = if about_x {
+        ((p.tip.0 + 1) % 4, p.tip.1)
+    } else {
+        (p.tip.0, (p.tip.1 + 1) % 4)
+    };
+    let Some(d) = project.library.get(&p.descriptor) else {
+        return;
+    };
+    if emerge_core::descriptor::tipped_extents(d, want).is_none() {
+        state.status = format!(
+            "`{}` is unmeasured — a tip cannot be seated. Measure it on the tiles tab first.",
+            p.id
+        );
+        return;
+    }
+    let Some(p) = project.map.placements.get_mut(index) else {
+        return;
+    };
+    let was = std::mem::replace(&mut p.tip, want);
+    let id = p.id.clone();
+    project.dirty = true;
+    state.record(Undo::Tipped { index, tip: was });
+    match redraw_placements(commands, assets, project, placed, &[index]) {
+        Ok(()) => {
+            state.status = if want == (0, 0) {
+                format!("{id} upright again")
+            } else {
+                format!("{id} tipped {}/4 about X, {}/4 about Z", want.0, want.1)
+            };
+        }
+        Err(e) => {
+            state.status = format!("tipped {id} but cannot draw it: {e}");
+            error!("{e}");
+        }
+    }
 }
 
 /// **A carried piece leaves its spot.**
@@ -2965,14 +3742,14 @@ fn drive_move(
                         let Some(p) = project.map.placements.get(*i) else {
                             continue;
                         };
-                        let (id, at, yaw) = (p.id.clone(), p.at, p.yaw);
+                        let (id, at, yaw, tip) = (p.id.clone(), p.at, p.yaw, p.tip);
                         let (Some(d), Some(&y)) =
                             (project.library.get(&p.descriptor).cloned(), ys.get(*i))
                         else {
                             continue;
                         };
                         if let Some(e) =
-                            spawn_piece(&mut commands, &assets, &d, at, yaw, project.map.origin, y)
+                            spawn_piece(&mut commands, &assets, &d, at, yaw, tip, project.map.origin, y)
                         {
                             commands.entity(e).insert(Placement(id));
                         }
@@ -3079,6 +3856,157 @@ fn nearest_placement(
     let hit = cursor_ground(&window, cam, cam_tf)?;
     // Both sides in map space: `at` is authored there and the cursor answers in world metres.
     pick_at(project, project.map.to_map_space((hit.x, hit.z)))
+}
+
+/// **The placement the piece-verbs act on** — the locked target while it holds, else the nearest
+/// pick. One resolver for every verb, so `H`'s lock cannot mean different pieces to `R` and `]`.
+///
+/// The lock holds while the cursor stays on the cell it was taken on and the piece still exists;
+/// otherwise it lapses silently and the nearest pick resumes — a lock that followed the cursor
+/// around the map would turn every later nudge into a surprise.
+fn under_cursor_target(
+    lock: &mut TargetLock,
+    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    project: &Project,
+) -> Option<usize> {
+    let (window, camera) = (window?, camera?);
+    let (cam, cam_tf) = *camera;
+    let hit = cursor_ground(&window, cam, cam_tf)?;
+    let at = project.map.to_map_space((hit.x, hit.z));
+    if let Some((id, cell)) = &lock.0 {
+        if (snap(at.0), snap(at.1)) == *cell {
+            if let Some(i) = project.map.placements.iter().position(|p| &p.id == id) {
+                return Some(i);
+            }
+        }
+        lock.0 = None;
+    }
+    pick_at(project, at)
+}
+
+/// **`H`: step the target through the stack under the cursor**, bottom to top, wrapping.
+///
+/// Everyone whose footprint covers the cursor point is in the stack, ordered by resolved height
+/// (ids break ties, so the cycle is stable across presses). The status names the pick and the
+/// count, because a lock nobody can see is a surprise wearing a feature's clothes.
+fn cycle_target(
+    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    project: &Project,
+    state: &mut EditorState,
+    lock: &mut TargetLock,
+) {
+    let (Some(window), Some(camera)) = (window, camera) else {
+        return;
+    };
+    let (cam, cam_tf) = *camera;
+    let Some(hit) = cursor_ground(&window, cam, cam_tf) else {
+        state.status = "nothing under the cursor to target".to_owned();
+        return;
+    };
+    let at = project.map.to_map_space((hit.x, hit.z));
+    let cell = (snap(at.0), snap(at.1));
+    let ys = heights(project).unwrap_or_default();
+    let mut stack: Vec<(usize, f32)> = project
+        .map
+        .placements
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            project
+                .library
+                .get(&p.descriptor)
+                .is_some_and(|d| emerge_core::stack::covers(d, p.at, p.yaw, at))
+        })
+        .map(|(i, _)| (i, ys.get(i).copied().unwrap_or(0.0)))
+        .collect();
+    if stack.is_empty() {
+        lock.0 = None;
+        state.status = "nothing here to target".to_owned();
+        return;
+    }
+    // SORT-OK: editor-side pick, total by unique placement id tiebreak.
+    stack.sort_by(|a, b| {
+        a.1.partial_cmp(&b.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| project.map.placements[a.0].id.cmp(&project.map.placements[b.0].id))
+    });
+    // A press over the held cell steps up the stack; a press anywhere fresh starts at the bottom.
+    let next = match &lock.0 {
+        Some((id, held_cell)) if *held_cell == cell => stack
+            .iter()
+            .position(|(i, _)| &project.map.placements[*i].id == id)
+            .map(|p| (p + 1) % stack.len())
+            .unwrap_or(0),
+        _ => 0,
+    };
+    let (index, _) = stack[next];
+    let id = project.map.placements[index].id.clone();
+    state.status = format!(
+        "targeting `{id}` ({} of {} here) — turn / tip / lift act on it, {} steps up, Esc releases",
+        next + 1,
+        stack.len(),
+        keys::binding(Action::CycleTarget).chord,
+    );
+    lock.0 = Some((id, cell));
+}
+
+/// The gold quad under the locked target — and the lock's undertaker: a target that stopped
+/// resolving (deleted, undone) releases here rather than pointing at whatever inherits its name.
+fn drive_target_marker(
+    project: Res<Project>,
+    mut lock: ResMut<TargetLock>,
+    mut marker: Query<(&mut Transform, &mut Visibility), With<TargetTile>>,
+) {
+    let footprint = lock.0.as_ref().and_then(|(id, _)| {
+        let p = project.map.placements.iter().find(|p| &p.id == id)?;
+        let d = project.library.get(&p.descriptor)?;
+        let (w, depth) = crate::fill::cell_extents(d, p.yaw);
+        Some((p.at, w, depth))
+    });
+    if lock.0.is_some() && footprint.is_none() {
+        lock.0 = None;
+    }
+    for (mut tf, mut vis) in &mut marker {
+        match footprint {
+            Some((at, w, depth)) => {
+                *vis = Visibility::Visible;
+                *tf = Transform::from_xyz(
+                    project.map.origin.0 + at.0,
+                    project.map.origin.1 + MARKER_LIFT * 2.0,
+                    project.map.origin.2 + at.1,
+                )
+                .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
+                .with_scale(Vec3::new(w.max(0.05), depth.max(0.05), 1.0));
+            }
+            None => {
+                if *vis != Visibility::Hidden {
+                    *vis = Visibility::Hidden;
+                }
+            }
+        }
+    }
+}
+
+/// The target marker quad — [`spawn_removal_tile`]'s recipe in the lock's gold.
+fn spawn_target_tile(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.spawn((
+        TargetTile,
+        Mesh3d(meshes.add(Rectangle::new(1.0, 1.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: TARGET_TINT,
+            unlit: true,
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        })),
+        Transform::default(),
+        Visibility::Hidden,
+    ));
 }
 
 /// Type the reason a cell is pinned.
@@ -3361,6 +4289,9 @@ fn drive_ghost(
     // silently re-aiming it would be a second edit the author did not ask for.
     let subject = match state.tool {
         Tool::Remove => None,
+        // The clone tool draws its own marker — the set's bounds riding the cursor — and a brush
+        // ghost beside it would be a second preview for a click that stamps, not places.
+        Tool::Clone => None,
         Tool::Move => held
             .held
             .as_ref()
@@ -3466,6 +4397,7 @@ fn drive_ghost(
                 d,
                 at,
                 want_yaw,
+                (0, 0),
                 project.map.origin,
                 y,
             ) {
