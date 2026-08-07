@@ -4,7 +4,7 @@
 members = [
     "crates/emerge-core", "crates/emerge-anim", "crates/emerge-bevy", "crates/emerge-mapper",
     "crates/fvs",
-    "crates/bevy_orca", "crates/map_elites",
+    "crates/bevy_orca", "crates/map_elites", "crates/bevy_devshot",
 ]
 # Stated rather than inherited. The root package is edition 2024, so "3" is already what Cargo picks —
 # writing it down means a future edition bump cannot move the resolver as a side effect, and it says
@@ -70,6 +70,9 @@ bevy_orca = { path = "crates/bevy_orca" }
 # no evaluator — every loop takes the mutation and the evaluation as closures — which is exactly what
 # lets it leave the game. Re-exported at the old `squad_ai::{qd, map_elites, cmaes, poet, …}` paths.
 map_elites = { path = "crates/map_elites" }
+# The sentinel-file screenshot tool. Its own crate so the editor stops carrying a byte-for-byte copy
+# of the same capture rig — one screenshot path, in one place.
+bevy_devshot = { path = "crates/bevy_devshot" }
 avian3d = "0.7.0"
 # `jpeg`: the SCP_Characters glTFs (e.g. VALKYRIE, the squad body) embed their PBR textures as JPEG to
 # keep the .glb small; Bevy's default image features cover PNG but NOT JPEG, so without this the whole

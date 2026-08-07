@@ -1,0 +1,20 @@
+[package]
+name = "bevy_devshot"
+version = "0.1.0"
+edition = "2024"
+description = "A frame on demand: touch a sentinel file and the next frame writes a PNG, straight from the GPU."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Ladvien/bevy_devshot"
+keywords = ["bevy", "gamedev", "screenshot", "devtools", "testing"]
+categories = ["game-development", "development-tools"]
+publish = false
+
+# The four features this actually needs, not `default`. `bevy_render` carries
+# `view::window::screenshot`; `bevy_window` is what `Screenshot::primary_window()` names; `bevy_log` is
+# the `info!`; and **`png` is load-bearing at RUNTIME, not compile time** — `save_to_disk` picks its
+# encoder from the file extension via the `image` crate, so without it the capture fails with an
+# unsupported-format error at the moment you wanted the screenshot, having compiled perfectly.
+[dependencies]
+bevy = { version = "0.19.0", default-features = false, features = [
+    "bevy_render", "bevy_window", "bevy_log", "png",
+] }

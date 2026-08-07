@@ -53,7 +53,9 @@ pub fn add_editor_plugins(app: &mut App) -> &mut App {
         crate::anim_tab::AnimTabPlugin,
         crate::label_booth::LabelBoothPlugin,
         crate::labels::LabelsPlugin,
-        crate::devshot::DevShotPlugin,
+        // Two plugins, two jobs: the capture rig is the shared crate, the verbs are ours.
+        bevy_devshot::DevShotPlugin,
+        crate::devshot::DrivePlugin,
     ))
 }
 

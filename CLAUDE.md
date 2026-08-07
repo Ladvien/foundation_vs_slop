@@ -106,7 +106,7 @@ A determinism probe on an idle box proves nothing: run it under load.
 ## Screenshots
 
 To capture a frame from the running game, use the **`screenshots` skill** — the game screenshots
-itself from inside the render pipeline (`src/devshot.rs`); never reach for the macOS `screencapture`
-tool.
+itself from inside the render pipeline (`crates/bevy_devshot`, re-exported at `crate::devshot`; the
+editor registers the same crate); never reach for the macOS `screencapture` tool.
 
 - **Player region captures live in `debug_screenshots/`.** When the player runs the game and presses **Ctrl+P**, they drag a box and release to save *just that region* to `debug_screenshots/region_<timestamp>.png` — a deliberate "look here" pointer at whatever they're asking about. If the player references something visual, **check `debug_screenshots/` (newest first) and read `debug_screenshots/CLAUDE.md`.** Produced by `src/region_capture.rs` (dev-only, stripped from release).

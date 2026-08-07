@@ -42,8 +42,14 @@ pub mod camera;
 pub mod config;
 pub mod containment;
 pub mod crab;
+/// Dev-only in-process screenshot tool, moved to `crates/bevy_devshot`. The re-export keeps the
+/// `#[cfg(debug_assertions)]` gate exactly where it was, so `devshot::DevShotPlugin` does not exist in
+/// a release build and the registration at the bottom of `run` cannot compile there. The crate is
+/// still *built* in release — a path dependency is unconditional — but it is 32 lines nothing
+/// references, dropped at link. That is the honest description; the gate is about this crate's view
+/// of the module, not about the code's existence.
 #[cfg(debug_assertions)]
-pub mod devshot;
+pub use bevy_devshot as devshot;
 /// Dev-only visual-debug region capture: Ctrl+P → drag a screenspace rectangle → save just that region
 /// to `debug_screenshots/` with a snap sound, so a later session can see what the player pointed at.
 /// Debug-only, stripped from release like `devshot`.

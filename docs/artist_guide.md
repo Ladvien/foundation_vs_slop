@@ -702,7 +702,7 @@ If you change something that could shift the deterministic core, run
    GPU**.
 4. **Visual check** — `touch screenshot.request` from the project root, wait
    ~1.5 s, then read `screenshot.png` (the game screenshots itself from the
-   render pipeline via `src/devshot.rs`).
+   render pipeline via `crates/bevy_devshot`).
 5. **Region capture** — Ctrl+P in-game, drag a box, release. Saves to
    `debug_screenshots/region_<timestamp>.png` for a deliberate "look here"
    pointer.

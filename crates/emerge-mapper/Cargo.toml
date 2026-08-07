@@ -3,6 +3,11 @@ name = "emerge-mapper"
 version = "0.1.0"
 edition = "2024"
 description = "A standalone world-building editor: author maps from an asset library, save what a game can load."
+# GPL-3.0, same as the game this was carved out of — these are mirrors of the parent repo's history,
+# not independently-licensed libraries. (The crates extracted as general-purpose libraries —
+# bevy_orca, map_elites, bevy_devshot — are MIT OR Apache-2.0 instead, so they can be adopted.)
+license = "GPL-3.0-only"
+repository = "https://github.com/Ladvien/emerge-mapper"
 
 # **This is the application; `emerge-core` is the part with no engine in it.** The split is not
 # decoration — `crates/emerge-core/tests/engine_free.rs` fails the build if anything in the core
@@ -26,6 +31,8 @@ emerge-anim = { path = "../emerge-anim" }
 # `bevy_dev_tools-0.19.0/src/infinite_grid.rs`, reached as `bevy::dev_tools::infinite_grid`.
 # `jpeg` because the shipped kits embed PBR textures as JPEG and Bevy's defaults cover only PNG.
 bevy = { workspace = true, features = ["jpeg", "bevy_dev_tools"] }
+# The screenshot rig, shared with the game so there is one capture path rather than two copies of it.
+bevy_devshot = { path = "../bevy_devshot" }
 ron.workspace = true
 serde.workspace = true
 # The VLM labeler's transport (`vlm.rs`): one blocking OpenAI-style POST, made from a task-pool

@@ -785,6 +785,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_devshot"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+]
+
+[[package]]
 name = "bevy_diagnostic"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2748,6 +2755,7 @@ dependencies = [
  "arboard",
  "base64",
  "bevy",
+ "bevy_devshot",
  "emerge-anim",
  "emerge-bevy",
  "emerge-core",
@@ -2988,6 +2996,7 @@ dependencies = [
  "ab_glyph",
  "avian3d",
  "bevy",
+ "bevy_devshot",
  "bevy_orca",
  "bincode",
  "clap",
