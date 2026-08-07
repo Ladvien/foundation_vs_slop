@@ -130,7 +130,7 @@ where
     if cfg.reproduce_every == 0 || cfg.transfer_every == 0 {
         return Err("poet: reproduce_every and transfer_every must be > 0".to_string());
     }
-    let mut rng = crate::rng::seeded(cfg.seed);
+    let mut rng = emerge_core::rng::seeded(cfg.seed);
 
     // Seed niche — the authored environment paired with the authored agent. It must clear the MCC, else the
     // whole run has no valid starting pairing (loud failure, no degraded start).
@@ -293,8 +293,8 @@ mod tests {
             &cfg,
             0.0f32, // seed difficulty
             0.0f32, // seed skill
-            |&d, rng| Ok(d + (super::super::genome::gaussian(rng)).abs() * 0.5), // harder-only env mutation
-            |&s, rng| Ok(s + super::super::genome::gaussian(rng) * 0.3),          // agent skill drift
+            |&d, rng| Ok(d + (crate::gaussian(rng)).abs() * 0.5), // harder-only env mutation
+            |&s, rng| Ok(s + crate::gaussian(rng) * 0.3),          // agent skill drift
             |&d, &s| eval(d, s),
             |_it, _r| {},
         )

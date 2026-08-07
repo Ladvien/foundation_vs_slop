@@ -188,14 +188,10 @@ pub fn decode(template: &[Behavior], genome: &Genome) -> Result<Vec<Behavior>, S
     Ok(out)
 }
 
-/// A standard normal draw (Box–Muller). `unit()` yields `[0, 1)`, so `1.0 - unit()` moves it to `(0, 1]`
-/// and keeps `ln` finite. `pub(crate)` so `squad_ai::world_genome` shares the one Gaussian kernel.
-pub(crate) fn gaussian(rng: &mut ChaCha8Rng) -> f32 {
-    let u1 = 1.0 - rng.unit();
-    let u2 = rng.unit();
-    let r = (-2.0 * u1.ln()).sqrt();
-    (r * (std::f64::consts::TAU * u2).cos()) as f32
-}
+/// A standard normal draw (Box–Muller), now in `map_elites` beside the CMA-ES that shares its draw
+/// order. Re-exported at its old path so `genome::gaussian` still resolves for `world_genome`,
+/// `audio_genome`, `level_genome`, `policy_genome` and `flat_mutate` below.
+pub(crate) use ::map_elites::gaussian;
 
 // ── Shared scaffolding for the flat-vector *config* genomes (`world_genome`, `audio_genome`) ──
 //

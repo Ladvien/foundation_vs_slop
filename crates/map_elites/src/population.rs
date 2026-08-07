@@ -1,7 +1,11 @@
 //! The `Population<G>` container: the elite archive plus the sampling the emitters draw from.
-//! Split out of the former single-file `coevolve.rs`; a pure move (FVS-N-3).
+//! Split out of the former single-file `coevolve.rs` (a pure move, FVS-N-3), then out of the game
+//! crate entirely — the container is the archive plus a genome store, and neither is about a game.
 
-use super::*;
+use emerge_core::rng::DetRng;
+use rand_chacha::ChaCha8Rng;
+
+use crate::qd::{BehaviorDescriptor, MapElitesArchive};
 
 // ── Populations ──────────────────────────────────────────────────────────────────────────────────
 

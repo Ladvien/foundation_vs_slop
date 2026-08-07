@@ -20,8 +20,8 @@
 //! minimal criterion** (`surprise::minimal_criterion`): the caller gates on admission, this module measures
 //! variety over the admitted set. See [`replayability_gated`].
 
-use super::experience::Experience;
-use super::interest::Interest;
+use crate::experience::Experience;
+use crate::interest::Interest;
 
 /// Number of axes in a [`RunSignature`] — the three `interest` proxies plus the three `experience` proxies.
 pub const SIGNATURE_AXES: usize = 6;

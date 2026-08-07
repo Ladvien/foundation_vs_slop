@@ -2997,6 +2997,7 @@ dependencies = [
  "image",
  "indicatif",
  "libc",
+ "map_elites",
  "rand",
  "rand_chacha",
  "rayon",
@@ -3954,6 +3955,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a1b95cd5421ec55b445b5ae102f5ea0e768de1f82bd3001e11f426c269c3aea"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "map_elites"
+version = "0.1.0"
+dependencies = [
+ "emerge-core",
+ "rand_chacha",
+ "serde",
 ]
 
 [[package]]

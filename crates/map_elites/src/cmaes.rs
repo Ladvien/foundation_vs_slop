@@ -14,7 +14,7 @@
 //! what makes it a clean pure-Rust fit. It gives up modelling coordinate *correlations* but keeps the two
 //! things that matter here: per-coordinate scaling and cumulative step-size control (CSA).
 //!
-//! Determinism: every random draw goes through the seeded [`ChaCha8Rng`] (via `genome::gaussian`), never
+//! Determinism: every random draw goes through the seeded [`ChaCha8Rng`] (via [`crate::gaussian`]), never
 //! entropy — the search stays bit-reproducible from its seed, exactly like the isotropic path.
 //!
 //! Reference equations follow Hansen, "The CMA Evolution Strategy: A Tutorial" (2016), with the sep-CMA
@@ -22,7 +22,7 @@
 
 use rand_chacha::ChaCha8Rng;
 
-use super::genome::gaussian;
+use crate::gaussian;
 
 /// One drawn candidate's bookkeeping, returned by [`SepCmaEs::ask`] and handed back in [`SepCmaEs::tell`].
 /// Carries the standard-normal draw `z` and the scaled step `y = sqrt(C) .* z`, both needed for the update.
@@ -219,7 +219,7 @@ impl SepCmaEs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rng::seeded;
+    use emerge_core::rng::seeded;
 
     /// Sphere objective centred at `target`, as a maximiser: `-||x - target||²`.
     fn neg_sphere(x: &[f32], target: &[f32]) -> f32 {

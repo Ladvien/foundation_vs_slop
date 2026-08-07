@@ -1,0 +1,24 @@
+[package]
+name = "map_elites"
+version = "0.1.0"
+edition = "2024"
+description = "Quality-Diversity kernel: a MAP-Elites archive, isotropic / CMA-ME / CMA-MAE emitter loops, separable CMA-ES, and a POET outer loop — engine-free and bit-reproducible from one u64."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Ladvien/map_elites"
+keywords = ["quality-diversity", "map-elites", "cma-es", "poet", "optimization"]
+categories = ["algorithms", "science", "simulation"]
+publish = false
+
+# **No engine, and `tests/engine_free.rs` fails the build if that stops being true** — the same ratchet
+# `emerge-core` carries, for the same reason: an offline search runs in a worker subprocess with its
+# thread pools pinned, and a search that needed a renderer could not be fanned out across processes.
+[dependencies]
+serde.workspace = true
+rand_chacha.workspace = true
+# **The one RNG in the workspace, and the reason this crate is not a dependency leaf.**
+# `Population::sample_parent` draws `below(n)` and `gaussian` draws `unit()` — both `DetRng`, the trait
+# `tests/rng_guard.rs` freezes bit-for-bit. A local copy of those two methods would be a SECOND
+# definition of the generator every reproducibility claim in this repo rests on, and the whole value of
+# this crate is that a run replays exactly from its seed. `emerge-core` is itself engine-free, so
+# depending on it costs this crate nothing it was trying to avoid.
+emerge-core = { path = "../emerge-core" }

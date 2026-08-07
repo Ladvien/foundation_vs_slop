@@ -10,8 +10,8 @@
 
 use rand_chacha::ChaCha8Rng;
 
-use super::coevolve::Population;
-use super::qd::BehaviorDescriptor;
+use crate::population::Population;
+use crate::qd::BehaviorDescriptor;
 
 /// The outcome of a single-population MAP-Elites search: the illuminated archive plus reject tallies.
 /// The per-search result aliases (`LevelSearchResult`, `AudioSearchResult`) are this struct at their
@@ -35,7 +35,7 @@ pub struct MapElitesResult<G> {
 /// `Err(seed_criterion_err)`. `report(generation, &result)` fires after every generation. Behaviour is
 /// identical to the two hand-written loops it replaces: same RNG draw order, same seed → mutate →
 /// feasibility-reject → evaluate → insert sequence, same tally bookkeeping.
-pub(crate) fn map_elites_loop<G, FM, FF, FE, FR>(
+pub fn map_elites_loop<G, FM, FF, FE, FR>(
     rng: &mut ChaCha8Rng,
     result: &mut MapElitesResult<G>,
     authored_g: &G,
@@ -66,7 +66,7 @@ where
 
     // Convergence early-stop on QD-score plateau (Mouret & Clune 2015 archive-property termination). A no-op
     // when `patience == 0`. Deterministic: stopping the outer loop leaves the gen-K archive byte-identical.
-    let mut plateau = super::qd::PlateauStop::new(patience);
+    let mut plateau = crate::qd::PlateauStop::new(patience);
     for generation in 0..generations {
         for _ in 0..batch {
             let parent = result
@@ -104,7 +104,7 @@ const IMPROVE_SEP: f32 = 1.0e6;
 
 /// A **CMA-ME** improvement-emitter MAP-Elites loop (Fontaine et al. 2020, "Covariance Matrix Adaptation for
 /// the Rapid Illumination of Behavior Space"). Instead of sampling an archive parent and applying an
-/// isotropic kick ([`map_elites_loop`]), a [`super::cmaes::SepCmaEs`] emitter proposes each batch, is told an
+/// isotropic kick ([`map_elites_loop`]), a [`crate::cmaes::SepCmaEs`] emitter proposes each batch, is told an
 /// *improvement* ranking — a candidate that adds a new cell ranks above one that only improved a cell, above
 /// the rest — and adapts its distribution toward regions that illuminate the archive. On stagnation (a
 /// generation adds nothing new, or the step size collapses) the emitter restarts from a random elite, so the
@@ -114,7 +114,7 @@ const IMPROVE_SEP: f32 = 1.0e6;
 /// box), so it reuses the same feasibility + evaluate closures as [`map_elites_loop`]. Every search leaves it
 /// **default-off**, so the committed archives (built with the isotropic path) stay bit-reproducible.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn map_elites_cma_loop<G, FF, FE, TV, FV, FR>(
+pub fn map_elites_cma_loop<G, FF, FE, TV, FV, FR>(
     rng: &mut ChaCha8Rng,
     result: &mut MapElitesResult<G>,
     authored_g: &G,
@@ -146,12 +146,12 @@ where
         None => return Err(seed_criterion_err.to_string()),
     }
 
-    let mut emitter = super::cmaes::SepCmaEs::new(to_vec(authored_g), sigma, batch as usize);
+    let mut emitter = crate::cmaes::SepCmaEs::new(to_vec(authored_g), sigma, batch as usize);
 
     // QD-score plateau early-stop (no-op when `patience == 0`), independent of the emitter's own restart rule.
-    let mut plateau = super::qd::PlateauStop::new(patience);
+    let mut plateau = crate::qd::PlateauStop::new(patience);
     for generation in 0..generations {
-        let mut told: Vec<(super::cmaes::Sample, f32)> = Vec::new();
+        let mut told: Vec<(crate::cmaes::Sample, f32)> = Vec::new();
         let mut added_new = false;
         for _ in 0..emitter.lambda() {
             let sample = emitter.ask(rng);
@@ -187,7 +187,7 @@ where
         if !added_new || emitter.sigma() < 1e-4 {
             let restart_from =
                 result.pop.sample_parent(rng).cloned().unwrap_or_else(|| authored_g.clone());
-            emitter = super::cmaes::SepCmaEs::new(to_vec(&restart_from), sigma, batch as usize);
+            emitter = crate::cmaes::SepCmaEs::new(to_vec(&restart_from), sigma, batch as usize);
         }
 
         report(generation, result);
@@ -210,12 +210,12 @@ where
 /// The output archive (`result.pop`) still keeps the best genome per cell for the readable elite handoff;
 /// the thresholds are a *separate* side-structure driving only the emitter's ranking. Additive and
 /// default-off, so the committed archives (isotropic / CMA-ME) stay bit-reproducible.
-// Staged CMA-MAE (Fontaine & Nikolaidis 2023) emitter — implemented and unit-tested, but not yet wired
-// into `rl_search`'s emitter selection (that still picks isotropic vs CMA-ME on `--cma`). Kept ready for
-// the next increment; allow dead_code until it's selected.
-#[allow(dead_code)]
+// Staged CMA-MAE (Fontaine & Nikolaidis 2023) emitter — implemented and unit-tested. The parent repo's
+// `rl_search` does not select it yet (it still picks isotropic vs CMA-ME on `--cma`), but that is a
+// statement about one caller, not about this function: as a published entry point it is no more dead
+// than the other two loops beside it.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn map_elites_cma_mae_loop<G, FF, FE, TV, FV, FR>(
+pub fn map_elites_cma_mae_loop<G, FF, FE, TV, FV, FR>(
     rng: &mut ChaCha8Rng,
     result: &mut MapElitesResult<G>,
     authored_g: &G,
@@ -256,12 +256,12 @@ where
         None => return Err(seed_criterion_err.to_string()),
     }
 
-    let mut emitter = super::cmaes::SepCmaEs::new(to_vec(authored_g), sigma, batch as usize);
+    let mut emitter = crate::cmaes::SepCmaEs::new(to_vec(authored_g), sigma, batch as usize);
 
     // QD-score plateau early-stop (no-op when `patience == 0`), independent of the emitter's own restart rule.
-    let mut plateau = super::qd::PlateauStop::new(patience);
+    let mut plateau = crate::qd::PlateauStop::new(patience);
     for generation in 0..generations {
-        let mut told: Vec<(super::cmaes::Sample, f32)> = Vec::new();
+        let mut told: Vec<(crate::cmaes::Sample, f32)> = Vec::new();
         let mut any_improved = false;
         for _ in 0..emitter.lambda() {
             let sample = emitter.ask(rng);
@@ -297,7 +297,7 @@ where
         if !any_improved || emitter.sigma() < 1e-4 {
             let restart_from =
                 result.pop.sample_parent(rng).cloned().unwrap_or_else(|| authored_g.clone());
-            emitter = super::cmaes::SepCmaEs::new(to_vec(&restart_from), sigma, batch as usize);
+            emitter = crate::cmaes::SepCmaEs::new(to_vec(&restart_from), sigma, batch as usize);
         }
 
         report(generation, result);
@@ -311,7 +311,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rng::seeded;
+    use emerge_core::rng::seeded;
 
     /// Squash a real to `[0,1]` for a synthetic descriptor axis.
     fn unit(x: f32) -> f32 {

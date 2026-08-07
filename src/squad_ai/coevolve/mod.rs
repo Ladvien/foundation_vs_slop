@@ -289,12 +289,15 @@ fn propose_swarm(
 // the old single-file `coevolve` module still resolves.
 mod artifacts;
 mod descriptors;
-mod population;
 mod search;
 #[cfg(test)]
 mod tests;
 
 pub use artifacts::*;
 pub use descriptors::*;
-pub use population::*;
 pub use search::*;
+// `Population` moved to `crates/map_elites` with the archive it wraps. Re-exported HERE, inside the
+// still-gated `coevolve`, so `squad_ai::coevolve::Population` resolves exactly where and when it did —
+// including from `tests/search_parallel.rs`. The sibling modules pick it up through their `use super::*`
+// exactly as they did through the old `pub use population::*`.
+pub use ::map_elites::population::Population;

@@ -24,14 +24,25 @@ pub mod dialogue;
 pub mod coevolve;
 #[cfg(feature = "test-harness")]
 pub mod evaluate;
+// ── The engine-free QD kernel, re-exported at the paths it had before the extraction ─────────────
+//
+// The archive, the emitter loops, sep-CMA-ES, POET and the belief-series proxies moved to
+// `crates/map_elites` so a search can run without the game — the same argument `emerge-core` makes for
+// the placement stack. Every path that resolved before still resolves: `squad_ai::qd::PlateauStop`,
+// `super::map_elites::map_elites_loop`, `squad_ai::interest::Interest`, and the rest.
+//
+// **The gating changed and that is free.** `map_elites`/`cmaes`/`poet` used to be
+// `#[cfg(feature = "test-harness")]` and are now unconditional, because a path dependency is. Every
+// item in them is a GENERIC function or a struct nobody instantiates outside the gated searches, so a
+// default build monomorphises none of it. The gate was never about binary size — it was about
+// `coevolve::Population` being harness-only, and `coevolve` itself is still gated below.
+//
+// **Write `::map_elites::` (leading colons) for the CRATE anywhere inside `squad_ai`**: the aliasing
+// re-export two lines down shadows the extern-prelude name within this module.
 /// The shared single-population MAP-Elites loop that both `level_search` and `audio_search` drive.
-/// Gated because it reuses `coevolve::Population`.
-#[cfg(feature = "test-harness")]
-pub mod map_elites;
+pub use ::map_elites::loops as map_elites;
 /// Separable CMA-ES — the adaptive emitter behind the CMA-ME upgrade to `map_elites` (`map_elites_cma_loop`).
-/// Pure numeric logic, but search-only, so gated with the rest of the search machinery.
-#[cfg(feature = "test-harness")]
-pub mod cmaes;
+pub use ::map_elites::cmaes;
 /// The standalone level-generation MAP-Elites search + readable `elites_levels.ron` handoff. Gated
 /// because it reuses `coevolve::Population`; the genome/quality/eval it drives are all ungated.
 #[cfg(feature = "test-harness")]
@@ -54,24 +65,24 @@ pub mod level_eval;
 /// Human-interest proxies (suspense / outcome surprise / effectance) computed from a per-checkpoint squad
 /// survival-belief series — the psychology-grounded companion to `surprise`'s information-theoretic `W·S·L`.
 /// Pure logic; the harness (`evaluate`) samples the belief series, this reduces it.
-pub mod interest;
+pub use ::map_elites::interest;
 /// Tone / experience-shape proxies (dread / loneliness-liminality / pacing-arc) computed from the same
 /// per-checkpoint survival-belief series as `interest` — the SCP × Backrooms companion to `surprise`'s
 /// `W·S·L` and `interest`'s outcome swings. Pure logic; the harness (`evaluate`) samples the belief, this
 /// reduces it. Weighting into the objective is fit by the Phase-5 audition gate, not baked in here.
-pub mod experience;
+pub use ::map_elites::experience;
 /// Replayability / expressive-range: the *spread* of a candidate's run signatures across dungeon seeds — a
 /// property of a SET of episodes, unlike the single-episode `surprise`/`interest`/`experience` proxies. Pure
 /// logic; the caller runs the seeds and gates on the minimal criterion, this measures the variety.
-pub mod replayability;
+pub use ::map_elites::replayability;
 /// Fairness / exploitability: is the config beatable by a single dominant tactic (`competence ×
 /// strategy-concentration`), or does surviving it demand varied play? Computed from a Phase-4 *playtester*'s
 /// achieved play, not a belief series. Pure logic; `rl_eval::evaluate_playtester` supplies the inputs.
-pub mod fairness;
+pub use ::map_elites::fairness;
 pub mod perception;
 pub mod persona;
 pub mod policy;
-pub mod qd;
+pub use ::map_elites::qd;
 pub mod rl;
 pub mod role;
 pub mod surprise;
@@ -121,9 +132,8 @@ pub mod rl_eval;
 pub mod rl_search;
 /// POET — the open-ended outer loop that co-generates environments (world genome) and the agents that solve
 /// them (squad genome), with a learning-progress curriculum and cross-niche transfer. Generic core (unit-
-/// tested on a synthetic problem); the `train poet` driver instantiates it against a real rollout. Gated.
-#[cfg(feature = "test-harness")]
-pub mod poet;
+/// tested on a synthetic problem); the `train poet` driver instantiates it against a real rollout.
+pub use ::map_elites::poet;
 
 use cohesion::{SquadAnchor, SquadControlMode};
 use dialogue::{ActiveDialogueProvider, SquadLine, SquadUtterance};
