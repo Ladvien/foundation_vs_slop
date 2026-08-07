@@ -156,4 +156,40 @@ mod required_rigs {
             super::required().len()
         );
     }
+
+    /// **The valkyrie's declared `drive_speed` is the shipped config's realized range** — the
+    /// agreement test that makes the manifest's copy of the number safe to exist (the
+    /// `behavior_default_equals_shipped_config` pattern). The editor's skate check reads
+    /// `drive_speed` because it cannot reach this crate's movement config (dependency cycle); this
+    /// test is what keeps the two from drifting: retune `unit_speed` or `min_encumber` and CI
+    /// points here until `rigs.ron` follows.
+    ///
+    /// The QD genome's search bounds (2.0, 12.0) are deliberately NOT covered: the search explores
+    /// counterfactual configs, and a gene that actually ships lands in `config.ron` — at which
+    /// point this test forces the manifest to follow.
+    #[test]
+    fn the_valkyrie_drive_speed_is_the_shipped_configs_realized_range() {
+        let rigs = super::load().unwrap_or_else(|e| panic!("{e}"));
+        let valkyrie = rigs.get("valkyrie").unwrap_or_else(|| panic!("no valkyrie rig"));
+        let Some((lo, hi)) = valkyrie.drive_speed else {
+            panic!("the valkyrie declares no drive_speed; the skate check has nothing to sweep");
+        };
+        let cfg = crate::config::load_game_config().unwrap_or_else(|e| panic!("{e}"));
+        let unit_speed = cfg.behavior.squad_move.unit_speed;
+        // The slowest a member moves: fully crab-encumbered, floored at `min_encumber` of full
+        // speed (src/squad.rs's per-tick cap).
+        let realized_lo = unit_speed * cfg.behavior.squad_move.min_encumber;
+        // f32 arithmetic (6.0 × 0.15) does not land exactly on the hand-written 0.9.
+        assert!(
+            (lo - realized_lo).abs() < 1.0e-3 && (hi - unit_speed).abs() < 1.0e-3,
+            "rigs.ron valkyrie drive_speed ({lo}, {hi}) drifted from the shipped config's \
+             realized range ({realized_lo}, {unit_speed})"
+        );
+        let avatar = crate::site::visuals::AVATAR_SPEED;
+        assert!(
+            (lo..=hi).contains(&avatar),
+            "the hub avatar drives the valkyrie rig at {avatar} u/s, outside the declared \
+             drive_speed ({lo}, {hi})"
+        );
+    }
 }

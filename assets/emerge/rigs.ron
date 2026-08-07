@@ -15,17 +15,27 @@
 // One copy, here — the spawners read it from this file (v2 made it required; the five per-module
 // literals it replaced are gone).
 //
-// Other per-rig fields: `root_node:`/`contact_joints:` name the measurement anchors when an
-// exporter does not use the conventional `Root`/`foot_l`; `provenance:` is the bench's adopt stamp
-// (file hash, clip list, date) and is TOOL-OWNED — never hand-edit it. Per-slot: `keep: Some("why")`
-// makes adopt leave that slot's numbers alone, `tolerance: Some(f)` pins its own drift margin.
+// Other per-rig fields: `drive_speed: (min, max)` is the world-speed range the game drives a gaited
+// rig at (v3) — the skate check compares it against each gait's authored speed, and a game-side test
+// (`src/rigs.rs`) pins it to the shipped movement config; `root_node:`/`contact_joints:` name the
+// measurement anchors when an exporter does not use the conventional `Root`/`foot_l`; `provenance:`
+// is the bench's adopt stamp (file hash, clip list, date) and is TOOL-OWNED — never hand-edit it.
+// Per-slot: `keep: Some("why")` makes adopt leave that slot's numbers alone, `tolerance: Some(f)`
+// pins its own drift margin.
 (
-    version: 2,
+    version: 3,
     note: Some("Measured with emerge_core::clips. See docs/artist_guide.md §4 for the authoring contract."),
     rigs: {
         "valkyrie": (
             mesh: "characters/valkyrie.glb",
             scale: 1.13,
+            // Squad realized range: unit_speed 6.0 × the min_encumber 0.15 floor (config.ron,
+            // squad_move); the hub avatar's 3.2 walks inside it. Pinned by src/rigs.rs.
+            drive_speed: Some((0.9, 6.0)),
+            // Hand-validated against docs/artist_guide.md §4's table. The derived (log-Otsu)
+            // thresholds reproduce five of the six gaits, but run_back's transition-heavy
+            // histogram derives past the 20% drift guard — see clips::otsu_threshold's table.
+            contact_eps: Some(0.35),
             slots: [
                 (clip: 0, playback: Free(speed: 1.0), note: Some("idle")),
                 (clip: 1, playback: Free(speed: 1.0), note: Some("idle_alert")),

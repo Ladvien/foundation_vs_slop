@@ -181,7 +181,7 @@ mod tests {
     /// contains a field-name-looking string, and one-line slot records.
     const DOC: &str = r#"// Header prose that must survive.
 (
-    version: 2,
+    version: 3,
     rigs: {
         // The first rig.
         "alpha": (

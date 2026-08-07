@@ -32,7 +32,11 @@ pub const MAX_MASK_GROUP: u32 = 64;
 /// v2 added the required per-rig `scale`. Required and versioned rather than serde-defaulted on
 /// purpose: a default of 1.0 would silently mis-scale the 0.07 manca by 14×, and a wrong-but-running
 /// game is the failure mode this manifest exists to prevent. An old file fails loudly at load.
-pub const RIGS_VERSION: u32 = 2;
+///
+/// v3 added [`Rig::drive_speed`] — the world-speed range the game drives a gaited rig at, so the
+/// bench can check the clip set against how it will actually be played (the skate check), not just
+/// against itself.
+pub const RIGS_VERSION: u32 = 3;
 
 /// The node the FK checks anchor on when a rig does not name its own — see [`Rig::root_node`].
 pub const DEFAULT_ROOT_NODE: &str = "Root";
@@ -138,6 +142,16 @@ pub struct Rig {
     /// live as five separate `1.13`/`0.15`/`0.07` literals across the spawners and the checks, and
     /// five copies of a measurement is four copies that go stale.
     pub scale: f32,
+    /// **The world-space speed range `(min, max)`, in u/s, the game drives this rig at** — the
+    /// missing operand of the skate check. Every gait clip implies an authored speed
+    /// (`cycle_distance / duration`); outside `authored × PHASE_RATE_CLAMP` the cadence clamp pins
+    /// the legs while the body keeps the sim's speed, and the feet slide. Declared here because the
+    /// editor cannot reach the game's movement config (dependency cycle); pinned to the shipped
+    /// config by a game-side agreement test (`src/rigs.rs`) so the duplicate cannot drift silently.
+    /// Only meaningful on a rig with gaits — `Free` slots never scale with velocity — and
+    /// `validate` refuses it elsewhere.
+    #[serde(default)]
+    pub drive_speed: Option<(f32, f32)>,
     /// The node whose translation must be bit-zero in a gait clip — the in-place anchor. `None`
     /// means the conventional name, [`DEFAULT_ROOT_NODE`]; set it only for a rig whose exporter
     /// names its root something else.
@@ -149,6 +163,13 @@ pub struct Rig {
     /// elsewhere — configuration nothing reads is configuration that lies.
     #[serde(default)]
     pub contact_joints: Vec<String>,
+    /// **A declared contact threshold**, as a fraction of the clip's own stance speed — the human
+    /// overrule for the per-clip derived one (`clips::contact_core` separates the stance and swing
+    /// velocity modes itself; when they will not separate it refuses loudly and names this field
+    /// as the remedy). The `tolerance`/`keep` precedent: an explicit recorded decision, not a
+    /// fallback. Only meaningful on a rig with gaits; `validate` refuses it elsewhere.
+    #[serde(default)]
+    pub contact_eps: Option<f32>,
     /// The measurement stamp, written by the bench's adopt action. `None` = never measured.
     #[serde(default)]
     pub provenance: Option<Provenance>,
@@ -259,6 +280,37 @@ impl Rigs {
                     "rig `{name}` configures measurement anchors but declares no gait — nothing \
                      reads them, and configuration nothing reads is configuration that lies"
                 ));
+            }
+            if let Some(eps) = rig.contact_eps {
+                if !rig.has_gaits() {
+                    return Err(format!(
+                        "rig `{name}` declares a contact_eps but no gait — only contact labelling \
+                         reads it, and configuration nothing reads is configuration that lies"
+                    ));
+                }
+                if !(eps > 0.0 && eps < 1.0) {
+                    return Err(format!(
+                        "rig `{name}`'s contact_eps {eps} is not a fraction of the stance speed \
+                         in (0, 1) — at 1.0 every bin within one stance-speed of the stance \
+                         cluster would label planted, which is every bin"
+                    ));
+                }
+            }
+            if let Some((lo, hi)) = rig.drive_speed {
+                if !rig.has_gaits() {
+                    return Err(format!(
+                        "rig `{name}` declares a drive_speed but no gait — only the gait cadence \
+                         scales with ground speed, so nothing reads it, and configuration nothing \
+                         reads is configuration that lies"
+                    ));
+                }
+                if !(lo > 0.0) || !(hi >= lo) {
+                    return Err(format!(
+                        "rig `{name}`'s drive_speed ({lo}, {hi}) is not a positive (min, max) \
+                         range — the skate check sweeps it, and an empty or negative range \
+                         predicts nothing"
+                    ));
+                }
             }
             if let Some(p) = &rig.provenance {
                 let hex_ok = p.glb_fnv1a.len() == 18
@@ -388,6 +440,8 @@ mod tests {
             Rig {
                 mesh: "characters/valkyrie.glb".to_owned(),
                 scale: 1.13,
+                drive_speed: None,
+                contact_eps: None,
                 root_node: None,
                 contact_joints: Vec::new(),
                 provenance: None,
@@ -503,6 +557,47 @@ mod tests {
         let e = m.validate().err().unwrap_or_else(|| panic!("accepted"));
         assert!(e.contains("nothing"), "{e}");
         let _ = &mut m;
+    }
+
+    #[test]
+    fn a_drive_speed_on_a_gaitless_rig_is_refused_as_config_nothing_reads() {
+        let mut m = one(SlotDef {
+            clip: 0,
+            playback: Playback::Free { speed: 1.0 },
+            mask: None,
+            note: None,
+            state: None,
+            keep: None,
+            tolerance: None,
+        });
+        if let Some(r) = m.rigs.get_mut("valkyrie") {
+            r.drive_speed = Some((0.9, 6.0));
+        }
+        let e = m.validate().err().unwrap_or_else(|| panic!("accepted"));
+        assert!(e.contains("no gait"), "{e}");
+    }
+
+    #[test]
+    fn a_degenerate_drive_speed_range_is_refused() {
+        for bad in [(0.0, 6.0), (-1.0, 6.0), (6.0, 0.9)] {
+            let mut m = one(gait());
+            if let Some(r) = m.rigs.get_mut("valkyrie") {
+                r.drive_speed = Some(bad);
+            }
+            let e = m.validate().err().unwrap_or_else(|| panic!("accepted {bad:?}"));
+            assert!(e.contains("drive_speed"), "{e}");
+        }
+    }
+
+    #[test]
+    fn a_drive_speed_survives_a_round_trip() {
+        let mut m = one(gait());
+        if let Some(r) = m.rigs.get_mut("valkyrie") {
+            r.drive_speed = Some((0.9, 6.0));
+        }
+        let text = m.to_ron().unwrap_or_else(|e| panic!("{e}"));
+        let back = Rigs::parse(&text).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(m, back);
     }
 
     fn stamp() -> Provenance {
