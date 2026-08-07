@@ -1,7 +1,11 @@
 # The game is the workspace root package; the engine-free half lives in `crates/`. See
 # `docs/2026-08-03-emerge-mapper-plan.md` for why the split exists and what may cross the boundary.
 [workspace]
-members = ["crates/emerge-core", "crates/emerge-anim", "crates/emerge-bevy", "crates/emerge-mapper", "crates/fvs"]
+members = [
+    "crates/emerge-core", "crates/emerge-anim", "crates/emerge-bevy", "crates/emerge-mapper",
+    "crates/fvs",
+    "crates/bevy_orca",
+]
 # Stated rather than inherited. The root package is edition 2024, so "3" is already what Cargo picks —
 # writing it down means a future edition bump cannot move the resolver as a side effect, and it says
 # which rules the feature unification below is playing by.
@@ -59,6 +63,9 @@ emerge-core = { path = "crates/emerge-core" }
 emerge-bevy = { path = "crates/emerge-bevy" }
 # The pose blender. Its own crate so `emerge-mapper` can drive the real one — see that manifest.
 emerge-anim = { path = "crates/emerge-anim" }
+# ORCA local avoidance. Nothing in it is about this game — it is a 2-D linear program over discs — so
+# it is a crate anyone can use. Re-exported at `crate::orca`, so every call site is unchanged.
+bevy_orca = { path = "crates/bevy_orca" }
 avian3d = "0.7.0"
 # `jpeg`: the SCP_Characters glTFs (e.g. VALKYRIE, the squad body) embed their PBR textures as JPEG to
 # keep the .glb small; Bevy's default image features cover PNG but NOT JPEG, so without this the whole

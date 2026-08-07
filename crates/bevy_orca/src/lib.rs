@@ -1,5 +1,5 @@
 //! Hand-rolled **ORCA** (Optimal Reciprocal Collision Avoidance) — the local, unit-vs-unit
-//! avoidance layer beneath the flow-field global navigator (see `flowfield`). Given each unit's
+//! avoidance layer beneath a global navigator (a flow field, a path follower). Given each agent's
 //! *preferred* velocity (from the flow field), ORCA returns the collision-free velocity **closest**
 //! to it, assuming every neighbor does the same reasoning and each side takes half the avoidance
 //! (reciprocity). That reciprocity is what removes the oscillation and the mutual-cancel freeze of
@@ -12,11 +12,20 @@
 //! - van den Berg, Guy, Lin & Manocha, "Reciprocal n-Body Collision Avoidance", 2011,
 //!   DOI 10.1109/TRO.2011.2120810 (the ORCA half-plane construction + 2-D linear program below).
 //!
-//! Only unit↔unit avoidance lives here; static walls are the flow field's concern (it never routes
-//! through rock) and the collision resolver's authority (`dungeon::resolve_move`), so no static
-//! obstacle lines are fed in — the LP's obstacle-line count is always zero.
+//! The half-plane construction and the three-stage linear program follow the authors' reference
+//! implementation, **RVO2** (van den Berg et al., Apache-2.0), closely enough that its names are kept
+//! — [`linear_program1`]/[`linear_program2`]/[`linear_program3`], `t_left`/`t_right`, and
+//! `RVO_EPSILON` as [`EPSILON`] — so the two can be read side by side. See `NOTICE`.
+//!
+//! # Scope
+//!
+//! Only agent↔agent avoidance lives here. Static geometry is the caller's concern in two senses: a
+//! global navigator should not route through solid space in the first place, and final contact is
+//! whatever the caller's collision resolver says it is. Walls therefore enter only as the optional
+//! `walls` half-planes described on [`new_velocity`] — the LP's *obstacle-line* count from static
+//! geometry is otherwise zero.
 
-use bevy::prelude::*;
+use bevy_math::Vec2;
 
 /// Guard against division by near-zero / parallel-line degeneracies (RVO2's `RVO_EPSILON`).
 const EPSILON: f32 = 1.0e-5;
@@ -72,7 +81,7 @@ pub fn new_velocity(
     // max speed at which the agent may still close on that wall this step (its remaining gap ÷ dt).
     // The constraint `v · b <= approach` lets the agent slide along or move away freely and coast up
     // to contact, but never accelerate *through* the wall — so ORCA won't dodge a neighbor by
-    // steering into a wall and stalling. Actual contact is still resolved by `dungeon::resolve_move`.
+    // steering into a wall and stalling. Actual contact is still the caller's collision resolver.
     for &(b, approach) in walls {
         lines.push(Line {
             point: approach * b,
@@ -298,6 +307,19 @@ mod tests {
         Agent { pos, vel, radius: 0.5, avoids: true }
     }
 
+    /// A deterministic `u32 -> [0,1)` hash (PCG-style output mix), inlined here so the sweep below
+    /// needs neither an RNG crate nor an entropy source.
+    ///
+    /// It is a copy of the parent game's `util::hash_f32` **by construction, not by dependency**:
+    /// this crate must not grow a dependency to seed a test, and the value only has to be
+    /// *reproducible*, not *the same number* as any other caller's — nothing crosses the boundary.
+    fn hash_f32(x: u32) -> f32 {
+        let mut h = x.wrapping_mul(747_796_405).wrapping_add(2_891_336_453);
+        h = ((h >> ((h >> 28).wrapping_add(4))) ^ h).wrapping_mul(277_803_737);
+        h = (h >> 22) ^ h;
+        (h as f32) / (u32::MAX as f32)
+    }
+
     #[test]
     fn free_agent_keeps_its_preferred_velocity() {
         // No neighbours, no walls: ORCA has nothing to constrain, so it returns pref_vel unchanged.
@@ -338,8 +360,8 @@ mod tests {
         let max_speed = 2.0;
         for i in 0..40u32 {
             // Deterministic pseudo-positions from a cheap hash, no entropy source.
-            let hx = crate::util::hash_f32(i.wrapping_mul(0x9E37_79B1)) * 4.0 - 2.0;
-            let hy = crate::util::hash_f32(i.wrapping_mul(0x85EB_CA6B).wrapping_add(1)) * 4.0 - 2.0;
+            let hx = hash_f32(i.wrapping_mul(0x9E37_79B1)) * 4.0 - 2.0;
+            let hy = hash_f32(i.wrapping_mul(0x85EB_CA6B).wrapping_add(1)) * 4.0 - 2.0;
             let a = agent(Vec2::ZERO, Vec2::new(1.0, 0.0));
             let b = agent(Vec2::new(hx, hy), Vec2::new(-0.5, 0.2));
             let v = new_velocity(&a, Vec2::new(1.5, 0.5), &[b], &[], 2.0, 1.0 / 60.0, max_speed);

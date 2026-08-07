@@ -106,7 +106,11 @@ pub mod light;
 pub mod mold;
 pub mod mycelia;
 pub mod nest;
-pub mod orca;
+/// Hand-rolled ORCA local avoidance, moved to `crates/bevy_orca` so it can be used without the game.
+/// Re-exported here because every call site says `crate::orca::…` and none of them needed to know —
+/// the same shim `anim` gets above. See that crate's manifest for why it depends on `bevy_math`
+/// rather than `bevy`.
+pub use bevy_orca as orca;
 pub mod parasite;
 pub mod palette;
 pub mod pathfind;
