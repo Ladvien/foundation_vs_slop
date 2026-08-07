@@ -88,25 +88,10 @@ pub const CHANNEL_COUNT: usize = 10;
 pub const UNIT_THREAT_CHANNELS: [FieldId; 2] = [FieldId::THREAT_CRAB, FieldId::THREAT_ANOMALY];
 
 /// Per-channel behaviour, filled from the `ai_tuning:` slice of `assets/config/config.ron` at startup.
-#[derive(Clone, Copy)]
-pub struct ChannelDef {
-    /// Fraction of value lost per second (ACO evaporation ρ).
-    pub evaporate: f32,
-    /// Blend weight [0,1] toward the 4-neighbour average each update (Ch.29 diffusion).
-    pub diffuse: f32,
-    /// World-unit radius a single deposit smears over (placement kernel).
-    pub deposit_radius: f32,
-}
-
-impl Default for ChannelDef {
-    fn default() -> Self {
-        Self {
-            evaporate: 0.4,
-            diffuse: 0.1,
-            deposit_radius: 1.5,
-        }
-    }
-}
+/// Defined in `bevy_stigmergy`; re-exported here so `impl From<ChannelTuning> for ChannelDef` in
+/// `ai::tuning` still resolves (a local type onto a foreign one is legal, which is why the conversion
+/// did not have to move).
+pub use bevy_stigmergy::ChannelDef;
 
 /// One deposit request; pushed by gameplay systems, drained into the grid by `drain_deposits`.
 pub struct Deposit {
@@ -134,260 +119,86 @@ pub fn sort_deposits(batch: &mut [Deposit]) {
     });
 }
 
-/// The shared field grids. One `Vec<f32>` per channel over the (fixed) dungeon cell grid, row-major
-/// `y*width + x` — the same indexing every other grid in the project uses.
+/// The shared field grids — a thin **facade** over `bevy_stigmergy::StigGrid`.
+///
+/// The mechanism (deposit / evaporate / diffuse / sample / gradient) lives in that crate, which knows
+/// nothing about a dungeon and works in CELL space. This type is what turns it back into the game's
+/// vocabulary: it owns the `Dungeon` (world↔cell conversion, the floor set) and keeps the exact method
+/// signatures every call site already uses, so the extraction moved no caller.
+///
+/// **A newtype rather than a trait, deliberately.** Callers write `stig.sample(f, &dungeon, pos)` where
+/// `dungeon: Res<Dungeon>`; against a generic `&impl CellMap` inference would pick `Res<Dungeon>`, and
+/// the orphan rule forbids implementing a foreign trait for it — every one of the ~40 call sites would
+/// have needed `&*dungeon`. A `&dyn` would instead put a virtual call inside the diffusion inner loop.
 #[derive(Resource)]
-pub struct Stig {
-    width: usize,
-    height: usize,
-    channels: [Vec<f32>; CHANNEL_COUNT],
-    defs: [ChannelDef; CHANNEL_COUNT],
-    /// Reused double-buffer for the diffusion pass (avoids per-frame allocation).
-    scratch: Vec<f32>,
-    /// Reused contiguous, floor-indexed output buffer for the *parallel* diffusion map: one slot per
-    /// `floor_cells` entry, same order. The parallel pass writes disjoint slots here (no cross-cell
-    /// reduction), then a serial scatter copies it into the grid-indexed `scratch` double-buffer. A field so
-    /// the per-tick parallel diffuse never allocates.
-    diffuse_out: Vec<f32>,
-    /// The floor cells (the only cells that ever carry value), precomputed once so the per-tick
-    /// evaporation/diffusion/hotspot passes skip the rock cells. See [`floor_cells_of`].
-    floor_cells: Vec<FloorCell>,
-}
-
-/// Walk the floor cells within `radius` (in cells) of `pos`, calling `emit(cell_index, falloff)` with the
-/// linear falloff `1 - dist/radius` (1.0 when `radius == 0`). The shared deposit kernel — the disc walk,
-/// the `in_grid && is_floor` wall mask, and the falloff math — used by both the scalar [`Stig`] and the
-/// vectorial [`RallyField`] deposit paths, which differ only in what they accumulate per cell.
-fn deposit_disc(
-    width: usize,
-    height: usize,
-    dungeon: &Dungeon,
-    pos: Vec3,
-    radius: f32,
-    mut emit: impl FnMut(usize, f32),
-) {
-    let radius = radius.max(0.0);
-    let center = dungeon.world_to_cell(pos);
-    let r = radius.ceil() as i32;
-    for dy in -r..=r {
-        for dx in -r..=r {
-            let cell = center + IVec2::new(dx, dy);
-            if !crate::util::in_grid(cell, width, height) || !dungeon.is_floor(cell) {
-                continue;
-            }
-            let dist = ((dx * dx + dy * dy) as f32).sqrt();
-            if dist > radius {
-                continue;
-            }
-            let falloff = if radius > 0.0 { 1.0 - dist / radius } else { 1.0 };
-            emit(crate::util::row_major(cell, width), falloff);
-        }
-    }
-}
-
-/// A precomputed floor cell: its row-major grid index and its `(x, y)` coordinates, carried together so the
-/// per-tick passes need neither an `is_floor` test nor an `i % w` / `i / w` recompute. `idx == row_major(pos)`.
-#[derive(Clone, Copy)]
-struct FloorCell {
-    idx: usize,
-    pos: IVec2,
-}
-
-/// Every floor cell of the (static) dungeon, precomputed once in ascending row-major order. The per-tick
-/// field passes iterate only these: a rock cell never carries field value — deposits are floor-masked
-/// (`deposit_disc`), evaporation of 0 is 0, and the diffusion double-buffer's rock cells stay 0 across the
-/// swap — so skipping the ~half-to-two-thirds of the grid that is rock is **bit-identical** to scanning the
-/// whole grid, not an approximation. The floor set comes from the shared [`Dungeon::floor_cells`] so it can
-/// never drift from the harness coverage denominator or the habitat mask.
-fn floor_cells_of(dungeon: &Dungeon) -> Vec<FloorCell> {
-    let mut cells = Vec::with_capacity(dungeon.width * dungeon.height);
-    cells.extend(
-        dungeon
-            .floor_cells()
-            .map(|c| FloorCell { idx: crate::util::row_major(c, dungeon.width), pos: c }),
-    );
-    cells
-}
+pub struct Stig(bevy_stigmergy::StigGrid<CHANNEL_COUNT>);
 
 impl Stig {
     /// Allocate empty grids sized to the dungeon. `defs` come from tuning.
     pub fn new(dungeon: &Dungeon, defs: [ChannelDef; CHANNEL_COUNT]) -> Self {
-        let cells = dungeon.width * dungeon.height;
-        let floor_cells = floor_cells_of(dungeon);
-        let diffuse_out = vec![0.0; floor_cells.len()];
-        Self {
-            width: dungeon.width,
-            height: dungeon.height,
-            channels: std::array::from_fn(|_| vec![0.0; cells]),
+        Self(bevy_stigmergy::StigGrid::new(
+            dungeon.width,
+            dungeon.height,
+            dungeon.floor_cells(),
             defs,
-            scratch: vec![0.0; cells],
-            diffuse_out,
-            floor_cells,
-        }
-    }
-
-    #[inline]
-    fn index(&self, c: IVec2) -> usize {
-        crate::util::row_major(c, self.width)
-    }
-
-    #[inline]
-    fn in_grid(&self, c: IVec2) -> bool {
-        crate::util::in_grid(c, self.width, self.height)
+        ))
     }
 
     /// Point read at a world position (query). Off-grid reads as 0.
+    #[inline]
     pub fn sample(&self, field: FieldId, dungeon: &Dungeon, pos: Vec3) -> f32 {
-        let c = dungeon.world_to_cell(pos);
-        if self.in_grid(c) {
-            self.channels[field.0][self.index(c)]
-        } else {
-            0.0
-        }
+        self.0.sample_cell(field.0, dungeon.world_to_cell(pos))
     }
 
     /// Direction (world XZ) of *increasing* value, magnitude ≈ the local slope. Central differences on
     /// the 4-neighbour cells; `FollowGradient` uses `+`, `FleeGradient` uses `-`.
+    #[inline]
     pub fn gradient(&self, field: FieldId, dungeon: &Dungeon, pos: Vec3) -> Vec2 {
-        let c = dungeon.world_to_cell(pos);
-        let at = |dx: i32, dy: i32| -> f32 {
-            let n = c + IVec2::new(dx, dy);
-            if self.in_grid(n) {
-                self.channels[field.0][self.index(n)]
-            } else {
-                0.0
-            }
-        };
-        Vec2::new(at(1, 0) - at(-1, 0), at(0, 1) - at(0, -1))
+        self.0.gradient_cell(field.0, dungeon.world_to_cell(pos))
     }
 
     /// Add `amount` at `pos`, smeared over the channel's `deposit_radius` with linear falloff. Only
     /// floor cells receive value (deposits don't bleed into rock).
     fn deposit(&mut self, field: FieldId, dungeon: &Dungeon, pos: Vec3, amount: f32) {
-        let (w, h) = (self.width, self.height);
-        let channel = &mut self.channels[field.0];
-        deposit_disc(w, h, dungeon, pos, self.defs[field.0].deposit_radius, |i, falloff| {
-            channel[i] += amount * falloff;
-        });
+        self.0.deposit(field.0, dungeon.world_to_cell(pos), amount);
     }
 
-    /// One evaporation + diffusion step for every channel (Ch.29 diffusion, ACO evaporation). `dt` in
-    /// seconds. Diffusion blends only between floor cells so influence doesn't seep through walls.
-    fn evaporate_diffuse(&mut self, dungeon: &Dungeon, dt: f32) {
-        // Only floor cells ever hold value (rock cells are invariantly 0), so both passes iterate
-        // `floor_cells` rather than the whole grid. This is bit-identical, not an approximation: evaporating
-        // a rock cell (0·retain) and diffusion's old `scratch[rock] = grid[rock]` (0) were both no-ops, and
-        // the double-buffer's rock cells stay 0 across the swap. The neighbour sum keeps its fixed
-        // E/W/S/N order — float add is non-associative, so the order is load-bearing.
-        //
-        // The diffusion is a pure stencil — each cell's new value is a function of the PREVIOUS grid only,
-        // with the E/W/S/N order preserved inside each cell — so the result is identical for any thread
-        // count (no cross-cell float reduction). We parallelise it across `floor_cells`; Dourvas, Sirakoulis
-        // & Adamatzky (2019, IEEE Access) parallelise the same Physarum reaction-diffusion CA on exactly this
-        // basis. The headless harness pins the rayon pool to one thread (`sim_harness`) and `fold_fingerprint`
-        // hashes the post-step grids, so any accidental divergence fails `tests/replay.rs` loudly.
-        use rayon::prelude::*;
-        let w = self.width;
-        let h = self.height;
-        // Split the disjoint field borrows so the parallel map can read `channels[ch]`, write the reused
-        // `diffuse_out`, and read `floor_cells` at once.
-        let Self { channels, defs, scratch, diffuse_out, floor_cells, .. } = self;
-        for ch in 0..CHANNEL_COUNT {
-            let def = defs[ch];
-            let retain = (1.0 - def.evaporate * dt).clamp(0.0, 1.0);
-            // Evaporate in place (cell-local, cheap) and note whether any mass survives. An empty channel
-            // diffuses 0 → 0, so we skip its diffusion entirely — bit-identical, and several of the ten
-            // channels are empty on a typical tick.
-            let mut any_mass = false;
-            {
-                let grid = &mut channels[ch];
-                for fc in floor_cells.iter() {
-                    let v = grid[fc.idx] * retain;
-                    grid[fc.idx] = v;
-                    any_mass |= v != 0.0;
-                }
-            }
-            if def.diffuse <= 0.0 || !any_mass {
-                continue;
-            }
-            // Blend each floor cell toward the average of its floor neighbours (double-buffered, parallel).
-            let diffuse = def.diffuse;
-            let grid = &channels[ch];
-            diffuse_out
-                .par_iter_mut()
-                .zip(floor_cells.par_iter())
-                .for_each(|(out, fc)| {
-                    let (x, y) = (fc.pos.x, fc.pos.y);
-                    let mut sum = 0.0;
-                    let mut n = 0.0;
-                    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                        let nb = IVec2::new(x + dx, y + dy);
-                        if nb.x >= 0 && nb.y >= 0 && (nb.x as usize) < w && (nb.y as usize) < h && dungeon.is_floor(nb) {
-                            sum += grid[(nb.y as usize) * w + nb.x as usize];
-                            n += 1.0;
-                        }
-                    }
-                    let avg = if n > 0.0 { sum / n } else { grid[fc.idx] };
-                    *out = grid[fc.idx] * (1.0 - diffuse) + avg * diffuse;
-                });
-            // Serial scatter: contiguous floor-indexed results → grid-indexed `scratch`, then swap in.
-            for (fc, &v) in floor_cells.iter().zip(diffuse_out.iter()) {
-                scratch[fc.idx] = v;
-            }
-            std::mem::swap(&mut channels[ch], scratch);
-        }
+    /// One evaporation + diffusion step for every channel. `dt` in seconds.
+    fn evaporate_diffuse(&mut self, dt: f32) {
+        self.0.evaporate_diffuse(dt);
     }
 
-    /// The peak `(cell, value)` in a channel — used by the boss's "drawn to the biggest frenzy" hunt
-    /// and by diagnostics.
+    /// The peak `(world position, value)` in a channel — used by the boss's "drawn to the biggest
+    /// frenzy" hunt and by diagnostics.
+    ///
+    /// An empty channel reports the dungeon spawn at value 0, which is the behaviour callers were
+    /// written against: the crate returns `None` for "nothing above zero", and the seed lives here
+    /// because `dungeon.spawn` is a game fact.
     pub fn hotspot(&self, field: FieldId, dungeon: &Dungeon) -> (Vec3, f32) {
-        let grid = &self.channels[field.0];
-        let mut best = 0.0f32;
-        let mut best_cell = dungeon.spawn;
-        // `floor_cells` is ascending-index order, and rock cells are 0 (can never beat `best` under the
-        // strict `>`), so this yields the identical first-max-wins result as scanning the whole grid.
-        for fc in &self.floor_cells {
-            let v = grid[fc.idx];
-            if v > best {
-                best = v;
-                best_cell = fc.pos;
-            }
-        }
-        (dungeon.cell_center(best_cell), best)
+        let (cell, v) = self.0.hotspot_cell(field.0);
+        (dungeon.cell_center(cell.unwrap_or(dungeon.spawn)), v)
     }
 
-    /// Field-degeneracy stats for the offline search's field-sanity gate: `(peak, flatness)` where `peak`
-    /// is the largest value over every channel and floor cell, and `flatness` is the fraction of floor
-    /// cells whose strongest channel is at least **half** that peak. A healthy field has a sharp peak over
-    /// sparse activity (low flatness); a saturated field (evaporation ≈ 0) has a runaway peak, and a
-    /// whole-map smear (huge radius/diffusion) is high *and* uniform (flatness → 1), so agents cannot
-    /// navigate its gradient. Read-only and order-independent (`max`/count), so it never perturbs the
-    /// pinned sim — it is sampled from `squad_ai::evaluate::rollout`, not a system.
+    /// Field-degeneracy stats for the offline search's field-sanity gate: `(peak, flatness)`. Read-only
+    /// and order-independent, so it never perturbs the pinned sim — it is sampled from
+    /// `squad_ai::evaluate::rollout`, not a system.
     pub fn saturation_stats(&self) -> (f32, f32) {
-        let per_cell_max =
-            |i: usize| (0..CHANNEL_COUNT).map(|ch| self.channels[ch][i]).fold(0.0f32, f32::max);
-        let floor = self.floor_cells.len();
-        let peak = self.floor_cells.iter().map(|fc| per_cell_max(fc.idx)).fold(0.0f32, f32::max);
-        if floor == 0 || peak <= 0.0 {
-            return (peak, 0.0);
-        }
-        let thresh = 0.5 * peak;
-        let hot = self.floor_cells.iter().filter(|fc| per_cell_max(fc.idx) >= thresh).count();
-        (peak, hot as f32 / floor as f32)
+        self.0.saturation_stats()
     }
 
-    /// FNV-1a-fold the exact bit pattern of every channel cell (the **full** grid, so the rock-cells-stay-0
-    /// invariant is pinned too) plus the derived `saturation_stats`, into `hash`. The determinism oracle for
-    /// the field passes: `snapshot_hash` hashes only actor Transform+Health, so without this a reordered
-    /// neighbour sum or broken floor mask that doesn't happen to move an agent would ship silently. Test-only.
+    /// FNV-1a-fold the exact bit pattern of every channel cell (the **full** grid, so the
+    /// rock-cells-stay-0 invariant is pinned too) plus the derived `saturation_stats`, into `hash`. The
+    /// determinism oracle for the field passes: `snapshot_hash` hashes only actor Transform+Health, so
+    /// without this a reordered neighbour sum or broken floor mask that doesn't happen to move an agent
+    /// would ship silently. Test-only.
     #[cfg(feature = "test-harness")]
     pub fn fold_fingerprint(&self, hash: &mut u64) {
-        for ch in &self.channels {
+        for ch in self.0.channels() {
             for &v in ch {
                 fnv1a_fold(&v.to_bits().to_le_bytes(), hash);
             }
         }
-        let (peak, flatness) = self.saturation_stats();
+        let (peak, flatness) = self.0.saturation_stats();
         fnv1a_fold(&peak.to_bits().to_le_bytes(), hash);
         fnv1a_fold(&flatness.to_bits().to_le_bytes(), hash);
     }
@@ -410,11 +221,11 @@ pub fn drain_deposits(mut stig: ResMut<Stig>, dungeon: Res<Dungeon>, mut deposit
 }
 
 /// Evaporate + diffuse every channel once per frame.
-pub fn evaporate_diffuse(mut stig: ResMut<Stig>, dungeon: Res<Dungeon>, time: Res<Time>) {
+pub fn evaporate_diffuse(mut stig: ResMut<Stig>, time: Res<Time>) {
     // Profiling span: read the per-system cost under `--features bevy/trace_tracy` (see `perf_hud`).
     let _span = info_span!("stig_evaporate_diffuse").entered();
     let dt = time.delta_secs();
-    stig.evaporate_diffuse(&dungeon, dt);
+    stig.evaporate_diffuse(dt);
 }
 
 /// Per-second attention a squad unit lays on every cell it can currently **see**. Deposited as `RATE·dt`
@@ -463,27 +274,11 @@ pub fn deposit_attention(
 // swarm robots based on stigmergy", Robotics & Autonomous Systems 2019 (DOI 10.1016/j.robot.2019.103251).
 // ---------------------------------------------------------------------------------------------------
 
-/// Per-field tuning for the vectorial rally pheromone (mirrors [`ChannelDef`], but for the vector store).
-#[derive(Clone, Copy)]
-pub struct RallyDef {
-    /// Decay coefficient `c_d` (fraction lost per second). Drives both per-frame evaporation and the
-    /// `(1 - c_d)` term of the accumulation recurrence — evaporation is the automatic "call off the attack".
-    pub decay: f32,
-    /// Accumulation gain `c_a` applied to each deposited intermediate-vector.
-    pub accumulate: f32,
-    /// World-unit radius a single deposit smears over (placement kernel, linear falloff).
-    pub deposit_radius: f32,
-}
-
-impl Default for RallyDef {
-    fn default() -> Self {
-        Self {
-            decay: 0.3,
-            accumulate: 0.5,
-            deposit_radius: 2.0,
-        }
-    }
-}
+/// Per-field tuning for the vectorial rally pheromone (mirrors [`ChannelDef`], but for the vector
+/// store). Defined in `bevy_stigmergy`; re-exported here so `impl From<RallyTuning> for RallyDef` in
+/// `ai::tuning` still resolves — a local type onto a foreign one is legal, which is why the conversion
+/// did not have to move with it.
+pub use bevy_stigmergy::RallyDef;
 
 /// One vectorial-pheromone deposit request (a scout's intermediate-vector `s`, pointing toward the prey).
 pub struct RallyDeposit {
@@ -529,88 +324,49 @@ pub fn sort_rally_deposits(batch: &mut [RallyDeposit]) {
     });
 }
 
-/// The vectorial rally pheromone map (Tang et al. 2019). Each floor cell stores a 2D **direction vector**
-/// — the bearing toward the (moving) prey — not a scalar concentration like the [`Stig`] channels. A
-/// scout that senses prey deposits an intermediate-vector `s` pointing at it; the map accumulates
-/// deposits with decay (`pher = (1 - c_d)·pher + c_a·s`, the paper's `pher_N^m` recurrence) and
-/// evaporates each frame. Crabs read the vector **locally** and steer straight along it, so the swarm
-/// tracks the prey's live motion — and a crab far from any arrow reads ≈0, so it never has its flight
-/// suppressed by a distant beacon (the locality the old global-peak scalar lacked).
+/// The vectorial rally pheromone map (Tang et al. 2019) — a **facade** over
+/// `bevy_stigmergy::RallyGrid`, on the same argument as [`Stig`] above.
+///
+/// Each floor cell stores a 2D **direction vector** — the bearing toward the (moving) prey — not a
+/// scalar concentration like the [`Stig`] channels. A scout that senses prey deposits an
+/// intermediate-vector `s` pointing at it; the map accumulates deposits with decay (`pher =
+/// (1 - c_d)·pher + c_a·s`, the paper's `pher_N^m` recurrence) and evaporates each frame. Crabs read
+/// the vector **locally** and steer straight along it, so the swarm tracks the prey's live motion — and
+/// a crab far from any arrow reads ≈0, so it never has its flight suppressed by a distant beacon (the
+/// locality the old global-peak scalar lacked).
 #[derive(Resource)]
-pub struct RallyField {
-    width: usize,
-    height: usize,
-    grid: Vec<Vec2>,
-    decay: f32,
-    accumulate: f32,
-    deposit_radius: f32,
-    /// The floor cells (only floor cells receive value), so evaporation skips the rock cells. See
-    /// [`floor_cells_of`].
-    floor_cells: Vec<FloorCell>,
-}
+pub struct RallyField(bevy_stigmergy::RallyGrid);
 
 impl RallyField {
     /// Allocate an empty vector grid sized to the dungeon. `def` comes from tuning.
     pub fn new(dungeon: &Dungeon, def: RallyDef) -> Self {
-        let cells = dungeon.width * dungeon.height;
-        Self {
-            width: dungeon.width,
-            height: dungeon.height,
-            grid: vec![Vec2::ZERO; cells],
-            decay: def.decay,
-            accumulate: def.accumulate,
-            deposit_radius: def.deposit_radius,
-            floor_cells: floor_cells_of(dungeon),
-        }
-    }
-
-    #[inline]
-    fn index(&self, c: IVec2) -> usize {
-        crate::util::row_major(c, self.width)
-    }
-
-    #[inline]
-    fn in_grid(&self, c: IVec2) -> bool {
-        crate::util::in_grid(c, self.width, self.height)
+        Self(bevy_stigmergy::RallyGrid::new(dungeon.width, dungeon.height, dungeon.floor_cells(), def))
     }
 
     /// Local vectorial read at a world position (query). Off-grid reads as `Vec2::ZERO`. Magnitude ≈ the
     /// local beacon strength (gate on it); direction ≈ the bearing to the prey (steer along it).
+    #[inline]
     pub fn sample(&self, dungeon: &Dungeon, pos: Vec3) -> Vec2 {
-        let c = dungeon.world_to_cell(pos);
-        if self.in_grid(c) {
-            self.grid[self.index(c)]
-        } else {
-            Vec2::ZERO
-        }
+        self.0.sample_cell(dungeon.world_to_cell(pos))
     }
 
-    /// Accumulate a deposited intermediate-vector `s` (Tang's `c_a·s` term), smeared over `deposit_radius`
-    /// with linear falloff. Only floor cells receive value (deposits don't bleed into rock).
+    /// Accumulate a deposited intermediate-vector `s` (Tang's `c_a·s` term), smeared over
+    /// `deposit_radius` with linear falloff. Only floor cells receive value.
     fn deposit(&mut self, dungeon: &Dungeon, pos: Vec3, s: Vec2) {
-        let (w, h) = (self.width, self.height);
-        let accumulate = self.accumulate;
-        let grid = &mut self.grid;
-        deposit_disc(w, h, dungeon, pos, self.deposit_radius, |i, falloff| {
-            grid[i] += s * (accumulate * falloff);
-        });
+        self.0.deposit(dungeon.world_to_cell(pos), s);
     }
 
-    /// One evaporation step: decay every cell toward zero (the `(1 - c_d)` term / the automatic call-off).
+    /// One evaporation step: decay every cell toward zero (the `(1 - c_d)` term / the automatic
+    /// call-off).
     fn evaporate(&mut self, dt: f32) {
-        let retain = (1.0 - self.decay * dt).clamp(0.0, 1.0);
-        // Only floor cells ever hold a vector (deposits are floor-masked), so scaling the rock cells is a
-        // no-op — iterate floor cells only (bit-identical).
-        for fc in &self.floor_cells {
-            self.grid[fc.idx] *= retain;
-        }
+        self.0.evaporate(dt);
     }
 
     /// FNV-1a-fold the exact bit pattern of every cell's direction vector (full grid) into `hash`. The
     /// vectorial-field half of the determinism oracle — see [`Stig::fold_fingerprint`]. Test-only.
     #[cfg(feature = "test-harness")]
     pub fn fold_fingerprint(&self, hash: &mut u64) {
-        for v in &self.grid {
+        for v in self.0.cells() {
             fnv1a_fold(&v.x.to_bits().to_le_bytes(), hash);
             fnv1a_fold(&v.y.to_bits().to_le_bytes(), hash);
         }
