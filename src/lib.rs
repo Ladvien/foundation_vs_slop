@@ -246,6 +246,10 @@ pub struct MainCamera;
 #[derive(Component)]
 pub struct ThumbnailCamera;
 
+/// Offscreen frames for an agent, without raising the window (`--features debugger`).
+#[cfg(feature = "debugger")]
+pub mod debug_capture;
+
 /// Build and run the full windowed game. The headless test harness (`sim_harness`, behind the
 /// `test-harness` feature) constructs an equivalent `App` without render/winit/audio so the same
 /// gameplay plugins can be driven deterministically off-screen.
@@ -370,6 +374,10 @@ pub fn run() {
     app.add_plugins((
         bevy_debugger_bevy::DebuggerPlugin,
         bevy::remote::http::RemoteHttpPlugin::default(),
+        // Owns the offscreen camera + image the screenshot method captures. Without it that method
+        // reports a missing target rather than falling back to window capture, which would need the
+        // window raised — see `debug_capture`.
+        debug_capture::DebugCapturePlugin,
     ));
 
     app

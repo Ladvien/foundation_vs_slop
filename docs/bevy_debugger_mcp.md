@@ -45,16 +45,26 @@ Capture is asynchronous: the method replies *before* the image exists, so it alw
 
 `DebuggerPlugin::build` adds `RemotePlugin::default().with_method_main(..)` to register its two methods. Bevy rejects a duplicate plugin by name, so adding `RemotePlugin` alongside it panics the moment the feature is switched on. `src/lib.rs` therefore adds `DebuggerPlugin` plus **only** the HTTP transport.
 
-### `bevy_devshot` is still the screenshot path this project uses
+### Capture is offscreen, and never touches your desktop
 
-BRP capture now works — it was verified writing real frames, cropping to the pixel, and scaling — but `bevy_devshot` needs no running MCP server, no HTTP port, and no feature flag, and the standing rule is one path per job. BRP screenshots are for an agent already talking to a live game over BRP; the sentinel file is for everything else.
+`bevy_debugger/screenshot` captures an `Image` a camera renders to — not the window. That distinction is the whole point: reading the window surface only works while the window is actually on screen, so it needs the window raised, which steals focus and can switch Spaces. Measured here with one variable changed: **7,188 distinct colours** with the game focused, **1** with another app in front.
 
-**Either way the window must be frontmost.** A capture taken while another application holds focus comes back a single flat colour, through *both* paths — it is the window surface, not the handler. Raise the game by its unix id and verify the raise stuck before capturing, because the raise can silently lose to whatever steals focus next:
+`src/debug_capture.rs` owns the mirror camera and its target image, spawned from `camera::setup` with the *same* environment map, exposure and bloom the player's camera gets — parity by construction, because the first version guessed at the lighting and rendered the squad against black. `bevy_debugger_bevy` never captures the window and has no fallback that would; without the `DebugCaptureTarget` resource it fails loudly.
 
-```sh
-osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $PID) to true"
-osascript -e 'tell application "System Events" to get name of first process whose frontmost is true'   # must say foundation_vs_slop
-```
+Verified writing 11,721-colour frames of live gameplay with a different application frontmost throughout. No `osascript`, no raise, no `screencapture(1)`.
+
+Two things to know:
+
+- **The UI layer is not in the capture.** Bevy draws UI through the window camera, so a mirror 3D camera does not receive the HUD or menus. The 3D scene is faithful; the interface is not there.
+- **The scene renders twice per frame** while the feature is on. That is the cost of never touching the window, and it is why this lives behind an opt-in feature.
+
+`bevy_devshot` remains the path for a capture that must include the UI — it reads the window, so it needs the window visible.
+
+### Input goes to the game, never through the OS
+
+`bevy_debugger/input` writes into `ButtonInput<KeyCode>` and `ButtonInput<MouseButton>` — resources inside the game process. It cannot leak into whatever window you are actually using, and this is structural rather than careful: the crate depends only on `bevy`, `bevy_remote`, `serde`, `serde_json` and `image`, none of which can synthesise an OS event, and its sources contain no `enigo`, `CGEvent`, `core-graphics`, `xdotool`, `SendInput`, `winit` or `unsafe`. Keys injected while another application held focus produced nothing in that application.
+
+Its key table currently covers twelve keys (`parse_keycode`), and `InputKind::Scroll` is a stub that writes nothing — widen them upstream when a workflow needs more.
 
 ## Hacking on the debugger locally
 

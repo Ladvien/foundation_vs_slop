@@ -181,6 +181,9 @@ fn setup_camera(
     // The ambient path. `crate::world` owns what the light *is* (and documents why it is an environment
     // map rather than a flat fill); Bevy requires the component ride the camera, so it is attached here.
     let env_map = images.add(crate::world::interior_env_cubemap(cfg));
+    // Cloned before the handle moves into the camera below; the mirror must share the SAME map.
+    #[cfg(feature = "debugger")]
+    let env_map_for_mirror = env_map.clone();
     commands.spawn((
         Camera3d::default(),
         // The one camera every gameplay system means. See `crate::MainCamera`.
@@ -220,6 +223,19 @@ fn setup_camera(
         },
         Transform::from_translation(rig.focus + ISO_OFFSET).looking_at(rig.focus, Vec3::Y),
     ));
+
+    // The agent's offscreen mirror of this camera (`--features debugger`). Spawned here, from the same
+    // `cfg` and the same environment map, so the capture cannot drift from what the player sees — the
+    // first version guessed at the lighting and rendered the squad against black.
+    #[cfg(feature = "debugger")]
+    crate::debug_capture::spawn_mirror(
+        &mut commands,
+        &mut images,
+        env_map_for_mirror,
+        cfg.env_brightness,
+        cfg.bloom_intensity,
+        rig.height,
+    );
 }
 
 impl CameraRig {
