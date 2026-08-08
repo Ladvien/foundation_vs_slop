@@ -753,6 +753,7 @@ dependencies = [
 [[package]]
 name = "bevy_debugger_bevy"
 version = "0.1.0"
+source = "git+https://github.com/Ladvien/bevy_debugger_mcp?rev=f3c2347#f3c23474571598a0489a309e2313cbb629ab57af"
 dependencies = [
  "bevy",
  "bevy_remote",
