@@ -84,12 +84,10 @@ Edits in the sibling checkout are picked up on the next `cargo build`, and they 
 
 `crates/bevy_debugger_bevy` did not compile against that `main`, and its screenshot handler was a skeleton that parsed `region` and `zoom` and then discarded the captured image. Both are fixed in `61ed2cb` — see that commit for the reasoning. The pin has since moved forward to **`f3c2347`**, which adds the offscreen capture and the full key coverage described above; `scripts/sync_debugger.sh` reports the pin against upstream. The MCP server binary itself builds clean; an earlier note in this tree claiming ~43 errors in `src/observability/` is stale.
 
-### The MCP server's own tools do not load in Claude Code
+### The MCP tool surface, and what it needed
 
-The two BRP methods above are reached by POSTing to `:15702` and need no MCP server at all — that is the sanctioned agent path and it works. The **separate** convenience surface, the 13 MCP tools (`observe`, `experiment`, `hypothesis`, `detect_anomaly`, `stress_test`, `time_travel_replay`, plus user/security management), is currently rejected by the client:
+Alongside the two BRP methods above, the server exposes 13 MCP tools (`observe`, `experiment`, `hypothesis`, `detect_anomaly`, `stress_test`, `time_travel_replay`, plus user and security management). Those were rejected wholesale by the client with `Invalid input: expected "object" (at tools.0.inputSchema.type)`: twelve took `Parameters<Value>`, and schemars renders `serde_json::Value` as `{"$schema": ..., "title": "AnyValue"}` — no `type`, no `properties`. One malformed entry rejects the entire list, so every tool was unreachable including the well-formed ones.
 
-```
-tools fetch failed — Invalid input: expected "object" (at tools.0.inputSchema.type)
-```
+Fixed in `f428b85`: each tool takes a typed request struct, with the JWT riding on it as `auth_token` / `authorization`. `tools/list` now returns 13 tools with zero missing `inputSchema.type`, and `tools/call` on `authenticate` returns a JWT. Their tools require that JWT, so set `BEVY_MCP_DEV_PASSWORD` when registering the server — otherwise the development passwords are random per start and written only to stderr, which the client cannot read.
 
-Every tool in `src/secure_mcp_tools.rs` takes `Parameters(req): Parameters<Value>`, and `schemars` renders `serde_json::Value` as `{"$schema": …, "title": "AnyValue"}` — a schema with no `type` and no `properties`. MCP requires `inputSchema` to be an object schema. Fixing it means giving those tools real parameter structs upstream; until then, use BRP directly.
+**None of that is on the agent path.** The two BRP methods are reached by POSTing to `:15702` and need no MCP server at all; that is what `CLAUDE.md` points agents at, and it is what was tested end to end. The MCP tools are a convenience surface on top.
