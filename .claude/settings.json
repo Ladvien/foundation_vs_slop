@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.command // \"\"' | grep -qE '(^|[;&|(]|`|\\$\\()[[:space:]]*([^[:space:]]*/)?screencapture([[:space:]]|$)|(^|[;&|(]|`|\\$\\()[[:space:]]*(python[0-9.]*[[:space:]]+)?([^[:space:]]*/)?(macinput|vinput)\\.py([[:space:]]|$)' && printf '%s' '{\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"permissionDecision\": \"deny\", \"permissionDecisionReason\": \"Blocked by project policy: agents use bevy_debugger_mcp over BRP for screenshots and input, never the OS. Capturing the window needs it raised, which steals focus and may switch Spaces; OS keystrokes land in whichever window actually has focus. Run the game with the debugger feature (cargo run --features debugger), then POST to http://127.0.0.1:15702 -- bevy_debugger/screenshot captures offscreen and needs no focus, bevy_debugger/input writes straight into ButtonInput. See the Screenshots section of CLAUDE.md and docs/bevy_debugger_mcp.md.\"}}' || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

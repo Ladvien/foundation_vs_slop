@@ -53,8 +53,14 @@ islands_out/
 # trail for a moved golden, and a review trail nobody else can see is not one.
 assets/config/bake_history/
 
-# Claude Code per-project state (worktrees from other sessions, settings, transcripts) — never commit
-.claude/
+# Claude Code per-project state (worktrees from other sessions, transcripts) — never commit.
+# `.claude/settings.json` is the exception and IS tracked: it carries the PreToolUse hook that denies
+# `screencapture` / `macinput.py` / `vinput.py`, and a policy only this machine enforces is not a
+# project policy. Per-developer overrides belong in `.claude/settings.local.json`, still ignored.
+# Written as `.claude/*` rather than `.claude/`, because git cannot re-include a file whose parent
+# directory is excluded — the negation below is silently dead if the directory itself is ignored.
+.claude/*
+!.claude/settings.json
 
 # Per-developer Cargo overrides (e.g. a machine-specific build.target-dir for local build isolation).
 # MUST NOT be committed: a hardcoded absolute path broke CI on ubuntu-latest for every commit
