@@ -33,6 +33,8 @@ Each crate is still reached by the path the game always used. **The facade is th
 
 **Inside `squad_ai`, write `::map_elites::` with leading colons for the crate.** `squad_ai::map_elites` aliases `::map_elites::loops`, so the bare path resolves to the module, not the crate (`src/squad_ai/mod.rs:40`).
 
+**One crate is editable but lives outside this repo:** `bevy_debugger_bevy`, from [`Ladvien/bevy_debugger_mcp`](https://github.com/Ladvien/bevy_debugger_mcp). It is a git dependency pinned to a rev and gated behind the optional `debugger` feature, so it is absent from every default, release and determinism build — `cargo tree -i bevy_debugger_bevy` finds no package unless the feature is on. To edit it, clone the repo as a sibling and redirect it with a `[patch]` in the gitignored `.cargo/config.toml`; edits are picked up on the next build and commit to the debugger's own repo rather than becoming a vendored second copy here. Full recipe, the custom BRP methods, and the `DebuggerPlugin`-owns-`RemotePlugin` trap are in `docs/bevy_debugger_mcp.md`.
+
 **Licensing is split on purpose.** The six `bevy_*`/`map_elites` libraries are **MIT OR Apache-2.0** with `publish = false` — a GPL crate in the Bevy ecosystem is unadoptable. The four `emerge-*` crates stay **GPL-3.0** with the game they were carved out of. `bevy_orca` also carries a `NOTICE`: it keeps RVO2's function names.
 
 ### Changes flow one way: monorepo → mirror

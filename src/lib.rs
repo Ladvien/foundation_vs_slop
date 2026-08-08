@@ -361,9 +361,14 @@ pub fn run() {
     // and from every determinism run — an external writer into pinned state is exactly what the goldens
     // exist to catch — and a Cargo feature is the only gate that also removes it from the resolved
     // dependency graph rather than merely from the plugin list.
+    // **`DebuggerPlugin` owns `RemotePlugin`, so this must not add a second one.** Bevy rejects a
+    // duplicate plugin by name, and `bevy_debugger_bevy::DebuggerPlugin::build` adds
+    // `RemotePlugin::default().with_method_main(..)` twice over to register `bevy_debugger/screenshot`
+    // and `bevy_debugger/input`. Adding `RemotePlugin` here as well panics the moment the feature is on.
+    // Only the HTTP transport is ours to add.
     #[cfg(feature = "debugger")]
     app.add_plugins((
-        bevy::remote::RemotePlugin::default(),
+        bevy_debugger_bevy::DebuggerPlugin,
         bevy::remote::http::RemoteHttpPlugin::default(),
     ));
 
