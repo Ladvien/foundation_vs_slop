@@ -144,6 +144,8 @@ curl -s -X POST http://127.0.0.1:15702 -H 'Content-Type: application/json' \
 bevy_debugger_bevy = { path = "/absolute/path/to/bevy_debugger_mcp/crates/bevy_debugger_bevy" }
 ```
 
+**If you add or bump that dependency while the `[patch]` is active, the resulting `Cargo.lock` records your local path instead of the git rev** — the build works for you and the committed lockfile is wrong for everyone else, which defeats the pin. Regenerate it with the `[patch]` block commented out before committing. `scripts/sync_debugger.sh --apply` now checks this and refuses rather than letting it through.
+
 `Cargo.toml` pins an exact rev so a fresh clone and CI build the same thing. `scripts/sync_debugger.sh` reports what upstream has moved past it; `--apply` bumps the pin and verifies the build.
 
 ## 7. Pushing the extracted crates (only if you maintain them)
@@ -159,6 +161,7 @@ Ten crates under `crates/` mirror to their own private `Ladvien/*` repos via `gi
 | `cargo test` passes but crate tests never ran | Missing `--workspace` — §5 |
 | A screenshot comes back one flat colour | The window is not on screen. Use the BRP offscreen capture, which does not care — §6 |
 | Disk full mid-build | `rm -rf target/debug/incremental` — §1 |
+| `Cargo.lock` suddenly drops the git source for `bevy_debugger_bevy` | Re-resolved under the local `[patch]` — §6 |
 | Bevy API doesn't match the docs you found | bevy.org documents `main`; this is pinned to 0.19.0. Read the vendored source under `~/.cargo/registry/src/*/bevy-0.19.0/` — see `CLAUDE.md` |
 | MCP tools missing after `claude mcp add` | Claude Code needs a restart — §6 |
 

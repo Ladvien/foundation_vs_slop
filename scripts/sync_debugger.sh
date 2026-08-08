@@ -68,8 +68,23 @@ grep -n 'bevy_debugger_bevy = ' "$MANIFEST"
 echo
 echo "== verifying it builds (a bump that does not compile is worse than a stale pin)"
 if cargo check --features debugger; then
+    # **A rev bump re-resolves, and re-resolving under a local `[patch]` bakes the sibling PATH into
+    # Cargo.lock instead of the git rev.** The build still works here and the committed lockfile is then
+    # wrong for everyone else — which defeats the pin, whose whole job is that a fresh clone and CI
+    # resolve the same thing. It already happened once. Caught by checking the lock, not by remembering.
+    if ! grep -q "git+https://github.com/Ladvien/bevy_debugger_mcp?rev=$short" Cargo.lock; then
+        echo >&2
+        echo "Cargo.lock does not record the git rev $short — a [patch] in .cargo/config.toml was" >&2
+        echo "active while cargo re-resolved, so the lock now points at your local checkout." >&2
+        echo "Regenerate it without the patch before committing:" >&2
+        echo >&2
+        echo "  # comment out the [patch] block in .cargo/config.toml, then:" >&2
+        echo "  cargo check --features debugger" >&2
+        echo "  # restore the block" >&2
+        exit 1
+    fi
     echo
-    echo "done. The debugger is at $short and the game builds against it."
+    echo "done. The debugger is at $short, the game builds against it, and Cargo.lock records the rev."
     echo "Commit \`$MANIFEST\` and \`Cargo.lock\` together."
 else
     echo
