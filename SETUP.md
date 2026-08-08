@@ -19,8 +19,12 @@ rustup default stable
 - **Linux** — the same set CI installs, needed even for the headless suite because the binary target still links them:
 
   ```sh
+  # Debian / Ubuntu, which is what CI runs
   sudo apt-get install -y --no-install-recommends \
     libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+
+  # Arch / CachyOS — the same libraries, and headers ship in the same packages
+  sudo pacman -S --needed alsa-lib systemd-libs wayland libxkbcommon vulkan-icd-loader
   ```
 
 **Disk — budget 60 GB.** `target/` reached 58 GB during heavy work on this machine and has filled a 460 GB volume twice. When it bites, `rm -rf target/debug/incremental` reclaims tens of GB (10 GB in one recent case) without throwing away the expensive Bevy dependency build; `cargo clean -p foundation_vs_slop` is the next step up.
