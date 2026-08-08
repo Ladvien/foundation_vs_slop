@@ -18,3 +18,11 @@ publish = false
 bevy = { version = "0.19.0", default-features = false, features = [
     "bevy_render", "bevy_window", "bevy_log", "png",
 ] }
+
+# **Examples only.** The plugin itself needs render + window + log + png and nothing more, which is why
+# the dependency above is so narrow. A runnable example, though, needs an actual window and event loop
+# (winit), a camera pipeline and a mesh to look at — so it takes the full umbrella here, where it
+# cannot reach a consumer's dependency graph. `tests/`-style boundary checks read `[dependencies]`
+# only, deliberately: a dev-dependency on something heavier is a different conversation.
+[dev-dependencies]
+bevy = { version = "0.19.0" }

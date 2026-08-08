@@ -73,6 +73,20 @@ for name in "${CRATES[@]}"; do
     for required in README.md Cargo.toml CLAUDE.md; do
         [ -f "$prefix/$required" ] || { echo "$prefix/$required is missing; a mirror needs it at its root." >&2; exit 1; }
     done
+    # **Examples are how a stranger judges the crate without building the game.** One runnable example
+    # is the difference between "here is a library, read the source" and "here is what it does, run it".
+    # A crate whose behaviour cannot be seen in isolation is one nobody adopts, so this is required
+    # rather than encouraged.
+    if ! ls "$prefix"/examples/*.rs >/dev/null 2>&1; then
+        echo "$prefix needs examples/ with at least one .rs — a mirror nobody can run is a mirror nobody adopts." >&2
+        exit 1
+    fi
+    # The honesty label. These crates were written by an agent; anyone landing on the repo cold is
+    # entitled to know that before they depend on one.
+    if ! grep -q 'Vibe Coded' "$prefix/README.md"; then
+        echo "$prefix/README.md is missing the \"Vibe Coded\" warning label." >&2
+        exit 1
+    fi
     # Two licensing arrangements exist here on purpose: the crates extracted as reusable libraries are
     # MIT OR Apache-2.0 (the Bevy-ecosystem norm, so they can actually be adopted), and the `emerge-*`
     # family stays GPL-3.0 with the game it was carved out of. Either is fine; NO license file is not,
