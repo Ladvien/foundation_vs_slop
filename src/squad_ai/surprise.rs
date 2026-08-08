@@ -708,9 +708,13 @@ const FIELD_FLATNESS_CEILING: f32 = 0.5;
 ///
 /// It is what rejects the degenerates `fitness` cannot see:
 /// - **always-Flee** (a flat `Logistic` is the constant 0.5, so an all-zero genome passes both startup
-///   guards) — no crab dies, the squad takes no damage, the map is never explored;
+///   guards) — it expresses no role, so the agency clause rejects it, and the map is never explored;
 /// - **always-Wander** — same;
 /// - a squad wipe, or a swarm extinction, which leave nothing to co-adapt against.
+///
+/// **"A real encounter" means resolved, not necessarily lethal.** A kill and a completed containment both
+/// count — see the clauses below. Reading it as "a crab must have died" is what made this gate reject the
+/// shipped game once containment landed and holding fire became a core verb.
 ///
 /// The clauses are *relational* — they depend on the opponent, not on the candidate alone. That is the
 /// point: this is minimal-criterion coevolution, and "neither too easy nor too hard" is a statement about
@@ -728,8 +732,29 @@ pub fn minimal_criterion(outcome: &EpisodeOutcome) -> Result<(), String> {
     if outcome.crabs_alive == 0 {
         return Err("swarm went extinct — nothing left to co-adapt against".into());
     }
-    if outcome.crabs_killed == 0 {
-        return Err("no crab died — the world was static".into());
+    // **A completed containment resolves an episode, exactly as a kill does.**
+    //
+    // This clause and the damage clause below were written when killing was the only way an encounter
+    // could end. Containment is now the game's central verb, and the evaluation's synthetic player
+    // deliberately *holds fire* while a capture is under way — `evaluate.rs` sets weapons tight for the
+    // whole ENGAGE window, which is the only window the brain controls. So an episode can walk in,
+    // contain an anomaly, and record **zero kills**, and this gate would call that "static".
+    //
+    // It was not hypothetical: measured 2026-08-07 on the authored brains at 7200 ticks, all three
+    // held-in worlds recorded `crabs_killed = 0` with 1–2 completed captures, so the criterion was
+    // rejecting the shipped game itself — every offline search wrote an empty archive and `train` exited
+    // 0 (`BACKLOG.md`, located 2026-08-05).
+    //
+    // **This does not weaken the degenerate filter**, which is the reason the clauses exist. A capture is
+    // thrown by the synthetic player, so like `crabs_killed` (which counts the Smiley's cull and crabs
+    // despawning on delivery) it is environment evidence, not agency evidence — and the doc above says so.
+    // Agency is carried by the `squad_duty_decisions` clause below, which is untouched: an always-Flee or
+    // always-Wander brain still expresses no role and is still rejected there, and by coverage.
+    //
+    // `captures_completed`, not `captures_attempted`: an attempt that broke is not a resolved encounter.
+    let contained = outcome.captures_completed > 0;
+    if outcome.crabs_killed == 0 && !contained {
+        return Err("no crab died and nothing was contained — the world was static".into());
     }
     // The agency clause. Everything above can be satisfied by the environment: the rifles auto-fire, the
     // synthetic player walks the squad into the nests, and crabs despawn for reasons the squad had no
@@ -742,8 +767,11 @@ pub fn minimal_criterion(outcome: &EpisodeOutcome) -> Result<(), String> {
                 .into(),
         );
     }
-    if outcome.unit_damage_taken <= 0.0 {
-        return Err("no unit was ever hurt — nothing was at stake".into());
+    // Same reasoning as the kill clause: a squad that closed to throwing range of a live anomaly, held
+    // its fire, and contained it had something at stake whether or not it was scratched doing so. Held-in
+    // world `0x5C09191` is exactly this case — 1 completed capture, 0 damage taken.
+    if outcome.unit_damage_taken <= 0.0 && !contained {
+        return Err("no unit was hurt and nothing was contained — nothing was at stake".into());
     }
     if outcome.reachable_cells == 0 {
         return Err("no reachable cells — degenerate dungeon".into());
@@ -1179,6 +1207,54 @@ mod tests {
         let smeared = EpisodeOutcome { field_flatness: 0.9, ..healthy() };
         assert!(minimal_criterion(&smeared).is_err(), "a flooded, gradient-less field must be rejected");
         assert!(minimal_criterion(&EpisodeOutcome { field_flatness: 0.45, ..healthy() }).is_ok());
+    }
+
+    /// A containment-only episode — no kill, no damage — is a real encounter.
+    ///
+    /// This is the shipped game: the synthetic player holds fire for the whole engage window while a
+    /// capture is under way, so held-in world `0x5C09191` really does record `crabs_killed = 0` and
+    /// `unit_damage_taken = 0.0` with one completed capture. Before containment was recognised here, that
+    /// made the gate reject every episode and every offline search wrote an empty archive.
+    #[test]
+    fn minimal_criterion_admits_an_encounter_resolved_by_containment() {
+        let contained = EpisodeOutcome {
+            crabs_killed: 0,
+            unit_damage_taken: 0.0,
+            captures_completed: 1,
+            ..healthy()
+        };
+        assert!(
+            minimal_criterion(&contained).is_ok(),
+            "a completed containment resolves an episode as surely as a kill does"
+        );
+
+        // And only a COMPLETED capture counts: an attempt that broke resolved nothing.
+        let broke = EpisodeOutcome { captures_attempted: 3, captures_completed: 0, ..contained };
+        assert!(
+            minimal_criterion(&broke).is_err(),
+            "attempts that never completed leave the episode unresolved"
+        );
+    }
+
+    /// The relaxation must not cost the degenerate filter. A capture is thrown by the synthetic player,
+    /// so it is environment evidence; agency is the `squad_duty_decisions` clause, which is untouched.
+    #[test]
+    fn a_contained_episode_still_needs_agency_and_coverage() {
+        let carried = EpisodeOutcome {
+            crabs_killed: 0,
+            unit_damage_taken: 0.0,
+            captures_completed: 1,
+            squad_duty_decisions: 0,
+            ..healthy()
+        };
+        assert!(
+            minimal_criterion(&carried).is_err(),
+            "a brain that never chose role work is still carried, however many captures the player threw"
+        );
+
+        let cooped =
+            EpisodeOutcome { cells_covered: 2, reachable_cells: 4000, ..carried.clone() };
+        assert!(minimal_criterion(&cooped).is_err(), "and a capture does not excuse exploring nothing");
     }
 
     #[test]

@@ -23,84 +23,60 @@
 
 use foundation_vs_slop::squad_ai::surprise::{minimal_criterion, EpisodeOutcome};
 
-/// **Guards three skips: `playtest_level` and both `search_calibration` tests.**
+/// **Guards two skips: `playtest_level` and `search_calibration`'s candidate-genome test.**
 ///
-/// All three fail because `minimal_criterion` rejects the shipped brains with *"no crab died — the world
-/// was static"*, measured on world `0x5C09191`:
+/// The criterion half of this debt is **paid** (2026-08-07). `minimal_criterion` used to reject the
+/// shipped brains with *"no crab died — the world was static"*, because the synthetic player holds fire
+/// while a capture is under way and the gate only recognised kills. It now accepts a completed
+/// containment as a resolved encounter, and
+/// `search_calibration::the_authored_brains_produce_a_real_encounter_on_every_world` went green and had
+/// its skip deleted.
+///
+/// **What is left is the other half, and it is a different defect: the brain barely runs.** Measured on
+/// world `0x5C09191`:
 ///
 /// ```text
-/// ordered_ticks: 4500 of 7200   weapons_tight_ticks: 900
-/// captures_attempted: 3, completed: 1     crabs_killed: 0   unit_damage_taken: 0.0
+/// ordered_ticks: 4500 of 7200 (62.5%)   weapons_tight_ticks: 900 (12.5%)
 /// ```
 ///
-/// The squad is under a standing player order for 62.5% of the episode and holding fire for another
-/// 12.5% — and holding fire is a *containment verb*, correctly used: three captures were attempted and
-/// one completed. So the containment mechanic and this criterion's "something must have died" are in
-/// direct conflict, and the harness satisfies containment.
+/// A standing `MoveOrder` excludes a unit from `unit_actions`/`medic_heal` (both `Without<MoveOrder>`),
+/// so only the ENGAGE window exercises the brain at all. That is why
+/// `a_candidate_genome_actually_changes_the_simulation` still fails: two different genomes produce a
+/// byte-identical hash because neither gets enough control to diverge. And it is why
+/// `playtest_level`'s 1800-tick smoke rollout still fails — one hub cycle costs
+/// `DWELL_ADVANCES × ADVANCE_TICKS + ENGAGE_TICKS` = 1200 ticks, so 1800 barely reaches one engage
+/// window and the capture that would resolve the episode usually has not completed.
 ///
-/// `search_calibration`'s own message names the fix this guards: *"a threshold in
-/// `surprise::minimal_criterion` needs recalibrating"*. The obvious recalibration is to let a
-/// **completed capture** count as a real encounter alongside a kill — the outcome already carries
-/// `captures_completed`. This test constructs exactly that episode: everything the criterion wants,
-/// zero kills, one capture. While the criterion still rejects it, the three skips are still needed.
+/// Both therefore rest on the same number: the fraction of an episode the brain controls. This guard
+/// pins it, so rebalancing the tour — the candidate fix — fires it.
 ///
-/// **What this does NOT cover.** Two of the three candidate fixes leave the criterion untouched —
-/// shortening `ADVANCE_TICKS` so less of the episode is spent ordered, or stopping the synthetic player
-/// holding weapons tight. Either would make the three tests pass without moving this guard. It catches
-/// the fix the failing test itself recommends, not every possible fix.
+/// **What this does NOT cover.** A fix that lengthens `playtest_level`'s horizon instead of rebalancing
+/// the tour would make that test pass without moving this guard. It catches the shared cause, not every
+/// possible route around it.
 #[test]
-fn minimal_criterion_still_demands_a_kill_so_three_skips_are_still_needed() {
-    // An episode that satisfies every other clause: a live squad, a live swarm, real agency, damage
-    // taken, reachable floor — and a completed containment capture instead of a kill.
-    let contained_not_killed = EpisodeOutcome {
-        squad_size: 5,
-        survivors: 5,
-        squad_duty_decisions: 440,
-        crabs_alive: 43,
-        crabs_killed: 0,
-        unit_damage_taken: 4.0,
-        reachable_cells: 3577,
-        // The real measured coverage from the failure dump. Not decoration: `minimal_criterion` also
-        // requires >2% of the map covered, and leaving this at `0` had the synthetic episode refused
-        // for THAT clause instead — which the control assertion above caught on the first run.
-        cells_covered: 332,
-        captures_completed: 1,
-        captures_attempted: 3,
-        liveness_violations: 0,
-        ..EpisodeOutcome::default()
-    };
-    // **This guard proves it can fail before it asserts anything.** The same episode with a single kill
-    // must be ACCEPTED — otherwise `contained_not_killed` is being refused by some other clause, the
-    // assertion below would hold for a reason unrelated to the skips, and this guard would be exactly
-    // the kind that cannot fail. (That defect shipped in this repo once already:
-    // `every_action_resolves_to_a_binding` asserted only that the returned row had non-empty fields,
-    // which the fallback row satisfies.)
-    let same_but_one_kill = EpisodeOutcome { crabs_killed: 1, ..contained_not_killed };
+fn the_brain_barely_runs_so_two_skips_are_still_needed() {
+    use foundation_vs_slop::squad_ai::evaluate::{ADVANCE_TICKS, DWELL_ADVANCES, ENGAGE_TICKS};
+
+    // One hub cycle: the dwell windows under a standing order, then the one window the brain owns.
+    let cycle = DWELL_ADVANCES * ADVANCE_TICKS + ENGAGE_TICKS;
+    let brain_fraction = ENGAGE_TICKS as f32 / cycle as f32;
     assert!(
-        minimal_criterion(&same_but_one_kill).is_ok(),
-        "the control case is refused: this synthetic episode fails `minimal_criterion` even WITH a kill \
-         ({:?}), so the assertion below proves nothing about the three skips. Fix the synthetic outcome \
-         until only the kill clause separates the two.",
-        minimal_criterion(&same_but_one_kill).err()
+        brain_fraction <= 0.30,
+        "the synthetic player now leaves the brain in control for {:.0}% of each hub cycle (was 25%). \
+         That is the rebalancing the two remaining skips were waiting on: re-run \
+         `playtest_level::shipped_level_playtests_and_is_deterministic` and \
+         `search_calibration::a_candidate_genome_actually_changes_the_simulation`, delete the `--skip` \
+         lines that now pass from `.github/workflows/ci.yml`'s `harness` job, and delete this guard. \
+         Nothing is broken; this is the to-do firing.",
+        brain_fraction * 100.0
     );
 
-    let verdict = minimal_criterion(&contained_not_killed);
+    // And the 1800-tick smoke rollout still cannot fit two hub cycles, which is the other half of
+    // `playtest_level`'s failure. Stated as data so a horizon change is visible here too.
     assert!(
-        verdict.is_err(),
-        "`minimal_criterion` now ACCEPTS a zero-kill episode that completed a containment capture — \
-         which is the recalibration `search_calibration`'s own failure message asks for. If that was \
-         deliberate, the three sim-based skips in `.github/workflows/ci.yml`'s `harness` job are \
-         probably stale: re-run `playtest_level` and both `search_calibration` tests, delete the skips \
-         that now pass, and delete this guard. Nothing is broken — this is the to-do firing."
-    );
-    // And that it is refused for the documented reason, not some unrelated clause — otherwise this
-    // guard would keep passing for a reason that has nothing to do with the three skips.
-    let why = verdict.err().unwrap_or_default();
-    assert!(
-        why.contains("no crab died"),
-        "the criterion still refuses a capture-only episode, but no longer because nothing died — it \
-         says {why:?}. Re-read `BACKLOG.md`'s entry for the four skips: this guard's reasoning is \
-         built on the \"no crab died\" clause and needs revisiting."
+        cycle * 2 > 1800,
+        "a hub cycle is now {cycle} ticks, so `playtest_level`'s 1800-tick rollout reaches two engage \
+         windows — re-run it; if it passes, delete its skip."
     );
 }
 

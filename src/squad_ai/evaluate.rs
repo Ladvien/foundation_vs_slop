@@ -40,16 +40,20 @@ const LIVENESS_EVERY: u32 = 300;
 /// Measured, not guessed. At 2 s the squad never arrived anywhere: orders were re-issued mid-transit, it
 /// oscillated, and coverage plateaued at ~4% even over a two-minute episode. Crossing a 192-tile dungeon
 /// takes far longer than the flow field's re-plan interval.
-const ADVANCE_TICKS: u32 = 300;
+pub const ADVANCE_TICKS: u32 = 300;
 
 /// Ticks the squad is then left **unordered**, with the AI in full control (~5 s at 60 Hz).
+///
+/// Public, with [`ADVANCE_TICKS`] and [`DWELL_ADVANCES`], so `tests/skip_debt.rs` can pin the fraction
+/// of an episode the brain actually controls. Two known-red skips rest on that fraction being small;
+/// the guard fires when it changes, which is the necessary half of the fix.
 ///
 /// This phase is not optional garnish — it is the only part of the episode that evaluates the brain. A
 /// standing `MoveOrder` overrides locomotion *and* excludes the unit from `unit_actions` and `medic_heal`
 /// (both are `Without<MoveOrder>`), so a permanently-ordered squad exercises nothing but the mode label
 /// and the auto-firing rifles. Alternating also matches how the game is actually played: the player
 /// advances the squad, then watches the fight.
-const ENGAGE_TICKS: u32 = 300;
+pub const ENGAGE_TICKS: u32 = 300;
 
 /// Advance windows spent DWELLING toward each crab hub before the engage window. The squad is fast and the
 /// swarm is slow, but crabs forage away from their nests, so a single ADVANCE window (~30 world-units) never
@@ -57,7 +61,7 @@ const ENGAGE_TICKS: u32 = 300;
 /// windows (~90 units of unbroken travel, no engage drift between them) reliably lands it on the hub, where
 /// breeding respawns crabs into firing range. Keep it a FIXED count (not an arrival check) so the tour
 /// schedule stays independent of the brain under test.
-const DWELL_ADVANCES: u32 = 3;
+pub const DWELL_ADVANCES: u32 = 3;
 
 /// Floor goals interleaved between nests, so the tour both explores and fights.
 const FLOOR_GOALS: usize = 4;

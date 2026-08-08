@@ -191,8 +191,7 @@ jobs:
             --skip search_rollouts_of_mutants_are_reproducible_under_load \
             --skip watching_the_feed_makes_it_generate_and_ignoring_it_stops \
             --skip shipped_level_playtests_and_is_deterministic \
-            --skip a_candidate_genome_actually_changes_the_simulation \
-            --skip the_authored_brains_produce_a_real_encounter_on_every_world
+            --skip a_candidate_genome_actually_changes_the_simulation
 
   # Release-profile determinism gate. The shipped game and the `--release` `train` driver run with
   # `debug_assertions` OFF, which ELIDES the `sort_total!` tie-check (util.rs:59) — so a latent tie could,

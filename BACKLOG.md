@@ -883,7 +883,25 @@ All present in the local `home-still` corpus (returned with PDF path + chunk ind
      `squad=5  survivors=5  crabs_alive=41  crabs_killed=0  duty_decisions=138  unit_damage=0.000  reachable=3577  liveness_violations=0`
 
   3. `search_calibration::a_candidate_genome_actually_changes_the_simulation`
-  4. `search_calibration::the_authored_brains_produce_a_real_encounter_on_every_world` — both recorded as pre-existing when they were found during the crab/SCP-150 combat-feel work (world `0xA11CE`, Engineer brain).
+  4. ~~`search_calibration::the_authored_brains_produce_a_real_encounter_on_every_world`~~ — **FIXED 2026-08-07**, skip deleted. Both were recorded as pre-existing when they were found during the crab/SCP-150 combat-feel work (world `0xA11CE`, Engineer brain).
+
+  **✅ RESOLVED 2026-08-07 — the criterion half.** `minimal_criterion` now accepts a **completed containment** as a resolved encounter alongside a kill (`surprise.rs`; `captures_completed` was already on the outcome). This is the recalibration `search_calibration`'s own failure message asked for.
+
+  Measured first, on the authored brains at 7200 ticks — a capture completes on **every** held-in world, so the gate really was rejecting the shipped game:
+
+  | seed | captures_completed | crabs_killed | unit_damage |
+  |---|---|---|---|
+  | `0x5C09191` | 1 | 0 | **0.0** |
+  | `0x1CE5` | 2 | 0 | 48.7 |
+  | `0xFEED` | 1 | 0 | 507.5 |
+
+  Note `0x5C09191` takes **zero damage**, so the "nothing was at stake" clause had to recognise containment too, not just the kill clause — a capture-only fix to one clause would have left that world rejected.
+
+  **It does not weaken the degenerate filter.** A capture is thrown by the synthetic player, so like `crabs_killed` it is environment evidence; agency is `squad_duty_decisions`, untouched. New unit tests pin both directions, including that an always-carried brain with a capture is still rejected.
+
+  **Cheaper than this entry predicted:** the criterion is applied to the outcome *after* the rollout, so unlike the other two candidates it cannot move `snapshot_hash` or the field golden — verified, both unchanged.
+
+  **⬜ STILL OPEN — the other half: the brain barely runs.** `a_candidate_genome_actually_changes_the_simulation` and `playtest_level` remain red for the *ordered/weapons-tight fraction*, not the gate: only the ENGAGE window exercises the brain (`DWELL_ADVANCES × ADVANCE_TICKS + ENGAGE_TICKS` = 1200 ticks per hub cycle, 25% of it brain-controlled), so two genomes produce a byte-identical hash, and `playtest_level`'s 1800-tick horizon barely reaches one engage window. `tests/skip_debt.rs::the_brain_barely_runs_so_two_skips_are_still_needed` now guards exactly that ratio. Candidates unchanged: shorten `ADVANCE_TICKS`/`DWELL_ADVANCES`, or stop holding weapons tight for the whole engage window. **Both move `snapshot_hash` and re-score every archive.**
 
   **LOCATED (2026-08-05). One cause, three of the four skips, and it is the evaluation harness — not the game.** The decisive experiment: take the **identical** `SimConfig` the failing test rolls out (`deterministic_core_seeded(0x5C09191)` + `BrainSource::Authored` + `.with_level(pheno)`) and step it **by hand** instead of through `run_episode`. Result: crabs 40 → 44, lowest crab health **0.303**, 4 nests present at tick 1. **Combat works.** The same config through `run_episode` gives `crabs_killed = 0, unit_damage = 0.00`. The only difference is `run_episode`'s **synthetic player**.
 
