@@ -347,7 +347,27 @@ pub fn run() {
         // Shared `foundation::noise` WGSL library — must load after `DefaultPlugins` (AssetPlugin's
         // EmbeddedAssetRegistry) and before any material shader specializes, so `#import foundation::noise`
         // resolves for the blood/vhs/impact/mycelia shaders (2026-07-19 review Finding E).
-        .add_plugins(shader_lib::ShaderLibraryPlugin)
+        .add_plugins(shader_lib::ShaderLibraryPlugin);
+
+    // **Bevy Remote Protocol, for agent-driven debugging** (`--features debugger`).
+    //
+    // Two plugins, per the vendored `bevy/examples/remote/server.rs`: `RemotePlugin` owns the method
+    // registry and the request queue, `RemoteHttpPlugin` is the JSON-RPC-over-HTTP transport (default
+    // port 15702). Our `bevy_debugger_mcp` server is a SEPARATE PROCESS that speaks MCP to an agent and
+    // BRP to this one — so nothing here links it, and the game gains no HTTP client.
+    //
+    // Feature-gated rather than `debug_assertions`-gated, unlike `devshot`/`region_capture`: BRP is not
+    // only an observation channel, it can MUTATE a live `World`. It must be absent from a shipped binary
+    // and from every determinism run — an external writer into pinned state is exactly what the goldens
+    // exist to catch — and a Cargo feature is the only gate that also removes it from the resolved
+    // dependency graph rather than merely from the plugin list.
+    #[cfg(feature = "debugger")]
+    app.add_plugins((
+        bevy::remote::RemotePlugin::default(),
+        bevy::remote::http::RemoteHttpPlugin::default(),
+    ));
+
+    app
         // avian3d rigid-body physics — deliberately scoped: only gib chunks are dynamic bodies and
         // only the floor + walls are static colliders (see `gore`/`autogib`/`dungeon`). Units,
         // enemies, and lasers keep their own custom movement and never touch the solver.
