@@ -64,7 +64,7 @@ Two things to know:
 
 `bevy_debugger/input` writes into `ButtonInput<KeyCode>` and `ButtonInput<MouseButton>` — resources inside the game process. It cannot leak into whatever window you are actually using, and this is structural rather than careful: the crate depends only on `bevy`, `bevy_remote`, `serde`, `serde_json` and `image`, none of which can synthesise an OS event, and its sources contain no `enigo`, `CGEvent`, `core-graphics`, `xdotool`, `SendInput`, `winit` or `unsafe`. Keys injected while another application held focus produced nothing in that application.
 
-Its key table currently covers twelve keys (`parse_keycode`), and `InputKind::Scroll` is a stub that writes nothing — widen them upstream when a workflow needs more.
+`key` and `button` deserialize straight into `KeyCode` and `MouseButton`, so **every variant Bevy knows works by name** — `KeyW`, `Space`, `ArrowLeft`, `F5`, `ShiftLeft`, `Numpad7`. There is no hand-maintained key table to fall behind the engine. `InputKind::Scroll` writes a real `MouseWheel` message (`unit` is `"Line"` or `"Pixel"`) and fails loudly when there is no primary window to address it to.
 
 ## Hacking on the debugger locally
 
@@ -82,4 +82,14 @@ Edits in the sibling checkout are picked up on the next `cargo build`, and they 
 
 `bevy_debugger_mcp` moved from Bevy 0.16 to 0.19 in PR #3, already merged to its `main`. That upgrade replaced the WebSocket transport with HTTP JSON-RPC and renamed every BRP method (`bevy/query` → `world.query`, `bevy/get` → `world.get_components`, and so on).
 
-`crates/bevy_debugger_bevy` did not compile against that `main`, and its screenshot handler was a skeleton that parsed `region` and `zoom` and then discarded the captured image. Both are fixed in `61ed2cb`, which is the rev pinned here — see that commit for the reasoning. The MCP server binary itself builds clean; an earlier note in this tree claiming ~43 errors in `src/observability/` is stale.
+`crates/bevy_debugger_bevy` did not compile against that `main`, and its screenshot handler was a skeleton that parsed `region` and `zoom` and then discarded the captured image. Both are fixed in `61ed2cb` — see that commit for the reasoning. The pin has since moved forward to **`f3c2347`**, which adds the offscreen capture and the full key coverage described above; `scripts/sync_debugger.sh` reports the pin against upstream. The MCP server binary itself builds clean; an earlier note in this tree claiming ~43 errors in `src/observability/` is stale.
+
+### The MCP server's own tools do not load in Claude Code
+
+The two BRP methods above are reached by POSTing to `:15702` and need no MCP server at all — that is the sanctioned agent path and it works. The **separate** convenience surface, the 13 MCP tools (`observe`, `experiment`, `hypothesis`, `detect_anomaly`, `stress_test`, `time_travel_replay`, plus user/security management), is currently rejected by the client:
+
+```
+tools fetch failed — Invalid input: expected "object" (at tools.0.inputSchema.type)
+```
+
+Every tool in `src/secure_mcp_tools.rs` takes `Parameters(req): Parameters<Value>`, and `schemars` renders `serde_json::Value` as `{"$schema": …, "title": "AnyValue"}` — a schema with no `type` and no `properties`. MCP requires `inputSchema` to be an object schema. Fixing it means giving those tools real parameter structs upstream; until then, use BRP directly.
