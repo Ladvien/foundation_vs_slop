@@ -101,7 +101,7 @@ bevy_speech_bubbles = { path = "crates/bevy_speech_bubbles" }
 # drift (see `emerge-bevy`'s header on `spawn_descriptor`). To hack on it, clone the repo as a sibling
 # and redirect this with a `[patch]` in the gitignored `.cargo/config.toml` — that recipe is in
 # `docs/bevy_debugger_mcp.md`, and it keeps CI and fresh clones on the reproducible pinned rev.
-bevy_debugger_bevy = { git = "https://github.com/Ladvien/bevy_debugger_mcp", rev = "a525482", optional = true }
+bevy_debugger_bevy = { git = "https://github.com/Ladvien/bevy_debugger_mcp", rev = "f3c2347", optional = true }
 avian3d = "0.7.0"
 # `jpeg`: the SCP_Characters glTFs (e.g. VALKYRIE, the squad body) embed their PBR textures as JPEG to
 # keep the .glb small; Bevy's default image features cover PNG but NOT JPEG, so without this the whole

@@ -1,4 +1,4 @@
-- Use home still and lookup research on whatever you are implementing BEFORE you implement it.  We want SOTA and best practices.
+- Use home still and lookup research on whatever you are implementing BEFORE you implement it.  We want SOTA and best practices.  And it is filled with game development research and best practices.
 - Do not use hardbreaks when writing markdown.  Markdown should be easy for humans to read when rendered.
 - When creating new features, attempt to use Bevy's plugin pattern as much as possible.  Create separate workspace crates.  Create their own Github repo with idiomatic name.  This is to ensure reusable components are generated during our work. Ensure each respective crate has a warning label of "Vibe Coded" a the top of the README.md. Please refer to [bevy_plugins.md](docs/bevy_plugins.md).  Each separate create must include examples (1-3) demoing the crate.  This is allow inspection of crate behavior without inclusion in this game.
 - Do not use unwrap() or anything that'd lead to a panic.  Code safe.  Handle errors.
@@ -133,8 +133,19 @@ A determinism probe on an idle box proves nothing: run it under load.
 
 Cataloged at `/mnt/codex_fs/game_assets/CATALOG.md` — use any of them.
 
-## Screenshots
+## Screenshots and input — agents use BRP, and only BRP
 
-To capture a frame from the running game, use the **`screenshots` skill** — the game shoots itself from inside the render pipeline (`crates/bevy_devshot`, re-exported at `crate::devshot`; the editor registers the same crate). Never reach for macOS `screencapture`.
+**An agent looking at or driving this game uses `bevy_debugger_mcp` over BRP. Nothing else.** Run the game with `cargo run --features debugger`, then:
+
+- `bevy_debugger/screenshot` — offscreen capture. Writes a PNG from an `Image` the mirror camera renders to, with optional `region` and `zoom`.
+- `bevy_debugger/input` — keyboard, mouse and scroll written into the game's own `ButtonInput` resources. Any `KeyCode` variant by name: `KeyW`, `F5`, `ShiftLeft`, `Numpad7`.
+
+**This is the single path because the alternatives are not equivalent — they are worse in a specific way.** Capturing the window requires the window to be on screen, so it means raising the game: stealing focus, possibly switching Spaces, interrupting whoever is at the machine. Measured, same scene, one variable: **7,188 distinct colours focused, 1 unfocused**. Driving the OS keyboard is worse still — the keystrokes land in whatever window actually has focus, which may be someone's editor.
+
+So these are **forbidden** for an agent, and a hook blocks them: macOS `screencapture`, `scripts/macinput.py`, `scripts/vinput.py`.
+
+Details, the `DebuggerPlugin`-owns-`RemotePlugin` trap, and the `[patch]` recipe for editing the debugger: `docs/bevy_debugger_mcp.md`. Keep the pinned rev current with `scripts/sync_debugger.sh` (report-only; `--apply` bumps it and verifies the build) — run it whenever you touch the debugger, because a pin drifts silently by design.
+
+**`bevy_devshot` is not an agent path.** It still serves two callers with no BRP of their own: `emerge-mapper`, and the game's own player-facing Ctrl+P. It also captures the **UI layer**, which the offscreen mirror cannot — Bevy renders UI to one camera, so a mirror camera never receives the HUD. If a shot must show the interface, that is a request to hand to the player, not a reason to raise the window yourself.
 
 **Player region captures live in `debug_screenshots/`.** Ctrl+P drags a box and saves *just that region* to `debug_screenshots/region_<timestamp>.png` — a deliberate "look here" pointer. So if the player references something visual, **check `debug_screenshots/` newest-first and read `debug_screenshots/CLAUDE.md`.** From `src/region_capture.rs` (dev-only, stripped from release).
