@@ -65,8 +65,12 @@ for name in "${CRATES[@]}"; do
         echo "$prefix does not exist — fix CRATES rather than skipping, or a mirror goes stale in silence." >&2
         exit 1
     fi
-    # A mirror's root IS this directory, so anything a reader needs must live in it.
-    for required in README.md Cargo.toml; do
+    # A mirror's root IS this directory, so anything a reader needs must live in it — and the reader is
+    # no longer only a human. `CLAUDE.md` is required for the same reason `README.md` is: an agent that
+    # clones one of these repos standalone has no monorepo to consult, so the crate's own
+    # non-negotiables (the engine-free ratchets, "the caller owns the schedule", no-transitions, the
+    # single spawner) have to travel with it or they are simply absent at the moment they are needed.
+    for required in README.md Cargo.toml CLAUDE.md; do
         [ -f "$prefix/$required" ] || { echo "$prefix/$required is missing; a mirror needs it at its root." >&2; exit 1; }
     done
     # Two licensing arrangements exist here on purpose: the crates extracted as reusable libraries are

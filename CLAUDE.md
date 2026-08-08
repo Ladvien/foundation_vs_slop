@@ -10,6 +10,79 @@
 - When items are complete, move them from `BACKLOG.md` to `BACKLOG_ARCHIVE.md`.  DO NOT DELETE `BACKLOG_ARCHIVE.md`.
 - **Read the vendored Bevy 0.19 source before writing Bevy code** — not bevy.org, which tracks `main`. See "Bevy 0.19" below.
 
+## Workspace & crates — how this all fits together
+
+The game is the workspace **root package** (`foundation_vs_slop`, `src/`). Eleven members live under
+`crates/`; ten of them are **mirrored** to their own private `Ladvien/*` repos. The exception is
+`crates/fvs` — the zero-dependency `cargo fvs` dispatcher, which is its own crate so that printing
+`--help` does not first rebuild the game (see its manifest header).
+
+Each extracted crate is still reached by the path the game always used. **The facade is the API** — if
+you are changing a call site, you are almost certainly editing `src/`, not `crates/`:
+
+| Crate | What it is | How the game reaches it | License |
+|---|---|---|---|
+| `bevy_orca` | ORCA local avoidance: the 2-D linear program over discs | `crate::orca` (`src/lib.rs:119`) | MIT/Apache |
+| `map_elites` | QD kernel: archive, three emitters, sep-CMA-ES, POET | `squad_ai::{qd, map_elites, cmaes, poet, interest, …}` (`src/squad_ai/mod.rs:43+`) | MIT/Apache |
+| `bevy_devshot` | Sentinel-file screenshot capture | `crate::devshot` (`src/lib.rs:52`) | MIT/Apache |
+| `bevy_stigmergy` | N influence channels + the vectorial rally pheromone | `Stig(StigGrid<CHANNEL_COUNT>)` in `ai::field` (`src/ai/field.rs:134`) | MIT/Apache |
+| `bevy_light_grid` | CPU illuminance grid creatures read | `LightField { core, dirty }` in `light.rs` (`src/light.rs:341`) | MIT/Apache |
+| `bevy_speech_bubbles` | World-space speech/thought balloons | `dialogue::{bubble, model}` re-exports (`src/dialogue/bubble.rs:15`) | MIT/Apache |
+| `emerge-core` | Engine-free world building: schemas, IR, solvers, WFC, `DetRng` | `crate::{geom, rng, wfc}` (`src/lib.rs:169`), `placement::{ir, …}` (`src/placement/mod.rs:26`) | GPL-3.0 |
+| `emerge-anim` | The pose blender | `crate::anim` (`src/lib.rs:23`) | GPL-3.0 |
+| `emerge-bevy` | A library + a map become entities | `src/emerge_map.rs` | GPL-3.0 |
+| `emerge-mapper` | The standalone editor — its own app, **not** a game dependency | `cargo run -p emerge-mapper` | GPL-3.0 |
+
+**Inside `squad_ai`, write `::map_elites::` with leading colons for the crate.** `squad_ai::map_elites`
+is an alias for `::map_elites::loops`, so the bare path resolves to the module, not the crate
+(`src/squad_ai/mod.rs:40`).
+
+### Changes flow one way: monorepo → mirror
+
+The mirrors are `git subtree split` of `crates/<name>/`, history intact. **Nothing is ever edited on
+the far side and nothing is ever pulled back.** Re-sync with `scripts/mirror_crates.sh` (idempotent —
+a no-op run reports `Everything up-to-date`).
+
+If a push is **not** a fast-forward, that is the correct outcome, not a problem to route around: it
+means monorepo history was rewritten under the mirror, which is a human decision. Never `--force` past
+it; the script's header carries the deliberate resolution.
+
+Because `crates/<name>/` *is* the mirror's root, anything a standalone reader needs lives in that
+directory — its `README.md`, its `CLAUDE.md`, and any future `crates/<name>/.github/workflows/ci.yml`
+(GitHub ignores that path here; the split lifts it to where it runs).
+
+**Each mirrored crate has its own `CLAUDE.md`** carrying that crate's non-negotiable — the engine-free
+ratchets, "caller owns the schedule", no-transitions, the single spawner. Read it before editing under
+`crates/`. `scripts/mirror_crates.sh` refuses to mirror a crate that lacks one.
+
+### The pattern to reuse: facade newtypes, not traits
+
+`Stig` and `LightField` wrap the crate type, keep today's exact signatures, and delegate — so the
+extraction changed **zero call sites**. Reach for the same shape next time, because the obvious
+alternatives are both dead ends:
+
+- A `trait CellMap` cannot work. Call sites pass `&dungeon` where `dungeon: Res<Dungeon>`, inference
+  picks `M = Res<Dungeon>`, and the orphan rule forbids implementing a foreign trait for it — so all
+  ~40 sites would need `&*dungeon`.
+- `&dyn` puts a virtual call in the diffusion inner loop.
+
+Game-shaped state stays in the shell, not the crate: `LightField::dirty` is bake-gating for *this
+game's* fixtures, and a grid that tracked it would be guessing at a schedule it does not own.
+Occlusion crosses the boundary as `los: impl Fn(IVec2, IVec2) -> bool` — monomorphised at the call
+site and returning a `bool`, so it cannot perturb a float.
+
+### Licensing is split on purpose
+
+The six extracted libraries are **MIT OR Apache-2.0** (a GPL crate in the Bevy ecosystem is
+unadoptable) and carry `publish = false`. The four `emerge-*` crates stay **GPL-3.0** with the game
+they were carved out of. `bevy_orca` also carries a `NOTICE` — it keeps RVO2's function names.
+
+Editing a crate is editing the game: see the `--workspace` warning under **Testing** below, which is
+load-bearing for exactly this reason.
+
+Deeper rationale, all already written: the per-dependency comments in the root `Cargo.toml`, the
+header of `scripts/mirror_crates.sh`, and `docs/2026-08-08-handoff.md`.
+
 ## Bevy 0.19 — read the vendored source, not the web
 
 We are pinned to **`bevy 0.19.0`**. bevy.org documents `main`, and it has been wrong for us more than
