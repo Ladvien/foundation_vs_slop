@@ -1,0 +1,55 @@
+# Rust build artifacts
+/target/
+# Unanchored too: `crates/bevy_debugger_bevy` is a standalone package, not a workspace member,
+# so building it directly creates its own target dir and lockfile beside it.
+target/
+crates/*/Cargo.lock
+debug/
+**/*.rs.bk
+*.pdb
+**/mutants.out*/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs and temporary files
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Configuration files (keep examples)
+config.toml
+.env
+.env.local
+
+# Build artifacts
+dist/
+build/
+
+# Coverage reports
+tarpaulin-report.html
+coverage/
+
+# Local development
+.claude/
+claude_cache/
+
+# macOS service files (runtime generated)
+*.log.bak
+.DS_Store
