@@ -41,6 +41,16 @@ default-run = "foundation_vs_slop"
 # accessors, and any test-only visual-decoupling hooks. Off by default so the shipped binary carries
 # none of it. Enable with `cargo test --features test-harness`.
 test-harness = ["bevy/debug", "dep:clap", "dep:indicatif", "dep:libc"]
+# **Agent debugging over BRP** (`cargo run --features debugger`). Turns on Bevy's own Remote Protocol so
+# `bevy_debugger_mcp` — our MCP server, a separate process — can query entities, components and resources
+# in the running game. See `docs/bevy_debugger_mcp.md`.
+#
+# **Opt-in, not default, and that is the point.** BRP is a remote-control channel into a live `World`: it
+# can read and MUTATE anything. It has no place in a shipped binary, and it must never be on during a
+# determinism run, where an external writer into pinned state is precisely the thing the goldens exist to
+# catch. Gating it as a feature keeps the default and `--release` builds byte-identical to today —
+# measured: with this off, the resolved feature set is unchanged.
+debugger = ["bevy/bevy_remote"]
 
 # Both binaries are declared explicitly. `src/bin/train.rs` would otherwise be auto-discovered and
 # compiled on a plain `cargo check`, where `sim_harness` does not exist — `required-features` is the
