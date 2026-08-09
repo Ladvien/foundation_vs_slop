@@ -69,7 +69,31 @@ curl -s -X POST http://127.0.0.1:15702 -H 'Content-Type: application/json' -d '{
 
 Capture is asynchronous: the method replies *before* the image exists, so it always writes to a path and reports that path back rather than returning bytes. Read the file once it appears.
 
-**`bevy_debugger/input`** — headless keyboard and mouse injection, writing straight into Bevy's input resources without touching the OS input stack. This is the one that matters here: the project forbids driving a real keyboard or display, and this is the sanctioned version of exactly that.
+**`bevy_debugger/input`** — headless keyboard, mouse and **cursor** injection, writing straight into Bevy's input resources without touching the OS input stack. This is the one that matters here: the project forbids driving a real keyboard or display, and this is the sanctioned version of exactly that.
+
+### The cursor, and why it is a resource rather than the window's
+
+`kind: "Cursor"` takes `x`/`y` in **logical window pixels**, or `clear: true` to hand the pointer back to the real mouse. The position is state, not an edge — it stays where it was put until moved again, so there is no per-frame stream to keep up with. That is what makes a drag expressible:
+
+```sh
+B=http://127.0.0.1:15702
+post() { curl -s -X POST $B -H 'Content-Type: application/json' \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"bevy_debugger/input\",\"params\":$1}"; }
+
+post '{"kind":"Cursor","x":640,"y":360}'
+post '{"kind":"Mouse","button":"Left","action":"Press"}'
+post '{"kind":"Cursor","x":720,"y":400}'
+post '{"kind":"Mouse","button":"Left","action":"Release"}'
+post '{"kind":"Cursor","clear":true}'
+```
+
+`action` now defaults to `Tap`, and `Cursor` ignores it — a position has no press and no release.
+
+**It writes a `DebugCursor` resource and never `Window::set_cursor_position`**, and that was read out of the pinned engine rather than guessed. Bevy's window setter writes an internal field; `bevy_winit`'s `changed_windows` diffs that field against a per-window cache every frame and asks the platform to **move the physical pointer** (`bevy_winit-0.19.0/src/system.rs:433`). The cache is `pub(crate)`, so a plugin cannot suppress the diff. Writing the window would drag the mouse out from under whoever is at the machine — exactly the class of thing this crate exists to prevent, and it would have passed the OS-boundary ratchet while defeating the point of it.
+
+**The consequence for a host: a system that calls `Window::cursor_position` directly cannot be driven.** It has to read `bevy_debugger_bevy::cursor_position(&window, &debug_cursor)`. That is not a bug in the plugin, and it is the one part of this method that needs the game or the editor to meet it halfway. `emerge-mapper` does it once, in `view::Pointer` (filled in `keys::Phase::Sense`), so every spatial system downstream gets one answer; `window` had no other use in `editor.rs`, so seventeen window params became one resource.
+
+**Ordering is load-bearing.** A move queued *after* a button, or a second move in one frame, is deferred to the next frame: applying `press, move` together makes the game read the press at the new position, so the click never happens where it was aimed, and two moves in one frame collapse a drag's path to its endpoint. The example `cargo run -p bevy_debugger_bevy --example cursor_drag_lands` demonstrates it, and earned its keep immediately — it caught a release overtaking two still-pending moves while every individual rule behaved as written.
 
 ### `DebuggerPlugin` owns `RemotePlugin` — do not add a second one
 

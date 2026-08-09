@@ -178,7 +178,9 @@ Cataloged at `/mnt/codex_fs/game_assets/CATALOG.md` — use any of them.
 **An agent looking at or driving this game uses `bevy_debugger_mcp` over BRP. Nothing else.** Run the game with `cargo run --features debugger`, then:
 
 - `bevy_debugger/screenshot` — offscreen capture. Writes a PNG from an `Image` the mirror camera renders to, with optional `region` and `zoom`.
-- `bevy_debugger/input` — keyboard, mouse and scroll written into the game's own `ButtonInput` resources. Any `KeyCode` variant by name: `KeyW`, `F5`, `ShiftLeft`, `Numpad7`.
+- `bevy_debugger/input` — keyboard, mouse, scroll **and cursor position** written into the game's own input state. Any `KeyCode` variant by name: `KeyW`, `F5`, `ShiftLeft`, `Numpad7`. `kind: "Cursor"` takes `x`/`y` in logical window pixels or `clear: true`, so a click-drag is expressible: aim, press, move, release.
+
+  **A cursor injection only reaches a system that reads it.** The pointer lands in a `DebugCursor` resource, never in the window's own cursor — writing that makes Bevy's windowing backend move the *physical* mouse, which is the one thing this whole path exists to avoid. So a system calling `Window::cursor_position` directly is undrivable by an agent; it has to go through `bevy_debugger_bevy::cursor_position(&window, &debug_cursor)`. `emerge-mapper` does this once, in `view::Pointer`.
 
 **This is the single path because the alternatives are not equivalent — they are worse in a specific way.** Capturing the window requires the window to be on screen, so it means raising the game: stealing focus, possibly switching Spaces, interrupting whoever is at the machine. Measured, same scene, one variable: **7,188 distinct colours focused, 1 unfocused**. Driving the OS keyboard is worse still — the keystrokes land in whatever window actually has focus, which may be someone's editor.
 

@@ -100,7 +100,13 @@ just made.
   writes atomically, adopts only on success; a duplicate id refuses and leaves both the file and the
   in-memory project untouched.
 
-**An agent cannot drive this one end to end, and that is a finding rather than an excuse.**
+**~~An agent cannot drive this one end to end~~ — fixed while building step 3; see §3.8.** The gap
+below was real when step 1 shipped and is not any more: `bevy_debugger/input` now carries a cursor
+position, so the box drag is drivable. The paragraph stands as written because the reasoning in it —
+treating a missing capability in a crate we own as a fixed constraint — is the thing worth not
+repeating.
+
+
 `bevy_debugger/input` takes `kind` / `action` / `key` / `button` and scroll `x` / `y` — **no cursor
 position**. The gesture that fills a `CloneSet` is a box *drag*, so no injected input can produce one.
 The keyboard half (`M` opens the field, `Enter` commits) is drivable; the mouse half is not. Either a
