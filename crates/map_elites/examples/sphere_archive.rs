@@ -16,7 +16,7 @@
 //!
 //! Run: `cargo run -p map_elites --example sphere_archive`
 
-use emerge_core::rng::seeded;
+use det_rng::seeded;
 use map_elites::gaussian;
 use map_elites::loops::{map_elites_loop, MapElitesResult};
 use map_elites::population::Population;

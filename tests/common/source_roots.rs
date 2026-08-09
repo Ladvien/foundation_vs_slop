@@ -29,6 +29,7 @@ pub const SCANNED_ROOTS: &[&str] = &[
     "crates/bevy_light_grid/src",
     "crates/bevy_speech_bubbles/src",
     "crates/bevy_autogib/src",
+    "crates/det_rng/src",
 ];
 
 /// Every `.rs` file under [`SCANNED_ROOTS`], sorted, at the workspace-relative path the lints'

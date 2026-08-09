@@ -3131,6 +3131,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "det_rng"
+version = "0.1.0"
+dependencies = [
+ "rand 0.10.2",
+ "rand_chacha 0.10.0",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3250,6 +3258,7 @@ dependencies = [
 name = "emerge-core"
 version = "0.1.0"
 dependencies = [
+ "det_rng",
  "rand 0.10.2",
  "rand_chacha 0.10.0",
  "ron",
@@ -4957,7 +4966,7 @@ dependencies = [
 name = "map_elites"
 version = "0.1.0"
 dependencies = [
- "emerge-core",
+ "det_rng",
  "rand_chacha 0.10.0",
  "serde",
 ]

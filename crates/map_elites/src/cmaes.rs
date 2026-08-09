@@ -219,7 +219,7 @@ impl SepCmaEs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use emerge_core::rng::seeded;
+    use det_rng::seeded;
 
     /// Sphere objective centred at `target`, as a maximiser: `-||x - target||²`.
     fn neg_sphere(x: &[f32], target: &[f32]) -> f32 {

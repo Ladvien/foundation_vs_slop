@@ -50,7 +50,13 @@ pub mod policy;
 pub mod rig_check;
 pub mod rigs;
 pub mod rigs_edit;
-pub mod rng;
+/// The deterministic RNG, re-exported at its original path.
+///
+/// It lives in the `det_rng` crate now — lifted out so a permissively-licensed sibling could depend
+/// on the same generator without inheriting this crate's GPL. Copying it there instead would have
+/// created a SECOND definition of the stream every reproducibility claim here rests on, which is the
+/// one outcome that had to be avoided. This alias means no caller moved.
+pub use det_rng as rng;
 pub mod ron_surgery;
 pub mod smart;
 pub mod stack;

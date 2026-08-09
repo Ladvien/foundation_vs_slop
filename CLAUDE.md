@@ -16,12 +16,13 @@
 
 ## Workspace & crates
 
-Root package is the game (`foundation_vs_slop`, `src/`). Fourteen members live under `crates/`; twelve mirror to `Ladvien/*` repos — all private except `bevy_autogib`, which needs none of the game to be useful and ships nothing the ecosystem already has. The exception is `crates/fvs`, the zero-dependency `cargo fvs` dispatcher — its own crate so `--help` doesn't rebuild the game (see its manifest header). The fourteenth is `crates/bevy_debugger_mcp/crates/bevy_debugger_bevy`, nested inside the debugger's own tree and mirrored as part of it rather than on its own.
+Root package is the game (`foundation_vs_slop`, `src/`). Fifteen members live under `crates/`; thirteen mirror to `Ladvien/*` repos. **Seven are public** — `bevy_autogib`, `bevy_light_grid`, `bevy_speech_bubbles`, `bevy_orca`, `bevy_stigmergy`, `det_rng` and `map_elites` — each carrying a runnable example and, where the behaviour is only legible in motion, a gif. The rest stay private. The exception is `crates/fvs`, the zero-dependency `cargo fvs` dispatcher — its own crate so `--help` doesn't rebuild the game (see its manifest header). The fourteenth is `crates/bevy_debugger_mcp/crates/bevy_debugger_bevy`, nested inside the debugger's own tree and mirrored as part of it rather than on its own.
 
 Each crate is still reached by the path the game always used. **The facade is the API: changing a call site means editing `src/`, not `crates/`.**
 
 | Crate | What it is | How the game reaches it |
 |---|---|---|
+| `det_rng` | The one seeded ChaCha8 stream + unbiased draws | `emerge_core::rng` re-exports it, so `crate::rng` is unchanged |
 | `bevy_orca` | ORCA avoidance: 2-D linear program over discs | `crate::orca` (`src/lib.rs:119`) |
 | `map_elites` | QD kernel: archive, three emitters, sep-CMA-ES, POET | `squad_ai::{qd, map_elites, cmaes, poet, interest, …}` (`src/squad_ai/mod.rs:43+`) |
 | `bevy_devshot` | Sentinel-file screenshot capture | `crate::devshot` (`src/lib.rs:52`) |
@@ -29,7 +30,7 @@ Each crate is still reached by the path the game always used. **The facade is th
 | `bevy_light_grid` | CPU illuminance grid creatures read | `LightField { core, dirty }` (`src/light.rs:341`) |
 | `bevy_speech_bubbles` | World-space speech/thought balloons | `dialogue::{bubble, model}` re-exports (`src/dialogue/bubble.rs:15`) |
 | `bevy_autogib` | Runtime mesh fracture: slicer, watertight caps, bake-once cache | `crate::autogib` facade + `squad::{FigurineSource, GunModel}` aliases (`src/autogib.rs`) |
-| `emerge-core` | Engine-free world building: schemas, IR, solvers, WFC, `DetRng` | `crate::{geom, rng, wfc}` (`src/lib.rs:169`), `placement::{ir, …}` (`src/placement/mod.rs:26`) |
+| `emerge-core` | Engine-free world building: schemas, IR, solvers, WFC (re-exports `det_rng` as `rng`) | `crate::{geom, rng, wfc}` (`src/lib.rs:169`), `placement::{ir, …}` (`src/placement/mod.rs:26`) |
 | `emerge-anim` | Pose blender | `crate::anim` (`src/lib.rs:23`) |
 | `emerge-bevy` | Library + map → entities | `src/emerge_map.rs` |
 | `emerge-mapper` | Standalone editor app — **not** a game dependency | `cargo run -p emerge-mapper` |

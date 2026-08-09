@@ -8,9 +8,11 @@ The source of truth for this crate is [`Ladvien/foundation_vs_slop`](https://git
 
 ## Build and test
 
-**Not a leaf.** It path-depends on the sibling `emerge-core` for `DetRng`, so it builds *inside* the workspace, not on its own: `cargo test -p map_elites`.
+**Not a leaf.** It path-depends on the sibling `det_rng` for the seeded generator, so it builds *inside* the workspace, not on its own: `cargo test -p map_elites`.
 
-That dependency is deliberate and should not be removed by copying the two RNG methods locally. A local copy would be a **second definition** of the generator every reproducibility claim in this repo rests on. `emerge-core` is itself engine-free, so depending on it costs this crate nothing it was avoiding.
+That dependency is deliberate and should not be removed by copying the two RNG methods locally. A local copy would be a **second definition** of the generator every reproducibility claim rests on, and this crate's whole value is that a run replays exactly from its seed.
+
+It used to depend on `emerge-core` for the same generator. That crate is GPL-3.0-only, which meant this MIT-OR-Apache crate could only be built against copyleft — a trap for anyone who adopted it on the strength of its licence. `det_rng` is the same code lifted out under a permissive licence; the stream did not change, and `tests/rng_guard.rs` upstream still freezes the same bits.
 
 ## The non-negotiables
 

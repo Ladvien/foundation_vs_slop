@@ -2,6 +2,7 @@
 # `docs/2026-08-03-emerge-mapper-plan.md` for why the split exists and what may cross the boundary.
 [workspace]
 members = [
+    "crates/det_rng",
     "crates/emerge-core", "crates/emerge-anim", "crates/emerge-bevy", "crates/emerge-mapper",
     "crates/fvs",
     "crates/bevy_orca", "crates/map_elites", "crates/bevy_devshot",

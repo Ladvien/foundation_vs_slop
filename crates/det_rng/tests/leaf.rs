@@ -1,45 +1,26 @@
 //! **The crate boundary, enforced.**
 //!
-//! `map_elites` is arithmetic: an archive, three emitter loops, an optimiser and an outer loop. None
-//! of it needs a renderer, and it must stay that way for two concrete reasons.
+//! `det_rng` is one seeded stream and three draws. It takes `rand` and `rand_chacha`, and nothing
+//! else — no engine, no math library, no game.
 //!
-//! The first is *deployment*. The offline search fans out across worker subprocesses with their thread
-//! pools pinned to one thread apiece; a search that dragged in an engine could not be fanned out that
-//! way, and the parent repo's whole training loop depends on it being able to.
+//! That matters for a specific reason. This crate exists so that several other crates can share ONE
+//! definition of the generator their reproducibility claims rest on. A dependency here is inherited
+//! by every one of them, which is the opposite of what a crate at the bottom of the graph is for.
 //!
-//! The second is *reproducibility*. Every draw in this crate goes through one seeded `ChaCha8Rng` and
-//! every archive walk is over a `BTreeMap`, so a run replays bit-for-bit from a single `u64`. An
-//! engine dependency brings thread pools, entropy sources and `Instant`s — all of the things that turn
-//! a reproducible run into an almost-reproducible one, which is the worst kind.
-//!
-//! Adding `bevy` here would compile fine and nobody would notice until a golden moved. These two tests
-//! are the ratchet, in the spirit of the parent repo's `tests/determinism_lint.rs` and
-//! `tests/panic_budget.rs`: cheap, GPU-free, and they fail at the door.
-//!
-//! Widening the dependency list is a design decision, so it should cost an argument and a deliberate
-//! edit here — not a passing `cargo build`. Note that `det_rng` is on the list: it is the seeded
-//! RNG, and it is itself engine-free under this very same test.
-//!
-//! # Which test actually catches what
-//!
-//! Both were verified by introducing a violation and watching them fail, and the experiment was
-//! informative: writing `bevy::math::Vec2` in a source file **does not reach these tests at all** —
-//! the crate simply fails to compile, because `bevy` is not a dependency. The compiler is the first
-//! line of defence and it is a good one.
-//!
-//! So the real pairing is: [`the_dependency_list_stays_closed`] is the one that bites, because adding
-//! the dependency is the only way to make an engine reference compile. [`no_source_file_reaches_for_an_engine`]
-//! is the backstop for the case where someone adds the dep *and* edits `ALLOWED_DEPS` to match —
-//! it names the file and line that motivated it, which a manifest diff cannot.
+//! These two tests are the ratchet: cheap, and they fail at the door rather than at link time.
+//! Widening the list is a design decision, so it should cost a deliberate edit here.
 
 use std::path::{Path, PathBuf};
 
-/// Everything `map_elites` is allowed to depend on. Data, arithmetic, and one seeded generator.
-const ALLOWED_DEPS: &[&str] = &["serde", "rand_chacha", "det_rng"];
+/// Everything `emerge-core` is allowed to depend on. Data and arithmetic, nothing that draws.
+const ALLOWED_DEPS: &[&str] = &["rand", "rand_chacha"];
 
 /// Crate names that would mean the boundary has been crossed, checked as substrings so
 /// `bevy_math`/`bevy_ecs` are caught as readily as `bevy`.
-const FORBIDDEN_DEP_MARKERS: &[&str] = &["bevy", "avian", "wgpu", "winit"];
+/// Crate names that would mean the boundary has been crossed. `bevy_math` is glam types and is
+/// allowed above; anything that draws, schedules, or knows what a game is, is not.
+const FORBIDDEN_DEP_MARKERS: &[&str] =
+    &["bevy", "avian", "wgpu", "winit", "emerge", "foundation_vs_slop", "rayon"];
 
 fn crate_root() -> PathBuf {
     // Cargo runs a test binary with the cwd set to its own package root.
@@ -112,7 +93,7 @@ fn no_source_file_reaches_for_an_engine() {
     let mut files = Vec::new();
     rust_sources(&src, &mut files);
     assert!(
-        files.len() >= 8,
+        files.len() >= 1,
         "expected to scan the whole crate, found only {} file(s) — has the layout moved?",
         files.len()
     );
@@ -139,7 +120,7 @@ fn no_source_file_reaches_for_an_engine() {
 
     assert!(
         offenders.is_empty(),
-        "map_elites must stay engine-free, but {} line(s) reference an engine crate.\n  {}\n\n\
+        "det_rng must stay at the bottom of the dependency graph, but {} line(s) reference something above it.\n  {}\n\n\
          This crate is what lets the game, the headless search and the standalone editor share the \
          placement stack without agreeing on a renderer. If a type genuinely needs to cross the \
          boundary, the answer is a plain-data type here and a conversion on the far side — not a \
@@ -152,14 +133,14 @@ fn no_source_file_reaches_for_an_engine() {
 #[test]
 fn the_dependency_list_stays_closed() {
     let manifest = std::fs::read_to_string(crate_root().join("Cargo.toml"))
-        .expect("map_elites must have a Cargo.toml");
+        .expect("det_rng must have a Cargo.toml");
 
     // Only the `[dependencies]` table — a dev-dependency on something heavier would be a different
     // (and much less alarming) conversation.
     let deps = manifest
         .split("[dependencies]")
         .nth(1)
-        .expect("map_elites must declare a [dependencies] table");
+        .expect("det_rng must declare a [dependencies] table");
     let deps = deps.split("\n[").next().unwrap_or(deps);
 
     for line in deps.lines() {
@@ -181,7 +162,7 @@ fn the_dependency_list_stays_closed() {
         }
         assert!(
             ALLOWED_DEPS.contains(&name),
-            "map_elites declares `{name}`, which is not in its allowed set {ALLOWED_DEPS:?}.\n\
+            "det_rng declares `{name}`, which is not in its allowed set {ALLOWED_DEPS:?}.\n\
              Widening this is a design decision, not a convenience — see \
              docs/2026-08-03-emerge-mapper-plan.md. If it is genuinely warranted, add it to ALLOWED_DEPS in \
              this test in the same commit, so the change is visible in review."
@@ -189,7 +170,7 @@ fn the_dependency_list_stays_closed() {
         for marker in FORBIDDEN_DEP_MARKERS {
             assert!(
                 !name.contains(marker),
-                "map_elites declares `{name}` — the crate exists precisely so it does not depend on \
+                "det_rng declares `{name}` — the crate exists precisely so it does not depend on \
                  an engine."
             );
         }

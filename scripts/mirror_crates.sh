@@ -33,6 +33,7 @@ ORG=Ladvien
 
 # Every crate that gets a mirror. Order is cosmetic; each split is independent.
 CRATES=(
+    det_rng
     bevy_orca
     map_elites
     bevy_devshot
@@ -60,7 +61,12 @@ CRATES=(
 # does not answer; `bevy_speech_bubbles` because a world-space balloon is not something Bevy's text
 # stack does; `bevy_orca` because reciprocal avoidance is a solved algorithm most engines still make
 # you write yourself; `bevy_stigmergy` because coordination-through-the-environment is a whole class
-# of group behaviour that needs no messaging layer. None of the five needs any of the game to be useful. Both are standalone-buildable and
+# of group behaviour that needs no messaging layer; `det_rng` because it is the generator the others'
+# reproducibility rests on and it must be depend-able by anything; and `map_elites` because with
+# `det_rng` extracted its only dependency is finally permissive too. None needs any of the game.
+#
+# `map_elites` still does not build entirely alone — it path-depends on `det_rng` as `../det_rng`, so
+# clone the two mirrors as SIBLINGS and it resolves. That is why the pair went public together. Both are standalone-buildable and
 # both carry a `.github/workflows/ci.yml` that the split lifts to the mirror root, per the note above.
 # `bevy_debugger_mcp` is also public on GitHub, but it was vendored in already-created, so this list
 # never has to make it so.
@@ -73,6 +79,8 @@ PUBLIC_CRATES=(
     bevy_speech_bubbles
     bevy_orca
     bevy_stigmergy
+    det_rng
+    map_elites
 )
 
 cd "$(git rev-parse --show-toplevel)"

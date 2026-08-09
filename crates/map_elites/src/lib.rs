@@ -39,7 +39,7 @@ pub mod population;
 pub mod qd;
 pub mod replayability;
 
-use emerge_core::rng::DetRng;
+use det_rng::DetRng;
 use rand_chacha::ChaCha8Rng;
 
 /// A standard normal draw (Box–Muller). `unit()` yields `[0, 1)`, so `1.0 - unit()` moves it to

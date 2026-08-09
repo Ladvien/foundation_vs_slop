@@ -4,7 +4,14 @@
 
 A Quality-Diversity kernel: the MAP-Elites archive, three emitter loops (isotropic, CMA-ME, CMA-MAE), separable CMA-ES, and a POET outer loop. Engine-free, and bit-reproducible from a single `u64`.
 
-> **This repo is a read-only mirror.** It is split out of [`Ladvien/foundation_vs_slop`](https://github.com/Ladvien/foundation_vs_slop) with `git subtree split`, history intact. It depends on a sibling crate by workspace path, so it builds *inside* that workspace, not on its own. Issues and PRs belong upstream.
+> **This repo is a read-only mirror.** It is split out of [`Ladvien/foundation_vs_slop`](https://github.com/Ladvien/foundation_vs_slop) with `git subtree split`, history intact. It depends on [`det_rng`](https://github.com/Ladvien/det_rng) by relative path (`../det_rng`), so clone the two repos as siblings and it builds:
+>
+> ```sh
+> git clone https://github.com/Ladvien/det_rng
+> git clone https://github.com/Ladvien/map_elites && cd map_elites && cargo test
+> ```
+>
+> Issues and PRs belong upstream.
 
 ![A 40x40 grid of behaviour niches filling in over a search: dark unexplored cells give way to a blue-green field with two bright optima emerging, while a coverage bar underneath fills to nearly full](docs/illuminate.gif)
 

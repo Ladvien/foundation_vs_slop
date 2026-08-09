@@ -17,6 +17,10 @@ repository = "https://github.com/Ladvien/emerge-core"
 # Adding a `bevy` dependency here is a design change, not a convenience — see
 # `docs/2026-08-03-emerge-mapper-plan.md`.
 [dependencies]
+# The deterministic RNG, lifted out of this crate so a permissive sibling can share the exact same
+# generator rather than copy it. Re-exported as `emerge_core::rng`, so this crate's callers are
+# unchanged. See `crates/det_rng/CLAUDE.md` for why one definition is non-negotiable.
+det_rng = { path = "../det_rng" }
 serde.workspace = true
 ron.workspace = true
 # Reading a `.glb`'s JSON chunk (`glb.rs`). Data only — no engine, no renderer. The reader is

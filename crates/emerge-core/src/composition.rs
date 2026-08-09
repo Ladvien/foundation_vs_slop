@@ -523,13 +523,12 @@ impl Composition {
                 self.id
             ));
         }
-        if self.members.is_empty() {
-            return Err(format!(
-                "composition: `{}` has no members. An empty group stamps nothing, which looks exactly \
-                 like a stamp that failed.",
-                self.id
-            ));
-        }
+        // **An empty composition is not refused here, and that is a correction.** The reason this
+        // check gave — "an empty group stamps nothing, which looks exactly like a stamp that failed"
+        // — is an argument about *stamping*, and it is now made where stamping happens, in [`expand`].
+        // Refusing at definition time made the editor's own NEW verb impossible: it creates an empty
+        // tile and then asks you to fill it, so the door refused the thing it had just been asked to
+        // make. A composition with no members yet is the ordinary first state of authoring one.
         if let Envelope::Bounded { size } = self.envelope {
             for (axis, v) in [("x", size.0), ("y", size.1), ("z", size.2)] {
                 if !(v.is_finite() && v > 0.0) {
@@ -1073,6 +1072,18 @@ pub fn expand(
         let comp = find(compositions, &s.of, &s.id)?;
         let (flats, locs) = flatten(comp, compositions, &s.overrides, &mut Vec::new(), 0)?;
 
+        // **Where the empty-composition refusal lives**, moved down from `validate_shape`. A group
+        // with no members is a legitimate thing to be authoring and an illegitimate thing to have
+        // stamped: it puts nothing in the map, which looks exactly like a stamp that failed. Naming
+        // both the stamp and the composition, because at this point the author has one of each.
+        if flats.is_empty() {
+            return Err(format!(
+                "map: stamp `{}` places `{}`, which has no members. An empty composition stamps \
+                 nothing, which looks exactly like a stamp that failed.",
+                s.id, comp.id
+            ));
+        }
+
         // Every override has to name a member that exists. A dangling one is the failure
         // `Stamped::of_fingerprint` exists to catch a session earlier than this.
         let known: BTreeSet<&str> = comp.members.iter().map(|m| m.id.as_str()).collect();
@@ -1574,6 +1585,42 @@ mod tests {
         }
         p.subgrid = Some(Subgrid { cells });
         p
+    }
+
+    /// **An empty composition is a composition being authored, and stamping one is the mistake.**
+    ///
+    /// This refusal used to sit in `validate_shape`, which made the editor's NEW verb impossible:
+    /// it creates an empty tile and then asks you to fill it, so the commit door refused the thing
+    /// it had just been told to make. The reason the refusal gave was always about *stamping*, so
+    /// that is where it now is — and both halves are pinned here, because moving a check is only
+    /// safe if the thing it was catching is still caught.
+    #[test]
+    fn an_empty_composition_may_exist_but_may_not_be_stamped() {
+        let comp = Composition {
+            id: "half_built".to_owned(),
+            envelope: Envelope::Bounded { size: (1.0, 2.4, 1.0) },
+            members: Vec::new(),
+            locations: Vec::new(),
+            note: None,
+        };
+        let lib = library(vec![piece("floor", 1.0, 1.0, 0.1)]);
+        // It exists, it loads, it can be selected and filled.
+        comp.validate_shape().unwrap_or_else(|e| panic!("an empty composition must be authorable: {e}"));
+        validate(std::slice::from_ref(&comp), &lib)
+            .unwrap_or_else(|e| panic!("an empty composition must load: {e}"));
+
+        // Stamping it is refused, and the refusal names the stamp AND the composition — at that
+        // point the author has one of each and needs to know which.
+        let stamps = vec![Stamped {
+            id: "s1".to_owned(),
+            of: "half_built".to_owned(),
+            ..Default::default()
+        }];
+        let err = expand(&empty_map(), &stamps, std::slice::from_ref(&comp), &lib)
+            .expect_err("stamping an empty composition has to refuse");
+        assert!(err.contains("s1"), "the stamp is not named: {err}");
+        assert!(err.contains("half_built"), "the composition is not named: {err}");
+        assert!(err.contains("no members"), "{err}");
     }
 
     fn library(descriptors: Vec<Descriptor>) -> Library {

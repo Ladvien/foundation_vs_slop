@@ -311,7 +311,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use emerge_core::rng::seeded;
+    use det_rng::seeded;
 
     /// Squash a real to `[0,1]` for a synthetic descriptor axis.
     fn unit(x: f32) -> f32 {

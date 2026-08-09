@@ -1,0 +1,36 @@
+# CI for the standalone `det_rng` mirror.
+#
+# **This path is inert upstream and live here.** GitHub only reads workflows from `.github/` at a
+# repository root, so in the monorepo this file is an ordinary text file that nothing runs. The
+# `git subtree split` that produces the mirror lifts `crates/det_rng/` to the root — and this
+# file with it — so it becomes the mirror's CI without the monorepo gaining a second workflow.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (standalone) + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release
+
+      # **`the_stream_is_frozen` is the one that matters.** This crate's contract is that its output
+      # never changes; consumers' replay goldens sit downstream of exactly these bits. A red here is a
+      # breaking change, not a flaky test.
+      - name: Test
+        run: cargo test
+
+      - name: Run the example
+        run: cargo run --release --example reproducible

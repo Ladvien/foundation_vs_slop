@@ -15,10 +15,13 @@ publish = false
 [dependencies]
 serde.workspace = true
 rand_chacha.workspace = true
-# **The one RNG in the workspace, and the reason this crate is not a dependency leaf.**
-# `Population::sample_parent` draws `below(n)` and `gaussian` draws `unit()` — both `DetRng`, the trait
-# `tests/rng_guard.rs` freezes bit-for-bit. A local copy of those two methods would be a SECOND
-# definition of the generator every reproducibility claim in this repo rests on, and the whole value of
-# this crate is that a run replays exactly from its seed. `emerge-core` is itself engine-free, so
-# depending on it costs this crate nothing it was trying to avoid.
-emerge-core = { path = "../emerge-core" }
+# **The one RNG, and the reason this crate is not a dependency leaf.**
+# `Population::sample_parent` draws `below(n)` and `gaussian` draws `unit()` — both `DetRng`, whose
+# output is frozen bit-for-bit by a test upstream. A local copy of those two methods would be a SECOND
+# definition of the generator every reproducibility claim rests on, and the whole value of this crate
+# is that a run replays exactly from its seed.
+#
+# This used to be `emerge-core`, which is GPL-3.0-only — so a permissively-licensed crate could only be
+# built against copyleft, which is a trap for anyone adopting it. `det_rng` is that same generator,
+# lifted out under MIT OR Apache-2.0. Nothing about the stream changed; the licence did.
+det_rng = { path = "../det_rng" }

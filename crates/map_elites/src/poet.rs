@@ -130,7 +130,7 @@ where
     if cfg.reproduce_every == 0 || cfg.transfer_every == 0 {
         return Err("poet: reproduce_every and transfer_every must be > 0".to_string());
     }
-    let mut rng = emerge_core::rng::seeded(cfg.seed);
+    let mut rng = det_rng::seeded(cfg.seed);
 
     // Seed niche — the authored environment paired with the authored agent. It must clear the MCC, else the
     // whole run has no valid starting pairing (loud failure, no degraded start).

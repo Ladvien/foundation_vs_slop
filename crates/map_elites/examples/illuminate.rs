@@ -29,7 +29,7 @@
 
 use std::path::Path;
 
-use emerge_core::rng::seeded;
+use det_rng::seeded;
 use map_elites::gaussian;
 use map_elites::loops::{MapElitesResult, map_elites_loop};
 use map_elites::population::Population;
