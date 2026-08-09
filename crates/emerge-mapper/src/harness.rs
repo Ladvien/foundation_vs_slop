@@ -116,6 +116,19 @@ pub fn build_headless(root: &Path, map: &str, kit: Option<&str>) -> Result<App, 
     let project = crate::project::Project::open(root, map, kit)?;
     let mut app = App::new();
 
+    // **The injected-pointer resource, without the plugin that owns it.**
+    //
+    // `view::sense_pointer` reads `DebugCursor` to let an agent aim the cursor, and in Bevy 0.19 a
+    // missing `Res<T>` panics its system rather than skipping it. `add_debugger_plugins` stays out of
+    // here on purpose — it binds a port, and a test process builds several `App`s — so the resource
+    // has to be provided on its own. Empty, so `sense_pointer` reads the real window exactly as it
+    // does for a person.
+    //
+    // This went red the moment the `debugger` feature became default, which is the feature working:
+    // the panic named the system and the parameter.
+    #[cfg(feature = "debugger")]
+    app.init_resource::<bevy_debugger_bevy::DebugCursor>();
+
     // Absolute, for the same reason `main.rs` canonicalizes: a relative `file_path` resolves
     // against `CARGO_MANIFEST_DIR` (the CRATE dir under `cargo test -p`), not the workspace.
     let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());

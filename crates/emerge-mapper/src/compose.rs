@@ -62,6 +62,13 @@ pub struct ComposeState {
     /// visible — `tests/headless.rs` builds one.
     pub undo: Vec<Vec<Composition>>,
     pub redo: Vec<Vec<Composition>>,
+    /// **The name being typed for a new group.** `Some("")` the moment `N` is pressed, so the panel
+    /// can show the field before a character exists.
+    pub naming: Option<String>,
+    /// **Index into the library while the piece picker is open.** While this is `Some`, the walk keys
+    /// and `Enter` belong to the picker rather than to the group list — one modal, stated in one
+    /// place, which is how every other field in this editor takes the keyboard.
+    pub picking: Option<usize>,
     /// **The armed group** — by id, never by index.
     ///
     /// An index would silently re-point the moment `compositions.ron` gained a row above it, which is
@@ -96,6 +103,9 @@ impl Plugin for ComposePlugin {
             .add_systems(
                 Update,
                 (
+                    pick_keys,
+                    start_new,
+                    start_pick,
                     walk,
                     arm,
                     record,
@@ -111,6 +121,7 @@ impl Plugin for ComposePlugin {
             )
             // Not gated on the mode, for the same reason `rebuild` is not: the staged group is
             // despawned when the tab is left, and a system that stops running cannot despawn it.
+            .add_systems(Update, new_group_keys.in_set(keys::Phase::Text))
             .add_systems(Update, restage_group.after(keys::Phase::Act))
             .add_systems(Update, draw_stage.run_if(in_compose_mode))
             // Not gated on the mode: the armed group is shown on the Map tab too, and a panel that
@@ -175,6 +186,10 @@ fn spawn_compose_panel(mut commands: Commands) {
 
 /// Walk the list. Shift steps five, matching every other list in this editor.
 fn walk(mut state: ResMut<ComposeState>, project: Res<Project>, keys: Res<keys::Live>, input: Res<ButtonInput<KeyCode>>) {
+    // The picker owns up/down while it is open.
+    if state.picking.is_some() {
+        return;
+    }
     let n = project.compositions.compositions.len();
     if n == 0 {
         return;
@@ -197,6 +212,10 @@ fn walk(mut state: ResMut<ComposeState>, project: Res<Project>, keys: Res<keys::
 /// **nothing armed has to be a reachable state**, or an author cannot put the cursor over the map
 /// without something following it.
 fn arm(mut state: ResMut<ComposeState>, project: Res<Project>, keys: Res<keys::Live>, input: Res<ButtonInput<KeyCode>>) {
+    // `Enter` adds the picked piece while the picker is open, and arms only when it is not.
+    if state.picking.is_some() {
+        return;
+    }
     if !keys::just_pressed(&input, keys.0, Action::ComposeArm) {
         return;
     }
@@ -337,6 +356,223 @@ fn commit(
     // that never followed from what is now on disk.
     state.redo.clear();
     state.status.note(receipt);
+}
+
+// ------------------------------------------------------------------------------------------------
+// Making a group here, rather than capturing one on the Map
+// ------------------------------------------------------------------------------------------------
+
+/// The tile a new group claims until somebody says otherwise.
+///
+/// **Bounded, not anchored**, because a group that claims a tile is the thing this whole effort is
+/// for: `grammar::learn` refuses a piece that is not the cell's size, and not one wall piece in the
+/// Site kit is. One metre square by the height the kit's walls stand at.
+const NEW_TILE: (f32, f32, f32) = (1.0, 2.4, 1.0);
+
+/// `N` — start naming a new group.
+fn start_new(
+    mut state: ResMut<ComposeState>,
+    keys: Res<keys::Live>,
+    input: Res<ButtonInput<KeyCode>>,
+) {
+    if !keys::just_pressed(&input, keys.0, Action::NewGroup) {
+        return;
+    }
+    state.naming = Some(String::new());
+    state.status.note("name the new group, then Enter — Esc to abandon it");
+}
+
+/// The name field. Same shape as every other field here: drain on the frame it opens, or the
+/// keystroke that opened it is read as its first character.
+fn new_group_keys(
+    mut events: MessageReader<bevy::input::keyboard::KeyboardInput>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<ComposeState>,
+) {
+    use bevy::input::keyboard::Key;
+    if state.naming.is_none() {
+        events.clear();
+        return;
+    }
+    for event in events.read() {
+        if !event.state.is_pressed() {
+            continue;
+        }
+        match &event.logical_key {
+            Key::Enter => {
+                let Some(raw) = state.naming.take() else { return };
+                new_group(&mut state, &mut project, &raw);
+                return;
+            }
+            Key::Escape => {
+                state.naming = None;
+                state.status.note("no new group");
+                return;
+            }
+            Key::Backspace => {
+                if let Some(raw) = state.naming.as_mut() {
+                    raw.pop();
+                }
+            }
+            Key::Character(text) => {
+                if let Some(raw) = state.naming.as_mut() {
+                    raw.push_str(text);
+                }
+            }
+            Key::Space => {
+                if let Some(raw) = state.naming.as_mut() {
+                    raw.push(' ');
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// **Make an empty bounded group and select it**, through the same door everything else goes through.
+///
+/// `pub` for the same reason [`seat_selected`] is: a test drives the verb the key drives.
+pub fn new_group(state: &mut ComposeState, project: &mut Project, raw: &str) {
+    let id = emerge_core::naming::to_snake_case(raw);
+    if id.is_empty() {
+        return state
+            .status
+            .problem(format!("`{raw}` leaves nothing usable as a name"));
+    }
+    if project.compositions.compositions.iter().any(|c| c.id == id) {
+        return state.status.problem(format!(
+            "`{id}` is already a group. Pick another name — renaming one would strand every map that \
+             stamped it."
+        ));
+    }
+    let made = id.clone();
+    commit(state, project, move |set| {
+        set.push(Composition {
+            id: made.clone(),
+            envelope: Envelope::Bounded { size: NEW_TILE },
+            members: Vec::new(),
+            locations: Vec::new(),
+            note: None,
+        });
+        // Sorted, because the file has one encoding — the same rule members follow.
+        set.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(format!("`{made}` — empty; press A to add a piece"))
+    });
+    // Select what was just made, so the next verb acts on it rather than on whatever was selected
+    // before. Looked up by id rather than remembered as an index, because the sort above moved things.
+    if let Some(at) = project
+        .compositions
+        .compositions
+        .iter()
+        .position(|c| c.id == id)
+    {
+        state.selected = at;
+        state.member = 0;
+    }
+}
+
+/// `A` — open the picker over the library.
+fn start_pick(
+    mut state: ResMut<ComposeState>,
+    project: Res<Project>,
+    keys: Res<keys::Live>,
+    input: Res<ButtonInput<KeyCode>>,
+) {
+    if !keys::just_pressed(&input, keys.0, Action::AddMember) {
+        return;
+    }
+    if project.compositions.compositions.is_empty() {
+        return state
+            .status
+            .problem("there is no group to add to — press N to make one first");
+    }
+    if project.library.descriptors.is_empty() {
+        return state.status.problem("the library has no pieces to add");
+    }
+    state.picking = Some(0);
+    state.status.note("pick a piece — up/down, Enter to add, Esc to stop");
+}
+
+/// While the picker is open the walk keys and `Enter` belong to it.
+///
+/// Runs before [`walk`] and [`arm`], which both return early while `picking` is set — the focus rule
+/// `docs/ui.md` §3.5 states, and the one `research_room::editor` found the hard way when one `Space`
+/// both clicked a focused button and toggled the pause.
+fn pick_keys(
+    mut state: ResMut<ComposeState>,
+    mut project: ResMut<Project>,
+    keys: Res<keys::Live>,
+    input: Res<ButtonInput<KeyCode>>,
+) {
+    let Some(at) = state.picking else { return };
+    let n = project.library.descriptors.len();
+    if n == 0 {
+        state.picking = None;
+        return;
+    }
+    let step = if input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight) { 5 } else { 1 };
+    if keys::just_pressed(&input, keys.0, Action::ComposePrev) {
+        state.picking = Some((at + n - step % n) % n);
+        return;
+    }
+    if keys::just_pressed(&input, keys.0, Action::ComposeNext) {
+        state.picking = Some((at + step) % n);
+        return;
+    }
+    if keys::just_pressed(&input, keys.0, Action::Cancel) {
+        state.picking = None;
+        state.status.note("nothing added");
+        return;
+    }
+    if keys::just_pressed(&input, keys.0, Action::ComposeArm) {
+        let Some(d) = project.library.descriptors.get(at) else {
+            state.picking = None;
+            return;
+        };
+        let descriptor = d.id.clone();
+        state.picking = None;
+        add_member(&mut state, &mut project, &descriptor);
+    }
+}
+
+/// **Put a library piece into the selected group**, at its centre, through the commit door.
+///
+/// It lands at the middle of the tile rather than anywhere clever: the seat and flush verbs are how
+/// it gets where it belongs, and guessing a position would be the tool acting on a model other than
+/// the author's.
+pub fn add_member(state: &mut ComposeState, project: &mut Project, descriptor: &str) {
+    let selected = state.selected;
+    let what = descriptor.to_owned();
+    commit(state, project, move |set| {
+        let c = set
+            .get_mut(selected)
+            .ok_or_else(|| "that group is no longer there".to_owned())?;
+        // A member id from the piece's own name, numbered from the second — the rule capture uses.
+        let short = what.rsplit('/').next().unwrap_or(&what).to_owned();
+        let mut id = short.clone();
+        let mut n = 2;
+        while c.members.iter().any(|m| m.id == id) {
+            id = format!("{short}_{n}");
+            n += 1;
+        }
+        c.members.push(composition::Member {
+            id: id.clone(),
+            body: composition::Body::Descriptor {
+                id: what.clone(),
+                tip: (0, 0),
+                on: None,
+                patch: None,
+            },
+            at: (0.0, 0.0),
+            yaw: 0.0,
+            lift: 0.0,
+            // Never recorded is a different fact from stale; `R` is what records it.
+            of_fingerprint: None,
+            note: None,
+        });
+        c.members.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(format!("added `{id}` — T F G H to seat it, Shift for flush"))
+    });
 }
 
 /// The selected member of the selected group, or a note saying there is none.
@@ -777,6 +1013,40 @@ fn rebuild(
 
     let comps = &project.compositions.compositions;
     let mut rows: Vec<(String, Color)> = Vec::new();
+
+    // **The two modal blocks first**, because while one is open it is the only thing the keyboard
+    // reaches, and a field you cannot see is a field you cannot finish.
+    if let Some(raw) = &state.naming {
+        rows.push(("NEW GROUP".to_owned(), LABEL));
+        rows.push((format!("    {raw}_"), ACCENT));
+        rows.push((
+            format!(
+                "    Enter to make it — an empty {:.0}x{:.0} m tile. Esc to stop.",
+                NEW_TILE.0, NEW_TILE.2
+            ),
+            DIM,
+        ));
+        rows.push((String::new(), TEXT));
+    }
+    if let Some(at) = state.picking {
+        rows.push(("ADD A PIECE".to_owned(), LABEL));
+        let lib = &project.library.descriptors;
+        // A window round the cursor rather than the whole library: the site kit is 45 pieces and the
+        // furniture one is hundreds, and a list that runs off the panel is the bug this tab just had.
+        let first = at.saturating_sub(4);
+        for (i, d) in lib.iter().enumerate().skip(first).take(9) {
+            let marker = if i == at { "> " } else { "  " };
+            rows.push((
+                format!("{marker}{}", d.id),
+                if i == at { ACCENT } else { TEXT },
+            ));
+        }
+        rows.push((
+            format!("    {} of {} — up/down, Enter adds, Esc stops", at + 1, lib.len()),
+            DIM,
+        ));
+        rows.push((String::new(), TEXT));
+    }
 
     if comps.is_empty() {
         rows.push((
