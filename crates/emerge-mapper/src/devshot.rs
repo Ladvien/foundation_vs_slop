@@ -72,10 +72,6 @@ fn watch_drive(
                 crate::compose::toggle_arm(&mut compose, &project);
                 info!("drive.request: arm — {}", compose.status.line());
             }
-            "record" => {
-                crate::compose::record_selected(&mut compose, &mut project);
-                info!("drive.request: record — {}", compose.status.line());
-            }
             "stamp" => {
                 crate::editor::stamp_here_for_test(
                     &mut project,

@@ -925,167 +925,6 @@ mod compose {
         assert_eq!(project.map.stamps[0].of, "break_table");
     }
 
-    /// **Making a composition and then filling it** — the two halves of the same act.
-    ///
-    /// Reported from the running editor: "I can create a new one, but I can't place any meshes on it."
-    #[test]
-    fn a_piece_can_be_placed_into_a_composition_that_was_just_created() {
-        let root = Fixture::new("add_after_new")
-            .descriptor("floor", "alpha")
-            .bounded_composition("tile_a", (1.0, 2.4, 1.0), &[("floor", "floor", (0.0, 0.0))])
-            .build("m");
-        let mut app = emerge_mapper::harness::build_headless(&root, "m", None)
-            .unwrap_or_else(|e| panic!("{e}"));
-        *app.world_mut().resource_mut::<Mode>() = Mode::Compose;
-        for _ in 0..3 {
-            app.update();
-        }
-
-        app.world_mut().resource_scope(|world, mut project: bevy::prelude::Mut<Project>| {
-            let mut state = world.resource_mut::<ComposeState>();
-            emerge_mapper::compose::new_group(&mut state, &mut project, "test");
-            assert!(state.status.problems().is_empty(), "creating: {}", state.status.line());
-
-            // **The receipt has to name the verb that actually adds a piece.** It said "press A",
-            // and `A` is `PanLeft` — so following it slid the camera and added nothing, which is
-            // indistinguishable from "you cannot place meshes here". Reported by an author.
-            let told = state.status.line();
-            let arm = emerge_mapper::keys::chord(emerge_mapper::keys::Action::ComposeArm);
-            assert!(
-                told.contains(&arm),
-                "the new-composition receipt does not name the add verb (`{arm}`): {told}"
-            );
-
-            // The library's first piece, the way the PLACE list offers it.
-            let first = project.library.descriptors[0].id.clone();
-            emerge_mapper::compose::add_member(&mut state, &mut project, &first);
-            assert!(
-                state.status.problems().is_empty(),
-                "placing a piece into the new composition: {}",
-                state.status.line()
-            );
-        });
-        app.update();
-
-        let made = app
-            .world()
-            .resource::<Project>()
-            .compositions
-            .compositions
-            .iter()
-            .find(|c| c.id == "test")
-            .cloned()
-            .unwrap_or_else(|| panic!("`test` is gone"));
-        assert_eq!(made.members.len(), 1, "the piece never landed in the composition");
-    }
-
-    /// **An observer fires for every `Activate`, so it has to ask which entity was activated.**
-    ///
-    /// `on_new_group_click` tested `buttons.is_empty()` — whether a `NewGroupButton` exists anywhere,
-    /// and one always does — so clicking any row of the PLACE list opened the new-composition name
-    /// field. An author picking a mesh was asked to name a composition instead. Reported from the
-    /// running editor; no test could see it, because the arithmetic was never wrong.
-    #[test]
-    fn activating_something_else_does_not_open_the_name_field() {
-        use bevy::ui_widgets::Activate;
-        use emerge_mapper::compose::NewGroupButton;
-
-        let root = Fixture::new("activate")
-            .descriptor("floor", "alpha")
-            .bounded_composition("tile_a", (1.0, 2.4, 1.0), &[("floor", "floor", (0.0, 0.0))])
-            .build("m");
-        let mut app = emerge_mapper::harness::build_headless(&root, "m", None)
-            .unwrap_or_else(|e| panic!("{e}"));
-        *app.world_mut().resource_mut::<Mode>() = Mode::Compose;
-        for _ in 0..3 {
-            app.update();
-        }
-
-        // Anything that is not the NEW button — a PLACE row is one, and so is a bare entity.
-        let other = app.world_mut().spawn_empty().id();
-        app.world_mut().trigger(Activate { entity: other });
-        app.update();
-        assert!(
-            app.world().resource::<ComposeState>().naming.is_none(),
-            "activating something else opened the name field"
-        );
-
-        // And the button itself still does open it, or the fix would have been a removal.
-        let button = app
-            .world_mut()
-            .query_filtered::<bevy::prelude::Entity, bevy::prelude::With<NewGroupButton>>()
-            .iter(app.world())
-            .next()
-            .unwrap_or_else(|| panic!("the NEW button was never spawned"));
-        app.world_mut().trigger(Activate { entity: button });
-        app.update();
-        assert_eq!(
-            app.world().resource::<ComposeState>().naming.as_deref(),
-            Some(""),
-            "the NEW button has to open an empty name field"
-        );
-    }
-
-    /// **`N` makes a composition that survives the commit door**, which it could not before.
-    ///
-    /// The verb creates an *empty* bounded tile and then asks you to fill it — and `validate_shape`
-    /// refused an empty composition, so the door turned away the thing it had just been asked to
-    /// make. An author saw `composition: `test` has no members`, and the verb was unusable.
-    ///
-    /// Driven through `new_group`, which is the function the key handler calls: `bevy_debugger/input`
-    /// writes `ButtonInput` and not the `KeyboardInput` stream a text field reads, so a name cannot
-    /// be typed by an agent (`FVS-R-12`) and this is the level the verb can be tested at.
-    #[test]
-    fn a_new_composition_is_created_empty_and_written_to_disk() {
-        let root = Fixture::new("new_group")
-            .descriptor("floor", "alpha")
-            .bounded_composition("tile_a", (1.0, 2.4, 1.0), &[("floor", "floor", (0.0, 0.0))])
-            .build("m");
-        let mut app = emerge_mapper::harness::build_headless(&root, "m", None)
-            .unwrap_or_else(|e| panic!("{e}"));
-        *app.world_mut().resource_mut::<Mode>() = Mode::Compose;
-        for _ in 0..3 {
-            app.update();
-        }
-
-        app.world_mut().resource_scope(|world, mut project: bevy::prelude::Mut<Project>| {
-            let mut state = world.resource_mut::<ComposeState>();
-            emerge_mapper::compose::new_group(&mut state, &mut project, "test");
-            assert!(
-                state.status.problems().is_empty(),
-                "the commit door refused its own verb: {}",
-                state.status.line()
-            );
-        });
-        app.update();
-
-        let project = app.world().resource::<Project>();
-        let made = project
-            .compositions
-            .compositions
-            .iter()
-            .find(|c| c.id == "test")
-            .unwrap_or_else(|| panic!("`test` was not adopted into the project"));
-        assert!(made.members.is_empty(), "N makes an EMPTY tile — filling it is the next verb");
-        assert_eq!(app.world().resource::<ComposeState>().selected, {
-            let comps = &app.world().resource::<Project>().compositions.compositions;
-            comps.iter().position(|c| c.id == "test").unwrap_or(usize::MAX)
-        }, "the new composition has to be selected, or the next verb acts on the wrong one");
-
-        // **On disk, not only in memory.** `compositions.ron` is written on the keypress — this file
-        // has no staging buffer — so a reload has to find it.
-        let text = std::fs::read_to_string(
-            project.emerge_dir.join(emerge_core::composition::Compositions::FILE),
-        )
-        .unwrap_or_else(|e| panic!("compositions.ron: {e}"));
-        let back = emerge_core::composition::Compositions::parse(&text)
-            .unwrap_or_else(|e| panic!("what was written does not parse: {e}"));
-        assert!(
-            back.compositions.iter().any(|c| c.id == "test"),
-            "the new composition never reached disk"
-        );
-    }
-
     /// **The focal group stands up with its neighbours either side** — the carousel, asked of a
     /// running app rather than of the layout function.
     ///
@@ -1318,94 +1157,15 @@ fn a_captured_group_is_written_and_reads_back() {
     assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), before, "and writes nothing");
 }
 
-/// **Seating goes through the commit door**, and a refusal leaves both the file and memory alone.
-///
-/// The pure arithmetic is unit-tested in `compose::seating_tests`; what only a booted editor can show
-/// is that the verb writes the file it claims to, reads back, and that a refusal writes nothing —
-/// which is the half a pure test cannot see.
-#[test]
-fn seating_a_member_is_written_and_reads_back() {
-    let root = fixtures::Fixture::new("seat")
-        .descriptor("wall", "alpha")
-        // Three metres across, so a 1 m piece has somewhere to go and somewhere it cannot.
-        .bounded_composition("bay", (3.0, 2.0, 3.0), &[("north", "wall", (0.0, 0.0))])
-        .build("m");
-    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
-    app.update();
-
-    let world = app.world_mut();
-    let mut project = world.resource_mut::<emerge_mapper::project::Project>();
-    let path = project
-        .emerge_dir
-        .join(emerge_core::composition::Compositions::FILE);
-    let before = std::fs::read_to_string(&path).expect("the fixture wrote a compositions file");
-    let mut state = emerge_mapper::compose::ComposeState::default();
-
-    emerge_mapper::compose::seat_selected(
-        &mut state,
-        &mut project,
-        emerge_mapper::compose::Nudge::Right,
-    );
-    assert_eq!(
-        project.compositions.compositions[0].members[0].at,
-        (0.5, 0.0),
-        "one lattice step right, in memory"
-    );
-    assert!(!state.status.has_problem(), "{:?}", state.status.problem_text());
-
-    // On disk, and it parses back to the same thing — the door is `save_atomic` plus a reparse, not
-    // an in-memory edit that a reader would have to be told about.
-    let after = std::fs::read_to_string(&path).expect("still there");
-    assert_ne!(before, after, "a seat has to reach the file");
-    let reread = emerge_core::composition::Compositions::parse(&after).expect("reads back");
-    assert_eq!(reread.compositions[0].members[0].at, (0.5, 0.0));
-    assert_eq!(
-        reread.compositions[0].members[0].of_fingerprint, None,
-        "a seat moves a member; it does not re-record what its body was built against"
-    );
-
-    // Undo is the same value, restored.
-    assert_eq!(state.undo.len(), 1, "one seat, one undo entry");
-
-    // **A refusal writes nothing.** A 1 m piece in a 3 m bay reaches 1.0 and no further; the step
-    // past it leaves the file and the in-memory set exactly as they were.
-    for _ in 0..2 {
-        emerge_mapper::compose::seat_selected(
-            &mut state,
-            &mut project,
-            emerge_mapper::compose::Nudge::Right,
-        );
-    }
-    let at_wall = project.compositions.compositions[0].members[0].at;
-    let flush = std::fs::read_to_string(&path).expect("still there");
-    emerge_mapper::compose::seat_selected(
-        &mut state,
-        &mut project,
-        emerge_mapper::compose::Nudge::Right,
-    );
-    assert!(state.status.has_problem(), "a step out of the envelope has to be refused");
-    assert!(
-        state.status.problem_text().contains("outside"),
-        "and say so: {:?}",
-        state.status.problem_text()
-    );
-    assert_eq!(
-        project.compositions.compositions[0].members[0].at, at_wall,
-        "a refusal must not move the member"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&path).expect("still there"),
-        flush,
-        "a refusal must not touch the file"
-    );
-}
-
 /// **The name field takes the keyboard, so typing a name cannot also drive the tab.**
 ///
-/// `N`, `T`, `F`, `G`, `H`, `Y`, `U` are all live Compose verbs and all live letters. Typing
-/// "north wall" into an unguarded field would seat, turn and drop things on the way past — which is
-/// exactly what naming a captured set on the Map used to do, because `EditorState::grouping` was
-/// missing from the same guard.
+/// Naming a captured composition on the Map used to dispatch a Map verb for every letter — typing
+/// `corner` fired aim, turn, rename-map and turn-view — because `EditorState::grouping` was missing
+/// from the guard that decides who owns the keyboard.
+///
+/// This used to be asserted through Compose's own name field, which was the same guard reached by a
+/// second door. Authoring collapsed onto the Map, so `grouping` is now the **only** text field that
+/// can be open while the Map holds the keyboard, and this is the one place the property lives.
 ///
 /// Testable despite the field itself not being: `keys::Live` is a resource, and it is the one thing
 /// standing between a keystroke and a verb. `bevy_debugger/input` writes `ButtonInput` and not the
@@ -1418,15 +1178,15 @@ fn naming_a_composition_takes_the_keyboard_from_the_verbs() {
         .build("m");
     let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
     *app.world_mut().resource_mut::<emerge_mapper::tiles::Mode>() =
-        emerge_mapper::tiles::Mode::Compose;
+        emerge_mapper::tiles::Mode::Map;
     app.update();
     assert_eq!(
         app.world().resource::<emerge_mapper::keys::Live>().0,
-        emerge_mapper::keys::Context::Compose,
+        emerge_mapper::keys::Context::Map,
         "with no field open the tab's verbs are live"
     );
 
-    app.world_mut().resource_mut::<emerge_mapper::compose::ComposeState>().naming =
+    app.world_mut().resource_mut::<emerge_mapper::editor::EditorState>().grouping =
         Some(String::new());
     app.update();
     assert_eq!(
@@ -1435,11 +1195,11 @@ fn naming_a_composition_takes_the_keyboard_from_the_verbs() {
         "while a name is being typed the keyboard belongs to the text, or every letter is a verb"
     );
 
-    // And it hands the keyboard back, or the tab is dead after one rename.
-    app.world_mut().resource_mut::<emerge_mapper::compose::ComposeState>().naming = None;
+    // And it hands the keyboard back, or the tab is dead after one capture.
+    app.world_mut().resource_mut::<emerge_mapper::editor::EditorState>().grouping = None;
     app.update();
     assert_eq!(
         app.world().resource::<emerge_mapper::keys::Live>().0,
-        emerge_mapper::keys::Context::Compose
+        emerge_mapper::keys::Context::Map
     );
 }

@@ -522,15 +522,14 @@ pub fn scroll_list(parent: &mut ChildSpawnerCommands, marker: impl Bundle) {
 
 /// **The name box** — the centred prompt for naming a new composition.
 ///
-/// Two tabs ask for the same thing: `N` on Compose makes an empty tile, `M` on the Map keeps the set
-/// in hand as one. It used to be answered in two different places — four rows at the top of the
-/// COMPOSE panel and a field in the Map's status readout — which made one act look like two, and put
-/// the question in the corner of the screen while the whole screen waited for it.
+/// `M` on the Map keeps the set in hand as one composition, and this is where it is named. It used to
+/// be a field in the Map's status readout, which put the question in the corner of the screen while
+/// the whole screen waited for it.
 ///
-/// One box, painted by [`paint_name_box`], which picks the live tab's field the way
-/// `notice::paint_notices` picks the live tab's `Status`. That is the established shape here for
-/// "one widget, several owners", and the alternative — a projection resource each tab writes every
-/// frame — is a third copy of a string that already has two homes.
+/// Two tabs asked it when Compose could also make a composition. That is why this is a shared widget
+/// painted by [`paint_name_box`] rather than a Map-local one: authoring collapsed onto the Map, and a
+/// widget that survives losing one of its two callers is cheaper than one that has to be rebuilt if a
+/// second ever returns.
 #[derive(Component)]
 pub struct NameBox;
 
@@ -603,34 +602,25 @@ fn spawn_name_box(mut commands: Commands) {
 
 /// **Show the live tab's name field, or nothing.**
 ///
-/// Reads each tab's own state rather than a shared projection, and formats the value the way that tab
-/// commits it — Compose keeps what you typed, because a composition id carries a kit namespace and
-/// `to_snake_case` would eat the slash; the Map forces snake_case as you type, so its own naming rule
-/// teaches itself. Relocating the prompt must not quietly change what either one will save.
+/// Reads the Map's own state rather than a shared projection, and formats the value the way the Map
+/// commits it — snake_case as you type. Relocating the prompt must not quietly change what is saved.
 fn paint_name_box(
     mode: Res<crate::tiles::Mode>,
-    compose: Res<crate::compose::ComposeState>,
     editor: Res<crate::editor::EditorState>,
     mut roots: Query<&mut Node, With<NameBox>>,
     mut titles: Query<&mut Text, (With<NameBoxTitle>, Without<NameBoxValue>, Without<NameBoxHint>)>,
     mut values: Query<&mut Text, (With<NameBoxValue>, Without<NameBoxTitle>, Without<NameBoxHint>)>,
     mut hints: Query<&mut Text, (With<NameBoxHint>, Without<NameBoxTitle>, Without<NameBoxValue>)>,
 ) {
+    // **The Map's field, and only the Map's.** Compose used to ask this too; authoring moved to
+    // the Map, so there is one asker and the match is a guard rather than a choice. Kept as a match
+    // on `Mode` because that is what makes "which tab is asking" answerable in one place if a second
+    // tab ever asks again.
     let asking: Option<(&str, String, String)> = match *mode {
-        crate::tiles::Mode::Compose => compose.naming.as_ref().map(|raw| {
-            (
-                "NEW COMPOSITION",
-                format!("{raw}_"),
-                format!(
-                    "Enter makes an empty {:.0}x{:.0} m tile.   Esc stops.",
-                    crate::compose::NEW_TILE.0,
-                    crate::compose::NEW_TILE.2
-                ),
-            )
-        }),
         crate::tiles::Mode::Map => editor.grouping.as_ref().map(|raw| {
             (
                 "NAME THIS COMPOSITION",
+                // Forced to snake_case as it is typed, so the naming rule teaches itself.
                 format!("{}_", emerge_core::naming::to_snake_case(raw)),
                 "Enter keeps it.   Esc leaves the set in hand.".to_owned(),
             )

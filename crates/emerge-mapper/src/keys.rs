@@ -79,49 +79,13 @@ pub enum Action {
     ComposeNext,
     /// Arm the selected composition on the map, so a click stamps it.
     ComposeArm,
-    /// Write down what this group's members present now, so later drift is measurable.
-    ComposeRecord,
     /// Walk the selected group's members. A second cursor, under the one that walks the groups.
     ComposeMemberPrev,
     ComposeMemberNext,
-    /// **Seat the selected member** — one lattice step, in the frame `Member::at` is written in.
-    ///
-    /// Not a cursor that a verb is then applied to, which is what the Tiles lattice keys are. Here the
-    /// movement *is* the verb, so the member is seen to move; Merrell's furniture layout calls that
-    /// progressively pinning a layout down, and it is why seating is per-member rather than a solve.
-    SeatForward,
-    SeatLeft,
-    SeatBack,
-    SeatRight,
-    SeatDown,
-    SeatUp,
-    /// **Put the selected member flush against an envelope face.** The verb a wall wants: its offset
-    /// comes from its own measured thickness, not from a grid step it cannot land on.
-    FlushForward,
-    FlushLeft,
-    FlushBack,
-    FlushRight,
-    /// Turn the selected member. A quarter bare, 15° on Shift — see the binding for why that way round.
-    TurnMemberLeft,
-    TurnMemberRight,
-    TurnMemberLeftFine,
-    TurnMemberRightFine,
-    /// Take the selected member out of the group.
-    DropMember,
-    /// Move the selected member forward or back in paint order — what draws on top where two things
-    /// share a spot.
-    PaintUp,
-    PaintDown,
-    /// **Start a new group** on the Compose tab — an empty bounded tile, named as it is made.
-    NewGroup,
     /// Step the Compose carousel — the previous or next composition becomes the focal one. Its own
     /// keys rather than the arrows, which belong to whichever of the three lists has focus.
     CarouselPrev,
     CarouselNext,
-    /// Compose's own undo pair. Map, Tiles and Anim each keep one; an editing surface without one
-    /// would be the odd tab out.
-    UndoCompose,
-    RedoCompose,
     Save,
     Undo,
     Redo,
@@ -538,8 +502,7 @@ pub const BINDINGS: &[Binding] = &[
     // force a worse binding here, which is the whole reason contexts exist.
     b(Action::ComposePrev, KeyCode::ArrowUp, false, Context::Compose, "up", "walk the focused list"),
     b(Action::ComposeNext, KeyCode::ArrowDown, false, Context::Compose, "down", "walk the focused list"),
-    b(Action::ComposeArm, KeyCode::Enter, false, Context::Compose, "Enter", "add the picked piece / arm this composition"),
-    b(Action::ComposeRecord, KeyCode::KeyR, false, Context::Compose, "R", "record what this composition's members present now"),
+    b(Action::ComposeArm, KeyCode::Enter, false, Context::Compose, "Enter", "arm this composition for the Map"),
     // Symmetric with the pair above: `up`/`down` walk the groups, `left`/`right` walk the members of
     // the one you are on. Costs no letter, and the two cursors read as one idea.
     b(Action::ComposeMemberPrev, KeyCode::ArrowLeft, false, Context::Compose, "left", "which list the arrows walk"),
@@ -547,12 +510,6 @@ pub const BINDINGS: &[Binding] = &[
     // **The Tiles lattice cluster, on the other lattice.** `Context` overlaps by design, so one hand
     // shape means one thing on both surfaces rather than colliding. Declared adjacent to `[` and `]`
     // and sharing their `does`, so `rows()` collapses all six into one row.
-    bs(Action::SeatForward, KeyCode::KeyT, false, false, Context::Compose, "T", "seat this member / raise"),
-    bs(Action::SeatLeft, KeyCode::KeyF, false, false, Context::Compose, "F", "seat this member / raise"),
-    bs(Action::SeatBack, KeyCode::KeyG, false, false, Context::Compose, "G", "seat this member / raise"),
-    bs(Action::SeatRight, KeyCode::KeyH, false, false, Context::Compose, "H", "seat this member / raise"),
-    b(Action::SeatDown, KeyCode::BracketLeft, false, Context::Compose, "[", "seat this member / raise"),
-    b(Action::SeatUp, KeyCode::BracketRight, false, Context::Compose, "]", "seat this member / raise"),
     // **Flush to a face, which is the verb a wall actually wants.**
     //
     // Step 4 measured why: `site/wall` is 0.1 m thick, so seating it flush inside a 1 m tile puts it
@@ -563,10 +520,6 @@ pub const BINDINGS: &[Binding] = &[
     //
     // Its own row rather than the seat row's: ten chords collapsed into one line stops being a row
     // and starts being a paragraph.
-    bs(Action::FlushForward, KeyCode::KeyT, false, true, Context::Compose, "T", "flush to that face"),
-    bs(Action::FlushLeft, KeyCode::KeyF, false, true, Context::Compose, "F", "flush to that face"),
-    bs(Action::FlushBack, KeyCode::KeyG, false, true, Context::Compose, "G", "flush to that face"),
-    bs(Action::FlushRight, KeyCode::KeyH, false, true, Context::Compose, "H", "flush to that face"),
     // **A quarter bare, 15° on Shift — and that order is the argument, not a preference.**
     //
     // A group is a tile. `adjacency::quarter_turns` refuses a yaw that is not a multiple of 90 and
@@ -581,22 +534,14 @@ pub const BINDINGS: &[Binding] = &[
     // **Not `,` and `.`, and the test is why.** `rows()` joins a collapsed row's chords with `", "`,
     // so a chord that *is* a comma comes out as `, , .` and cannot be read back —
     // `collapsing_rows_loses_nothing` failed on exactly that, naming the vanished chord.
-    bs(Action::TurnMemberLeft, KeyCode::KeyY, false, false, Context::Compose, "Y", "turn a quarter / Shift: 15"),
-    bs(Action::TurnMemberRight, KeyCode::KeyU, false, false, Context::Compose, "U", "turn a quarter / Shift: 15"),
-    bs(Action::TurnMemberLeftFine, KeyCode::KeyY, false, true, Context::Compose, "Y", "turn a quarter / Shift: 15"),
-    bs(Action::TurnMemberRightFine, KeyCode::KeyU, false, true, Context::Compose, "U", "turn a quarter / Shift: 15"),
-    b(Action::DropMember, REMOVE_KEY, false, Context::Compose, REMOVE_NAME, "drop this member"),
     // **Not `,` and `.`, for the second time, and the test caught it both times.**
     //
     // `rows()` joins a collapsed row's chords with `", "`, so a comma chord is unreadable the moment
     // it shares a row with anything — including its own pair. `,`/`.` were tried for turn and printed
     // `, , .`; tried again here and did it again. A comma cannot be a chord in this editor while the
     // separator is a comma, and that is a property of the census, not of this row.
-    b(Action::PaintDown, KeyCode::Minus, false, Context::Compose, "-", "paint order: back / front"),
-    b(Action::PaintUp, KeyCode::Equal, false, Context::Compose, "=", "paint order: back / front"),
     // **The two verbs this tab was missing.** It could refine a group and not make one, so every
     // group had to be captured on the Map first — which is a fine way to work and a bad only way.
-    b(Action::NewGroup, KeyCode::KeyN, false, Context::Compose, "N", "new composition"),
     // **The carousel, and this tab's TWELFTH row — the last one it has.** The focal composition stands
     // full size with its neighbours either side as miniatures; these step the strip.
     //
@@ -611,8 +556,6 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::CarouselPrev, KeyCode::KeyO, false, Context::Compose, "O", "previous / next composition"),
     b(Action::CarouselNext, KeyCode::KeyP, false, Context::Compose, "P", "previous / next composition"),
     // One row, two chords — the Map, Tiles and Anim pairs again.
-    bs(Action::UndoCompose, KeyCode::KeyZ, true, false, Context::Compose, "Z", "undo / redo"),
-    bs(Action::RedoCompose, KeyCode::KeyZ, true, true, Context::Compose, "Z", "undo / redo"),
     // One row, two chords, same as the Map and Tiles undo pairs.
     bs(Action::UndoBench, KeyCode::KeyZ, true, false, Context::Anim, "Z", "undo / redo the last write"),
     bs(Action::RedoBench, KeyCode::KeyZ, true, true, Context::Anim, "Z", "undo / redo the last write"),
@@ -965,14 +908,7 @@ mod tests {
         let actions = [
             Action::NextTab, Action::MapTab, Action::TilesTab, Action::AnimTab,
             Action::ComposeTab, Action::ComposePrev, Action::ComposeNext, Action::ComposeArm,
-            Action::ComposeRecord, Action::ComposeMemberPrev, Action::ComposeMemberNext,
-            Action::SeatForward, Action::SeatLeft, Action::SeatBack, Action::SeatRight,
-            Action::SeatDown, Action::SeatUp,
-            Action::FlushForward, Action::FlushLeft, Action::FlushBack, Action::FlushRight,
-            Action::TurnMemberLeft, Action::TurnMemberRight,
-            Action::TurnMemberLeftFine, Action::TurnMemberRightFine,
-            Action::DropMember, Action::UndoCompose, Action::RedoCompose,
-            Action::NewGroup, Action::PaintUp, Action::PaintDown,
+            Action::ComposeMemberPrev, Action::ComposeMemberNext,
             Action::CarouselPrev, Action::CarouselNext,
             Action::Save, Action::Undo, Action::Redo, Action::Shortcuts, Action::EditTile,
             Action::AimLeft, Action::AimRight, Action::AimReset, Action::Cancel,

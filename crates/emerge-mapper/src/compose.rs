@@ -27,7 +27,6 @@
 
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use bevy::ui_widgets::{Activate, Button as UiButton};
 
 use emerge_core::composition::{self, Band, Composition, Envelope};
 
@@ -43,27 +42,25 @@ use crate::tiles::{ComposeRoot, Mode};
 /// member move.
 pub const COMPOSE_STAGE: Vec3 = crate::stages::COMPOSE;
 
-/// The three lists on this tab, and the order `left`/`right` cycles them.
+/// The two lists on this tab, and the order `left`/`right` cycles them.
 ///
-/// Groups on the left, then that group's members under it, then the library on the right — reading
-/// order, so cycling forward walks the screen left to right rather than in an order only the code
-/// knows.
+/// Compositions, then the members of the selected one — reading order, so cycling forward walks the
+/// screen top to bottom rather than in an order only the code knows. There was a third, the library
+/// to place from; it went when authoring moved to the Map.
 #[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pane {
     #[default]
     Groups,
     Members,
-    Meshes,
 }
 
 impl Pane {
-    pub const ALL: [Pane; 3] = [Pane::Groups, Pane::Members, Pane::Meshes];
+    pub const ALL: [Pane; 2] = [Pane::Groups, Pane::Members];
 
     pub fn label(self) -> &'static str {
         match self {
             Pane::Groups => "COMPOSITIONS",
             Pane::Members => "MEMBERS",
-            Pane::Meshes => "PLACE",
         }
     }
 
@@ -83,29 +80,12 @@ pub struct ComposeState {
     /// Index into the selected group's members — the second cursor, under the one above. Clamped the
     /// same way and for the same reason.
     pub member: usize,
-    /// **Previous member lists, most recent last.** Compose's own undo, because Map, Tiles and Anim
-    /// each keep one and an editing surface without one would be the odd tab out.
-    ///
-    /// Whole values rather than an operation enum. The Map's stack argues the shape it needs —
-    /// *"Every variant's inverse is another variant of this same enum"* — and for a file this size
-    /// the simplest thing with that property is the value itself, which cannot disagree with what it
-    /// is the inverse of.
-    /// Written only by [`commit`] and [`step_history`]; public because this is a `Resource` whose
-    /// other fields are, and because a functional-update literal outside the crate needs every field
-    /// visible — `tests/headless.rs` builds one.
-    pub undo: Vec<Vec<Composition>>,
-    pub redo: Vec<Vec<Composition>>,
-    /// **The name being typed for a new group.** `Some("")` the moment `N` is pressed, so the panel
-    /// can show the field before a character exists.
-    pub naming: Option<String>,
     /// **Which of the three lists the walk keys move.**
     ///
     /// Replaced a modal picker that took the keyboard while open. A mode you cannot see is the
     /// defect this tab was rebuilt for, so this is drawn — see `rebuild`, which tints the focused
     /// list's header — and the lists are all on screen at once rather than one at a time.
     pub focus: Pane,
-    /// Index into the library, for the mesh list on the right.
-    pub mesh: usize,
     /// **The armed group** — by id, never by index.
     ///
     /// An index would silently re-point the moment `compositions.ron` gained a row above it, which is
@@ -137,11 +117,7 @@ impl Default for ComposeState {
         ComposeState {
             selected: 0,
             member: 0,
-            undo: Vec::new(),
-            redo: Vec::new(),
-            naming: None,
             focus: Pane::default(),
-            mesh: 0,
             armed: None,
             staged: None,
             status: crate::chrome::Status::default(),
@@ -161,24 +137,6 @@ struct ComposeLine;
 #[derive(Component)]
 struct ComposeBody;
 
-/// The right-hand mesh list's scroll area, and the header above it that shows the focus.
-#[derive(Component)]
-struct MeshList;
-
-#[derive(Component)]
-struct MeshHeader;
-
-/// One row of the mesh list. Carries its library index so a click needs no second lookup.
-#[derive(Component)]
-struct MeshRow(usize);
-
-/// The **NEW** button, top right. The `N` key does the same thing through the same call.
-///
-/// `pub` for the same reason [`StagedMember`] is: whether an observer fires for the *right* entity is
-/// a question about the schedule, and only `tests/headless.rs` can ask it.
-#[derive(Component)]
-pub struct NewGroupButton;
-
 pub struct ComposePlugin;
 
 impl Plugin for ComposePlugin {
@@ -188,27 +146,12 @@ impl Plugin for ComposePlugin {
             .add_systems(Startup, spawn_compose_panel)
             .add_systems(
                 Update,
-                (
-                    start_new,
-                    walk,
-                    arm,
-                    record,
-                    cycle_focus,
-                    seat_member,
-                    flush_member,
-                    turn_member,
-                    drop_member,
-                    paint_member,
-                    step_history,
-                    step_carousel,
-                    pick_slot,
-                )
+                (walk, arm, cycle_focus, step_carousel, pick_slot)
                     .in_set(keys::Phase::Act)
                     .run_if(in_compose_mode),
             )
-            // Not gated on the mode, for the same reason `rebuild` is not: the staged group is
-            // despawned when the tab is left, and a system that stops running cannot despawn it.
-            .add_systems(Update, new_group_keys.in_set(keys::Phase::Text))
+            // Not gated on the mode: the staged strip is despawned when the tab is left, and a
+            // system that stops running cannot despawn it.
             .add_systems(Update, restage_group.after(keys::Phase::Act))
             // After the strip is published, so nothing is drawn against last frame's layout.
             .add_systems(
@@ -223,10 +166,7 @@ impl Plugin for ComposePlugin {
             )
             // Not gated on the mode: the armed group is shown on the Map tab too, and a panel that
             // stops updating when you leave it is a panel that lies the moment you come back.
-            .add_systems(Update, rebuild.after(keys::Phase::Act))
-            .add_systems(Update, rebuild_meshes.after(keys::Phase::Act))
-            .add_observer(on_new_group_click)
-            .add_observer(on_mesh_click);
+            .add_systems(Update, rebuild.after(keys::Phase::Act));
     }
 }
 
@@ -283,50 +223,6 @@ fn spawn_compose_panel(mut commands: Commands) {
         crate::chrome::problem_log(p, Mode::Compose);
     });
 
-    // **The mesh list, on the right where the Map tab keeps its palette.**
-    //
-    // Tagged `ComposeRoot` like the panel above, so `tiles::apply_mode` shows and hides it with the
-    // tab and needs no change — it iterates every marker it knows and this is one of them.
-    //
-    // This is the thing the tab was missing: you could not see what you were choosing between. A
-    // modal picker over the same list was tried first and rejected for the reason the whole rebuild
-    // exists — a mode you cannot see is a mode you cannot use.
-    crate::chrome::panel_root(
-        &mut commands,
-        crate::chrome::Side::Right,
-        crate::chrome::LIST_W,
-        true,
-        true,
-    )
-    .insert(ComposeRoot)
-    .with_children(|p| {
-        // **The verb, where it can be seen.** `N` has made a group since this tab could make one at
-        // all, and an author looked straight at the tab and reported that it could not — a key with
-        // no visible affordance is a key nobody finds. Cockburn et al. is the same finding the key
-        // census is built on: a fast path offered beside no slow path is not offered.
-        p.spawn((
-            UiButton,
-            Hovered::default(),
-            NewGroupButton,
-            Node {
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                min_height: Val::Px(22.0),
-                margin: UiRect::bottom(Val::Px(4.0)),
-                ..default()
-            },
-            BackgroundColor(crate::chrome::HEADER_BG),
-        ))
-        .with_children(|b| {
-            b.spawn((
-                Text::new(format!("+ NEW COMPOSITION   {}", keys::chord(Action::NewGroup))),
-                TextColor(ACCENT),
-                TextFont::from_font_size(11.0),
-            ));
-        });
-        p.spawn((Text::new("PLACE"), TextColor(LABEL), TextFont::from_font_size(11.0), MeshHeader));
-        crate::chrome::scroll_list(p, MeshList);
-    });
 }
 
 /// Walk the list. Shift steps five, matching every other list in this editor.
@@ -348,11 +244,7 @@ fn cycle_focus(
         return;
     };
     state.focus = state.focus.step(by);
-    let focus = state.focus;
-    let said = match focus {
-        Pane::Meshes => format!("{} — Enter drops one into this tile", focus.label()),
-        _ => focus.label().to_owned(),
-    };
+    let said = state.focus.label().to_owned();
     state.status.note(said);
 }
 
@@ -378,7 +270,6 @@ fn walk(
             .compositions
             .get(state.selected)
             .map_or(0, |c| c.members.len()),
-        Pane::Meshes => project.library.descriptors.len(),
     };
     if n == 0 {
         return;
@@ -392,7 +283,6 @@ fn walk(
             state.member = 0;
         }
         Pane::Members => state.member = wrap(state.member.min(n - 1)),
-        Pane::Meshes => state.mesh = wrap(state.mesh.min(n - 1)),
     }
 }
 
@@ -401,25 +291,18 @@ fn walk(
 /// Toggling rather than a separate disarm verb, for the reason `EditorState::brush` is an `Option`:
 /// **nothing armed has to be a reachable state**, or an author cannot put the cursor over the map
 /// without something following it.
-/// `Enter` — **adds the highlighted mesh when the library has focus, arms the group otherwise.**
+/// `Enter` — **arms this composition for the Map**, and that is now all it does.
 ///
-/// One key, two meanings decided by something visible on screen, rather than a modal that takes the
-/// keyboard and says so only in a status line.
+/// It used to mean two things decided by which list had focus: add the highlighted mesh, or arm the
+/// group. The library list went with authoring, so one key means one thing again.
 fn arm(
     mut state: ResMut<ComposeState>,
-    mut project: ResMut<Project>,
+    project: Res<Project>,
     keys: Res<keys::Live>,
     input: Res<ButtonInput<KeyCode>>,
 ) {
     if !keys::just_pressed(&input, keys.0, Action::ComposeArm) {
         return;
-    }
-    if state.focus == Pane::Meshes {
-        let Some(d) = project.library.descriptors.get(state.mesh) else {
-            return state.status.problem("the library has no piece there");
-        };
-        let descriptor = d.id.clone();
-        return add_member(&mut state, &mut project, &descriptor);
     }
     toggle_arm(&mut state, &project);
 }
@@ -442,565 +325,6 @@ pub fn toggle_arm(state: &mut ComposeState, project: &Project) {
         state.armed = Some(c.id.clone());
         state.status.note(format!("`{}` armed — the map tab stamps it", c.id));
     }
-}
-
-/// **Write down what every member currently presents, and save it.**
-///
-/// The verb the STALE badge is about. Without it nothing in a shipped path ever called
-/// `record_fingerprints`, so every group stayed permanently `Unrecorded` and the whole verifying
-/// trace was inert — a mechanism that could report drift and would never be given a baseline to
-/// report it against.
-///
-/// It writes `compositions.ron` through the same atomic save the library uses, and **only** when
-/// something changed: a keypress that rewrites a file to identical bytes is a keypress that makes
-/// every group look edited in a diff.
-fn record(
-    mut state: ResMut<ComposeState>,
-    mut project: ResMut<Project>,
-    keys: Res<keys::Live>,
-    input: Res<ButtonInput<KeyCode>>,
-) {
-    if !keys::just_pressed(&input, keys.0, Action::ComposeRecord) {
-        return;
-    }
-    record_selected(&mut state, &mut project);
-}
-
-/// The body, `pub` so the sentinel driver calls the same one the key does — never a second copy.
-pub fn record_selected(state: &mut ComposeState, project: &mut Project) {
-    let at = state.selected;
-    let snapshot = project.compositions.compositions.clone();
-    let library = project.library.clone();
-    let Some(target) = project.compositions.compositions.get_mut(at) else {
-        state.status.note("no composition to record");
-        return;
-    };
-    let id = target.id.clone();
-    let changed = match composition::record_fingerprints(target, &snapshot, &library) {
-        Ok(n) => n,
-        Err(e) => {
-            state.status.problem(format!("cannot record `{id}`: {e}"));
-            return;
-        }
-    };
-    if changed == 0 {
-        state.status.note(format!("`{id}` was already up to date — nothing written"));
-        return;
-    }
-    let path = project
-        .emerge_dir
-        .join(emerge_core::composition::Compositions::FILE);
-    let text = match project.compositions.to_ron() {
-        Ok(t) => t,
-        Err(e) => {
-            state.status.problem(format!("NOT WRITTEN: {e}"));
-            return;
-        }
-    };
-    // A refusal must not read like a receipt — which is now structural rather than a matter of
-    // spelling, because the two go to different slots and only one of them is a red block.
-    state.status.say(
-        emerge_core::ron_surgery::save_atomic(&path, &text)
-            .map(|()| format!("recorded {changed} member(s) of `{id}`"))
-            .map_err(|e| format!("NOT WRITTEN: {e}")),
-    );
-}
-
-// ------------------------------------------------------------------------------------------------
-// Seating — the door, and the verbs that go through it
-// ------------------------------------------------------------------------------------------------
-
-/// How deep the undo stack goes. Deep enough for a seating session, bounded so a long one cannot
-/// grow without limit.
-const HISTORY: usize = 64;
-
-/// **Edit the composition set, and keep the result only if it is a valid set.**
-///
-/// The same door [`crate::editor::keep_as_group`] and [`record_selected`] go through, and the reason
-/// there is one: a group that fails validation must leave both the file and the in-memory set exactly
-/// as they were, or the editor is showing something the game will refuse to load.
-///
-/// Writes immediately rather than staging, because **that is the model `compositions.ron` already
-/// has** — both existing writers `save_atomic` on the keypress. A staging buffer would be a second
-/// write model for one file. It is safe here for a reason specific to this file: it carries no `//`
-/// comments on purpose, recorded in its own `note`, precisely because `to_ron` reserializes. There is
-/// nothing for a rewrite to lose.
-fn commit(
-    state: &mut ComposeState,
-    project: &mut Project,
-    edit: impl FnOnce(&mut Vec<Composition>) -> Result<String, String>,
-) {
-    let was = project.compositions.compositions.clone();
-    let mut proposed = project.compositions.clone();
-    let receipt = match edit(&mut proposed.compositions) {
-        Ok(r) => r,
-        Err(e) => return state.status.problem(e),
-    };
-    if let Err(e) = composition::validate(&proposed.compositions, &project.library) {
-        return state.status.problem(e);
-    }
-    let path = project
-        .emerge_dir
-        .join(emerge_core::composition::Compositions::FILE);
-    let text = match proposed.to_ron() {
-        Ok(t) => t,
-        Err(e) => return state.status.problem(format!("NOT WRITTEN: {e}")),
-    };
-    if let Err(e) = emerge_core::ron_surgery::save_atomic(&path, &text) {
-        return state.status.problem(format!("NOT WRITTEN: {e}"));
-    }
-    project.compositions = proposed;
-    state.undo.push(was);
-    if state.undo.len() > HISTORY {
-        state.undo.remove(0);
-    }
-    // A new edit forks the history. Keeping the redo stack would let a later redo reinstate a set
-    // that never followed from what is now on disk.
-    state.redo.clear();
-    state.status.note(receipt);
-}
-
-// ------------------------------------------------------------------------------------------------
-// Making a group here, rather than capturing one on the Map
-// ------------------------------------------------------------------------------------------------
-
-/// The tile a new group claims until somebody says otherwise.
-///
-/// **Bounded, not anchored**, because a group that claims a tile is the thing this whole effort is
-/// for: `grammar::learn` refuses a piece that is not the cell's size, and not one wall piece in the
-/// Site kit is. One metre square by the height the kit's walls stand at.
-pub(crate) const NEW_TILE: (f32, f32, f32) = (1.0, 2.4, 1.0);
-
-/// `N` — start naming a new group.
-fn start_new(
-    mut state: ResMut<ComposeState>,
-    keys: Res<keys::Live>,
-    input: Res<ButtonInput<KeyCode>>,
-) {
-    if !keys::just_pressed(&input, keys.0, Action::NewGroup) {
-        return;
-    }
-    state.naming = Some(String::new());
-    state.status.note("name the new composition, then Enter — Esc to abandon it");
-}
-
-/// The name field. Same shape as every other field here: drain on the frame it opens, or the
-/// keystroke that opened it is read as its first character.
-fn new_group_keys(
-    mut events: MessageReader<bevy::input::keyboard::KeyboardInput>,
-    mut project: ResMut<Project>,
-    mut state: ResMut<ComposeState>,
-) {
-    use bevy::input::keyboard::Key;
-    if state.naming.is_none() {
-        events.clear();
-        return;
-    }
-    for event in events.read() {
-        if !event.state.is_pressed() {
-            continue;
-        }
-        match &event.logical_key {
-            Key::Enter => {
-                let Some(raw) = state.naming.take() else { return };
-                new_group(&mut state, &mut project, &raw);
-                return;
-            }
-            Key::Escape => {
-                state.naming = None;
-                state.status.note("no new composition");
-                return;
-            }
-            Key::Backspace => {
-                if let Some(raw) = state.naming.as_mut() {
-                    raw.pop();
-                }
-            }
-            Key::Character(text) => {
-                if let Some(raw) = state.naming.as_mut() {
-                    raw.push_str(text);
-                }
-            }
-            Key::Space => {
-                if let Some(raw) = state.naming.as_mut() {
-                    raw.push(' ');
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// **Make an empty bounded group and select it**, through the same door everything else goes through.
-///
-/// `pub` for the same reason [`seat_selected`] is: a test drives the verb the key drives.
-pub fn new_group(state: &mut ComposeState, project: &mut Project, raw: &str) {
-    let id = emerge_core::naming::to_snake_case(raw);
-    if id.is_empty() {
-        return state
-            .status
-            .problem(format!("`{raw}` leaves nothing usable as a name"));
-    }
-    if project.compositions.compositions.iter().any(|c| c.id == id) {
-        return state.status.problem(format!(
-            "`{id}` is already a composition. Pick another name — renaming one would strand every map \
-             that stamped it."
-        ));
-    }
-    let made = id.clone();
-    commit(state, project, move |set| {
-        set.push(Composition {
-            id: made.clone(),
-            envelope: Envelope::Bounded { size: NEW_TILE },
-            members: Vec::new(),
-            locations: Vec::new(),
-            note: None,
-        });
-        // Sorted, because the file has one encoding — the same rule members follow.
-        set.sort_by(|a, b| a.id.cmp(&b.id));
-        // **Built from the census, not written out.** This said "press A to add a piece", and there
-        // is no `A` verb on this tab — `A` is `PanLeft`, so an author following the receipt slid the
-        // camera and concluded pieces could not be placed at all. A chord in a message has to come
-        // from the same table the key handler reads, or it is a claim nothing checks.
-        Ok(format!(
-            "`{made}` — empty. Click a piece in PLACE (or {} to walk to that list), then {} to add it.",
-            keys::chord(Action::ComposeMemberNext),
-            keys::chord(Action::ComposeArm),
-        ))
-    });
-    // Select what was just made, so the next verb acts on it rather than on whatever was selected
-    // before. Looked up by id rather than remembered as an index, because the sort above moved things.
-    if let Some(at) = project
-        .compositions
-        .compositions
-        .iter()
-        .position(|c| c.id == id)
-    {
-        state.selected = at;
-        state.member = 0;
-    }
-}
-
-
-
-/// **Put a library piece into the selected group**, at its centre, through the commit door.
-///
-/// It lands at the middle of the tile rather than anywhere clever: the seat and flush verbs are how
-/// it gets where it belongs, and guessing a position would be the tool acting on a model other than
-/// the author's.
-pub fn add_member(state: &mut ComposeState, project: &mut Project, descriptor: &str) {
-    let selected = state.selected;
-    let what = descriptor.to_owned();
-    commit(state, project, move |set| {
-        let c = set
-            .get_mut(selected)
-            .ok_or_else(|| "that composition is no longer there".to_owned())?;
-        // A member id from the piece's own name, numbered from the second — the rule capture uses.
-        let short = what.rsplit('/').next().unwrap_or(&what).to_owned();
-        let mut id = short.clone();
-        let mut n = 2;
-        while c.members.iter().any(|m| m.id == id) {
-            id = format!("{short}_{n}");
-            n += 1;
-        }
-        c.members.push(composition::Member {
-            paint: 0,
-            id: id.clone(),
-            body: composition::Body::Descriptor {
-                id: what.clone(),
-                tip: (0, 0),
-                on: None,
-                patch: None,
-            },
-            at: (0.0, 0.0),
-            yaw: 0.0,
-            lift: 0.0,
-            // Never recorded is a different fact from stale; `R` is what records it.
-            of_fingerprint: None,
-            note: None,
-        });
-        c.members.sort_by(|a, b| a.id.cmp(&b.id));
-        Ok(format!("added `{id}` — T F G H to seat it, Shift for flush"))
-    });
-}
-
-/// The selected member of the selected group, or a note saying there is none.
-fn selected_member<'a>(
-    state: &ComposeState,
-    comps: &'a [Composition],
-) -> Option<(&'a Composition, usize)> {
-    let c = comps.get(state.selected)?;
-    let i = state.member.min(c.members.len().checked_sub(1)?);
-    Some((c, i))
-}
-
-
-/// **Seat the selected member** — one lattice step per press, written through the door.
-fn seat_member(
-    mut state: ResMut<ComposeState>,
-    mut project: ResMut<Project>,
-    keys: Res<keys::Live>,
-    input: Res<ButtonInput<KeyCode>>,
-) {
-    let nudge = [
-        (Action::SeatForward, Nudge::Forward),
-        (Action::SeatBack, Nudge::Back),
-        (Action::SeatLeft, Nudge::Left),
-        (Action::SeatRight, Nudge::Right),
-        (Action::SeatUp, Nudge::Up),
-        (Action::SeatDown, Nudge::Down),
-    ]
-    .into_iter()
-    .find(|(a, _)| keys::just_pressed(&input, keys.0, *a));
-    let Some((_, nudge)) = nudge else { return };
-    seat_selected(&mut state, &mut project, nudge);
-}
-
-/// **The body, `pub` so a test and a driver call the same one the key does** — never a second copy.
-///
-/// The same reason [`toggle_arm`] and [`record_selected`] are public: the one time a caller
-/// re-implemented a verb inline, the two immediately disagreed.
-pub fn seat_selected(state: &mut ComposeState, project: &mut Project, nudge: Nudge) {
-    let comps = &project.compositions.compositions;
-    let Some((c, i)) = selected_member(&state, comps) else {
-        state.status.note("no member to seat");
-        return;
-    };
-    let (envelope, member_id) = (c.envelope, c.members[i].id.clone());
-    // Measured against the set as it stands, before the edit — a member's footprint does not depend
-    // on where it is being moved to.
-    let footprint = match member_footprint(&c.members[i], comps, &project.library) {
-        Ok(f) => f,
-        Err(e) => return state.status.problem(e),
-    };
-    let step = seat_step(&project);
-    let (at, lift) = (c.members[i].at, c.members[i].lift);
-    let (next_at, next_lift) = match seated(envelope, at, lift, footprint, nudge, step) {
-        Ok(v) => v,
-        Err(e) => return state.status.problem(format!("`{member_id}`: {e}")),
-    };
-    if (next_at, next_lift) == (at, lift) {
-        return;
-    }
-    let selected = state.selected;
-    commit(state, project, |set| {
-        let m = set
-            .get_mut(selected)
-            .and_then(|c| c.members.get_mut(i))
-            .ok_or_else(|| format!("`{member_id}` is no longer there to seat"))?;
-        m.at = next_at;
-        m.lift = next_lift;
-        // `of_fingerprint` is deliberately untouched: it records what this member's *body* was built
-        // against, and moving one changes no body. Writing it here would make every seat look like a
-        // re-record and would silence a real STALE badge.
-        Ok(format!(
-            "`{member_id}` seated at ({:.2}, {:.2}) lift {:.2}",
-            next_at.0, next_at.1, next_lift
-        ))
-    });
-}
-
-/// Flush the selected member against a face — `Shift` + a seat key.
-fn flush_member(
-    mut state: ResMut<ComposeState>,
-    mut project: ResMut<Project>,
-    keys: Res<keys::Live>,
-    input: Res<ButtonInput<KeyCode>>,
-) {
-    let to = [
-        (Action::FlushForward, Nudge::Forward),
-        (Action::FlushBack, Nudge::Back),
-        (Action::FlushLeft, Nudge::Left),
-        (Action::FlushRight, Nudge::Right),
-    ]
-    .into_iter()
-    .find(|(a, _)| keys::just_pressed(&input, keys.0, *a));
-    let Some((_, to)) = to else { return };
-    flush_selected(&mut state, &mut project, to);
-}
-
-/// The body, `pub` for the same reason [`seat_selected`] is.
-pub fn flush_selected(state: &mut ComposeState, project: &mut Project, to: Nudge) {
-    let comps = &project.compositions.compositions;
-    let Some((c, i)) = selected_member(state, comps) else {
-        state.status.note("no member to flush");
-        return;
-    };
-    let (envelope, member_id) = (c.envelope, c.members[i].id.clone());
-    let footprint = match member_footprint(&c.members[i], comps, &project.library) {
-        Ok(f) => f,
-        Err(e) => return state.status.problem(e),
-    };
-    let at = c.members[i].at;
-    let next = match flushed(envelope, at, footprint, to) {
-        Ok(v) => v,
-        Err(e) => return state.status.problem(format!("`{member_id}`: {e}")),
-    };
-    if next == at {
-        return;
-    }
-    let selected = state.selected;
-    commit(state, project, |set| {
-        let m = set
-            .get_mut(selected)
-            .and_then(|c| c.members.get_mut(i))
-            .ok_or_else(|| format!("`{member_id}` is no longer there to flush"))?;
-        m.at = next;
-        Ok(format!("`{member_id}` flush at ({:.2}, {:.2})", next.0, next.1))
-    });
-}
-
-/// Turn the selected member — a quarter bare, 15° on Shift.
-fn turn_member(
-    mut state: ResMut<ComposeState>,
-    mut project: ResMut<Project>,
-    keys: Res<keys::Live>,
-    input: Res<ButtonInput<KeyCode>>,
-) {
-    let turn = [
-        (Action::TurnMemberLeft, -1.0, 90.0),
-        (Action::TurnMemberRight, 1.0, 90.0),
-        (Action::TurnMemberLeftFine, -1.0, 15.0),
-        (Action::TurnMemberRightFine, 1.0, 15.0),
-    ]
-    .into_iter()
-    .find(|(a, _, _)| keys::just_pressed(&input, keys.0, *a));
-    let Some((_, dir, step)) = turn else { return };
-
-    let comps = &project.compositions.compositions;
-    let Some((c, i)) = selected_member(&state, comps) else {
-        state.status.note("no member to turn");
-        return;
-    };
-    let member_id = c.members[i].id.clone();
-    let next = turned(c.members[i].yaw, step, dir);
-    let selected = state.selected;
-    commit(&mut state, &mut project, |set| {
-        let m = set
-            .get_mut(selected)
-            .and_then(|c| c.members.get_mut(i))
-            .ok_or_else(|| format!("`{member_id}` is no longer there to turn"))?;
-        m.yaw = next;
-        Ok(format!("`{member_id}` turned to {next:.0}"))
-    });
-}
-
-/// `,` / `.` — move the selected member back or forward in paint order.
-fn paint_member(
-    mut state: ResMut<ComposeState>,
-    mut project: ResMut<Project>,
-    keys: Res<keys::Live>,
-    input: Res<ButtonInput<KeyCode>>,
-) {
-    let by: i8 = if keys::just_pressed(&input, keys.0, Action::PaintUp) {
-        1
-    } else if keys::just_pressed(&input, keys.0, Action::PaintDown) {
-        -1
-    } else {
-        return;
-    };
-    let comps = &project.compositions.compositions;
-    let Some((c, i)) = selected_member(&state, comps) else {
-        return state.status.note("no member to reorder");
-    };
-    let member_id = c.members[i].id.clone();
-    // Saturating: `i8` is deliberately narrow, and a wrap would send the front-most member behind
-    // everything — the one outcome nobody presses this key for.
-    let next = c.members[i].paint.saturating_add(by);
-    if next == c.members[i].paint {
-        return state.status.note(format!("`{member_id}` is already as far {} as it goes",
-            if by > 0 { "front" } else { "back" }));
-    }
-    let selected = state.selected;
-    commit(&mut state, &mut project, move |set| {
-        let m = set
-            .get_mut(selected)
-            .and_then(|c| c.members.get_mut(i))
-            .ok_or_else(|| format!("`{member_id}` is no longer there"))?;
-        m.paint = next;
-        Ok(format!("`{member_id}` paint {next}"))
-    });
-}
-
-/// Take the selected member out of the composition.
-///
-/// The pair to the Map's capture verb: a box drag takes whatever was inside it, and this is how the
-/// one piece that should not have come along leaves again.
-fn drop_member(
-    mut state: ResMut<ComposeState>,
-    mut project: ResMut<Project>,
-    keys: Res<keys::Live>,
-    input: Res<ButtonInput<KeyCode>>,
-) {
-    if !keys::just_pressed(&input, keys.0, Action::DropMember) {
-        return;
-    }
-    let comps = &project.compositions.compositions;
-    let Some((c, i)) = selected_member(&state, comps) else {
-        state.status.note("no member to drop");
-        return;
-    };
-    let member_id = c.members[i].id.clone();
-    let selected = state.selected;
-    commit(&mut state, &mut project, |set| {
-        let c = set
-            .get_mut(selected)
-            .ok_or_else(|| format!("`{member_id}`'s composition is no longer there"))?;
-        if i >= c.members.len() {
-            return Err(format!("`{member_id}` is no longer there to drop"));
-        }
-        c.members.remove(i);
-        // A `Location` names member ids in `props`; leaving one pointing at a member that is gone is
-        // exactly the dangling reference `validate` refuses, so the refusal below would fire and the
-        // write would be abandoned. Dropping the prop with the member keeps the composition loadable, and
-        // an affordance left with no props at all is reported rather than silently kept.
-        for l in &mut c.locations {
-            l.props.retain(|p| *p != member_id);
-        }
-        Ok(format!("dropped `{member_id}`"))
-    });
-    state.member = 0;
-}
-
-/// Undo and redo, over whole member lists.
-fn step_history(
-    mut state: ResMut<ComposeState>,
-    mut project: ResMut<Project>,
-    keys: Res<keys::Live>,
-    input: Res<ButtonInput<KeyCode>>,
-) {
-    let back = keys::just_pressed(&input, keys.0, Action::UndoCompose);
-    let forward = keys::just_pressed(&input, keys.0, Action::RedoCompose);
-    if !(back || forward) {
-        return;
-    }
-    let taken = if back { state.undo.pop() } else { state.redo.pop() };
-    let Some(want) = taken else {
-        state.status.note(if back { "nothing to undo" } else { "nothing to redo" });
-        return;
-    };
-    let was = project.compositions.compositions.clone();
-    let mut proposed = project.compositions.clone();
-    proposed.compositions = want;
-    let path = project
-        .emerge_dir
-        .join(emerge_core::composition::Compositions::FILE);
-    let text = match proposed.to_ron() {
-        Ok(t) => t,
-        Err(e) => return state.status.problem(format!("NOT WRITTEN: {e}")),
-    };
-    if let Err(e) = emerge_core::ron_surgery::save_atomic(&path, &text) {
-        return state.status.problem(format!("NOT WRITTEN: {e}"));
-    }
-    project.compositions = proposed;
-    // The inverse goes on the other stack, so undo and redo are the same walk in opposite
-    // directions — the shape the Map's own stack argues for.
-    if back {
-        state.redo.push(was);
-    } else {
-        state.undo.push(was);
-    }
-    state.status.note(if back { "undone" } else { "redone" });
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1743,106 +1067,6 @@ fn pick_slot(
         state.selected = i;
         state.member = 0;
     }
-}
-
-/// Clicking **NEW** opens the same name field `N` opens — never a second copy of the verb.
-///
-/// # It has to ask *which* entity was activated
-///
-/// This took `On<Activate>` and then tested `buttons.is_empty()` — which asks whether a
-/// `NewGroupButton` exists **anywhere in the world**, and one always does. An observer fires for every
-/// `Activate` regardless of target, so clicking any row of the PLACE list on the right opened the
-/// name field: an author picking a mesh was asked to name a new composition instead. `on_mesh_click`
-/// directly below has always done it right, which is the shape to copy — `get(activate.entity)`
-/// answers "was it this one", and an empty result is the answer "no", not an error.
-fn on_new_group_click(
-    activate: On<Activate>,
-    buttons: Query<&NewGroupButton>,
-    mut state: ResMut<ComposeState>,
-) {
-    if buttons.get(activate.entity).is_err() {
-        return;
-    }
-    state.naming = Some(String::new());
-    state.status.note("name the new composition, then Enter — Esc to abandon it");
-}
-
-/// Clicking a mesh row selects it **and takes the focus**, so `Enter` then means "add this one".
-///
-/// Taking the focus is the point: picking something to place is an unambiguous statement about which
-/// list you are working in, and the Map palette's own click handler makes the same argument about
-/// arming a piece returning you to placing.
-fn on_mesh_click(
-    activate: On<Activate>,
-    rows: Query<&MeshRow>,
-    mut state: ResMut<ComposeState>,
-) {
-    let Ok(row) = rows.get(activate.entity) else {
-        return;
-    };
-    state.mesh = row.0;
-    state.focus = Pane::Meshes;
-}
-
-/// **The mesh list, and the header that says whether it has the arrows.**
-///
-/// Rebuilt wholesale when the selection or the project moves, like every other list here — a diffing
-/// version would be a second opinion about what is on screen.
-fn rebuild_meshes(
-    mut commands: Commands,
-    state: Res<ComposeState>,
-    project: Res<Project>,
-    thumbs: Option<Res<crate::thumbs::Thumbnails>>,
-    list: Query<Entity, With<MeshList>>,
-    mut header: Query<(&mut Text, &mut TextColor), With<MeshHeader>>,
-    rows: Query<Entity, With<MeshRow>>,
-) {
-    if !(state.is_changed() || project.is_changed()) {
-        return;
-    }
-    // **The focus, drawn.** Two lists cannot both look live, and an author who cannot tell which one
-    // the arrows move is back to the modal picker this replaced.
-    let focused = state.focus == Pane::Meshes;
-    for (mut text, mut colour) in &mut header {
-        let want = if focused { "PLACE  <- arrows" } else { "PLACE" };
-        if text.0 != want {
-            text.0 = want.to_owned();
-        }
-        colour.0 = if focused { ACCENT } else { LABEL };
-    }
-    let Ok(root) = list.single() else { return };
-    for e in &rows {
-        commands.entity(e).despawn();
-    }
-    let at = state.mesh.min(project.library.descriptors.len().saturating_sub(1));
-    commands.entity(root).with_children(|p| {
-        for (i, d) in project.library.descriptors.iter().enumerate() {
-            let picked = i == at;
-            let mut row = p.spawn((
-                UiButton,
-                Hovered::default(),
-                MeshRow(i),
-                Node {
-                    flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::Center,
-                    column_gap: Val::Px(6.0),
-                    ..default()
-                },
-                BackgroundColor(if picked { crate::chrome::ROW_SELECTED } else { crate::chrome::ROW_BG }),
-            ));
-            row.with_children(|r| {
-                // The same thumbnails the Map palette uses — baked once at startup, keyed by id.
-                if let Some(image) = thumbs.as_ref().and_then(|t| t.image(&d.id)) {
-                    r.spawn((ImageNode::new(image), Node { width: Val::Px(28.0), height: Val::Px(28.0), ..default() }));
-                }
-                r.spawn((
-                    Text::new(d.id.clone()),
-                    TextColor(if picked { ACCENT } else { TEXT }),
-                    TextFont::from_font_size(11.0),
-                ));
-            });
-        }
-    });
 }
 
 /// **Everything the panel says, derived on the spot.**

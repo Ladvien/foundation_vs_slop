@@ -1674,16 +1674,15 @@ pub fn sense_context(
     note: Res<crate::tiles::NoteEdit>,
     width: Res<crate::tiles::ScaleEdit>,
     height: Res<crate::tiles::HeightEdit>,
-    compose: Res<crate::compose::ComposeState>,
     mut live: ResMut<keys::Live>,
 ) {
     let typing = state.renaming.is_some()
         || state.pinning.is_some()
-        // **`grouping` was missing here**, so naming a captured group on the Map also dispatched Map
-        // actions for every letter typed — `corner` fired aim, turn, rename-map and turn-view. Added
-        // with `compose.naming`, which is the same field on the other tab.
+        // **`grouping` was missing here**, so naming a captured composition also dispatched Map
+        // actions for every letter typed — `corner` fired aim, turn, rename-map and turn-view. It was
+        // added alongside Compose's own name field; that tab no longer has one, and this is now the
+        // only text field that can be open while the Map holds the keyboard.
         || state.grouping.is_some()
-        || compose.naming.is_some()
         || edit.active.is_some()
         || import.renaming.is_some()
         || filters.typing()
