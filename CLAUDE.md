@@ -1,6 +1,6 @@
 - Use home still and lookup research on whatever you are implementing BEFORE you implement it.  We want SOTA and best practices.  And it is filled with game development research and best practices.
 - Do not use hardbreaks when writing markdown.  Markdown should be easy for humans to read when rendered.
-- When creating new features, attempt to use Bevy's plugin pattern as much as possible.  Create separate workspace crates.  Create their own Github repo with idiomatic name.  This is to ensure reusable components are generated during our work. Ensure each respective crate has a warning label of "Vibe Coded" a the top of the README.md. Please refer to [bevy_plugins.md](docs/bevy_plugins.md).  Each separate create must include examples (1-3) demoing the crate.  This is allow inspection of crate behavior without inclusion in this game.
+- When creating new features, attempt to use Bevy's plugin pattern as much as possible.  Create separate workspace crates.  Create their own Github repo with idiomatic name.  This is to ensure reusable components are generated during our work. Ensure each respective crate has a warning label of "Vibe Coded" a the top of the README.md. Please refer to [bevy_plugins.md](docs/bevy_plugins.md).  Each separate create must include examples (1-3) demoing the crate.  This is allow inspection of crate behavior without inclusion in this game.  If you discover debugging needs, make recommendations on adding it to this plugin, ever evolving.
 - Do not use unwrap() or anything that'd lead to a panic.  Code safe.  Handle errors.
 - Leave academic paper references in comments, if a paper was used in writing the code.
 - Rember compilation cost time; try to bunch changes and use `cargo check` to spot issues
@@ -15,7 +15,7 @@
 
 ## Workspace & crates
 
-Root package is the game (`foundation_vs_slop`, `src/`). Eleven members live under `crates/`; ten mirror to private `Ladvien/*` repos. The exception is `crates/fvs`, the zero-dependency `cargo fvs` dispatcher — its own crate so `--help` doesn't rebuild the game (see its manifest header).
+Root package is the game (`foundation_vs_slop`, `src/`). Thirteen members live under `crates/`; eleven mirror to private `Ladvien/*` repos. The exception is `crates/fvs`, the zero-dependency `cargo fvs` dispatcher — its own crate so `--help` doesn't rebuild the game (see its manifest header). The thirteenth is `crates/bevy_debugger_mcp/crates/bevy_debugger_bevy`, nested inside the debugger's own tree and mirrored as part of it rather than on its own.
 
 Each crate is still reached by the path the game always used. **The facade is the API: changing a call site means editing `src/`, not `crates/`.**
 
@@ -31,10 +31,19 @@ Each crate is still reached by the path the game always used. **The facade is th
 | `emerge-anim` | Pose blender | `crate::anim` (`src/lib.rs:23`) |
 | `emerge-bevy` | Library + map → entities | `src/emerge_map.rs` |
 | `emerge-mapper` | Standalone editor app — **not** a game dependency | `cargo run -p emerge-mapper` |
+| `bevy_debugger_mcp` | Agent debugging: MCP server binary + the `bevy_debugger_bevy` plugin | `bevy_debugger_bevy::DebuggerPlugin` behind `--features debugger` (`src/lib.rs:374`) |
 
 **Inside `squad_ai`, write `::map_elites::` with leading colons for the crate.** `squad_ai::map_elites` aliases `::map_elites::loops`, so the bare path resolves to the module, not the crate (`src/squad_ai/mod.rs:40`).
 
-**One crate is editable but lives outside this repo:** `bevy_debugger_bevy`, from [`Ladvien/bevy_debugger_mcp`](https://github.com/Ladvien/bevy_debugger_mcp). It is a git dependency pinned to a rev and gated behind the optional `debugger` feature, so it is absent from every default, release and determinism build — `cargo tree -i bevy_debugger_bevy` finds no package unless the feature is on. To edit it, clone the repo as a sibling and redirect it with a `[patch]` in the gitignored `.cargo/config.toml`; edits are picked up on the next build and commit to the debugger's own repo rather than becoming a vendored second copy here. Full recipe, the custom BRP methods, and the `DebuggerPlugin`-owns-`RemotePlugin` trap are in `docs/bevy_debugger_mcp.md`.
+**The agent debugger is vendored whole, and that was a correction.** `crates/bevy_debugger_mcp/` holds both halves of [`Ladvien/bevy_debugger_mcp`](https://github.com/Ladvien/bevy_debugger_mcp) — the MCP server binary and the companion Bevy plugin the game links — brought in with `git subtree add`, history intact, and mirrored back out like every other crate.
+
+It used to be a git dependency pinned to a rev, edited through a `[patch]` to a sibling clone. **That pin made the thing unfixable at the moment it needed fixing:** `bevy_debugger/input` answered `success: true` and moved nothing, because BRP handlers run in `Last` and Bevy clears `just_pressed` in the next `PreUpdate` — so every `just_pressed` action was unreachable by injected input. Repairing that meant editing another repo, cutting a rev and bumping. It is now an ordinary edit. `scripts/sync_debugger.sh` and the `[patch]` recipe are gone with the pin; keeping either alongside a vendored copy would be two paths to the same crate.
+
+The game still reaches the plugin only through the optional `debugger` feature, so it is absent from every default and release build — `cargo tree -i bevy_debugger_bevy` finds no package unless the feature is on, and neither does `bevy_remote`.
+
+**One caveat, measured rather than assumed:** that is true of the game's own build, not of `--workspace`. `cargo tree --workspace -i bevy_remote` *does* match, because Cargo unifies features across everything one build compiles and `bevy_debugger_bevy` needs `bevy/bevy_remote`. So the `--workspace` gate compiles a differently-featured `bevy` than a shipped build does. No extra system runs (adding `RemotePlugin` still requires the feature), but if a golden ever moves after touching the debugger's dependencies, this is the first thing to check.
+
+The custom BRP methods and the `DebuggerPlugin`-owns-`RemotePlugin` trap are in `docs/bevy_debugger_mcp.md`; the crate's own non-negotiables are in `crates/bevy_debugger_mcp/CLAUDE.md`.
 
 **Licensing is split on purpose.** The six `bevy_*`/`map_elites` libraries are **MIT OR Apache-2.0** with `publish = false` — a GPL crate in the Bevy ecosystem is unadoptable. The four `emerge-*` crates stay **GPL-3.0** with the game they were carved out of. `bevy_orca` also carries a `NOTICE`: it keeps RVO2's function names.
 
@@ -145,7 +154,7 @@ Cataloged at `/mnt/codex_fs/game_assets/CATALOG.md` — use any of them.
 
 So these are **forbidden** for an agent, and a hook blocks them: macOS `screencapture`, `scripts/macinput.py`, `scripts/vinput.py`.
 
-Details, the `DebuggerPlugin`-owns-`RemotePlugin` trap, and the `[patch]` recipe for editing the debugger: `docs/bevy_debugger_mcp.md`. Keep the pinned rev current with `scripts/sync_debugger.sh` (report-only; `--apply` bumps it and verifies the build) — run it whenever you touch the debugger, because a pin drifts silently by design.
+Details and the `DebuggerPlugin`-owns-`RemotePlugin` trap: `docs/bevy_debugger_mcp.md`. The debugger lives at `crates/bevy_debugger_mcp/`, so fixing it is an ordinary edit here — no pin to bump, and no sibling checkout to keep in sync.
 
 **`bevy_devshot` is not an agent path.** It still serves two callers with no BRP of their own: `emerge-mapper`, and the game's own player-facing Ctrl+P. It also captures the **UI layer**, which the offscreen mirror cannot — Bevy renders UI to one camera, so a mirror camera never receives the HUD. If a shot must show the interface, that is a request to hand to the player, not a reason to raise the window yourself.
 

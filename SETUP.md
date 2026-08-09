@@ -117,13 +117,14 @@ That gives **1160 passed / 0 failed / 7 ignored** across 38 binaries. `TESTING.m
 
 This project forbids agents from taking your keyboard or screen. The replacement is [`bevy_debugger_mcp`](https://github.com/Ladvien/bevy_debugger_mcp) — a separate process speaking MCP to an agent and BRP to the running game, so screenshots come from an offscreen render target and keystrokes go straight into the game's own input resources. Neither touches the OS.
 
+The debugger lives **in this repo** at `crates/bevy_debugger_mcp/`, so there is nothing else to clone.
+
 ```sh
-# 1. The MCP server.
-git clone https://github.com/Ladvien/bevy_debugger_mcp.git ~/bevy_debugger_mcp
-cargo install --path ~/bevy_debugger_mcp --locked        # ~6 minutes, release build
+# 1. The MCP server, built from the copy in this workspace.
+cargo install --path crates/bevy_debugger_mcp --locked   # ~6 minutes, release build
 
 # 2. Register it with Claude Code. NOTE: the flag is `--stdio`, not `stdio` —
-#    the repo's own setup-claude.sh prints the wrong form.
+#    the vendored setup-claude.sh prints the wrong form.
 claude mcp add bevy-debugger --scope user \
   -e BEVY_BRP_HOST=127.0.0.1 -e BEVY_BRP_PORT=15702 -e BEVY_MCP_DEV_PASSWORD=<pick-one> \
   -- ~/.cargo/bin/bevy-debugger-mcp --stdio
@@ -141,18 +142,13 @@ curl -s -X POST http://127.0.0.1:15702 -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"rpc.discover"}' | jq '.result.methods | length'   # 25
 ```
 
-**To edit the debugger** rather than just use it, add a `[patch]` to the same machine-local `.cargo/config.toml`, so edits are picked up on the next build and commit to the debugger's own repo instead of becoming a vendored copy here:
-
-```toml
-[patch."https://github.com/Ladvien/bevy_debugger_mcp"]
-bevy_debugger_bevy = { path = "/absolute/path/to/bevy_debugger_mcp/crates/bevy_debugger_bevy" }
-```
-
-`Cargo.toml` pins an exact rev so a fresh clone and CI build the same thing. `scripts/sync_debugger.sh` reports what upstream has moved past it; `--apply` bumps the pin and verifies the build.
+**To edit the debugger** rather than just use it, edit it — it is an ordinary crate in this workspace. `cargo build --features debugger` picks up plugin changes; `cargo install --path crates/bevy_debugger_mcp` reinstalls the server. It was a pinned git dependency until the pin turned a one-line bug into a cross-repo errand, and `docs/bevy_debugger_mcp.md` records both the bug and why the pin went away.
 
 ## 7. Pushing the extracted crates (only if you maintain them)
 
-Ten crates under `crates/` mirror to their own private `Ladvien/*` repos via `git subtree split`. `scripts/mirror_crates.sh` re-syncs them; it needs `gh` authenticated and a clean working tree, and refuses any crate missing a README, `CLAUDE.md`, a license, `examples/*.rs`, or the "Vibe Coded" label. Changes flow monorepo → mirror only.
+Eleven crates under `crates/` mirror to their own private `Ladvien/*` repos via `git subtree split`. `scripts/mirror_crates.sh` re-syncs them; it needs `gh` authenticated and a clean working tree, and refuses any crate missing a README, `CLAUDE.md`, a license, `examples/*.rs`, or the "Vibe Coded" label. Changes flow monorepo → mirror only.
+
+`bevy_debugger_mcp` is the one that arrived by the opposite route — `git subtree add`, history intact — and its nested `crates/bevy_debugger_bevy` travels with it as part of the same mirror.
 
 ## 8. Things that will bite you
 

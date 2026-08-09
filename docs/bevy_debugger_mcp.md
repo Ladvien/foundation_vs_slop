@@ -12,7 +12,14 @@ agent  ──MCP──▶  bevy-debugger-mcp  ──BRP (JSON-RPC/HTTP :15702)�
 
 `devshot` and `region_capture` are `#[cfg(debug_assertions)]`. BRP is not, and the difference is deliberate: BRP is not only an observation channel, it can **mutate a live `World`**. It has no business in a shipped binary, and it must never be on during a determinism run — an external writer into pinned state is precisely what the goldens exist to catch.
 
-A Cargo feature is the only gate that removes it from the *resolved dependency graph* rather than merely from the plugin list. Measured with the feature off: `bevy`'s `bevy_remote` feature is not enabled, and the resolved `bevy_math`/`glam` feature sets are byte-identical to before the feature existed. `Cargo.lock` records nine extra packages (`bevy_remote`, `hyper`, `tokio`, …) because a lockfile records every possible resolution — none of them build unless you ask for them.
+A Cargo feature is the only gate that removes it from the *resolved dependency graph* rather than merely from the plugin list. Measured with the feature off, building the game alone: `cargo tree -i bevy_remote` matches no package, and the resolved `bevy_math`/`glam` feature sets are byte-identical to before the feature existed.
+
+**That holds for the game's own build, and not for `--workspace`.** Since the debugger was vendored in as a workspace member, `cargo tree --workspace -i bevy_remote` *does* match — `bevy_debugger_bevy` declares `bevy` with `bevy_remote` and `serialize` non-optionally, and Cargo unifies features across everything a single build compiles, so `bevy_internal` gains `bevy_remote` for the duration of a `--workspace` build. The determinism gate runs exactly that way.
+
+Two things follow, and neither is hidden:
+
+- **The shipped game is unaffected.** `cargo build`, `cargo build --release` and `cargo build --profile dist` compile only the root package, where the gate still holds exactly as measured.
+- **The `--workspace` build compiles a differently-featured `bevy` than the goldens were pinned under.** Nothing *adds* `RemotePlugin` — that still requires `--features debugger` — so no extra system runs; the difference is which code is compiled, not which code executes. Treat a golden movement after touching this crate's dependencies as a signal to re-measure rather than a mystery.
 
 ## Running it
 
@@ -20,16 +27,29 @@ A Cargo feature is the only gate that removes it from the *resolved dependency g
 # 1. The game, with the remote protocol on (default port 15702).
 cargo run --features debugger
 
-# 2. The MCP server, once, from its own checkout or an install.
-cargo install --git https://github.com/Ladvien/bevy_debugger_mcp   # or: brew, or ./install.sh
-./setup-claude.sh                                                  # registers it with Claude Code
+# 2. The MCP server, once, from the copy in this repo.
+cargo install --path crates/bevy_debugger_mcp --locked
+
+# 3. Register it with Claude Code. NOTE: `--stdio`, not `stdio` — the vendored setup-claude.sh
+#    prints the wrong form. `BEVY_MCP_DEV_PASSWORD` seeds the dev users; without it the password is
+#    random per start and only written to stderr, which the client cannot read.
+claude mcp add bevy-debugger --scope user \
+  -e BEVY_BRP_HOST=127.0.0.1 -e BEVY_BRP_PORT=15702 -e BEVY_MCP_DEV_PASSWORD=<pick-one> \
+  -- ~/.cargo/bin/bevy-debugger-mcp --stdio
 ```
+
+**Restart Claude Code afterwards** — MCP tools do not appear until it reconnects.
 
 Then ask the agent to look at the running game. The observation tools ride Bevy's **built-in** BRP methods (`world.query`, `world.get_components`, `world.list_components`, `registry.schema`, …), so they work with nothing in this repo beyond the two plugins.
 
 ## The companion plugin, and what it adds
 
-The debugger ships `crates/bevy_debugger_bevy`, which registers two **custom** BRP methods on top of Bevy's built-in ones. It is adopted here as a git dependency pinned to a rev, behind the same `debugger` feature, so it is absent from every default, release and determinism build. Confirm that with `cargo tree -i bevy_debugger_bevy`, which fails to match a package unless the feature is on.
+The debugger ships `bevy_debugger_bevy`, which registers two **custom** BRP methods on top of Bevy's built-in ones. It lives at `crates/bevy_debugger_mcp/crates/bevy_debugger_bevy` and is reached as a path dependency behind the same `debugger` feature, so it is absent from every default, release and determinism build. Confirm both halves of that with:
+
+```sh
+cargo tree -i bevy_debugger_bevy                      # error: did not match any packages
+cargo tree -i bevy_debugger_bevy --features debugger  # matches, and so does bevy_remote
+```
 
 **`bevy_debugger/screenshot`** — captures the primary window, optionally crops to a region, optionally scales, and writes a PNG.
 
@@ -64,22 +84,28 @@ Two things to know:
 
 `bevy_debugger/input` writes into `ButtonInput<KeyCode>` and `ButtonInput<MouseButton>` — resources inside the game process. It cannot leak into whatever window you are actually using, and this is structural rather than careful: the crate depends only on `bevy`, `bevy_remote`, `serde`, `serde_json` and `image`, none of which can synthesise an OS event, and its sources contain no `enigo`, `CGEvent`, `core-graphics`, `xdotool`, `SendInput`, `winit` or `unsafe`. Keys injected while another application held focus produced nothing in that application.
 
-Its key table currently covers twelve keys (`parse_keycode`), and `InputKind::Scroll` is a stub that writes nothing — widen them upstream when a workflow needs more.
+`key` and `button` deserialize straight into Bevy's `KeyCode`/`MouseButton`, so every key Bevy knows is accepted under Bevy's own variant spelling — `KeyW`, `ArrowLeft`, `F11`, `Numpad7`, `ShiftLeft`. (An earlier note here described a hand-written twelve-key table and a scroll stub that wrote nothing; both are gone.)
 
-## Hacking on the debugger locally
+### Injected input is queued, and lands in `PreUpdate` — this was a real bug
 
-Clone it as a sibling and redirect the dependency with a `[patch]` in the **gitignored** `.cargo/config.toml` — the same file that carries the `cargo fvs` alias, so this stays machine-local and CI and fresh clones keep the reproducible pinned rev:
+**BRP handlers registered with `with_method_main` run in the `Last` schedule.** Bevy's `keyboard_input_system` runs at the top of `PreUpdate` and clears the just-pressed and just-released sets.
 
-```toml
-# .cargo/config.toml  (gitignored)
-[patch."https://github.com/Ladvien/bevy_debugger_mcp"]
-bevy_debugger_bevy = { path = "../bevy_debugger_mcp/crates/bevy_debugger_bevy" }
-```
+So a handler that wrote straight into `ButtonInput` had its `just_pressed` flag wiped by the very next `PreUpdate`, *before* any `Update` system could read it. **Every `just_pressed`-based action was unreachable by injected input**, while the method cheerfully answered `success: true`. Held `pressed` state survived the clear, which is what made it look intermittent — some actions responded and some silently did not.
 
-Edits in the sibling checkout are picked up on the next `cargo build`, and they commit to the debugger's own repo where they belong.
+Measured against this game: `bevy_debugger/input` reported success for `KeyQ` (`Action::CameraRotateLeft`) and the camera's rotation quaternion was bit-identical before and after, across `Press`, hold, and `Tap`.
+
+The handler now validates and **queues**; `input::apply_pending_input` runs in `PreUpdate` `.after(bevy::input::InputSystems)` and does the write on the far side of the clear. A `Tap` presses on one frame and releases on the next, because pressing and releasing within a single frame produces a state no physical key can — `pressed` false all frame while both edges are true — which silently skips every `pressed`-based reader. Verified after the fix: the same `Tap` of `KeyQ` rotated the camera 90°.
+
+If you change that ordering, re-verify against a running game. A unit test on `ButtonInput` cannot see this class of bug, because the bug is entirely in *when* the write happens.
+
+## Hacking on the debugger
+
+It is in this repo — `crates/bevy_debugger_mcp/` — so edit it and rebuild. There is no pin to bump and no sibling checkout to keep in sync; both were deleted along with `scripts/sync_debugger.sh` when the crate was vendored in. Changes flow **monorepo → mirror**, like every other crate: `scripts/mirror_crates.sh` pushes `crates/bevy_debugger_mcp/` out to `Ladvien/bevy_debugger_mcp` with `git subtree split`, and nothing is ever pulled back.
+
+`crates/bevy_debugger_mcp/CLAUDE.md` carries the crate's own non-negotiables. The one that matters most: **nothing in `bevy_debugger_bevy` may be able to touch the OS**, enforced by `crates/bevy_debugger_mcp/crates/bevy_debugger_bevy/tests/leaf.rs`, which pins the five-crate dependency list and fails on any source mentioning `enigo`, `xdotool`, `CGEvent`, `SendInput`, `winit` or `unsafe`.
 
 ## Upstream notes
 
-`bevy_debugger_mcp` moved from Bevy 0.16 to 0.19 in PR #3, already merged to its `main`. That upgrade replaced the WebSocket transport with HTTP JSON-RPC and renamed every BRP method (`bevy/query` → `world.query`, `bevy/get` → `world.get_components`, and so on).
+`bevy_debugger_mcp` moved from Bevy 0.16 to 0.19 in PR #3. That upgrade replaced the WebSocket transport with HTTP JSON-RPC and renamed every BRP method (`bevy/query` → `world.query`, `bevy/get` → `world.get_components`, and so on).
 
-`crates/bevy_debugger_bevy` did not compile against that `main`, and its screenshot handler was a skeleton that parsed `region` and `zoom` and then discarded the captured image. Both are fixed in `61ed2cb`, which is the rev pinned here — see that commit for the reasoning. The MCP server binary itself builds clean; an earlier note in this tree claiming ~43 errors in `src/observability/` is stale.
+The repo was vendored in at `f428b85`, which is upstream `main`. It was **relicensed GPL-3.0 → MIT OR Apache-2.0** on the way in, matching the other `bevy_*` crates here: a GPL crate in the Bevy ecosystem is unadoptable, and adoption is the reason these are mirrored out at all. An older note in this tree claiming ~43 errors in `src/observability/` is stale — the server builds clean.
