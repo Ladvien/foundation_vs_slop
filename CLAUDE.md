@@ -140,6 +140,35 @@ Four sites documented the exact trap they then fell into, so don't trust a comme
 
 A determinism probe on an idle box proves nothing: run it under load.
 
+## Assets: what git carries, and what it does not
+
+**A derived asset is build output.** `assets/ozea_kit/*.glb` is what `scripts/fbx_to_glb.py` makes from an `.fbx` on the library share — a resource compiler's output in exactly Gregory's sense (*Game Engine Architecture* 3e §7.2.1: source assets in native DCC formats pass through exporters and resource compilers on their way to the engine). Committing it is committing build artifacts, and git keeps every version of every binary forever: `assets/scp610/scp-610.glb` is in this repo's history **three times, at 27 MB, 5 MB and 4 MB**.
+
+So git carries `assets/derived.json` — the recipe, and a **sha256 per output** — and `.gitignore` carries the bytes away. 418 Ozea meshes, 114 MB, described by 87 KB of manifest.
+
+```sh
+cargo fvs assets verify   # do the files on disk match the manifest?  (the default)
+cargo fvs assets sync     # copy them from the cache on the share — no Blender, what a clone runs
+cargo fvs assets stage    # put what is on disk into that cache, for everyone else
+cargo fvs assets build    # regenerate from source with Blender, then verify and stage
+```
+
+The hash is not decoration. Blender's exporter is not promised to be byte-identical across versions, and an asset that quietly changed shape surfaces as a placement looking wrong three weeks later — Lamb & Zacchiroli's reproducible-builds argument (`10.1109/ms.2021.3073045`), made concrete. `verify` turns a drift into a named failure.
+
+**The cache is on the library share**, content-addressed by that hash, at `$FVS_ASSET_LIBRARY/fvs_derived_cache` (default `/mnt/codex_fs/game_assets`). One machine with Blender pays the conversion; every other machine copies. Regenerate a manifest with `scripts/manifest_from_staging.py` — never by hand.
+
+**Hand-authored binaries are the other class** — `assets/characters/`, `assets/scp610/`, anything out of TRELLIS. No script derives them, so a recipe cannot restore them. They go in **git-annex**, whose store is a plain directory on the same share:
+
+```sh
+git annex add assets/characters/new_rig.glb   # content to the annex, a pointer to git
+git annex copy --to codex                     # push the bytes to the share
+git annex get assets/characters               # pull them down on another machine
+```
+
+The remote is `codex` → `/mnt/codex_fs/fvs_annex`, `type=directory`, no encryption. No server, no daemon — it rides the NFS mount that is already there. `git annex info` lists it.
+
+**Existing history is left alone, deliberately.** `git lfs migrate` and friends rewrite history, and this repo `subtree split`s eleven crates to mirrors, where a non-fast-forward push is a human decision that is never forced. So the annex takes **new** binaries; the 80 MB already in the pack stays where it is. Moving an existing asset in is an ordinary commit (`git rm --cached` then `git annex add`) — it stops *future* versions accumulating without touching the past.
+
 ## Additional game assets
 
 Cataloged at `/mnt/codex_fs/game_assets/CATALOG.md` — use any of them.
@@ -157,6 +186,10 @@ So these are **forbidden** for an agent, and a hook blocks them: macOS `screenca
 
 Details and the `DebuggerPlugin`-owns-`RemotePlugin` trap: `docs/bevy_debugger_mcp.md`. The debugger lives at `crates/bevy_debugger_mcp/`, so fixing it is an ordinary edit here — no pin to bump, and no sibling checkout to keep in sync.
 
-**`bevy_devshot` is not an agent path.** It still serves two callers with no BRP of their own: `emerge-mapper`, and the game's own player-facing Ctrl+P. It also captures the **UI layer**, which the offscreen mirror cannot — Bevy renders UI to one camera, so a mirror camera never receives the HUD. If a shot must show the interface, that is a request to hand to the player, not a reason to raise the window yourself.
+**`emerge-mapper` speaks BRP too, behind the same feature.** `cargo run -p emerge-mapper --features debugger` adds `DebuggerPlugin`, the HTTP transport and the editor's own mirror camera (`crates/emerge-mapper/src/debug_capture.rs`), so an agent drives the editor exactly the way it drives the game. It was carved out as a devshot-only caller while the debugger was a pinned git dependency; vendoring made that a choice rather than a constraint, and `bevy_debugger/input` is what the sentinel driver's verb list was always a hand-built stand-in for.
+
+The port is **`BEVY_BRP_PORT`** — the variable `bevy_debugger_mcp`'s own config already reads, so one knob points both ends at the same socket. It defaults to 15702, which the game also uses: **running both with the debugger on at once needs the variable set**, or the second process fails to bind.
+
+**`bevy_devshot` is not an agent path, and it is still the only way to see a panel.** Bevy renders a UI tree to one camera, so no mirror camera ever receives the interface — in the editor, where the interface is most of what there is to look at, that matters more than it does in the game. Devshot captures the whole frame including UI, and serves the game's player-facing Ctrl+P. If a shot must show the interface, that is a devshot request; it is never a reason to raise the window yourself.
 
 **Player region captures live in `debug_screenshots/`.** Ctrl+P drags a box and saves *just that region* to `debug_screenshots/region_<timestamp>.png` — a deliberate "look here" pointer. So if the player references something visual, **check `debug_screenshots/` newest-first and read `debug_screenshots/CLAUDE.md`.** From `src/region_capture.rs` (dev-only, stripped from release).

@@ -162,4 +162,16 @@ Eleven crates under `crates/` mirror to their own private `Ladvien/*` repos via 
 | Bevy API doesn't match the docs you found | bevy.org documents `main`; this is pinned to 0.19.0. Read the vendored source under `~/.cargo/registry/src/*/bevy-0.19.0/` — see `CLAUDE.md` |
 | MCP tools missing after `claude mcp add` | Claude Code needs a restart — §6 |
 
+## Assets
+
+Two commands on a fresh clone:
+
+```sh
+brew install git-annex          # or your platform's package
+cargo fvs assets sync           # 418 derived meshes, from the cache on the library share
+git annex get assets/characters # hand-authored binaries
+```
+
+`cargo fvs assets sync` needs the library share mounted but **not** Blender — one machine converts, everything else copies. `cargo fvs assets build` is the one that needs Blender, and it verifies and re-caches what it produces. `cargo fvs assets verify` answers "is what I have what the manifest says". The why is in `CLAUDE.md` under *Assets: what git carries, and what it does not*.
+
 `CLAUDE.md` is the working agreement for changes to this repo; `TESTING.md` covers the test system; `docs/bevy_debugger_mcp.md` covers the debugger in depth.

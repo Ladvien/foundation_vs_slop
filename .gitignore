@@ -88,3 +88,10 @@ assets/emerge/*.map.ron
 # Runtime session state from `bevy-debugger-mcp`, which writes relative to the working
 # directory — so running it from the repo root drops this here. Not source.
 debug_sessions/
+
+# **Derived assets are build output.** `assets/derived.json` is the recipe and the hashes; the bytes
+# live in a content-addressed cache on the asset library share. `cargo fvs assets sync` fetches them,
+# `... build` regenerates them from source with Blender. Committing them is committing build
+# artifacts — `assets/scp610/scp-610.glb` is in this repo's history three times, at 27, 5 and 4 MB.
+# See scripts/derived_assets.py.
+assets/ozea_kit/*.glb

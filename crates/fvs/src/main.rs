@@ -98,12 +98,22 @@ COMMANDS:
         --harness         Instead run the headless replay/liveness suite. Needs a GPU,
                           runs single-threaded, and takes about an hour.
 
+    assets [verb]     Derived assets — build output that git does not carry. The recipe and
+                      a sha256 per file live in assets/derived.json; the bytes live in a
+                      content-addressed cache on the asset library share.
+        verify            Do the files on disk match the manifest? (the default)
+        sync              Copy them from the cache. No Blender needed — this is what a
+                          fresh clone runs.
+        stage             Put what is on disk into the cache, for everyone else.
+        build             Regenerate from source with Blender, then verify and stage.
+
 EXAMPLES:
     cargo run -p fvs -- play --map break_room --at 80,112
     cargo run -p fvs -- edit break_room --fullscreen
     cargo run -p fvs -- edit site_67 --kit site --fullscreen
     cargo run -p fvs -- train behavior --generations 2 --batch 8
     cargo run -p fvs -- test
+    cargo run -p fvs -- assets sync
 
 THE SHORTER SPELLING:
     `.cargo/config.toml` is not committed (a machine-specific target-dir in it once broke
@@ -126,6 +136,7 @@ fn main() -> ExitCode {
         "edit" => edit(rest),
         "train" => train(rest),
         "test" => test(rest),
+        "assets" => assets(rest),
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -267,6 +278,41 @@ fn test(args: &[String]) -> Result<ExitCode, String> {
         cargo.args(["--workspace", "--no-fail-fast"]);
     }
     run(cargo)
+}
+
+/// **`assets` — the derived-asset recipes.**
+///
+/// `assets/*.glb` under a recipe's `out_dir` is build output, not source: `scripts/fbx_to_glb.py`
+/// makes it from an `.fbx` on the library share. git keeps `assets/derived.json` — the recipe and a
+/// sha256 per output — and `.gitignore` keeps the bytes out, because git retains every version of
+/// every binary forever. This repo's history has `scp-610.glb` three times, at 27, 5 and 4 MB.
+///
+/// Dispatched rather than implemented here for the reason the module note gives: this crate has no
+/// dependencies on purpose, and the work needs Blender anyway.
+fn assets(args: &[String]) -> Result<ExitCode, String> {
+    let verb = args.first().map(String::as_str).unwrap_or("verify");
+    if !["verify", "sync", "stage", "build"].contains(&verb) {
+        return Err(format!(
+            "unknown assets verb `{verb}`. One of:\n  \
+             verify  do the files on disk match the manifest's hashes\n  \
+             sync    copy them from the cache on the library share (no Blender)\n  \
+             stage   put what is on disk into that cache\n  \
+             build   regenerate from source with Blender, then verify and stage"
+        ));
+    }
+    let mut python = Command::new("python3");
+    python.arg(script("derived_assets.py")).arg(verb).args(&args[1..]);
+    run(python)
+}
+
+/// A path to a script in this repo, resolved from the manifest rather than the cwd.
+fn script(name: &str) -> String {
+    let manifest = manifest();
+    let root = std::path::Path::new(&manifest)
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    root.join("scripts").join(name).to_string_lossy().into_owned()
 }
 
 fn cargo(release: bool) -> Command {

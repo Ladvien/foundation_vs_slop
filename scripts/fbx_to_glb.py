@@ -117,7 +117,14 @@ def find_fbx(src: str, packs: list[str] | None) -> list[tuple[str, str]]:
 
 
 def slug(pack: str) -> str:
-    """`Pack_SciFi_A_001+_V2.0` → `scifi_a_001_v2_0`. Filesystem- and asset-path-safe."""
+    """`Pack_SciFi_A_001+_V2.0` → `scifi_a_001__v2_0`. Filesystem- and asset-path-safe.
+
+    **Each** non-alphanumeric becomes an underscore; runs are NOT collapsed, so `+_` becomes `__`.
+    This docstring said `scifi_a_001_v2_0` — one underscore — which is what a collapsing rule would
+    produce and is not what the files are called. `scripts/manifest_from_staging.py` restates this
+    rule (it cannot import this module, which needs `bpy`), and matched 20 files short until it was
+    read off the code rather than the sentence above it.
+    """
     s = pack.lower().replace("pack_", "")
     return "".join(c if c.isalnum() else "_" for c in s).strip("_")
 
