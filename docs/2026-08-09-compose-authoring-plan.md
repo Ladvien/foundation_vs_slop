@@ -420,6 +420,28 @@ Four for four. Sturgeon's tags, Karth & Smith's edge-constrained multi-tile modu
 query-time `Shape.occ` all said the cross product need not be enumerated; the kit has now said it
 cannot be.
 
+### Looked at, not only measured
+
+Every claim above was numeric until it was checked in a running editor
+(`cargo run -p emerge-mapper --features debugger -- . site_67 --kit site`, driven over BRP). That
+distinction is not pedantry — this project's own notes record *"three Site editor bugs that were
+invisible to a green test suite and visible only in a measured frame"*, and a clean `adjacency::faults`
+is a statement about **tokens agreeing**, not about geometry meeting.
+
+What the frames showed: the envelope and its 0.5 m lattice draw correctly; the corner tile's two walls
+meet **closed**; the doorway's lintel sits at the top of the envelope with the opening beneath, reading
+as a doorway rather than a floating beam; the floor's edges sit on the envelope, the parts that
+overhang being the mesh's own connector nubs. And the one that mattered — **three tiles stamped side by
+side make one continuous wall**, with clean butt joints, no gap and no doubled thickness.
+
+The stamps were placed by injected cursor plus a click, in a real window, with the machine's own mouse
+untouched — the capability added earlier the same day, used in anger rather than only in its tests.
+
+**One finding no test would have produced.** A tile carries its own floor, so stamping one onto ground
+that already has floor leaves **two coplanar floors** — visible as a changed surface in the frame, and
+something that would z-fight in motion. That is why converting `site_67`'s hand-placed architecture
+must *replace* its floor rows as well as its wall rows, not add stamps beside them.
+
 ### The one decision step 5 is still gated on
 
 **Is a lit wall a tag on the wall tile, or a fifth authored variant?** Tag → step 5 shrinks and the
