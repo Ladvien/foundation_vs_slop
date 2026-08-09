@@ -751,6 +751,40 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 
 ---
 
+### Push 12 — World-building tools: composition-as-tile  ·  cross-cutting  ·  continuous
+
+**Goal:** a kit whose meshes are never cell-sized becomes solvable, by making the **composition** the unit a WFC grammar works on rather than the mesh. `emerge-mapper` is where they are authored.
+
+**Reading:** `docs/2026-08-09-compose-authoring-plan.md` (steps 1–5 and the decisions on the record), `docs/2026-08-09-composition-grammar-plan.md` (the grammar half), `docs/2026-08-09-unified-composition.md` (design), `docs/research/2026-08-09-grid-composition-corpus-check.md` (citations).
+
+**Done when:** a room solved from an authored example is stampable, and the falsification criterion in the grammar plan §3 has been run rather than argued.
+
+> **Where this stands.** Steps 1–4 shipped: capture on the Map, faces as bands, seating on Compose, and four authored site tiles pinned by `tests/site_tiles.rs`. The central claim held — **no wall piece in the Site kit is cell-sized and every authored composition is**, so a group of floor-plus-wall is a tile where the 0.1 × 1.0 m wall never could be. A 3 × 3 room of them passes `adjacency::faults` with zero disagreements, and three stamped side by side make one continuous wall.
+
+**FVS-R-1 · The composition gallery — a contact sheet, and a seam inspector.** Stand every composition up side by side on the Compose stage; arrow or click to pick, `Enter` to edit. Reuses `restage_group`. **Spacing is a parameter and that is the point:** at tile pitch with zero gap it stops being a gallery and becomes a seam inspector — tiles laid touching are `summarise_face` rendered, so an interface disagreement arrives as a visible seam rather than a fault list. *Done when:* four tiles are legible side by side and closing the gap makes a disagreement visible without reading a list.
+
+**FVS-R-2 · Baked thumbnails for compositions — deliberately second.** The booth bakes per *descriptor*; photographing a composition means it must call `composition::expand`, coupling a startup asset cache to a schema that is still moving (`paint` landed 2026-08-09, `seating_divisions` with it, the corner question open). A cache keyed to an unsettled schema yields stale thumbnails that look right and are not. **Trigger, named in advance:** when the contact sheet needs scrolling or zooming to read. That N is the same number FVS-R-5's acceptance asks for.
+
+**FVS-R-3 · The Compose stage does not say what it is showing.** A staged composition renders as loose meshes in an orange box with no name in the viewport — measured by an author reading it as *"a bunch of meshes 1 by 2"* rather than as `site/tile_corner_nw`. Draw the id and its position in the list at the stage. *Done when:* the viewport answers "which one is this" without the panel.
+
+**FVS-R-4 · Finish the Compose rebuild.** Remaining from the plan: the seat-step unit tests (a step is `SNAP / seating_divisions` on all three axes; **the centre is a legal seat**, so nudging out and back returns exactly), and the run-and-look pass — two decals at one spot with paint raised, a piece landing at the bottom of the tile, the focus reading clearly. *Done when:* an author has driven it and the frames are recorded.
+
+**FVS-R-5 · Convert `site_67`'s architecture to stamps.** Five `site/wall` rows sit **centred on the tile seam** (`x = 0.0`, spanning `[-0.05, 0.05]`), so read as a composition such a wall lands on no face and presents nothing. **The floor rows must be replaced too, not only the walls** — a tile carries its own floor, so stamping onto already-floored ground leaves two coplanar floors, seen in a captured frame and z-fighting in motion. *Done when:* the run is unbroken in a frame, and **the count of tile kinds the conversion wanted and did not have is recorded** — that number is FVS-R-7's input.
+
+**FVS-R-6 · Decide: is a lit wall a tag or an authored variant?** The last thing gating the schema work. Step 4 argued for tags four times without being asked — the doorway could not be placed (2.06 m) only built from a lifted lintel, the corner is two seatings of one piece, one wall tile covers four orientations, and **the sconce could not be authored at all because the Site kit has no wall-mounted piece**. The stronger argument for tags: under tags an absent mesh is a missing renderer and the functional layer still solves; under variants the axis cannot be expressed. *Done when:* decided in writing, because it sets FVS-R-8's size.
+
+**FVS-R-7 · A grammar over compositions, behind a validity-function seam.** `grammar::learn` gains a sibling building prototypes from the composition set. **Invariant on how the commit is written:** adjacency must go through a substitutable `agrees(&Interface, &Interface, Dir) -> bool`, never an inline face comparison — Karth & Smith, *"any arbitrary adjacency validity function can be substituted here… without changing the WFC solver itself"*, which is what stops the edge-versus-corner question gating anything. Weights come from FVS-R-5's converted map. Fixed-tile authoring folds in: the solver half exists (`generate_from` expands stamps as unary constraints); the missing half is that `O` cannot pin a stamp, because `redraw_stamps` gives stamped entities no `Placement`. *Done when:* the Site kit is solvable and no golden moves.
+
+**FVS-R-8 · The schema: typed split values and the occupancy test.** Only after FVS-R-6 and a real solve. Absolute/relative split values (CGA); the occupancy test **with `Shape.occ("noparent")` scoping in the same commit**. **Do not retire the positional `Mount` variants** — furniture uses them and furniture is deliberately not gridded. This is where a golden is expected to move.
+
+**FVS-R-9 · Expressive range, against thresholds already committed.** Generate 200+ solves, compute enclosure and opening density, plot the 2-D histogram, and read it against the four failure signatures written in `docs/2026-08-09-composition-grammar-plan.md` §3 **before** looking at the maps. Those numbers are arguable and should be argued *now*, while they cost nothing. Non-convergence is already loud (`grammar::solve` returns a named error), so failed solves are countable rather than mistaken for mediocre ones.
+
+**FVS-R-10 · `site/wall_doorway` can never be a tile.** 0.46 × 2.06 m against `CELL_EPSILON` 1e-4 — it fits neither a 1 m cell nor a 2 m one, and `grammar::learn` refuses it by name. `site/tile_doorway_n` routes around it with `wall_header` as a lifted lintel. *Done when:* the mesh is re-authored to cell size or the descriptor is retired, so nothing reaches for a piece the grid cannot hold.
+
+**FVS-R-11 · The corner question.** Whether an interface token lives on an edge or a corner is a schema decision and hard to revisit. Blocked on Lagae & Dutré (`10.1145/1183287.1183296`) for **layered vs replacement** — Merrell layers, and *"square tiles with colored corners"* reads like substitution. Not open access; `paper_download` found no OA PDF. PDF staged at `/mnt/home-still/papers/LD/LD06AWTCECC.pdf`; needs `scribe_convert(stem="LD06AWTCECC")` then `distill_index`, and the server's papers root has not been identified from this host. **FVS-R-7's seam is what stops this blocking anything.**
+
+**FVS-R-12 · `bevy_debugger/input` cannot type.** It writes `ButtonInput` but not the `KeyboardInput` message stream, so no agent can drive a text field — including Compose's name field and every id/token field on the Tiles tab. The crate is ours (`crates/bevy_debugger_mcp/`); a `kind: "Text"` emitting `Key::Character` events is the shape. *Done when:* an agent can name a composition end to end. Cursor injection landed 2026-08-09 and is the precedent.
+
 ## 5. Traceability
 
 **Pushes → vision tiers:** Tier 1 (Encounter/Contain) = P2, P3. Tier 2 (Expedition/Secure+extract) = P1, P6. Tier 3 (Site/Protect+research + endgame) = P4, P5, **P10**, P7. Cross-cutting = P8 (determinism/CI), P9 (engine/housekeeping).
@@ -799,6 +833,11 @@ All present in the local `home-still` corpus (returned with PDF path + chunk ind
 ---
 
 ## 7. Risks, decisions, and things to re-verify
+
+- **⚠️ Mirrors are stale while `crates/bevy_autogib/` is untracked.** `scripts/mirror_crates.sh` refuses on a dirty tree — correct behaviour, refusing beats forcing past uncommitted work — but it is an **unowned** blocker: it clears only when that crate is committed. Check rather than assume. When it lands it also needs adding to `CRATES` in that script, plus the `README.md` (with the "Vibe Coded" banner), `CLAUDE.md`, both licenses, 1–3 `examples/`, and a `tests/leaf.rs` ratchet — the script refuses a crate missing any of them.
+- **⚠️ `10.1145_1814256.1814260` is catalogued as Smith & Whitehead, *Analyzing the Expressive Range of a Level Generator*, but its indexed text is UCSC website boilerplate** — the conversion captured a landing page, not the PDF. **Do not quote it.** Cite `pcgbook-ch12-evaluating-content-generators` until it is re-fetched and re-converted.
+- **A comma cannot be a key chord in `emerge-mapper`.** `keys::rows()` joins a collapsed row's chords with `", "`, so a comma chord is unreadable the moment it shares a row with anything — including its own pair. Tried for turn, caught by `collapsing_rows_loses_nothing`; tried again for paint order, caught again. It is a property of the census, not of any one row.
+
 
 - ~~**Top design risk — kill-vs-capture fitness conflict (I-1).**~~ ✅ **RESOLVED 2026-07-27; this entry
   was stale until 2026-07-31.** It read *"Unresolved … a weighting/decomposition decision is required"*
