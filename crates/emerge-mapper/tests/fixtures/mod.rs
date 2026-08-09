@@ -211,7 +211,32 @@ impl Fixture {
     /// `Anchored` — it claims no tile, so it has no boundary for anything to abut and needs no
     /// derived edge interface. That is the simplest thing a stamp can be, which is what a test about
     /// stamping wants.
-    pub fn composition(mut self, id: &str, members: &[(&str, &str, (f32, f32))]) -> Fixture {
+    /// A **bounded** group — one that claims a tile, and so the only kind with a lattice to seat in.
+    ///
+    /// A separate constructor rather than an option on the one below, because `Anchored` and
+    /// `Bounded` are two different things a group can be and not two settings of one: an anchored
+    /// group presents no interface and has no envelope to be seated inside, which is exactly what
+    /// `compose::seated` refuses on.
+    pub fn bounded_composition(
+        self,
+        id: &str,
+        size: (f32, f32, f32),
+        members: &[(&str, &str, (f32, f32))],
+    ) -> Fixture {
+        let envelope = format!("Bounded( size: ({:.1}, {:.1}, {:.1}) )", size.0, size.1, size.2);
+        self.composition_with(id, &envelope, members)
+    }
+
+    pub fn composition(self, id: &str, members: &[(&str, &str, (f32, f32))]) -> Fixture {
+        self.composition_with(id, "Anchored", members)
+    }
+
+    fn composition_with(
+        mut self,
+        id: &str,
+        envelope: &str,
+        members: &[(&str, &str, (f32, f32))],
+    ) -> Fixture {
         // **Sorted by member id**, which the schema requires rather than prefers: one group must
         // have one encoding, or two authors building the same thing produce diffs that differ
         // without meaning to. `Composition::validate_shape` refuses otherwise, and names the order.
@@ -237,7 +262,7 @@ impl Fixture {
         self.compositions.push(format!(
             r#"        (
             id: "{id}",
-            envelope: Anchored,
+            envelope: {envelope},
             note: None,
             members: [
 {}

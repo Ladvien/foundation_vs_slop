@@ -60,7 +60,7 @@ const BOUNDS_FILL: Color = Color::srgb(0.105, 0.100, 0.092);
 /// of `srgb(0.035, ...)`, a separation of about 0.165. [`BOUNDS_FILL`] raised the ground it is read
 /// against to 0.105, so holding that separation puts the lines here. Warm-neutral rather than pure
 /// grey, because every other colour in this editor is.
-const GRID_LINE: Color = Color::srgb(0.270, 0.262, 0.248);
+pub(crate) const GRID_LINE: Color = Color::srgb(0.270, 0.262, 0.248);
 
 /// The **least** the slab drops below the datum, metres — enough to beat z-fighting against a piece
 /// lying at `y_offset: 0.0`. See [`ground_drop`], which is usually deeper.
@@ -2353,7 +2353,7 @@ fn sense_fine_anchor(
 /// The editor used to own this arithmetic. It cannot: a preview that disagrees with the runtime by
 /// half a degree of `front` or a centimetre of `y_offset` is a preview that lies, and the only way to
 /// be sure two places agree is for there to be one place. `emerge_bevy::spawn_descriptor` is it.
-fn spawn_piece(
+pub(crate) fn spawn_piece(
     commands: &mut Commands,
     assets: &AssetServer,
     d: &emerge_core::descriptor::Descriptor,

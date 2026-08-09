@@ -329,6 +329,35 @@ the simplest thing with that property is the value itself. The Tiles tab already
 **An agent can drive this one end to end**, unlike step 1: every verb is a keypress, so
 `bevy_debugger/input` reaches all of them. The missing cursor position only blocked the box drag.
 
+### 3.8 What changed while building it
+
+**The cursor gap was closed rather than worked around.** `bevy_debugger/input` now takes
+`kind: "Cursor"`, so step 1's box drag is drivable too. It writes a `DebugCursor` resource and **not**
+`Window::set_cursor_position`: Bevy's windowing backend diffs the window's cursor against a cache each
+frame and asks the platform to move the *physical* pointer (`bevy_winit-0.19.0/src/system.rs:433`),
+and the cache is `pub(crate)`, so a plugin cannot suppress it. `emerge-mapper` consumes it through
+`view::Pointer`, filled once a frame in `Phase::Sense` — `window` had no other use in `editor.rs`, so
+seventeen window params became one resource.
+
+The example written for it (`cursor_drag_lands`) immediately found a real ordering bug: the injection
+queue was ordered *per key*, so a release overtook two still-pending moves and a drag committed at the
+wrong corner while every individual rule behaved as written. Order is now total.
+
+**Compose stopped sharing the Map's camera, reversing a decision that was on the record.** The old
+argument — *"the tab is a list and a detail pane… a camera that jumped to a stage and back would make
+that one gesture look like two places"* — rested on a premise the seating verbs remove. A surface that
+edits geometry it cannot show is worse than a camera jump, and the Tiles tab has jumped and restored
+for as long as it has existed.
+
+**The verbs' key row landed on `Y`/`U`, not `,`/`.`, and a test decided it.** `rows()` joins a
+collapsed row's chords with `", "`, so a chord that *is* a comma prints `, , .` and cannot be read
+back; `collapsing_rows_loses_nothing` failed naming the vanished chord.
+
+**Delivered:** `left`/`right` walk the members, `T F G H` `[` `]` seat, `Y`/`U` turn, `Delete` drops,
+`Z`/`Shift+Z` undo — 8 rows of Compose's 12. The group stands on its own stage through
+`composition::expand`, with the envelope and the `SNAP` lattice drawn over it. `emerge-mapper` 127
+unit + 27 headless green.
+
 ---
 
 ## Step 3 — original sketch (superseded by §3.0–3.7 above)

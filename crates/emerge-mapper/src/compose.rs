@@ -95,10 +95,23 @@ impl Plugin for ComposePlugin {
             .add_systems(Startup, spawn_compose_panel)
             .add_systems(
                 Update,
-                (walk, arm, record)
+                (
+                    walk,
+                    arm,
+                    record,
+                    walk_members,
+                    seat_member,
+                    turn_member,
+                    drop_member,
+                    step_history,
+                )
                     .in_set(keys::Phase::Act)
                     .run_if(in_compose_mode),
             )
+            // Not gated on the mode, for the same reason `rebuild` is not: the staged group is
+            // despawned when the tab is left, and a system that stops running cannot despawn it.
+            .add_systems(Update, restage_group.after(keys::Phase::Act))
+            .add_systems(Update, draw_stage.run_if(in_compose_mode))
             // Not gated on the mode: the armed group is shown on the Map tab too, and a panel that
             // stops updating when you leave it is a panel that lies the moment you come back.
             .add_systems(Update, rebuild.after(keys::Phase::Act));
@@ -368,7 +381,14 @@ fn seat_member(
     .into_iter()
     .find(|(a, _)| keys::just_pressed(&input, keys.0, *a));
     let Some((_, nudge)) = nudge else { return };
+    seat_selected(&mut state, &mut project, nudge);
+}
 
+/// **The body, `pub` so a test and a driver call the same one the key does** — never a second copy.
+///
+/// The same reason [`toggle_arm`] and [`record_selected`] are public: the one time a caller
+/// re-implemented a verb inline, the two immediately disagreed.
+pub fn seat_selected(state: &mut ComposeState, project: &mut Project, nudge: Nudge) {
     let comps = &project.compositions.compositions;
     let Some((c, i)) = selected_member(&state, comps) else {
         state.status.note("no member to seat");
@@ -391,7 +411,7 @@ fn seat_member(
         return;
     }
     let selected = state.selected;
-    commit(&mut state, &mut project, |set| {
+    commit(state, project, |set| {
         let m = set
             .get_mut(selected)
             .and_then(|c| c.members.get_mut(i))
@@ -524,6 +544,154 @@ fn step_history(
     state.status.note(if back { "undone" } else { "redone" });
 }
 
+// ------------------------------------------------------------------------------------------------
+// The stage — seeing what you are seating
+// ------------------------------------------------------------------------------------------------
+
+/// A mesh standing on the Compose stage. Despawned wholesale, never diffed.
+#[derive(Component)]
+struct StagedMember;
+
+/// **Stand the selected group up, through `composition::expand`.**
+///
+/// The same three calls `editor::redraw_stamps` makes — build a scratch map, expand a stamp of the
+/// group against it, `stack::resolve_y` over a map carrying both — so **what this tab shows is what a
+/// stamp produces**. A second interpretation of a composition would be a preview that lies, which is
+/// the argument `spawn_piece` itself was written for.
+///
+/// Rebuilt wholesale whenever the project or the selection changes. A diffing version would be faster
+/// and would be a second opinion about what is on screen.
+fn restage_group(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mode: Res<Mode>,
+    mut state: ResMut<ComposeState>,
+    project: Res<Project>,
+    drawn: Query<Entity, With<StagedMember>>,
+) {
+    if !(project.is_changed() || state.is_changed() || mode.is_changed()) {
+        return;
+    }
+    for e in &drawn {
+        commands.entity(e).despawn();
+    }
+    if *mode != Mode::Compose {
+        return;
+    }
+    let Some(c) = project.compositions.compositions.get(state.selected) else {
+        return;
+    };
+    let size = match c.envelope {
+        Envelope::Bounded { size } => size,
+        // An anchored group claims no tile. It still stands up — it is furniture somewhere — and the
+        // scratch map just needs to be big enough not to clip it.
+        Envelope::Anchored => (64.0, 8.0, 64.0),
+    };
+    let scratch = emerge_core::map::Map {
+        version: emerge_core::map::MAP_VERSION,
+        name: "compose_stage".to_owned(),
+        origin: (COMPOSE_STAGE.x, COMPOSE_STAGE.y, COMPOSE_STAGE.z),
+        bounds: size,
+        placements: Vec::new(),
+        stamps: Vec::new(),
+        locations: Vec::new(),
+        note: None,
+    };
+    let stamp = emerge_core::composition::Stamped {
+        id: "staged".to_owned(),
+        of: c.id.clone(),
+        at: (0.0, 0.0),
+        ..Default::default()
+    };
+    let expanded = match composition::expand(
+        &scratch,
+        &[stamp],
+        &project.compositions.compositions,
+        &project.library,
+    ) {
+        Ok(e) => e,
+        // Loud. An empty patch of floor where a group should be, with nothing saying why, is the
+        // failure this editor's own notes call the worst it had.
+        Err(e) => return state.status.problem(format!("`{}` does not resolve: {e}", c.id)),
+    };
+    let mut with_rows = scratch.clone();
+    with_rows.placements.extend(expanded.placements.iter().cloned());
+    let ys = match emerge_core::stack::resolve_y(&with_rows, &project.library) {
+        Ok(ys) => ys,
+        Err(e) => return state.status.problem(format!("`{}` has no height: {e}", c.id)),
+    };
+    for (k, p) in expanded.placements.iter().enumerate() {
+        let Some(base) = project.library.get(&p.descriptor) else {
+            continue;
+        };
+        let d = match &p.patch {
+            Some(patch) => base.patched_with(patch),
+            None => base.clone(),
+        };
+        let Some(&y) = ys.get(k) else { continue };
+        if let Some(e) = crate::editor::spawn_piece(
+            &mut commands,
+            &assets,
+            &d,
+            p.at,
+            p.yaw,
+            p.tip,
+            scratch.origin,
+            y,
+        ) {
+            commands.entity(e).insert(StagedMember);
+        }
+    }
+}
+
+/// **The envelope and the lattice a member seats on.**
+///
+/// Drawn rather than spawned: it is not a thing in the world, it is the tile the group claims. An
+/// anchored group gets neither, because it claims none — an invented box would be exactly the guess
+/// `seated` refuses to make.
+fn draw_stage(state: Res<ComposeState>, project: Res<Project>, mut gizmos: Gizmos) {
+    let Some(c) = project.compositions.compositions.get(state.selected) else {
+        return;
+    };
+    let Envelope::Bounded { size } = c.envelope else {
+        return;
+    };
+    let base = COMPOSE_STAGE;
+    // The envelope, as the box it is.
+    gizmos.cube(
+        Transform::from_translation(base + Vec3::new(0.0, size.1 * 0.5, 0.0))
+            .with_scale(Vec3::new(size.0, size.1, size.2)),
+        crate::chrome::ACCENT,
+    );
+    // The seating lattice on its floor — `grid::SNAP`, the same quantum `seated` steps by and the
+    // Map snaps to. Drawing anything else here would be the drawn-grid-disagrees-with-the-snap bug
+    // that `GridSpacing`'s note records.
+    let step = emerge_core::grid::SNAP;
+    let cells = (
+        (size.0 / step).round().max(1.0) as u32,
+        (size.2 / step).round().max(1.0) as u32,
+    );
+    gizmos
+        .grid(
+            Isometry3d::new(base + Vec3::Y * 0.002, Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+            UVec2::new(cells.0, cells.1),
+            Vec2::splat(step),
+            crate::editor::GRID_LINE,
+        )
+        .outer_edges();
+    // The member being seated, ringed where it stands.
+    if let Some(m) = c.members.get(state.member.min(c.members.len().saturating_sub(1))) {
+        gizmos.circle(
+            Isometry3d::new(
+                base + Vec3::new(m.at.0, 0.01, m.at.1),
+                Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+            ),
+            step * 0.75,
+            crate::chrome::ACCENT,
+        );
+    }
+}
+
 /// **Everything the panel says, derived on the spot.**
 ///
 /// No count and no badge is stored: staleness and the interface are recomputed from the library and
@@ -579,8 +747,15 @@ fn rebuild(
     if let Some(c) = comps.get(state.selected) {
         rows.push((String::new(), TEXT));
         rows.push((format!("MEMBERS OF `{}`", c.id), LABEL));
-        for m in &c.members {
-            rows.push((format!("    {}", describe_member(m)), TEXT));
+        let at = state.member.min(c.members.len().saturating_sub(1));
+        for (i, m) in c.members.iter().enumerate() {
+            // The seating cursor, in the same `> ` shape the group list above uses — one marker
+            // shape for "the thing a verb will act on", read the same way in both lists.
+            let marker = if i == at { "> " } else { "  " };
+            rows.push((
+                format!("{marker}{}", describe_member(m)),
+                if i == at { ACCENT } else { TEXT },
+            ));
         }
         affordances(&mut rows, c);
         detail(&mut rows, c, comps, &project);
@@ -1013,5 +1188,138 @@ mod face_row_tests {
         assert_eq!(rows.len(), 2);
         assert!(rows[0].contains("1.00 m up"), "{}", rows[0]);
         assert!(rows.iter().all(|r| !r.contains("across")), "span quoted where it does not vary: {rows:?}");
+    }
+}
+
+#[cfg(test)]
+mod seating_tests {
+    use super::{member_footprint, seated, turned, turned_footprint, Nudge};
+    use emerge_core::composition::{Body, Composition, Envelope, Member};
+
+    fn bay() -> Envelope {
+        Envelope::Bounded { size: (3.0, 2.0, 3.0) }
+    }
+
+    fn member(id: &str, at: (f32, f32), yaw: f32) -> Member {
+        Member {
+            id: id.to_owned(),
+            body: Body::Descriptor { id: "wall".to_owned(), tip: (0, 0), on: None, patch: None },
+            at,
+            yaw,
+            lift: 0.0,
+            of_fingerprint: Some(7),
+            note: None,
+        }
+    }
+
+    /// **The lattice is the editor's own**, not a new one: half a metre across, `SNAP / divisions` up.
+    #[test]
+    fn a_step_is_the_grid_the_map_already_snaps_to() {
+        let (at, lift) =
+            seated(bay(), (0.0, 0.0), 0.0, (1.0, 1.0), Nudge::Right, 0.25).expect("seats");
+        assert_eq!(at, (0.5, 0.0));
+        assert_eq!(lift, 0.0);
+
+        let (at, lift) =
+            seated(bay(), (0.0, 0.0), 0.0, (1.0, 1.0), Nudge::Up, 0.25).expect("seats");
+        assert_eq!(at, (0.0, 0.0), "a lift moves nothing on the floor");
+        assert_eq!(lift, 0.25);
+    }
+
+    /// North is −Z, matching `wfc`'s `N` and the rest of this project.
+    #[test]
+    fn forward_is_negative_z() {
+        let (at, _) = seated(bay(), (0.0, 0.0), 0.0, (1.0, 1.0), Nudge::Forward, 0.25).expect("seats");
+        assert_eq!(at, (0.0, -0.5));
+    }
+
+    /// **It refuses rather than clamping**, and the bound is the footprint, not the centre.
+    ///
+    /// A 1 m piece in a 3 m bay can reach ±1.0 and no further: at 1.5 its centre is still inside the
+    /// envelope while half of it hangs out.
+    #[test]
+    fn a_step_out_of_the_envelope_is_refused_and_says_how_far() {
+        let ok = seated(bay(), (0.5, 0.0), 0.0, (1.0, 1.0), Nudge::Right, 0.25).expect("seats");
+        assert_eq!(ok.0, (1.0, 0.0), "flush against the wall is still inside");
+
+        let err = seated(bay(), (1.0, 0.0), 0.0, (1.0, 1.0), Nudge::Right, 0.25)
+            .expect_err("refuses");
+        assert!(err.contains("outside"), "{err}");
+        assert!(err.contains("0.50"), "it should say how far out: {err}");
+    }
+
+    /// An anchored group claims no tile, so there is nothing to seat inside — named, not guessed.
+    #[test]
+    fn an_anchored_group_has_no_lattice_and_says_so() {
+        let err = seated(Envelope::Anchored, (0.0, 0.0), 0.0, (1.0, 1.0), Nudge::Left, 0.25)
+            .expect_err("refuses");
+        assert!(err.contains("anchored"), "{err}");
+        assert!(err.contains("claims no tile"), "{err}");
+    }
+
+    /// **Lift is deliberately unbounded** — it is a nudge on a mount, not an absolute height, and a
+    /// ceiling-mounted member's useful lifts are negative.
+    #[test]
+    fn lift_is_not_bounded_by_the_envelope() {
+        let (_, lift) = seated(Envelope::Anchored, (0.0, 0.0), 0.0, (1.0, 1.0), Nudge::Down, 0.25)
+            .expect("an anchored group can still be lifted");
+        assert_eq!(lift, -0.25);
+    }
+
+    /// **A turn lands on the step from any start**, so a member that arrived off-square comes back
+    /// onto the lattice with one press — `adjacency::quarter_turns` refuses anything else.
+    #[test]
+    fn a_quarter_turn_lands_on_a_multiple_of_ninety() {
+        assert_eq!(turned(0.0, 90.0, 1.0), 90.0);
+        assert_eq!(turned(47.0, 90.0, 1.0), 180.0, "47 rounds to 90, then steps");
+        assert_eq!(turned(270.0, 90.0, 1.0), 0.0, "and it wraps");
+        assert_eq!(turned(0.0, 90.0, -1.0), 270.0);
+        // The fine step is still a step, for a chair drawn up to a table.
+        assert_eq!(turned(0.0, 15.0, 1.0), 15.0);
+    }
+
+    /// The bounding box of a turned rectangle, exact at every angle and not only the quarters.
+    #[test]
+    fn a_turned_footprint_is_the_box_that_contains_it() {
+        let (w, d) = turned_footprint((2.0, 1.0), 0.0);
+        assert!((w - 2.0).abs() < 1e-5 && (d - 1.0).abs() < 1e-5);
+        let (w, d) = turned_footprint((2.0, 1.0), 90.0);
+        assert!((w - 1.0).abs() < 1e-5 && (d - 2.0).abs() < 1e-5, "{w} x {d}");
+        // At 45 it needs more room on both axes than it does square-on, which is the whole point.
+        let (w, d) = turned_footprint((2.0, 1.0), 45.0);
+        assert!(w > 2.0 && d > 1.4, "{w} x {d}");
+    }
+
+    /// A nested group's footprint is its own envelope; an anchored child is refused by name.
+    #[test]
+    fn a_nested_group_is_measured_by_its_envelope_and_an_anchored_one_refuses() {
+        let lib = emerge_core::library::Library {
+            version: emerge_core::library::LIBRARY_VERSION,
+            note: None,
+            descriptors: Vec::new(),
+        };
+        let bounded = Composition {
+            id: "inner".to_owned(),
+            envelope: Envelope::Bounded { size: (2.0, 1.0, 4.0) },
+            members: Vec::new(),
+            locations: Vec::new(),
+            note: None,
+        };
+        let loose = Composition { id: "loose".to_owned(), envelope: Envelope::Anchored, ..bounded.clone() };
+        let comps = vec![bounded, loose];
+
+        let nested = Member {
+            body: Body::Composition { id: "inner".to_owned() },
+            ..member("part", (0.0, 0.0), 0.0)
+        };
+        assert_eq!(member_footprint(&nested, &comps, &lib).expect("measures"), (2.0, 4.0));
+
+        let bad = Member {
+            body: Body::Composition { id: "loose".to_owned() },
+            ..member("part", (0.0, 0.0), 0.0)
+        };
+        let err = member_footprint(&bad, &comps, &lib).expect_err("refuses");
+        assert!(err.contains("anchored"), "{err}");
+        assert!(err.contains("claims no tile"), "{err}");
     }
 }

@@ -1085,3 +1085,85 @@ fn a_captured_group_is_written_and_reads_back() {
     assert_eq!(project.compositions.compositions.len(), 1, "a refusal adopts nothing");
     assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), before, "and writes nothing");
 }
+
+/// **Seating goes through the commit door**, and a refusal leaves both the file and memory alone.
+///
+/// The pure arithmetic is unit-tested in `compose::seating_tests`; what only a booted editor can show
+/// is that the verb writes the file it claims to, reads back, and that a refusal writes nothing —
+/// which is the half a pure test cannot see.
+#[test]
+fn seating_a_member_is_written_and_reads_back() {
+    let root = fixtures::Fixture::new("seat")
+        .descriptor("wall", "alpha")
+        // Three metres across, so a 1 m piece has somewhere to go and somewhere it cannot.
+        .bounded_composition("bay", (3.0, 2.0, 3.0), &[("north", "wall", (0.0, 0.0))])
+        .build("m");
+    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    app.update();
+
+    let world = app.world_mut();
+    let mut project = world.resource_mut::<emerge_mapper::project::Project>();
+    let path = project
+        .emerge_dir
+        .join(emerge_core::composition::Compositions::FILE);
+    let before = std::fs::read_to_string(&path).expect("the fixture wrote a compositions file");
+    let mut state = emerge_mapper::compose::ComposeState::default();
+
+    emerge_mapper::compose::seat_selected(
+        &mut state,
+        &mut project,
+        emerge_mapper::compose::Nudge::Right,
+    );
+    assert_eq!(
+        project.compositions.compositions[0].members[0].at,
+        (0.5, 0.0),
+        "one lattice step right, in memory"
+    );
+    assert!(!state.status.has_problem(), "{:?}", state.status.problem_text());
+
+    // On disk, and it parses back to the same thing — the door is `save_atomic` plus a reparse, not
+    // an in-memory edit that a reader would have to be told about.
+    let after = std::fs::read_to_string(&path).expect("still there");
+    assert_ne!(before, after, "a seat has to reach the file");
+    let reread = emerge_core::composition::Compositions::parse(&after).expect("reads back");
+    assert_eq!(reread.compositions[0].members[0].at, (0.5, 0.0));
+    assert_eq!(
+        reread.compositions[0].members[0].of_fingerprint, None,
+        "a seat moves a member; it does not re-record what its body was built against"
+    );
+
+    // Undo is the same value, restored.
+    assert_eq!(state.undo.len(), 1, "one seat, one undo entry");
+
+    // **A refusal writes nothing.** A 1 m piece in a 3 m bay reaches 1.0 and no further; the step
+    // past it leaves the file and the in-memory set exactly as they were.
+    for _ in 0..2 {
+        emerge_mapper::compose::seat_selected(
+            &mut state,
+            &mut project,
+            emerge_mapper::compose::Nudge::Right,
+        );
+    }
+    let at_wall = project.compositions.compositions[0].members[0].at;
+    let flush = std::fs::read_to_string(&path).expect("still there");
+    emerge_mapper::compose::seat_selected(
+        &mut state,
+        &mut project,
+        emerge_mapper::compose::Nudge::Right,
+    );
+    assert!(state.status.has_problem(), "a step out of the envelope has to be refused");
+    assert!(
+        state.status.problem_text().contains("outside"),
+        "and say so: {:?}",
+        state.status.problem_text()
+    );
+    assert_eq!(
+        project.compositions.compositions[0].members[0].at, at_wall,
+        "a refusal must not move the member"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("still there"),
+        flush,
+        "a refusal must not touch the file"
+    );
+}

@@ -266,10 +266,33 @@ fn stage_camera(
                 rig.goal_yaw = yaw;
             }
         }
-        // **Compose keeps the map's camera.** The tab is a list and a detail pane over groups that
-        // land in *this* map, and arming one here is followed immediately by stamping it there — a
-        // camera that jumped to a stage and back would make that one gesture look like two places.
-        Mode::Map | Mode::Compose => {
+        // **Compose has its own stage, and that reverses an earlier decision on the record.**
+        //
+        // It used to share the Map's camera, argued this way: *"The tab is a list and a detail pane
+        // over groups that land in this map, and arming one here is followed immediately by stamping
+        // it there — a camera that jumped to a stage and back would make that one gesture look like
+        // two places."*
+        //
+        // That premise stopped being true when the tab gained seating verbs. It is no longer a list
+        // and a detail pane; it moves geometry, and a surface that edits what it cannot show is worse
+        // than a camera jump. The worry it names is also already answered elsewhere — the Tiles tab
+        // has jumped to a stage and restored on the way back for as long as it has existed, and
+        // arming still switches nothing by itself.
+        Mode::Compose => {
+            if saved.0.is_none() {
+                saved.0 = Some(crate::view::Rig {
+                    focus: rig.focus,
+                    height: rig.height,
+                    yaw: rig.yaw,
+                    goal_yaw: rig.goal_yaw,
+                    elevation: rig.elevation,
+                });
+            }
+            rig.focus = crate::compose::COMPOSE_STAGE;
+            rig.height = TILE_VIEW_HEIGHT;
+            rig.elevation = crate::view::ISO_ELEVATION;
+        }
+        Mode::Map => {
             if let Some(was) = saved.0.take() {
                 rig.focus = was.focus;
                 rig.height = was.height;
