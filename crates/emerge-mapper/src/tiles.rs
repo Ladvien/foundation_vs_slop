@@ -187,7 +187,7 @@ impl ImportState {
 /// world entities would mean touching every placement on every tab change — hundreds of visibility
 /// writes to solve a framing problem. `thumbs.rs` already stages its subject at `BOOTH` for the same
 /// reason. This is a different corner so the two can never be in shot together.
-pub const STAGE: Vec3 = Vec3::new(-4096.0, 0.0, 4096.0);
+pub const STAGE: Vec3 = crate::stages::TILE;
 
 /// Where the map camera was, so leaving the tab puts it back.
 ///

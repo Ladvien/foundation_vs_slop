@@ -26,7 +26,7 @@ use crate::chrome::{DIM, LABEL, ROW_BG, ROW_SELECTED, TEXT};
 use crate::tiles::Mode;
 
 /// The bench's staging corner — the third one.
-pub const BENCH_STAGE: Vec3 = Vec3::new(-4096.0, 0.0, -4096.0);
+pub const BENCH_STAGE: Vec3 = crate::stages::BENCH;
 
 /// Orthographic viewport height on the stage, metres — a ~2 m figure with air, the same reasoning
 /// as `tiles::TILE_VIEW_HEIGHT`.

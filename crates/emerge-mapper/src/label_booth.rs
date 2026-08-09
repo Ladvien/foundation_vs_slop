@@ -32,7 +32,7 @@ use crate::tiles::EditTarget;
 /// The labeling corner — the fourth one. `thumbs::BOOTH` owns `(4096, 0, 4096)`, `tiles::STAGE`
 /// owns `(-4096, 0, 4096)`, the anim bench owns `(-4096, 0, -4096)`; no two subjects are ever in
 /// shot together and the two booths never contend for a camera.
-const LAB_BOOTH: Vec3 = Vec3::new(4096.0, 0.0, -4096.0);
+const LAB_BOOTH: Vec3 = crate::stages::LABEL_BOOTH;
 
 /// Shot edge in pixels. Big enough for a VLM to judge shape and parts, small enough that two of
 /// them base64 into a request the local endpoint takes without complaint.

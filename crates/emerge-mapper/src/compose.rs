@@ -39,7 +39,7 @@ use crate::tiles::{ComposeRoot, Mode};
 /// Far from the map, like [`crate::tiles::STAGE`] and for the same reason: a group drawn over the map
 /// is indistinguishable from what is already placed there, and seating a member means watching *that*
 /// member move.
-pub const COMPOSE_STAGE: Vec3 = Vec3::new(4096.0, 0.0, 4096.0);
+pub const COMPOSE_STAGE: Vec3 = crate::stages::COMPOSE;
 
 /// Which group the tab is looking at, and which one the map will stamp.
 #[derive(Resource, Default)]

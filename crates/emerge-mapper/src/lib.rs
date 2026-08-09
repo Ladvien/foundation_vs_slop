@@ -51,6 +51,7 @@ pub mod chrome;
 #[cfg(feature = "debugger")]
 pub mod debug_capture;
 pub mod compose;
+pub mod stages;
 pub mod devshot;
 pub mod editor;
 pub mod fill;

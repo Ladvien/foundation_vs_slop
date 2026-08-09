@@ -36,7 +36,7 @@ use bevy::render::render_resource::TextureFormat;
 use crate::project::Project;
 
 /// Where pieces are staged for their portrait — far enough that nothing else can wander into frame.
-const BOOTH: Vec3 = Vec3::new(4096.0, 0.0, 4096.0);
+const BOOTH: Vec3 = crate::stages::THUMB_BOOTH;
 
 /// Thumbnail edge in pixels. Small enough that a few hundred are trivial memory, large enough to
 /// tell a stool from a chair.
