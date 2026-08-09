@@ -25,7 +25,9 @@
 //! disagree, and STALE says which member changed underneath it and by how much. A badge that says
 //! only "something is wrong" would be the version of this tool that gets ignored.
 
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
+use bevy::ui_widgets::{Activate, Button as UiButton};
 
 use emerge_core::composition::{self, Band, Composition, Envelope};
 
@@ -59,7 +61,7 @@ impl Pane {
 
     pub fn label(self) -> &'static str {
         match self {
-            Pane::Groups => "GROUPS",
+            Pane::Groups => "COMPOSITIONS",
             Pane::Members => "MEMBERS",
             Pane::Meshes => "PLACE",
         }
@@ -136,9 +138,13 @@ struct MeshList;
 #[derive(Component)]
 struct MeshHeader;
 
-/// One row of the mesh list. Carries its library index so a click can arm it without a second lookup.
+/// One row of the mesh list. Carries its library index so a click needs no second lookup.
 #[derive(Component)]
 struct MeshRow(usize);
+
+/// The **NEW** button, top right. The `N` key does the same thing through the same call.
+#[derive(Component)]
+struct NewGroupButton;
 
 pub struct ComposePlugin;
 
@@ -172,7 +178,9 @@ impl Plugin for ComposePlugin {
             // Not gated on the mode: the armed group is shown on the Map tab too, and a panel that
             // stops updating when you leave it is a panel that lies the moment you come back.
             .add_systems(Update, rebuild.after(keys::Phase::Act))
-            .add_systems(Update, rebuild_meshes.after(keys::Phase::Act));
+            .add_systems(Update, rebuild_meshes.after(keys::Phase::Act))
+            .add_observer(on_new_group_click)
+            .add_observer(on_mesh_click);
     }
 }
 
@@ -210,7 +218,7 @@ fn spawn_compose_panel(mut commands: Commands) {
         // Harmless while this context had three rows; step 3 took it to eight, and with Global's
         // twelve the group list was pushed off the bottom of the screen. Found by an author trying to
         // read it, which is the only way a layout bug is ever found.
-        crate::chrome::section(p, "GROUPS");
+        crate::chrome::section(p, "COMPOSITIONS");
         p.spawn((
             Node {
                 flex_direction: FlexDirection::Column,
@@ -246,6 +254,30 @@ fn spawn_compose_panel(mut commands: Commands) {
     )
     .insert(ComposeRoot)
     .with_children(|p| {
+        // **The verb, where it can be seen.** `N` has made a group since this tab could make one at
+        // all, and an author looked straight at the tab and reported that it could not — a key with
+        // no visible affordance is a key nobody finds. Cockburn et al. is the same finding the key
+        // census is built on: a fast path offered beside no slow path is not offered.
+        p.spawn((
+            UiButton,
+            Hovered::default(),
+            NewGroupButton,
+            Node {
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                min_height: Val::Px(22.0),
+                margin: UiRect::bottom(Val::Px(4.0)),
+                ..default()
+            },
+            BackgroundColor(crate::chrome::HEADER_BG),
+        ))
+        .with_children(|b| {
+            b.spawn((
+                Text::new(format!("+ NEW COMPOSITION   {}", keys::chord(Action::NewGroup))),
+                TextColor(ACCENT),
+                TextFont::from_font_size(11.0),
+            ));
+        });
         p.spawn((Text::new("PLACE"), TextColor(LABEL), TextFont::from_font_size(11.0), MeshHeader));
         crate::chrome::scroll_list(p, MeshList);
     });
@@ -354,7 +386,7 @@ fn arm(
 /// avoid.
 pub fn toggle_arm(state: &mut ComposeState, project: &Project) {
     let Some(c) = project.compositions.compositions.get(state.selected) else {
-        state.status.note("no group to arm");
+        state.status.note("no composition to arm");
         return;
     };
     if state.armed.as_deref() == Some(c.id.as_str()) {
@@ -394,7 +426,7 @@ pub fn record_selected(state: &mut ComposeState, project: &mut Project) {
     let snapshot = project.compositions.compositions.clone();
     let library = project.library.clone();
     let Some(target) = project.compositions.compositions.get_mut(at) else {
-        state.status.note("no group to record");
+        state.status.note("no composition to record");
         return;
     };
     let id = target.id.clone();
@@ -503,7 +535,7 @@ fn start_new(
         return;
     }
     state.naming = Some(String::new());
-    state.status.note("name the new group, then Enter — Esc to abandon it");
+    state.status.note("name the new composition, then Enter — Esc to abandon it");
 }
 
 /// The name field. Same shape as every other field here: drain on the frame it opens, or the
@@ -530,7 +562,7 @@ fn new_group_keys(
             }
             Key::Escape => {
                 state.naming = None;
-                state.status.note("no new group");
+                state.status.note("no new composition");
                 return;
             }
             Key::Backspace => {
@@ -836,7 +868,7 @@ fn paint_member(
     });
 }
 
-/// Take the selected member out of the group.
+/// Take the selected member out of the composition.
 ///
 /// The pair to the Map's capture verb: a box drag takes whatever was inside it, and this is how the
 /// one piece that should not have come along leaves again.
@@ -866,7 +898,7 @@ fn drop_member(
         c.members.remove(i);
         // A `Location` names member ids in `props`; leaving one pointing at a member that is gone is
         // exactly the dangling reference `validate` refuses, so the refusal below would fire and the
-        // write would be abandoned. Dropping the prop with the member keeps the group loadable, and
+        // write would be abandoned. Dropping the prop with the member keeps the composition loadable, and
         // an affordance left with no props at all is reported rather than silently kept.
         for l in &mut c.locations {
             l.props.retain(|p| *p != member_id);
@@ -983,7 +1015,7 @@ fn restage_group(
         &project.library,
     ) {
         Ok(e) => e,
-        // Loud. An empty patch of floor where a group should be, with nothing saying why, is the
+        // Loud. An empty patch of floor where a composition should be, with nothing saying why, is the
         // failure this editor's own notes call the worst it had.
         Err(e) => return state.status.problem(format!("`{}` does not resolve: {e}", c.id)),
     };
@@ -1024,7 +1056,7 @@ fn restage_group(
 
 /// **The envelope and the lattice a member seats on.**
 ///
-/// Drawn rather than spawned: it is not a thing in the world, it is the tile the group claims. An
+/// Drawn rather than spawned: it is not a thing in the world, it is the tile the composition claims. An
 /// anchored group gets neither, because it claims none — an invented box would be exactly the guess
 /// `seated` refuses to make.
 fn draw_stage(state: Res<ComposeState>, project: Res<Project>, mut gizmos: Gizmos) {
@@ -1070,6 +1102,36 @@ fn draw_stage(state: Res<ComposeState>, project: Res<Project>, mut gizmos: Gizmo
     }
 }
 
+/// Clicking **NEW** opens the same name field `N` opens — never a second copy of the verb.
+fn on_new_group_click(
+    _activate: On<Activate>,
+    buttons: Query<&NewGroupButton>,
+    mut state: ResMut<ComposeState>,
+) {
+    if buttons.is_empty() {
+        return;
+    }
+    state.naming = Some(String::new());
+    state.status.note("name the new group, then Enter — Esc to abandon it");
+}
+
+/// Clicking a mesh row selects it **and takes the focus**, so `Enter` then means "add this one".
+///
+/// Taking the focus is the point: picking something to place is an unambiguous statement about which
+/// list you are working in, and the Map palette's own click handler makes the same argument about
+/// arming a piece returning you to placing.
+fn on_mesh_click(
+    activate: On<Activate>,
+    rows: Query<&MeshRow>,
+    mut state: ResMut<ComposeState>,
+) {
+    let Ok(row) = rows.get(activate.entity) else {
+        return;
+    };
+    state.mesh = row.0;
+    state.focus = Pane::Meshes;
+}
+
 /// **The mesh list, and the header that says whether it has the arrows.**
 ///
 /// Rebuilt wholesale when the selection or the project moves, like every other list here — a diffing
@@ -1105,6 +1167,8 @@ fn rebuild_meshes(
         for (i, d) in project.library.descriptors.iter().enumerate() {
             let picked = i == at;
             let mut row = p.spawn((
+                UiButton,
+                Hovered::default(),
                 MeshRow(i),
                 Node {
                     flex_direction: FlexDirection::Row,
@@ -1161,7 +1225,7 @@ fn rebuild(
         rows.push((format!("    {raw}_"), ACCENT));
         rows.push((
             format!(
-                "    Enter to make it — an empty {:.0}x{:.0} m tile. Esc to stop.",
+                "    Enter makes an empty {:.0}x{:.0} m tile. Esc stops.",
                 NEW_TILE.0, NEW_TILE.2
             ),
             DIM,
@@ -1210,7 +1274,7 @@ fn rebuild(
         ));
         let at = state.member.min(c.members.len().saturating_sub(1));
         for (i, m) in c.members.iter().enumerate() {
-            // The seating cursor, in the same `> ` shape the group list above uses — one marker
+            // The seating cursor, in the same `> ` shape the composition list above uses — one marker
             // shape for "the thing a verb will act on", read the same way in both lists.
             let marker = if i == at { "> " } else { "  " };
             rows.push((
@@ -1396,12 +1460,12 @@ pub fn seated(
 /// this reason), and it is Tutenel et al.'s *"snapping to the nearest valid location"*
 /// (`10.1609/aiide.v6i1.12398`).
 ///
-/// # It is what makes a group a tile
+/// # It is what makes a composition a tile
 ///
 /// [`composition::interface`] reads a member on a face when its box edge is within
-/// `adjacency::EDGE_EPSILON` of the envelope's. Flush puts it exactly there, so the group presents
+/// `adjacency::EDGE_EPSILON` of the envelope's. Flush puts it exactly there, so the composition presents
 /// what it is made of — and the envelope stays exactly the tile, which is what lets
-/// `grammar::learn` accept a group of floor-plus-wall where the 0.1 × 1.0 wall alone is refused as
+/// `grammar::learn` accept a composition of floor-plus-wall where the 0.1 × 1.0 wall alone is refused as
 /// the wrong size for the cell.
 ///
 /// Only the axis being flushed to moves; the other is left alone, so flushing north then west is a
@@ -1496,12 +1560,12 @@ fn describe_member(m: &composition::Member) -> String {
     }
 }
 
-/// **What the group offers an actor**, and who may take part.
+/// **What the composition offers an actor**, and who may take part.
 ///
-/// The half a geometry-only view hides. A `Location` travels with the group and its `props` are
+/// The half a geometry-only view hides. A `Location` travels with the composition and its `props` are
 /// repointed at stamp time, so two stamps of one group are two independent affordances — and that is
 /// exactly the distinction `map::Location`'s own note is about: *a table plus four chairs is one
-/// affordance with four seats, not four affordances*. Without this block an author reading a group
+/// affordance with four seats, not four affordances*. Without this block an author reading a composition
 /// sees three meshes and no reason they belong together.
 fn affordances(rows: &mut Vec<(String, Color)>, c: &Composition) {
     if c.locations.is_empty() {
@@ -1636,7 +1700,7 @@ fn detail(rows: &mut Vec<(String, Color)>, c: &Composition, comps: &[Composition
 /// nothing left to summarise here, so this no longer does.
 ///
 /// Only the axis that actually varies is quoted. A plain wall is one word; a doorway varies across
-/// and not up, so its rows carry a span and no height; a group mixing a low piece with a tall one
+/// and not up, so its rows carry a span and no height; a composition mixing a low piece with a tall one
 /// varies up and carries the height instead.
 fn face_rows(bands: &[Band]) -> Vec<String> {
     let Some(first) = bands.first() else {

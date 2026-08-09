@@ -2571,7 +2571,7 @@ fn drive_removal(
     // **Each group the box touches goes whole**, the same rule the single delete follows: a rider
     // whose host is inside the box but which is itself a few centimetres outside it would otherwise
     // be left pointing at a placement that no longer exists, and `resolve_y` refuses the whole map for
-    // it. Sorted and deduped, so a group caught twice — box over both a table and its lamp — is
+    // it. Sorted and deduped, so a composition caught twice — box over both a table and its lamp — is
     // removed once.
     let mut doomed: Vec<usize> = project
         .map
@@ -2727,8 +2727,8 @@ fn drive_place(
 
     // **An armed group answers the click before the brush does.** Compose's arm and the palette's
     // brush are two ways of saying what the next click puts down; letting both fire would place a
-    // piece *and* a group in one gesture. Arming a group is the later, more deliberate act, so it
-    // wins — and a group stamps one at a time, never by the box, because a dragged rectangle of
+    // piece *and* a composition in one gesture. Arming a composition is the later, more deliberate act, so it
+    // wins — and a composition stamps one at a time, never by the box, because a dragged rectangle of
     // nurse stations is not a gesture anybody makes by accident.
     if compose.armed.is_some() {
         if drag.from.is_some() {
@@ -2900,12 +2900,12 @@ fn drive_place(
 /// **Put an armed group down** — one line in `map.stamps`, never the rows it stands for.
 ///
 /// This is the verb the whole reference model was chosen for. What lands in the file is a reference,
-/// so editing the group later changes this stamp and every other one; baking the rows here would have
+/// so editing the composition later changes this stamp and every other one; baking the rows here would have
 /// made each stamp an independent copy that silently stopped tracking its source.
 ///
 /// It refuses whole. `expand` is asked first, against a map that already carries the new stamp, and
 /// if any member has nowhere to rest the stamp never joins the list — the same rule a single
-/// placement follows, applied to a group.
+/// placement follows, applied to a composition.
 fn stamp_here(
     project: &mut Project,
     state: &mut EditorState,
@@ -2991,7 +2991,7 @@ fn redraw_stamps(
     let mut scratch = project.map.clone();
     scratch.placements.extend(expanded.placements.iter().cloned());
     // Loud. A silent return here is the failure mode this editor's own notes call the worst it had:
-    // an empty patch of floor where a group should be, with nothing anywhere saying why.
+    // an empty patch of floor where a composition should be, with nothing anywhere saying why.
     let ys = match emerge_core::stack::resolve_y(&scratch, &project.library) {
         Ok(ys) => ys,
         Err(e) => {
@@ -3259,8 +3259,8 @@ fn keys(
         return;
     }
 
-    // **`M`: keep the set in hand as a group.** It opens a name field rather than inventing a name —
-    // the group is the author's, and the tool's job is to ask. Nothing is captured implicitly, which
+    // **`M`: keep the set in hand as a composition.** It opens a name field rather than inventing a name —
+    // the composition is the author's, and the tool's job is to ask. Nothing is captured implicitly, which
     // is the mixed-initiative rule: suggestions only when requested.
     if keys::just_pressed(&keyboard, live.0, Action::GroupFromSet) {
         if clone_drag.holding() {
@@ -3460,7 +3460,7 @@ fn delete_index(
     let head = project.map.placements[index].id.clone();
 
     // **Back to front.** Removing an earlier row shifts every later one down, so a forward pass would
-    // take the wrong pieces the moment the group held more than one — the rule the box removal below
+    // take the wrong pieces the moment the composition held more than one — the rule the box removal below
     // already follows, and now the single delete needs it too.
     let mut ordered = group.clone();
     ordered.sort_unstable();
@@ -3762,7 +3762,7 @@ fn apply(
         }
         Undo::Group { ops } => {
             // Applied in order; the inverse is the sub-inverses REVERSED — the composition rule, and
-            // the whole reason a group can exist without a second undo mechanism. A sub-op that
+            // the whole reason a composition can exist without a second undo mechanism. A sub-op that
             // could not apply contributes nothing; if none could, there is nothing to put on the
             // other stack.
             let mut inverses = Vec::with_capacity(ops.len());
@@ -4033,8 +4033,8 @@ fn redraw_edited(
 /// naming the piece:
 ///
 /// * a member the library cannot measure — there is no honest height for the envelope;
-/// * a member whose host stayed **outside** the box — the group cannot carry it, and a member with a
-///   dangling `on` is a group that will not resolve;
+/// * a member whose host stayed **outside** the box — the composition cannot carry it, and a member with a
+///   dangling `on` is a composition that will not resolve;
 /// * a member mounted against the **ceiling** — `stack::datum` reads `bounds.1` for those, and the
 ///   bounds are what this function is deriving. Stating that height is step 3's job.
 pub fn composition_from_set(
@@ -4271,7 +4271,7 @@ mod capture_tests {
         // Sorted by id — the schema's rule, so one group has one encoding.
         let ids: Vec<&str> = c.members.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["lamp", "table"]);
-        // Positions are relative to the group's own centre, not the drag anchor.
+        // Positions are relative to the composition's own centre, not the drag anchor.
         for m in &c.members {
             assert!(m.at.0.abs() < 1e-6 && m.at.1.abs() < 1e-6, "`{}` at {:?}", m.id, m.at);
         }
@@ -4309,7 +4309,7 @@ mod capture_tests {
     }
 
     /// **Three refusals, each naming the piece.** The tool does not guess — the human has final say,
-    /// and a group built on a guess is one that fails later somewhere else.
+    /// and a composition built on a guess is one that fails later somewhere else.
     #[test]
     fn it_refuses_rather_than_guessing() {
         let measured = piece_desc("crate", 0.5, 0.5, 0.5);
@@ -5025,7 +5025,7 @@ fn spawn_target_tile(
 }
 
 /// Type the reason a cell is pinned.
-/// **Name a group, and keep it.** `pin_reason_keys`' shape — see `keys::Phase` for why the fields
+/// **Name a composition, and keep it.** `pin_reason_keys`' shape — see `keys::Phase` for why the fields
 /// run before the dispatchers.
 fn group_name_keys(
     mut events: MessageReader<bevy::input::keyboard::KeyboardInput>,
@@ -5094,7 +5094,7 @@ fn group_name_keys(
 ///
 /// `record_selected`'s discipline: nothing in `project` moves until the file is on disk, and a
 /// refusal leaves both exactly as they were. The validation is deliberately the FULL one
-/// (`composition::validate` over every group, not just this one), because a new group can only break
+/// (`composition::validate` over every group, not just this one), because a new composition can only break
 /// the set as a whole — a duplicate id, or a nested reference that no longer resolves.
 pub fn keep_as_group(project: &mut Project, set: &CloneSet, raw: &str) -> Result<String, String> {
     let comp = composition_from_set(set, raw, &project.library)?;
@@ -5242,7 +5242,7 @@ fn generate_from(
     // **The solver has to see the stamps, or an owned group protects nothing.**
     //
     // `solve` builds its pinned set from `map.placements.iter().filter(|p| p.owned)`, and stamped
-    // rows are deliberately never in `placements` — so a group an author marked owned, whose whole
+    // rows are deliberately never in `placements` — so a composition an author marked owned, whose whole
     // documented meaning is *"a generator routes around the whole group"*, was invisible and the
     // collapser filled straight through it. Expanding into a scratch map is what makes the pin real:
     // `expand` already propagates `Stamped::owned` to every row it produces, so the cells come back
@@ -5493,7 +5493,7 @@ fn drive_ghost(
     // While a piece is in hand its rows are only hidden, still present, and `move_placement`'s own
     // doc names the trap that leaves open: `host_under` does not know to skip the piece it is
     // seating, so a carried table would find its own (hidden) mug under the cursor and the ghost
-    // would preview a landing the drop then computes differently. The drop probes with the group
+    // would preview a landing the drop then computes differently. The drop probes with the composition
     // removed; so must the preview, or it is a promise about something that is not going to happen —
     // the one thing this editor's previews are held to.
     let probe_map = match (state.tool, held.held.as_ref()) {

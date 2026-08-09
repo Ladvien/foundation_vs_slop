@@ -426,14 +426,14 @@ pub const BINDINGS: &[Binding] = &[
     // **The Map context is at its twelve-row ceiling.** There is no headroom left; the next verb
     // here has to share a `does` with a neighbour or take something else's key — which is exactly
     // what the clone tool does: the Cmd+Z shape, one key, the shifted form for the sibling verb.
-    bs(Action::MoveMode, KeyCode::KeyB, false, false, Context::Map, "B", "move / clone a set / keep as a group"),
-    bs(Action::CloneMode, KeyCode::KeyB, false, true, Context::Map, "B", "move / clone a set / keep as a group"),
+    bs(Action::MoveMode, KeyCode::KeyB, false, false, Context::Map, "B", "move / clone a set / keep as a composition"),
+    bs(Action::CloneMode, KeyCode::KeyB, false, true, Context::Map, "B", "move / clone a set / keep as a composition"),
     // **A third verb on a state that already exists.** `Shift+B` drags a box and leaves a set in
     // hand; this keeps that set as a reusable group instead of stamping it. Declared adjacent to the
     // pair above and sharing their `does`, so `rows()` collapses all three into one line — the Map
     // context is AT its twelve-row ceiling and `no_context_carries_more_than_a_learnable_vocabulary`
     // enforces it. `M` for module; it is one of four letters this context has left.
-    b(Action::GroupFromSet, KeyCode::KeyM, false, Context::Map, "M", "move / clone a set / keep as a group"),
+    b(Action::GroupFromSet, KeyCode::KeyM, false, Context::Map, "M", "move / clone a set / keep as a composition"),
     b(Action::RenameMap, KeyCode::KeyN, false, Context::Map, "N", "rename map"),
     b(Action::OwnToggle, KeyCode::KeyO, false, Context::Map, "O", "pin / unpin"),
     // **Two sources, one row.** `rows()` collapses adjacent bindings sharing a `does` string, so the
@@ -534,8 +534,8 @@ pub const BINDINGS: &[Binding] = &[
     // force a worse binding here, which is the whole reason contexts exist.
     b(Action::ComposePrev, KeyCode::ArrowUp, false, Context::Compose, "up", "walk the focused list"),
     b(Action::ComposeNext, KeyCode::ArrowDown, false, Context::Compose, "down", "walk the focused list"),
-    b(Action::ComposeArm, KeyCode::Enter, false, Context::Compose, "Enter", "add the picked piece / arm this group"),
-    b(Action::ComposeRecord, KeyCode::KeyR, false, Context::Compose, "R", "record what this group's members present now"),
+    b(Action::ComposeArm, KeyCode::Enter, false, Context::Compose, "Enter", "add the picked piece / arm this composition"),
+    b(Action::ComposeRecord, KeyCode::KeyR, false, Context::Compose, "R", "record what this composition's members present now"),
     // Symmetric with the pair above: `up`/`down` walk the groups, `left`/`right` walk the members of
     // the one you are on. Costs no letter, and the two cursors read as one idea.
     b(Action::ComposeMemberPrev, KeyCode::ArrowLeft, false, Context::Compose, "left", "which list the arrows walk"),
@@ -592,7 +592,7 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::PaintUp, KeyCode::Equal, false, Context::Compose, "=", "paint order: back / front"),
     // **The two verbs this tab was missing.** It could refine a group and not make one, so every
     // group had to be captured on the Map first — which is a fine way to work and a bad only way.
-    b(Action::NewGroup, KeyCode::KeyN, false, Context::Compose, "N", "new group"),
+    b(Action::NewGroup, KeyCode::KeyN, false, Context::Compose, "N", "new composition"),
     // One row, two chords — the Map, Tiles and Anim pairs again.
     bs(Action::UndoCompose, KeyCode::KeyZ, true, false, Context::Compose, "Z", "undo / redo"),
     bs(Action::RedoCompose, KeyCode::KeyZ, true, true, Context::Compose, "Z", "undo / redo"),
