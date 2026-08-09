@@ -136,6 +136,13 @@ pub struct Member {
     /// [`crate::map::Placed::lift`] is, and it survives nesting by addition.
     #[serde(default)]
     pub lift: f32,
+    /// **Paint order among things at the same spot** — higher draws in front.
+    ///
+    /// The visual sibling of [`Self::lift`]: `lift` moves a member, this only decides what is seen
+    /// when two of them are in the same place. Copied onto [`crate::map::Placed::paint`] by
+    /// [`expand`], which carries the full note on what `depth_bias` does and does not deliver.
+    #[serde(default, skip_serializing_if = "paint_is_zero")]
+    pub paint: i8,
     /// **The fingerprint of the interface this member was built against.**
     ///
     /// A verifying trace in the sense of Mokhov, Mitchell & Peyton Jones (*Build Systems à la Carte*,
@@ -154,6 +161,10 @@ pub struct Member {
     pub of_fingerprint: Option<u64>,
     #[serde(default)]
     pub note: Option<String>,
+}
+
+fn paint_is_zero(v: &i8) -> bool {
+    *v == 0
 }
 
 /// What a member *is* — and, for a descriptor, everything only a descriptor can carry.
@@ -366,6 +377,10 @@ struct Flat {
     at: (f32, f32),
     yaw: f32,
     lift: f32,
+    /// **Paint order, summed through nesting** the way `lift` is added: a group given a paint offset
+    /// carries every member in it forward by that much, so nesting cannot reorder a child against
+    /// itself. Saturating, because `i8` is deliberately narrow.
+    paint: i8,
     tip: (u8, u8),
     /// A sibling **path**, already prefixed to match `path`.
     on: Option<String>,
@@ -435,6 +450,7 @@ fn flatten(
                     at: m.at,
                     yaw: m.yaw,
                     lift: m.lift,
+                    paint: m.paint,
                     tip: *tip,
                     on: on.clone(),
                     patch: merged,
@@ -456,6 +472,10 @@ fn flatten(
                         yaw: add_yaw(f.yaw, m.yaw),
                         // Lifts add: a group nudged up carries everything in it.
                         lift: m.lift + f.lift,
+                        // Paint adds the same way, and saturates rather than wrapping: a wrap would
+                        // send the front-most member behind everything, which is the one outcome an
+                        // author would never intend.
+                        paint: m.paint.saturating_add(f.paint),
                         tip: f.tip,
                         on: f.on.map(|o| format!("{}/{}", m.id, o)),
                         patch: f.patch,
@@ -882,6 +902,10 @@ fn fingerprint_inner(
     f.u32(comp.members.len() as u32);
     for m in &comp.members {
         f.str(&m.id).f32(m.at.0).f32(m.at.1).f32(m.yaw).f32(m.lift);
+        // **Paint is folded in even though it is cosmetic.** A stamp records what it was made
+        // against, and an author who reorders two decals and sees no STALE badge has been told the
+        // group did not change when it did. `i8` widened to i32 so the cast is total.
+        f.u32(m.paint as i32 as u32);
         f.u64(body_fingerprint(&m.body, compositions, library, stack, depth)?);
     }
     stack.pop();
@@ -1129,6 +1153,7 @@ pub fn expand(
                 at: (s.at.0 + at.0, s.at.1 + at.1),
                 yaw: add_yaw(f.yaw, s.yaw),
                 lift: f.lift,
+                paint: f.paint,
                 tip: f.tip,
                 on,
                 // An owned stamp is owned whole: a generator routing around half a group would leave
@@ -1221,6 +1246,10 @@ pub fn interface(
     };
     for f in &flats {
         scratch.placements.push(Placed {
+            // **Zero, deliberately.** A face is read off geometry; paint order only decides what is
+            // seen where two things coincide, so it must not reach the interface. This is the
+            // "seating precision does not become token precision" rule in its other direction.
+            paint: 0,
             id: f.path.clone(),
             descriptor: f.descriptor.clone(),
             at: f.at,
@@ -1567,6 +1596,7 @@ mod tests {
     fn member(id: &str, descriptor: &str, at: (f32, f32)) -> Member {
         Member {
             id: id.to_owned(),
+            paint: 0,
             body: Body::Descriptor {
                 id: descriptor.to_owned(),
                 tip: (0, 0),

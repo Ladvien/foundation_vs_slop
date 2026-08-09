@@ -510,7 +510,7 @@ mod stepped {
             "the site kit has 45 pieces; got {}",
             project.library.descriptors.len()
         );
-        assert_eq!(project.policy.divisions, 1);
+        assert_eq!(project.policy.face_bands, 1);
     }
 
     /// **An ASSET-CONTRACT test — it reads the shipped corpus on purpose.**

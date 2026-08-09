@@ -154,6 +154,10 @@ fn tip_is_zero(v: &(u8, u8)) -> bool {
     *v == (0, 0)
 }
 
+fn paint_is_zero(v: &i8) -> bool {
+    *v == 0
+}
+
 /// A new map's size before anyone has said otherwise: 32 m square and one storey, so an author opens
 /// on 16 m of workable ground in every direction.
 ///
@@ -231,6 +235,23 @@ pub struct Placed {
     /// Per-instance overrides layered over the descriptor. Absence inherits.
     #[serde(default)]
     pub patch: Option<Descriptor>,
+    /// **Paint order among things at the same spot** — higher draws in front.
+    ///
+    /// Purely cosmetic. It does **not** gate overlap (`stack::blocking` never reads it), does not
+    /// change what a tile presents to its neighbours, and does not move anything: a floor, the grime
+    /// on it and the marking over that are all at the same height and differ only here.
+    ///
+    /// # What it does and does not deliver
+    ///
+    /// Applied as `StandardMaterial::depth_bias`, which biases the **depth comparison**. That is the
+    /// right tool for coplanar surfaces — two decals on one floor — and it is **not** a general
+    /// stacking order: it will not lift something in front of unrelated geometry it sits well behind.
+    /// Say so here, because the field's name promises more than the mechanism gives.
+    ///
+    /// `i8` on purpose. The renderer caches one material per `(base, paint)` pair, so an unbounded
+    /// value is an unbounded cache — and a kit needs a handful of layers, not thousands.
+    #[serde(default, skip_serializing_if = "paint_is_zero")]
+    pub paint: i8,
     /// Why this prop is here — the trailing `// records desk` of the old format, as data.
     ///
     /// Distinct from [`Self::owned_because`], which answers a narrower question a generator has to

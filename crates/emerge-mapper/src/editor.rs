@@ -1315,7 +1315,7 @@ fn check_edges(project: Res<Project>, mut faults: ResMut<EdgeFaults>) {
     faults.0 = emerge_core::adjacency::faults(
         &project.map,
         &project.library,
-        project.policy.divisions,
+        project.policy.face_bands,
     );
 }
 
@@ -2266,6 +2266,7 @@ fn stamp_set(
             return;
         }
         rows.push(Placed {
+            paint: 0,
             id: new_ids[i].clone(),
             descriptor: piece.descriptor.clone(),
             at,
@@ -4103,6 +4104,7 @@ pub fn composition_from_set(
             }
         };
         members.push(Member {
+            paint: 0,
             id: member_ids[i].clone(),
             body: Body::Descriptor {
                 id: piece.descriptor.clone(),
@@ -4382,7 +4384,11 @@ fn with_dependents(map: &emerge_core::map::Map, root: usize) -> Vec<usize> {
 /// One subgrid unit of authored lift — the same subdivision the lattice uses, so "up one notch"
 /// means the same distance everywhere in the project.
 fn lift_step(project: &Project) -> f32 {
-    emerge_core::grid::SNAP / project.policy.divisions.max(1) as f32
+    // **Seating, not face bands.** A lift nudges a placement; it has nothing to do with how finely
+    // a face is read. Since the split this steps by `SNAP / seating_divisions` (125 mm at the
+    // default 4) rather than the old half metre — finer, which is what nudging a lamp onto a shelf
+    // wanted all along.
+    emerge_core::grid::SNAP / project.policy.seating_divisions.max(1) as f32
 }
 
 /// **Raise or lower the placement under the cursor by one subgrid unit.**
@@ -5217,7 +5223,7 @@ fn generate_from(
     let built = match source {
         Source::Learned => emerge_core::grammar::learn(&project.map, CELL),
         Source::Declared => {
-            emerge_core::grammar::declared(&project.library, project.policy.divisions, CELL)
+            emerge_core::grammar::declared(&project.library, project.policy.face_bands, CELL)
         }
     };
     let grammar = match built {

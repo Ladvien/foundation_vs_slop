@@ -191,7 +191,7 @@ fn the_site_kit_derives_the_lattices_its_architecture_implies() {
             .library
             .get(id)
             .unwrap_or_else(|| panic!("{id} is in the kit"));
-        emerge_core::descriptor::divisions(d, layered.policy.divisions)
+        emerge_core::descriptor::divisions(d, layered.policy.face_bands)
             .unwrap_or_else(|e| panic!("{e}"))
     };
 
@@ -228,10 +228,10 @@ fn the_site_kit_derives_the_lattices_its_architecture_implies() {
 fn the_furniture_library_derives_workable_lattices() {
     let layered = emerge_core::policy::layered_library(std::path::Path::new("assets/emerge"))
         .unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(layered.policy.divisions, 1, "the shipped setting is a 0.5 m subunit");
+    assert_eq!(layered.policy.face_bands, 1, "the shipped setting is a 0.5 m subunit");
 
     for d in &layered.library.descriptors {
-        let div = emerge_core::descriptor::divisions(d, layered.policy.divisions)
+        let div = emerge_core::descriptor::divisions(d, layered.policy.face_bands)
             .unwrap_or_else(|e| panic!("{e}"));
         let volume = emerge_core::descriptor::Subgrid::volume(div);
         assert!(volume > 0, "{} derives an empty lattice", d.id);
@@ -254,7 +254,7 @@ fn the_furniture_library_derives_workable_lattices() {
 fn the_authored_run_faces_let_the_full_height_family_meet() {
     let layered = emerge_core::policy::layered_library(Path::new("assets/emerge/site"))
         .unwrap_or_else(|e| panic!("{e}"));
-    let div = layered.policy.divisions;
+    let div = layered.policy.face_bands;
 
     // Every piece that carries tokens presents the same face size, or they cannot agree at all.
     let face_len = |id: &str| {
@@ -319,7 +319,7 @@ fn every_authored_architectural_piece_agrees_with_a_wall() {
     for kit in ["site", "site_greybox"] {
         let l = emerge_core::policy::layered_library(&Path::new("assets/emerge").join(kit))
             .unwrap_or_else(|e| panic!("{e}"));
-        let div = l.policy.divisions;
+        let div = l.policy.face_bands;
         let wall = l.library.get("site/wall").unwrap_or_else(|| panic!("no wall"));
         let (_, wall_d) = wall.extent.footprint.unwrap_or_else(|| panic!("no footprint"));
 
@@ -399,7 +399,7 @@ fn both_kits_derive_the_same_layers_for_every_piece_with_a_stated_height() {
 
     let layers = |l: &emerge_core::policy::Layered, id: &str| {
         let d = l.library.get(id).unwrap_or_else(|| panic!("{id}"));
-        emerge_core::descriptor::divisions(d, l.policy.divisions)
+        emerge_core::descriptor::divisions(d, l.policy.face_bands)
             .unwrap_or_else(|e| panic!("{e}"))
             .1
     };

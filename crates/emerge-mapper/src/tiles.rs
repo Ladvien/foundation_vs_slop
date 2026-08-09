@@ -2254,7 +2254,7 @@ fn commit_measured(
     // Rebuild the layered view from the edited measurements, and prove it still holds together,
     // before anything touches the disk.
     let library = project.policy.apply(&measured)?;
-    library.validate_lattices(project.policy.divisions)?;
+    library.validate_lattices(project.policy.face_bands)?;
     let masks = library.resolve(&project.vocab)?;
 
     let path = project.library_path.clone();
@@ -5007,7 +5007,7 @@ fn rebuild_detail(
             // size and the project's `divisions`, which is what lets an edge token on a 3 m wall
             // mean the same thing as one on a 0.5 m chair. The subunit's size in millimetres is
             // there because that is the number an author placing a token actually needs.
-            let subunit_mm = emerge_core::grid::SNAP / project.policy.divisions as f32 * 1000.0;
+            let subunit_mm = emerge_core::grid::SNAP / project.policy.face_bands as f32 * 1000.0;
             p.spawn((
                 Text::new(format!("{dx} x {dy} x {dz} cells of {subunit_mm:.0} mm")),
                 TextColor(TEXT),
@@ -5018,7 +5018,7 @@ fn rebuild_detail(
                 Text::new(format!(
                     "{marked} of {} marked — {} division(s) per {:.1} m tile, from project.ron",
                     emerge_core::descriptor::Subgrid::volume(div),
-                    project.policy.divisions,
+                    project.policy.face_bands,
                     emerge_core::grid::SNAP,
                 )),
                 TextColor(DIM),

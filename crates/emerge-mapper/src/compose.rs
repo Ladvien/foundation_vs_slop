@@ -556,6 +556,7 @@ pub fn add_member(state: &mut ComposeState, project: &mut Project, descriptor: &
             n += 1;
         }
         c.members.push(composition::Member {
+            paint: 0,
             id: id.clone(),
             body: composition::Body::Descriptor {
                 id: what.clone(),
@@ -648,7 +649,7 @@ pub fn seat_selected(state: &mut ComposeState, project: &mut Project, nudge: Nud
         Ok(f) => f,
         Err(e) => return state.status.problem(e),
     };
-    let step = emerge_core::grid::SNAP / project.policy.divisions.max(1) as f32;
+    let step = seat_step(&project);
     let (at, lift) = (c.members[i].at, c.members[i].lift);
     let (next_at, next_lift) = match seated(envelope, at, lift, footprint, nudge, step) {
         Ok(v) => v,
@@ -1306,6 +1307,19 @@ pub fn flushed(
     }
 }
 
+/// **One seat step, metres** — `grid::SNAP / seating_divisions`, 125 mm at the default 4.
+///
+/// The **seating** number, never the face one. They were a single `policy.divisions` until the split:
+/// edge tokens belong to a face and seating belongs to a volume, and one number serving both meant a
+/// finer seat cost a re-index of every authored token. [`emerge_core::policy::Policy`] carries the
+/// argument.
+///
+/// Seats are the multiples of this measured from the envelope's centre in X/Z and its floor in Y, so
+/// the centre is always a seat and nudging out and back returns exactly.
+pub fn seat_step(project: &Project) -> f32 {
+    emerge_core::grid::SNAP / project.policy.seating_divisions.max(1) as f32
+}
+
 /// The authoring grid, rounded the way [`crate::editor`] rounds it. One rule, two callers.
 fn snap_to(v: f32) -> f32 {
     (v / emerge_core::grid::SNAP).round() * emerge_core::grid::SNAP
@@ -1443,7 +1457,7 @@ fn detail(rows: &mut Vec<(String, Color)>, c: &Composition, comps: &[Composition
     }
 
     rows.push((String::new(), TEXT));
-    match composition::interface(c, comps, &project.library, project.policy.divisions) {
+    match composition::interface(c, comps, &project.library, project.policy.face_bands) {
         Ok(None) => rows.push((
             "ANCHORED — claims no tile, so it has no boundary for anything to abut".to_owned(),
             DIM,
@@ -1591,6 +1605,7 @@ mod seating_tests {
             id: id.to_owned(),
             body: Body::Descriptor { id: "wall".to_owned(), tip: (0, 0), on: None, patch: None },
             at,
+            paint: 0,
             yaw,
             lift: 0.0,
             of_fingerprint: Some(7),

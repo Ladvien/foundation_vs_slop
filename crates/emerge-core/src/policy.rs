@@ -76,7 +76,7 @@ pub fn layered_library(dir: &Path) -> Result<Layered, String> {
     // the **layered** library, since that is what the game reads and a patch may change an extent —
     // which is exactly the case where a cell authored against the measurement falls outside.
     library
-        .validate_lattices(policy.divisions)
+        .validate_lattices(policy.face_bands)
         .map_err(|e| format!("{}: {e}", dir.join(LIBRARY_FILE).display()))?;
     // **Compositions are optional and their absence is not a degraded mode.** A project that stamps
     // nothing has no file, and that is the same state as a file holding no compositions — so this is
@@ -110,7 +110,7 @@ pub fn layered_library(dir: &Path) -> Result<Layered, String> {
 ///
 /// The game reads [`Self::library`] and nothing else. An editor needs the other two: it writes
 /// [`Self::measured`] — the measurements file, *without* this game's architecture baked into it —
-/// and it reads [`Policy::divisions`] to know how finely a tile divides.
+/// and it reads [`Policy::face_bands`] to know how finely a face is read.
 ///
 /// One struct from the one loader rather than a second parse in the editor, for the reason
 /// [`layered_library`] exists at all: a library layered one way in the editor and another in the
@@ -129,7 +129,7 @@ pub struct Layered {
     pub measured: Library,
     /// The measurements with this project's policy applied. What the game places.
     pub library: Library,
-    /// The policy itself, for the fields that are not patches — see [`Policy::divisions`].
+    /// The policy itself, for the fields that are not patches — see [`Policy::face_bands`].
     pub policy: Policy,
 }
 
@@ -166,28 +166,66 @@ pub struct Policy {
     /// What this project's architecture is, in a sentence.
     #[serde(default)]
     pub note: Option<String>,
-    /// **How many ways each authoring tile divides** — the one number behind every piece's lattice.
+    /// **How finely a piece's subgrid of EDGE TOKENS is indexed** — the lattice a face is read on.
     ///
-    /// A subunit is `grid::SNAP / divisions` on every axis, and a piece spanning N cells gets `N *
-    /// divisions` of them. See [`crate::descriptor::divisions`] for the derivation and
+    /// A band is `grid::SNAP / face_bands` on every axis, and a piece spanning N cells gets
+    /// `N * face_bands` of them. See [`crate::descriptor::divisions`] for the derivation and
     /// [`crate::descriptor::Subgrid`] for why this is a project number rather than a per-piece one.
+    ///
+    /// # This was `divisions`, and the rename is the point
+    ///
+    /// One number used to serve two jobs: indexing edge tokens *and* deciding how finely the Compose
+    /// tab seats a member. They belong to different objects. **Edge tokens belong to the face** — a
+    /// 2-D component, where a token should be one word per face however finely the interior is cut;
+    /// `summarise_face`'s ten-cells-saying-the-same-word complaint was what it looked like when they
+    /// were the same number. **Seating belongs to the volume**, and is [`Policy::seating_divisions`].
+    ///
+    /// Splitting them also keeps a deferred migration deferred: edge-token indexing is still blocked
+    /// on the edge-versus-corner question, so raising this to seat a sconce would re-author every
+    /// token in the kit on a format that may change again. Merrell names the other half of the price
+    /// — *"small objects require closely spaced planes while large objects require large volumes,
+    /// which together means that many planes must be created"* — a finer face vocabulary buys the
+    /// adjacency problem nothing.
     ///
     /// **It belongs here, not in `library.ron`.** How finely to divide is a statement about how much
     /// detail *this game's* generator needs, exactly like `stretch_y` is a statement about its
     /// ceiling height — and the same argument applies: bake it into a shared library and one game's
     /// resolution silently governs another's.
     ///
-    /// **1 by default**, so a subunit is `grid::SNAP` itself — the half-metre grid the kits are
-    /// already authored on, on which a 3 m wall is 6 divisions and a 2.4 m one is 5 layers.
+    /// **1 by default**, so a band is `grid::SNAP` itself — the half-metre grid the kits are
+    /// already authored on, on which a 3 m wall is 6 bands and a 2.4 m one is 5 layers.
     #[serde(default = "one")]
-    pub divisions: u32,
+    pub face_bands: u32,
+    /// **How finely a tile subdivides for SEATING** — the step the Compose tab moves a member by.
+    ///
+    /// A seat step is `grid::SNAP / seating_divisions` metres, and seats are the multiples of it
+    /// measured from the envelope's **centre** in X/Z and its **floor** in Y. Multiples of a unit
+    /// from the centre always include the centre, so nudging a piece out and back returns it exactly
+    /// where it started — which dividing the tile into cells and seating at cell centres would not
+    /// (at 4 those are 0.125 / 0.375 / 0.625 / 0.875, with no seat in the middle).
+    ///
+    /// **Seating precision does not become token precision.** Two members at different seats can
+    /// project onto the same face band, because bands are indexed by [`Policy::face_bands`]. That is
+    /// the two axes being independent, working as intended — it is not a rounding bug.
+    ///
+    /// **4 by default**: 125 mm, fine enough to place a sconce and coarse enough to be a lattice
+    /// rather than free movement. It does not make the flush verb redundant — `site/wall` is 0.1 m
+    /// thick and sits flush at −0.45, which is not a multiple of 0.125 either, because art is
+    /// authored to look right rather than to tile.
+    #[serde(default = "four")]
+    pub seating_divisions: u32,
     #[serde(default)]
     pub patches: Vec<Patch>,
 }
 
-/// The default for [`Policy::divisions`]. A free function because `serde(default = ..)` needs a path.
+/// The default for [`Policy::face_bands`]. A free function because `serde(default = ..)` needs a path.
 fn one() -> u32 {
     1
+}
+
+/// The default for [`Policy::seating_divisions`].
+fn four() -> u32 {
+    4
 }
 
 /// The most a project may divide one tile.
@@ -202,7 +240,8 @@ impl Default for Policy {
         Policy {
             version: POLICY_VERSION,
             note: None,
-            divisions: one(),
+            face_bands: one(),
+            seating_divisions: four(),
             patches: Vec::new(),
         }
     }
@@ -230,12 +269,18 @@ impl Policy {
         }
         // Refused at the project boundary rather than per lattice: every piece derives from this one
         // number, so a zero here would make every tile in the project cell-less at once.
-        if self.divisions == 0 || self.divisions > MAX_DIVISIONS {
+        if self.seating_divisions == 0 || self.seating_divisions > MAX_DIVISIONS {
             return Err(format!(
-                "policy: `divisions` is {}; a tile divides between 1 and {MAX_DIVISIONS} ways. Zero \
+                "policy: `seating_divisions` is {}; a tile seats between 1 and {MAX_DIVISIONS} ways.",
+                self.seating_divisions
+            ));
+        }
+        if self.face_bands == 0 || self.face_bands > MAX_DIVISIONS {
+            return Err(format!(
+                "policy: `face_bands` is {}; a face reads between 1 and {MAX_DIVISIONS} ways. Zero \
                  leaves every piece without cells, and past {MAX_DIVISIONS} the lattice is finer \
                  than the meshes it describes.",
-                self.divisions
+                self.face_bands
             ));
         }
         for p in &self.patches {
@@ -462,8 +507,9 @@ mod tests {
     fn a_policy_round_trips() {
         let policy = Policy {
             version: POLICY_VERSION,
+            seating_divisions: 4,
             note: Some("this facility has 2.4 m ceilings".into()),
-            divisions: 2,
+            face_bands: 2,
             patches: vec![rule(Match::Kind("door".into()), stretch(1.2))],
         };
         let text = policy.to_ron().unwrap_or_else(|e| panic!("{e}"));
@@ -473,22 +519,44 @@ mod tests {
     /// A policy written before divisions existed still parses, and gets the half-metre subunit the
     /// kits are already authored on.
     #[test]
-    fn a_policy_written_before_divisions_defaults_to_one() {
+    fn a_policy_written_before_face_bands_defaults_to_one() {
         let p = Policy::parse("(version: 1)").unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(p.divisions, 1);
+        assert_eq!(p.face_bands, 1);
     }
 
-    /// Refused at the project boundary, because every piece in the project derives from this number.
+    /// Refused at the project boundary, because every piece in the project derives from these.
+    ///
+    /// **Both numbers, separately.** They were one field until the Compose tab needed a seating step
+    /// finer than the face lattice, and a range check that only policed one of them would let the
+    /// other be zero — which is every piece with no cells, or every member unable to move.
     #[test]
     fn a_division_count_outside_the_range_is_refused() {
         for bad in [0, MAX_DIVISIONS + 1] {
-            let text = format!("(version: 1, divisions: {bad})");
-            let err = Policy::parse(&text).err().unwrap_or_default();
-            assert!(err.contains("divides between 1 and"), "{bad}: {err}");
+            let err = Policy::parse(&format!("(version: 1, face_bands: {bad})"))
+                .err()
+                .unwrap_or_default();
+            assert!(err.contains("a face reads between 1 and"), "face_bands {bad}: {err}");
+            let err = Policy::parse(&format!("(version: 1, seating_divisions: {bad})"))
+                .err()
+                .unwrap_or_default();
+            assert!(err.contains("a tile seats between 1 and"), "seating {bad}: {err}");
         }
-        assert!(Policy::parse("(version: 1, divisions: 1)").is_ok());
-        let most = format!("(version: 1, divisions: {MAX_DIVISIONS})");
-        assert!(Policy::parse(&most).is_ok());
+        assert!(Policy::parse("(version: 1, face_bands: 1)").is_ok());
+        assert!(Policy::parse(&format!("(version: 1, face_bands: {MAX_DIVISIONS})")).is_ok());
+        assert!(Policy::parse(&format!("(version: 1, seating_divisions: {MAX_DIVISIONS})")).is_ok());
+    }
+
+    /// **The two numbers are independent**, and a project that sets only one gets the default for the
+    /// other. The whole reason they were split is that a face lattice and a seating lattice answer
+    /// different questions; a project raising one must not silently raise the other.
+    #[test]
+    fn the_two_lattices_default_independently() {
+        let p = Policy::parse("(version: 1, face_bands: 2)").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(p.face_bands, 2);
+        assert_eq!(p.seating_divisions, 4, "seating keeps its own default");
+        let p = Policy::parse("(version: 1, seating_divisions: 8)").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(p.face_bands, 1, "faces keep the half-metre grid the kits are authored on");
+        assert_eq!(p.seating_divisions, 8);
     }
 
     /// Version mismatch is refused rather than migrated, the same rule the map and library hold.

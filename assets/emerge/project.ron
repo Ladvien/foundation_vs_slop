@@ -24,6 +24,6 @@
     // `grid::SNAP` itself -- the half-metre grid these kits are already authored on, on which a
     // 3 m wall is 6 divisions across and a 2.4 m one is 5 layers tall. Raising it refines every
     // piece in the project by the same factor, which is what keeps two faces comparable.
-    divisions: 1,
+    face_bands: 1,
     patches: [],
 )
