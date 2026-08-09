@@ -48,6 +48,7 @@ pub mod anim_tab;
 pub mod anim_watch;
 pub mod harness;
 pub mod chrome;
+pub mod compose;
 pub mod devshot;
 pub mod editor;
 pub mod fill;

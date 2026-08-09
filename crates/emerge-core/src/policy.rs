@@ -78,10 +78,31 @@ pub fn layered_library(dir: &Path) -> Result<Layered, String> {
     library
         .validate_lattices(policy.divisions)
         .map_err(|e| format!("{}: {e}", dir.join(LIBRARY_FILE).display()))?;
+    // **Compositions are optional and their absence is not a degraded mode.** A project that stamps
+    // nothing has no file, and that is the same state as a file holding no compositions — so this is
+    // one path with one meaning, not a fallback. A file that *exists* and cannot be read is fatal,
+    // exactly as the other two are: an unreadable palette that opens empty looks like a project with
+    // no assets.
+    let comp_path = dir.join(crate::composition::Compositions::FILE);
+    let compositions = if comp_path.exists() {
+        let text = std::fs::read_to_string(&comp_path)
+            .map_err(|e| format!("{}: {e}", comp_path.display()))?;
+        crate::composition::Compositions::parse(&text)
+            .map_err(|e| format!("{}: {e}", comp_path.display()))?
+    } else {
+        crate::composition::Compositions {
+            version: crate::composition::COMPOSITIONS_VERSION,
+            ..Default::default()
+        }
+    };
+    crate::composition::validate(&compositions.compositions, &library)
+        .map_err(|e| format!("{}: {e}", comp_path.display()))?;
+
     Ok(Layered {
         measured,
         library,
         policy,
+        compositions,
     })
 }
 
@@ -95,6 +116,11 @@ pub fn layered_library(dir: &Path) -> Result<Layered, String> {
 /// [`layered_library`] exists at all: a library layered one way in the editor and another in the
 /// game is a preview that lies.
 pub struct Layered {
+    /// Every composition the project can stamp, validated against the layered library.
+    ///
+    /// Empty when the project has no `compositions.ron`, which means exactly what a file with no
+    /// compositions in it means.
+    pub compositions: crate::composition::Compositions,
     /// `library.ron` exactly as parsed — the measurements, portable to any game.
     ///
     /// **What an editor writes back.** Serializing the layered library over this file bakes one

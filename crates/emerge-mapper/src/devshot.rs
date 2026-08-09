@@ -1,6 +1,6 @@
 //! **Driving the editor from a script.** `drive.request` — whitespace-separated verbs applied through
 //! the same resources the key handlers write, so a capture script can reproduce an author's exact
-//! steps: `tiles`, `map`, `anim`, `down`, `up`.
+//! steps: `tiles`, `map`, `anim`, `compose`, `arm`, `stamp`, `down`, `up`.
 //!
 //! This exists because of how the editor actually gets checked: `scripts/vinput.py` pressing keys and
 //! `scripts/framestats.py` measuring what came out. Three of the Site editor's bugs were invisible to
@@ -35,7 +35,7 @@ impl Plugin for DrivePlugin {
 fn watch_drive(
     mut mode: ResMut<crate::tiles::Mode>,
     mut state: ResMut<crate::tiles::ImportState>,
-    project: Res<crate::project::Project>,
+    mut project: ResMut<crate::project::Project>,
     previews: Query<Entity, With<crate::tiles::Preview>>,
     names: Query<&Name>,
     children: Query<&Children>,
@@ -46,6 +46,8 @@ fn watch_drive(
         Option<&bevy::camera::visibility::ViewVisibility>,
     )>,
     transforms: Query<&GlobalTransform>,
+    mut compose: ResMut<crate::compose::ComposeState>,
+    mut editor: ResMut<crate::editor::EditorState>,
 ) {
     let Ok(text) = fs::read_to_string(DRIVE) else {
         return;
@@ -62,6 +64,27 @@ fn watch_drive(
             }
             "map" => *mode = crate::tiles::Mode::Map,
             "anim" => *mode = crate::tiles::Mode::Anim,
+            "compose" => *mode = crate::tiles::Mode::Compose,
+            // **Arm and stamp go through the same calls the keyboard and the click make**, so a
+            // captured frame is evidence about the real path rather than about a test-only one.
+            // The same call the key handler makes, toggle included — never a second copy of it.
+            "arm" => {
+                crate::compose::toggle_arm(&mut compose, &project);
+                info!("drive.request: arm — {}", compose.status);
+            }
+            "record" => {
+                crate::compose::record_selected(&mut compose, &mut project);
+                info!("drive.request: record — {}", compose.status);
+            }
+            "stamp" => {
+                crate::editor::stamp_here_for_test(
+                    &mut project,
+                    &mut editor,
+                    &mut compose,
+                    (0.0, 0.0),
+                );
+                info!("drive.request: stamp — {}", editor.status);
+            }
             "down" | "up" => {
                 let delta: isize = if verb == "down" { 1 } else { -1 };
                 let n = state.candidates.len() as isize;

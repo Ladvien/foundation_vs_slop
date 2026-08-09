@@ -2780,3 +2780,52 @@ Split out 2026-07-30.
   GPU is idle (`nvidia-smi --query-compute-apps=...`) before quoting any frame time from `big`, and
   run perf A/Bs as **A-B-A with replicates** — a single A→B pair produced a false "shadows −23%"
   result here that the repeat baseline destroyed. · *Touches:* — (measurement only)
+
+
+### ✅ FVS-Q-10 — Should authored `edge` tokens feed the solver? · ANSWERED: **both, and the author picks** · 2026-08-09
+
+`emerge_core::grammar::declared` builds `support[dir][p]` from the library's edge tokens; `learn` is
+untouched. **Two sources, one solver, and neither is a fallback for the other** — each either produces a
+grammar or refuses by name, so a library nobody has tokened does not quietly fall through to the learned
+grammar. Bound to `Shift+G` beside `G`, sharing one census row.
+
+Karth & Smith (FDG 2019, `10.1145/3337722.3341845`) name the distinction: Gumin's WFC *"simply allows any
+tile-compatible overlapping patterns to be placed adjacent to one another, even if they were never seen
+adjacent in the single source image"* — **Most General Generalization**, the inverse of learning from
+observation. `declared` is MGG over the token relation; `learn` is the observed half. The module note in
+`adjacency.rs` that argued the learned grammar should be the only source is not reversed: it stays the
+only source that *infers*.
+
+**Measured on the shipped site kit rather than predicted.** Two numbers moved the design:
+
+| | |
+|---|---|
+| 8 tokened descriptors × 4 turns | 32 candidates, over the 32-prototype `u32` domain with `Empty` |
+| after face-signature dedup | **16 prototypes**, 70 of 256 pairs allowed per direction |
+
+Deduplication is per descriptor and that was a **measured correction**: a global pass deleted
+`site/column`, which presents exactly the faces `site/wall` does, so the solver could never place a
+column. Identical faces make two tiles interchangeable to the propagator; they do not make them the same
+mesh. Widening the domain was rejected — `wfc::collapse_grid`'s `u32` is shared with the dungeon
+generator and is determinism-critical.
+
+Over the ceiling refuses **with the count and what to trim**, never samples. `edge` and `anchor` are now
+closed vocabulary axes (`vocab.ron`), so a typo is a load error rather than an unexplained contradiction.
+
+The original item, for the record:
+
+- **FVS-Q-10 — Should authored `edge` tokens feed the solver, or only check it?** · L · *determinism: core*
+  `crates/emerge-core/src/adjacency.rs` reads `SubCell::edge` and reports where a map disagrees with
+  the tokens its tiles declare. It deliberately does **not** generate: `grammar.rs` already learns
+  adjacency from the map, and its module note argues that should be the only way, because *"inventing
+  an adjacency schema would mean asking an author to write down a grammar before they are allowed to
+  draw one."*
+  The open question is whether `grammar::learn`'s `support[dir][p]` table should be built from tokens
+  instead of from observed pairs. **What it would buy:** generation into an *empty* map — a learned
+  grammar knows only the map it was learned from, so `G` on a blank canvas has nothing to continue.
+  **What it costs:** it reverses that documented thesis, and an unauthored library would generate
+  unconstrained noise rather than refusing. Decide on real data — the validator now makes it possible
+  to author tokens and see whether they agree with what you actually draw, which is the evidence this
+  decision was missing. Sandhu, Chen & McCoy 2019 (`10.1145/3337722.3337752`) is the closest prior art:
+  WFC as a constraint solver with design-level constraints layered over local adjacency.
+  · *Deps:* — · *Touches:* `crates/emerge-core/src/{grammar,adjacency}.rs`

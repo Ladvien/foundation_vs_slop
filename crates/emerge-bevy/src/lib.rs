@@ -67,7 +67,39 @@ impl EmergeWorld {
     /// Refuses rather than loading half of it: a map that names a descriptor nothing defines is a map
     /// with holes, and the piece silently failing to appear is how nobody finds out.
     pub fn new(library: Library, map: Map, vocab: Vocabularies) -> Result<EmergeWorld, String> {
+        Self::with_compositions(library, map, vocab, &[])
+    }
+
+    /// The same, for a map that stamps compositions.
+    ///
+    /// **Expansion happens once, here, before anything else looks at the map.** Everything downstream
+    /// — masks, `resolve_y`, roles, seats, the spawner — then sees a flat world exactly as it did
+    /// before stamps existed, which is what keeps this a schema addition rather than a second way for
+    /// a map to mean something.
+    ///
+    /// The expanded rows are folded into [`Self::map`] rather than kept beside it, because every
+    /// reader downstream indexes `map.placements` in step with [`Self::y`]. What is *not* done is
+    /// writing them back to disk: `Map::stamps` is what the file holds, and
+    /// `emerge_core::composition::expand` is the only thing that turns it into rows.
+    pub fn with_compositions(
+        library: Library,
+        mut map: Map,
+        vocab: Vocabularies,
+        compositions: &[emerge_core::composition::Composition],
+    ) -> Result<EmergeWorld, String> {
         let masks = library.resolve(&vocab)?;
+        // **Expand first, then validate once.** Validating before expansion checks a map that is not
+        // the map — `Map::validate` resolves `locations[].props` against `placements`, so a
+        // map-level location over a stamped row ("clean up `mess_a/table`") was refused for naming a
+        // placement that does not exist *yet*. Expansion is what makes the map whole; validation is
+        // the question asked of a whole map, and asking it twice about two different maps is two
+        // answers where the schema promises one.
+        if !map.stamps.is_empty() {
+            let expanded = emerge_core::composition::expand(&map, &map.stamps, compositions, &library)
+                .map_err(|e| format!("map `{}`: {e}", map.name))?;
+            map.placements.extend(expanded.placements);
+            map.locations.extend(expanded.locations);
+        }
         map.validate()?;
         let known: Vec<&str> = library.descriptors.iter().map(|d| d.id.as_str()).collect();
         let missing: Vec<&str> = map

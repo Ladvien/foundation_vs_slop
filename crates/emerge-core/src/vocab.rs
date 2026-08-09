@@ -185,6 +185,25 @@ pub struct Vocabularies {
     /// a scene that silently never starts.
     #[serde(default)]
     pub capabilities: Vocabulary,
+    /// What a lattice cell **presents to whatever abuts it** — `"wall"`, `"door"`, `"open"`.
+    ///
+    /// Closed for the reason every axis here is closed, but the cost of leaving it open is higher than
+    /// elsewhere: `crate::adjacency` matches these by **equality**, so a typo does not read as a wrong
+    /// token, it reads as a token that matches nothing. The seam simply reports a fault the author
+    /// cannot account for — and once these feed a solver, as an unexplained contradiction.
+    ///
+    /// Empty means a project authors no edge tokens. That is not permissive: a cell carrying one is
+    /// then refused, naming the empty axis, which is the honest reading of "this project has not
+    /// decided what its tiles present".
+    #[serde(default)]
+    pub edge: Vocabulary,
+    /// A role an **item** may occupy on a piece — `"shelf-item"`, `"plate"`.
+    ///
+    /// Distinct from `capabilities`, which is about people, and from `surfaces`, which is about what
+    /// holds what up. Nothing in the shipped corpus authors one yet; the axis exists so that the first
+    /// one has to be declared rather than invented at a keyboard.
+    #[serde(default)]
+    pub anchor: Vocabulary,
 }
 
 /// A descriptor's tokens, resolved to masks. Cheap to compare, which is the point.
@@ -197,6 +216,10 @@ pub struct Masks {
     pub provides: u64,
     /// The surface class this piece **needs** to rest on, if it rests on one at all.
     pub requires: u64,
+    /// Every distinct `edge` token anywhere in this piece's lattice, OR'd together.
+    pub edges: u64,
+    /// Every distinct `anchor` token anywhere in this piece's lattice, OR'd together.
+    pub anchors: u64,
 }
 
 /// What one actor can do, as a bitmask over the `capabilities` axis.
@@ -283,12 +306,35 @@ impl Vocabularies {
             _ => 0,
         };
 
+        // **The lattice's own two axes.** Gathered from the cells rather than a list on the
+        // descriptor, because that is where they are authored — one token per cell, many cells. The
+        // mask is the OR of them, which is the useful question ("does this piece say anything about
+        // `door`") and the only one that fits a `u64`.
+        let mut cell_tokens: Vec<String> = Vec::new();
+        let mut anchor_tokens: Vec<String> = Vec::new();
+        if let Some(g) = &d.subgrid {
+            for c in &g.cells {
+                if let Some(e) = &c.edge
+                    && !cell_tokens.contains(e)
+                {
+                    cell_tokens.push(e.clone());
+                }
+                if let Some(a) = &c.anchor
+                    && !anchor_tokens.contains(a)
+                {
+                    anchor_tokens.push(a.clone());
+                }
+            }
+        }
+
         Ok(Masks {
             kind: axis(&self.kind, "kind", &d.kind)?,
             effects: axis(&self.effects, "effects", &d.effects)?,
             look: axis(&self.look, "look", &d.look)?,
             provides: axis(&self.surfaces, "surfaces", &d.offers.surfaces)?,
             requires,
+            edges: axis(&self.edge, "edge", &cell_tokens)?,
+            anchors: axis(&self.anchor, "anchor", &anchor_tokens)?,
         })
     }
 
@@ -400,6 +446,11 @@ mod tests {
                 ("stamina-recharge", "restores stamina when used"),
             ]),
             look: Vocabulary::of(&[("brown", "brown"), ("metal", "bare metal")]),
+            edge: Vocabulary::of(&[
+                ("wall", "a solid run-face"),
+                ("door", "an opening that must stay clear"),
+            ]),
+            anchor: Vocabulary::of(&[("shelf-item", "something small standing on a shelf")]),
             surfaces: Vocabulary::of(&[
                 ("support", "any support top"),
                 ("worktop", "a desk or table top"),

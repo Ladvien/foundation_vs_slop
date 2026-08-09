@@ -54,7 +54,7 @@ use crate::wfc::{E, N, S, W};
 /// Yaws are authored in 15° steps (`emerge-mapper`'s `YAW_STEP`) and stored as `f32`, so a value that
 /// went through a serialize/parse round trip can be a hair off. A thousandth of a degree is far below
 /// anything an author can express and far above `f32`'s error at these magnitudes.
-const SQUARE_EPSILON: f32 = 1e-3;
+pub(crate) const SQUARE_EPSILON: f32 = 1e-3;
 
 /// How far inside a cell boundary a piece's edge may land and still count as on it, as a fraction of
 /// a cell.
@@ -63,7 +63,7 @@ const SQUARE_EPSILON: f32 = 1e-3;
 /// depending on where it sits, and a seam that disappears because two `f32`s rounded opposite ways is
 /// the kind of fault an author cannot see the cause of. A thousandth of a cell is half a millimetre
 /// at the shipped size — far below anything authored, far above `f32`'s error here.
-const EDGE_EPSILON: f32 = 1e-3;
+pub(crate) const EDGE_EPSILON: f32 = 1e-3;
 
 /// **Which quarter turn this yaw is**, or a refusal naming the piece and the angle.
 ///
@@ -139,7 +139,7 @@ pub struct Placed3 {
 ///
 /// Clamped rather than refused: callers sample the centre of a step inside the overlap, so a value
 /// lands outside only through floating point, and the honest answer there is the edge cell.
-fn index(v: f32, (lo, hi): (f32, f32), n: u32) -> u32 {
+pub(crate) fn index(v: f32, (lo, hi): (f32, f32), n: u32) -> u32 {
     if n == 0 || hi <= lo {
         return 0;
     }

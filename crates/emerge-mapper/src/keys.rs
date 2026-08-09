@@ -41,6 +41,8 @@ pub enum Context {
     Tiles,
     /// The animation bench.
     Anim,
+    /// The composition tab — reusable groups, their derived interface, and what is stale.
+    Compose,
     /// A text field is taking raw keys. Overlaps everything, and suppresses everything.
     Typing,
 }
@@ -53,11 +55,12 @@ impl Context {
             // Typing shadows every other context by construction — that is what makes it the guard.
             (Typing, _) | (_, Typing) => true,
             (Global, _) | (_, Global) => true,
-            (Map, Map) | (Tiles, Tiles) | (Anim, Anim) => true,
+            (Map, Map) | (Tiles, Tiles) | (Anim, Anim) | (Compose, Compose) => true,
             // The three tabs are never live together — which is what lets them reuse each other's
             // letters freely. `the_key_space_has_no_collisions` polices that they only do so here.
             (Map, Tiles) | (Tiles, Map) => false,
             (Map, Anim) | (Anim, Map) | (Tiles, Anim) | (Anim, Tiles) => false,
+            (Compose, _) | (_, Compose) => false,
         }
     }
 }
@@ -70,6 +73,14 @@ pub enum Action {
     MapTab,
     TilesTab,
     AnimTab,
+    ComposeTab,
+    /// Walk the composition list.
+    ComposePrev,
+    ComposeNext,
+    /// Arm the selected composition on the map, so a click stamps it.
+    ComposeArm,
+    /// Write down what this group's members present now, so later drift is measurable.
+    ComposeRecord,
     Save,
     Undo,
     Redo,
@@ -108,6 +119,8 @@ pub enum Action {
     Cancel,
     OwnToggle,
     Generate,
+    /// Fill from what the kit's tiles DECLARE, rather than from what the map already shows.
+    GenerateDeclared,
     PanForward,
     PanBack,
     PanLeft,
@@ -259,6 +272,7 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::MapTab, KeyCode::Digit1, false, Context::Global, "1", "map tab"),
     b(Action::TilesTab, KeyCode::Digit2, false, Context::Global, "2", "tiles tab"),
     b(Action::AnimTab, KeyCode::Digit3, false, Context::Global, "3", "animation tab"),
+    b(Action::ComposeTab, KeyCode::Digit4, false, Context::Global, "4", "compose tab"),
     // **The modified tab key: go there, and take this with you.**
     //
     // Beside `2` because it is the same destination with a subject — `Cmd+2` reads as "the Tiles tab,
@@ -341,7 +355,11 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::Cancel, KeyCode::Escape, false, Context::Map, "Esc", "put back / stop / clear"),
     b(Action::RenameMap, KeyCode::KeyN, false, Context::Map, "N", "rename map"),
     b(Action::OwnToggle, KeyCode::KeyO, false, Context::Map, "O", "pin / unpin"),
-    b(Action::Generate, KeyCode::KeyG, false, Context::Map, "G", "continue the layout"),
+    // **Two sources, one row.** `rows()` collapses adjacent bindings sharing a `does` string, so the
+    // Map context stays at its twelve-row ceiling while gaining a verb. The two are not a fallback
+    // pair — each either produces a grammar or refuses by name.
+    bs(Action::Generate, KeyCode::KeyG, false, false, Context::Map, "G", "continue the layout / Shift: from the kit's tokens"),
+    bs(Action::GenerateDeclared, KeyCode::KeyG, false, true, Context::Map, "G", "continue the layout / Shift: from the kit's tokens"),
 
     // **The camera is Global — pan included.** This briefly moved to `Context::Map` to free
     // `W, A, S, D` for the Tiles lattice cursor, on the argument that panning off a staged tile has
@@ -430,6 +448,17 @@ pub const BINDINGS: &[Binding] = &[
 
     // Enter is the Tiles tab's Accept too — same legal cross-context share as the arrows above.
     b(Action::AdoptMeasured, KeyCode::Enter, false, Context::Anim, "Enter", "adopt measured values into rigs.ron"),
+
+    // ── Compose ──────────────────────────────────────────────────────────────────────────────────
+    //
+    // **Deliberately reusing Tiles' and Anim's letters.** The three tabs are never live at once, and
+    // `Context::overlaps` says so, so `up`/`down`/`Enter` mean walk-walk-commit in all three rather
+    // than being three arbitrary triples an author has to learn apart. A flat uniqueness rule would
+    // force a worse binding here, which is the whole reason contexts exist.
+    b(Action::ComposePrev, KeyCode::ArrowUp, false, Context::Compose, "up", "walk the groups"),
+    b(Action::ComposeNext, KeyCode::ArrowDown, false, Context::Compose, "down", "walk the groups"),
+    b(Action::ComposeArm, KeyCode::Enter, false, Context::Compose, "Enter", "arm this group — the map tab stamps it"),
+    b(Action::ComposeRecord, KeyCode::KeyR, false, Context::Compose, "R", "record what this group's members present now"),
     // One row, two chords, same as the Map and Tiles undo pairs.
     bs(Action::UndoBench, KeyCode::KeyZ, true, false, Context::Anim, "Z", "undo / redo the last write"),
     bs(Action::RedoBench, KeyCode::KeyZ, true, true, Context::Anim, "Z", "undo / redo the last write"),
@@ -781,10 +810,12 @@ mod tests {
     fn every_action_has_exactly_one_binding() {
         let actions = [
             Action::NextTab, Action::MapTab, Action::TilesTab, Action::AnimTab,
+            Action::ComposeTab, Action::ComposePrev, Action::ComposeNext, Action::ComposeArm,
+            Action::ComposeRecord,
             Action::Save, Action::Undo, Action::Redo, Action::Shortcuts, Action::EditTile,
             Action::AimLeft, Action::AimRight, Action::AimReset, Action::Cancel,
             Action::Fill, Action::Remove, Action::MoveMode, Action::CloneMode, Action::RenameMap,
-            Action::OwnToggle, Action::Generate,
+            Action::OwnToggle, Action::Generate, Action::GenerateDeclared,
             Action::PanForward, Action::PanBack, Action::PanLeft, Action::PanRight,
             Action::TurnViewLeft, Action::TurnViewRight,
             Action::PrevCandidate, Action::NextCandidate, Action::TypeId, Action::CycleMount,

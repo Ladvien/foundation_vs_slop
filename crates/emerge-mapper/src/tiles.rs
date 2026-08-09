@@ -7,10 +7,15 @@
 //!
 //! # The scan is lazy and says how big it was
 //!
-//! This project ships 360 meshes and 41 are in the library, so the candidate list is around 319. That
-//! is a second of file reading, and doing it at launch would make every session pay for a mode most
-//! of them never open. It happens on the first Tab, and the panel reports what it found — a list of
-//! 319 with no count is a list nobody trusts they have seen the end of.
+//! A project ships far more meshes than its library defines, so the candidate list is long and the
+//! scan is a second of file reading. Doing it at launch would make every session pay for a mode most
+//! of them never open, so it happens on the first Tab and the panel reports what it found — a long
+//! list with no count is a list nobody trusts they have seen the end of.
+//!
+//! **No number appears in this note on purpose.** Three module notes in this crate each stated the
+//! size of the same library, and all three were wrong by the time anyone read them; the panel had
+//! always computed its own. Counts belong to `emerge_core::census`, which derives them from the
+//! catalog, and to nothing else.
 //!
 //! # Findings are shown with their fix
 //!
@@ -38,18 +43,21 @@ pub enum Mode {
     Tiles,
     /// Preview and tune a rig's clips.
     Anim,
+    /// Build reusable groups, and see what they present and what has gone stale under them.
+    Compose,
 }
 
 impl Mode {
     /// The tabs, in the order they are shown. Map first: it is the job, and configuring tiles is
     /// what you do in order to do it.
-    pub const ALL: [Mode; 3] = [Mode::Map, Mode::Tiles, Mode::Anim];
+    pub const ALL: [Mode; 4] = [Mode::Map, Mode::Tiles, Mode::Anim, Mode::Compose];
 
     pub fn label(self) -> &'static str {
         match self {
             Mode::Map => "MAP",
             Mode::Tiles => "TILES",
             Mode::Anim => "ANIM",
+            Mode::Compose => "COMPOSE",
         }
     }
 
@@ -62,6 +70,7 @@ impl Mode {
             Mode::Map => crate::keys::Action::MapTab,
             Mode::Tiles => crate::keys::Action::TilesTab,
             Mode::Anim => crate::keys::Action::AnimTab,
+            Mode::Compose => crate::keys::Action::ComposeTab,
         }
     }
 
@@ -73,6 +82,7 @@ impl Mode {
             Mode::Map => crate::keys::Context::Map,
             Mode::Tiles => crate::keys::Context::Tiles,
             Mode::Anim => crate::keys::Context::Anim,
+            Mode::Compose => crate::keys::Context::Compose,
         }
     }
 }
@@ -85,7 +95,7 @@ pub struct ImportState {
     /// also true of a directory with nothing new in it — and those two states want different words.
     pub scanned: bool,
     /// What the last scan found. **Persistent**, and separate from [`Self::status`] on purpose: the
-    /// first version had one field, so "319 mesh(es) not in the library" was replaced by "layer: on
+    /// first version had one field, so "N mesh(es) not in the library" was replaced by "layer: on
     /// support" the moment anyone did anything, and the one number that says whether you have seen
     /// the whole list was gone for the rest of the session.
     pub summary: String,
@@ -248,7 +258,10 @@ fn stage_camera(
                 rig.goal_yaw = yaw;
             }
         }
-        Mode::Map => {
+        // **Compose keeps the map's camera.** The tab is a list and a detail pane over groups that
+        // land in *this* map, and arming one here is followed immediately by stamping it there — a
+        // camera that jumped to a stage and back would make that one gesture look like two places.
+        Mode::Map | Mode::Compose => {
             if let Some(was) = saved.0.take() {
                 rig.focus = was.focus;
                 rig.height = was.height;
@@ -2282,6 +2295,10 @@ pub struct MapRoot;
 #[derive(Component)]
 pub struct AnimRoot;
 
+/// Root of a compose panel.
+#[derive(Component)]
+pub struct ComposeRoot;
+
 /// One tag chip: which axis, and which token.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 struct TagChip {
@@ -3181,6 +3198,30 @@ fn take_out_of_library(id: &str, project: &mut Project) -> Result<std::path::Pat
             "`{id}` is used by {used} placement(s) in this map — remove those first"
         ));
     }
+    // **Compositions are the second referrer of a descriptor id, and they are stricter than a map.**
+    // `policy::layered_library` hard-refuses a composition whose member descriptor is missing, so
+    // writing this file without the entry does not produce a map with a hole — it produces a project
+    // that neither the editor nor the game can open at all. The map check above exists for exactly
+    // this reason and had one list to look at when it was written; it now has two.
+    let groups: Vec<&str> = project
+        .compositions
+        .compositions
+        .iter()
+        .filter(|c| {
+            c.members.iter().any(|m| {
+                matches!(&m.body, emerge_core::composition::Body::Descriptor { id: d, .. } if d == id)
+            })
+        })
+        .map(|c| c.id.as_str())
+        .collect();
+    if !groups.is_empty() {
+        return Err(format!(
+            "`{id}` is a member of {}: {}. Removing it would leave `compositions.ron` naming a \
+             descriptor nothing defines, and the project would stop opening — edit the group first.",
+            if groups.len() == 1 { "the group" } else { "the groups" },
+            groups.join(", ")
+        ));
+    }
     let Some(at) = project.measured.descriptors.iter().position(|d| d.id == id) else {
         return Err(format!("`{id}` is not in the measured layer"));
     };
@@ -3705,20 +3746,21 @@ fn apply_mode(
     // **One query with `Has`, not one per marker.** Three disjoint queries would each need `Without`
     // of both others, and a fourth tab would need three more — this asks each panel which tab it
     // belongs to instead.
-    mut panels: Query<(&mut Node, Has<MapRoot>, Has<TilesRoot>, Has<AnimRoot>)>,
+    mut panels: Query<(&mut Node, Has<MapRoot>, Has<TilesRoot>, Has<AnimRoot>, Has<ComposeRoot>)>,
 ) {
     if !mode.is_changed() {
         return;
     }
-    for (mut node, is_map, is_tiles, is_anim) in &mut panels {
+    for (mut node, is_map, is_tiles, is_anim, is_compose) in &mut panels {
         let mine = match *mode {
             Mode::Map => is_map,
             Mode::Tiles => is_tiles,
             Mode::Anim => is_anim,
+            Mode::Compose => is_compose,
         };
         // A panel belonging to no tab is not ours to touch — the tab strip and the cost readout are
         // both unmarked and must stay visible in every mode.
-        if !(is_map || is_tiles || is_anim) {
+        if !(is_map || is_tiles || is_anim || is_compose) {
             continue;
         }
         let want = if mine { Display::Flex } else { Display::None };
@@ -4140,7 +4182,7 @@ fn refresh_lines(
 /// Rebuild the candidate list.
 ///
 /// Wholesale rather than diffed: it changes on a rescan and on nothing else, and a diffing rebuild of
-/// a 319-row list would be more code than the thing it saves.
+/// a list this long would be more code than the thing it saves.
 fn rebuild_candidates(
     mut commands: Commands,
     state: Res<ImportState>,
@@ -4222,7 +4264,7 @@ fn rebuild_candidates(
                 ));
                 return;
             }
-            // **Grouped by pack.** 319 rows is a list you scroll past; grouped by where they came
+            // **Grouped by pack.** A flat list this long is one you scroll past; grouped by where they came
             // from it is a dozen headings, and an author importing a kit wants that kit rather than
             // an alphabet.
             //
@@ -5470,6 +5512,8 @@ mod write_library_tests {
         };
         let library = policy.apply(&measured).unwrap_or_else(|e| panic!("{e}"));
         Project {
+            // A test project stamps nothing; empty is the same state as a file with none in it.
+            compositions: emerge_core::composition::Compositions::default(),
             root: dir.to_path_buf(),
             emerge_dir: dir.to_path_buf(),
             library_path: dir.join("library.ron"),

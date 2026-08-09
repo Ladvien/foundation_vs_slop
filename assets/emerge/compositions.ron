@@ -1,0 +1,91 @@
+(
+    version: 1,
+    note: Some("Reusable groups this project can stamp into a map. A map holds a REFERENCE to one of these, never the rows it stands for — so editing a group here changes every map that stamped it. THIS FILE CARRIES NO `//` COMMENTS ON PURPOSE: the Compose tab's record verb reserializes it, which deletes them — the same `to_string_pretty` bake that lost 279 comments on 2026-07-16, recorded in map.rs's module note. Every explanation lives in a `note` field, where no serializer can lose it. See crates/emerge-core/src/composition.rs."),
+    compositions: [
+        (
+            id: "break_table",
+            envelope: Anchored,
+            note: Some("A mess table laid for two — the smallest thing worth stamping twice. `Anchored` because it claims no tile: it is furniture standing somewhere, not a module that has to meet a wall, so it has no boundary for anything to abut and therefore no derived edge interface. A `Bounded` group is the other kind. Members are stored sorted by id, and that is enforced rather than conventional — without it the same group has several encodings, and two authors building the same thing produce diffs that differ without meaning to."),
+            members: [
+                (
+                    id: "chair_north",
+                    body: Descriptor(
+                        id: "dining_chair",
+                        tip: (0, 0),
+                        on: None,
+                        patch: None,
+                    ),
+                    at: (0.0, -1.0),
+                    yaw: 180.0,
+                    lift: 0.0,
+                    of_fingerprint: Some(8120528109500030770),
+                    note: Some("Turned to face the table it is drawn up to, not the room."),
+                ),
+                (
+                    id: "chair_south",
+                    body: Descriptor(
+                        id: "dining_chair",
+                        tip: (0, 0),
+                        on: None,
+                        patch: None,
+                    ),
+                    at: (0.0, 1.0),
+                    yaw: 0.0,
+                    lift: 0.0,
+                    of_fingerprint: Some(8120528109500030770),
+                    note: None,
+                ),
+                (
+                    id: "table",
+                    body: Descriptor(
+                        id: "table",
+                        tip: (0, 0),
+                        on: None,
+                        patch: None,
+                    ),
+                    at: (0.0, 0.0),
+                    yaw: 0.0,
+                    lift: 0.0,
+                    of_fingerprint: Some(5971031338572550718),
+                    note: Some("The anchor the two chairs sit around. `on: None` on every member means each asks the map it lands in for a host — none of them rests on a sibling, which is what `on: Some(<member>)` would say."),
+                ),
+            ],
+            locations: [
+                (
+                    id: "meal",
+                    props: [
+                        "table",
+                        "chair_north",
+                        "chair_south",
+                    ],
+                    interactions: [
+                        (
+                            verb: "eat",
+                            roles: [
+                                (
+                                    name: "diner",
+                                    kind: Supporting,
+                                    min: 1,
+                                    max: 2,
+                                    socket_role: Some("diner"),
+                                    requires: [
+                                        "eat",
+                                    ],
+                                ),
+                            ],
+                            guard: None,
+                            effects: [
+                                Restore(
+                                    drive: "hunger",
+                                    rate: 0.15,
+                                ),
+                            ],
+                            note: Some("Both chairs are Supporting rather than Main: a diner alone at a table is a scene, and refusing to start it would leave the room empty. Note that no shipped descriptor offers a socket, so `socket_role: \"diner\"` resolves to no seats yet — authoring the first one is what closes that loop, and src/emerge_map.rs asserts the empty case so it goes red when somebody does."),
+                        ),
+                    ],
+                    note: Some("`props` name MEMBER ids; stamping repoints them to the rows that stamp produced, so two stamps of this group are two independent locations that cannot be confused. One affordance with two seats, not two affordances with one each — which is the reason these three pieces are a group at all."),
+                ),
+            ],
+        ),
+    ],
+)

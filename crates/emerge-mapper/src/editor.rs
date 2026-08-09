@@ -332,6 +332,17 @@ enum Undo {
     /// sub-inverses in reverse order — the standard composition rule, and what keeps the enum closed
     /// under inversion with no new mechanism.
     Group { ops: Vec<Undo> },
+    /// **Remove the last `count` stamps** — the inverse of stamping a group.
+    ///
+    /// Its own list, not `Added`: stamps live in `map.stamps`, and a map that expands them is a
+    /// different list from the one an author placed into by hand. Folding the two would make one
+    /// Ctrl+Z sometimes take back a crate and sometimes a whole nurse station.
+    Stamped { count: usize },
+    /// Put stamps back at their original indices — the inverse of [`Undo::Stamped`], on exactly the
+    /// argument [`Undo::RemovedMany`] makes about rows.
+    UnstampedMany {
+        items: Vec<(usize, Box<emerge_core::composition::Stamped>)>,
+    },
     /// Put a placement's pin back, reason included. Its own inverse.
     Pinned {
         index: usize,
@@ -574,7 +585,12 @@ impl Plugin for EditorPlugin {
                     drive_target_marker.run_if(in_map_mode),
                     hide_carried.run_if(in_map_mode),
                     drive_ghost.run_if(in_map_mode),
-                    fade_ghost,
+                    // **Not gated on the mode.** The stamped rows are part of the map, so they stay
+                    // drawn while an author is on Tiles or Compose looking at the group that made
+                    // them — a world that empties out when you change tabs would read as the stamp
+                    // having failed.
+                    // Nested: Bevy 0.19 caps an `add_systems` tuple at 20 and this one is full.
+                    (redraw_stamps, fade_ghost),
                     style_rows,
                     refresh_status,
                     rebuild_palette.run_if(
@@ -1320,10 +1336,19 @@ fn refresh_status(
             Field::Brush => (brush.to_owned(), TEXT),
             Field::Yaw => (format!("{} deg", state.brush_yaw), TEXT),
             Field::Map => (
-                if project.dirty {
-                    format!("{} placed, unsaved", project.map.placements.len())
-                } else {
-                    format!("{} placed", project.map.placements.len())
+                // Counted by `emerge_core::census`, never here — see
+                // `tests/census_is_the_one_counter.rs` for why a rendered count is the one that
+                // drifts. Stamps are named separately because a stamp is one reference however many
+                // rows it stands for, and folding them into "placed" would make the number disagree
+                // with what is on screen.
+                {
+                    let counted = emerge_core::census::of_map(&project.map);
+                    let stamps = match counted.stamps {
+                        0 => String::new(),
+                        n => format!(", {n} stamped"),
+                    };
+                    let unsaved = if project.dirty { ", unsaved" } else { "" };
+                    format!("{} placed{stamps}{unsaved}", counted.placements)
                 },
                 if project.dirty { ACCENT } else { TEXT },
             ),
@@ -2338,11 +2363,14 @@ fn drive_removal(
 /// rule exists to prevent. Seeding past the largest `@n` in the file makes minted ids unique by
 /// construction; ids with no `@n` tail (hand-authored names) cannot collide with minted ones.
 pub fn next_id_after(map: &emerge_core::map::Map) -> u32 {
-    map.placements
-        .iter()
-        .filter_map(|p| p.id.rsplit_once('@').and_then(|(_, n)| n.parse::<u32>().ok()))
-        .max()
-        .unwrap_or(0)
+    // **Both lists, because both are minted from this one counter.** `stamp_here` names a stamp
+    // `<short>@<n>` from the same `next_id` a placement uses, so scanning only `placements` seeds the
+    // counter below every stamp id the file already carries — and the next stamp collides with one,
+    // which `Map::validate` then refuses. One mint, one high-water mark.
+    let suffix = |id: &str| id.rsplit_once('@').and_then(|(_, n)| n.parse::<u32>().ok());
+    let placements = map.placements.iter().filter_map(|p| suffix(&p.id));
+    let stamps = map.stamps.iter().filter_map(|st| suffix(&st.id));
+    placements.chain(stamps).max().unwrap_or(0)
 }
 
 fn spawn_existing(
@@ -2401,6 +2429,7 @@ fn drive_place(
     anchor: Res<FineAnchor>,
     mut drag: ResMut<PlaceDrag>,
     mut gizmos: Gizmos,
+    mut compose: ResMut<crate::compose::ComposeState>,
 ) {
     // Placing is one tool among three, and a click belongs to whichever is armed. While removal is
     // armed a click removes and must not also place, or a box dragged over a crowded corner would
@@ -2433,6 +2462,24 @@ fn drive_place(
 
     // **Nothing armed places nothing** — and takes no drag with it, so a press-and-sweep over the map
     // with the palette cleared leaves no box hanging on screen waiting for a release.
+
+    // **An armed group answers the click before the brush does.** Compose's arm and the palette's
+    // brush are two ways of saying what the next click puts down; letting both fire would place a
+    // piece *and* a group in one gesture. Arming a group is the later, more deliberate act, so it
+    // wins — and a group stamps one at a time, never by the box, because a dragged rectangle of
+    // nurse stations is not a gesture anybody makes by accident.
+    if compose.armed.is_some() {
+        if drag.from.is_some() {
+            drag.from = None;
+        }
+        if mouse.just_released(MouseButton::Left) {
+            let free = keys::mod_held(&keyboard);
+            let at = map_at(&project, hit, free, &anchor);
+            stamp_here(&mut project, &mut state, &mut compose, at);
+        }
+        return;
+    }
+
     let Some(d) = state
         .brush
         .and_then(|ix| project.library.descriptors.get(ix))
@@ -2547,6 +2594,8 @@ fn drive_place(
         return;
     }
 
+
+
     state.next_id += 1;
     let id = format!("{}@{}", short_id(&d.id), state.next_id);
 
@@ -2584,6 +2633,196 @@ fn drive_place(
         Some(host) => format!("placed {id} on {host}{how}"),
         None => format!("placed {id} at ({:.2}, {:.2}){how}", at.0, at.1),
     };
+}
+
+/// **Put an armed group down** — one line in `map.stamps`, never the rows it stands for.
+///
+/// This is the verb the whole reference model was chosen for. What lands in the file is a reference,
+/// so editing the group later changes this stamp and every other one; baking the rows here would have
+/// made each stamp an independent copy that silently stopped tracking its source.
+///
+/// It refuses whole. `expand` is asked first, against a map that already carries the new stamp, and
+/// if any member has nowhere to rest the stamp never joins the list — the same rule a single
+/// placement follows, applied to a group.
+fn stamp_here(
+    project: &mut Project,
+    state: &mut EditorState,
+    compose: &mut crate::compose::ComposeState,
+    at: (f32, f32),
+) {
+    let Some(of) = compose.armed.clone() else {
+        return;
+    };
+    let comps = project.compositions.compositions.clone();
+    if !comps.iter().any(|c| c.id == of) {
+        state.status = format!("`{of}` is armed but the project no longer defines it");
+        compose.armed = None;
+        return;
+    }
+    state.next_id += 1;
+    let id = format!("{}@{}", short_id(&of), state.next_id);
+
+    let stamped = emerge_core::composition::Stamped {
+        id: id.clone(),
+        of: of.clone(),
+        at,
+        yaw: state.brush_yaw,
+        ..Default::default()
+    };
+    // **Tried before it is kept.** A trial map rather than a push-then-pop, so a refusal cannot leave
+    // the real map holding a stamp that does not resolve.
+    let mut trial = project.map.clone();
+    trial.stamps.push(stamped.clone());
+    if let Err(e) = emerge_core::composition::expand(&trial, &trial.stamps, &comps, &project.library)
+    {
+        state.status = format!("cannot stamp `{of}` here: {e}");
+        return;
+    }
+    project.map.stamps.push(stamped);
+    project.dirty = true;
+    state.record(Undo::Stamped { count: 1 });
+    state.status = format!("stamped `{of}` as {id}");
+}
+
+/// Draw every stamped row, and nothing else.
+///
+/// **Rebuilt wholesale from `map.stamps` whenever it changes.** A diffing version would be faster and
+/// would be a second opinion about what is on screen; this way the picture is a pure function of the
+/// list, which is the same contract `Placement` gives the hand-placed half.
+///
+/// These entities deliberately carry **no `Placement`**, so the remove, move and clone tools cannot
+/// see them at all. That is the non-override principle made structural rather than checked: a higher
+/// scope must not rewrite what a lower one authored, and here it cannot reach it.
+fn redraw_stamps(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    project: Res<Project>,
+    mut state: ResMut<EditorState>,
+    drawn: Query<Entity, With<StampedPiece>>,
+) {
+    if !project.is_changed() {
+        return;
+    }
+    for e in &drawn {
+        commands.entity(e).despawn();
+    }
+    if project.map.stamps.is_empty() {
+        return;
+    }
+    let expanded = match emerge_core::composition::expand(
+        &project.map,
+        &project.map.stamps,
+        &project.compositions.compositions,
+        &project.library,
+    ) {
+        Ok(e) => e,
+        // Loud, and only once per change: a map whose stamps stopped resolving is a map that will not
+        // load in the game either, and an empty patch of floor is not how anybody should find out.
+        Err(e) => {
+            state.status = format!("stamps do not resolve: {e}");
+            error!("emerge-mapper: {e}");
+            return;
+        }
+    };
+    // The expanded rows are not in `map.placements`, so their heights cannot come from the map's own
+    // resolve. A scratch map carrying both answers the question `stack::resolve_y` was written for.
+    let mut scratch = project.map.clone();
+    scratch.placements.extend(expanded.placements.iter().cloned());
+    // Loud. A silent return here is the failure mode this editor's own notes call the worst it had:
+    // an empty patch of floor where a group should be, with nothing anywhere saying why.
+    let ys = match emerge_core::stack::resolve_y(&scratch, &project.library) {
+        Ok(ys) => ys,
+        Err(e) => {
+            state.status = format!("stamped rows have no height: {e}");
+            error!("emerge-mapper: {e}");
+            return;
+        }
+    };
+    let first = project.map.placements.len();
+    let mut drawn = 0usize;
+    for (k, p) in expanded.placements.iter().enumerate() {
+        let Some(base) = project.library.get(&p.descriptor) else {
+            error!("emerge-mapper: stamped row `{}` names descriptor `{}`, which the library does not define", p.id, p.descriptor);
+            continue;
+        };
+        let d = match &p.patch {
+            Some(patch) => base.patched_with(patch),
+            None => base.clone(),
+        };
+        let Some(&y) = ys.get(first + k) else { continue };
+        if let Some(e) = spawn_piece(
+            &mut commands,
+            &assets,
+            &d,
+            p.at,
+            p.yaw,
+            p.tip,
+            project.map.origin,
+            y,
+        ) {
+            commands.entity(e).insert(StampedPiece);
+            drawn += 1;
+        }
+    }
+    let counted = emerge_core::census::of_map(&project.map);
+    info!(
+        "emerge-mapper: redrew {drawn} stamped row(s) from {} stamp(s)",
+        counted.stamps
+    );
+}
+
+/// A drawn row belonging to a stamp. Carries no id: the stamp list is the truth and this is a
+/// picture of it, rebuilt whole.
+#[derive(Component)]
+struct StampedPiece;
+
+/// Undo and redo, reachable from `tests/headless.rs`.
+///
+/// One-shot systems rather than re-implemented bodies: `undo` and `redo` are the same function
+/// reading opposite stacks, and a test that drove a copy of them would pass while the real pair was
+/// broken. `RunSystemError` is surfaced rather than swallowed — a test whose driver silently did
+/// nothing is a test that always passes.
+pub fn undo_for_test(world: &mut World) {
+    use bevy::ecs::system::RunSystemOnce;
+    world
+        .run_system_once(
+            |mut commands: Commands,
+             assets: Res<AssetServer>,
+             mut project: ResMut<Project>,
+             mut state: ResMut<EditorState>,
+             placed: Query<(Entity, &Placement)>| {
+                undo(&mut commands, &assets, &mut project, &mut state, &placed);
+            },
+        )
+        .unwrap_or_else(|e| panic!("undo_for_test: {e}"));
+}
+
+pub fn redo_for_test(world: &mut World) {
+    use bevy::ecs::system::RunSystemOnce;
+    world
+        .run_system_once(
+            |mut commands: Commands,
+             assets: Res<AssetServer>,
+             mut project: ResMut<Project>,
+             mut state: ResMut<EditorState>,
+             placed: Query<(Entity, &Placement)>| {
+                redo(&mut commands, &assets, &mut project, &mut state, &placed);
+            },
+        )
+        .unwrap_or_else(|e| panic!("redo_for_test: {e}"));
+}
+
+/// The stamp verb, reachable from `tests/headless.rs`.
+///
+/// The lib/bin split exists so tests can drive the real thing; this is that split applied to one
+/// function, so the test exercises the call the click makes rather than a re-implementation of it.
+pub fn stamp_here_for_test(
+    project: &mut Project,
+    state: &mut EditorState,
+    compose: &mut crate::compose::ComposeState,
+    at: (f32, f32),
+) {
+    stamp_here(project, state, compose, at);
 }
 
 /// The tail of a descriptor id, so a generated placement id reads as `crate@7` rather than
@@ -2844,6 +3083,16 @@ fn keys(
 
     // **G continues the layout.** Learn the grammar from what is already placed, then fill the free
     // cells with more of it — see `emerge_core::grammar`.
+    if keys::just_pressed(&keyboard, live.0, Action::GenerateDeclared) {
+        generate_from(
+            &mut commands,
+            &assets,
+            &mut project,
+            &mut state,
+            &placed,
+            Source::Declared,
+        );
+    }
     if keys::just_pressed(&keyboard, live.0, Action::Generate) {
         generate(&mut commands, &assets, &mut project, &mut state, &placed);
         return;
@@ -3232,6 +3481,36 @@ fn apply(
             }
             inverses.reverse();
             Undo::Group { ops: inverses }
+        }
+        // **Stamps come off the list, and the drawn rows follow.** The entities are not despawned
+        // here: `redraw_stamps` watches `map.stamps` and rebuilds the whole stamped set from it, so
+        // there is one place that turns a stamp list into pictures rather than two that could
+        // disagree about what is on screen.
+        Undo::Stamped { count } => {
+            let n = project.map.stamps.len();
+            let from = n.saturating_sub(count);
+            let items: Vec<(usize, Box<emerge_core::composition::Stamped>)> = project
+                .map
+                .stamps
+                .drain(from..)
+                .enumerate()
+                .map(|(k, st)| (from + k, Box::new(st)))
+                .collect();
+            if items.is_empty() {
+                return None;
+            }
+            state.status = format!("took back {} stamp(s)", items.len());
+            Undo::UnstampedMany { items }
+        }
+        Undo::UnstampedMany { items } => {
+            // Ascending by index, so each lands where it came from — `RemovedMany`'s rule.
+            let count = items.len();
+            for (at, st) in items {
+                let at = at.min(project.map.stamps.len());
+                project.map.stamps.insert(at, *st);
+            }
+            state.status = format!("put {count} stamp(s) back");
+            Undo::Stamped { count }
         }
         Undo::Pinned {
             index,
@@ -4078,6 +4357,21 @@ fn pin_reason_keys(
 }
 
 /// **Continue the author's arrangement.** Learn, solve, replace the unpinned pieces.
+/// **Where the rules come from.** Two sources, one solver, and neither substitutes for the other.
+///
+/// Karth & Smith (FDG 2019) name these as the algorithm's own two modes: rules inferred from an
+/// example, and rules stated up front. `Learned` cannot answer on an empty map — there are no
+/// observed pairs — and `Declared` cannot answer for a library nobody has tokened. Each says so
+/// rather than quietly deferring to the other, because a generator that silently changed which
+/// grammar it used would produce output the author cannot account for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// Learned from what is already placed. Continues the author's own corner of the room.
+    Learned,
+    /// Read off the kit's declared edge tokens. Works on an empty map.
+    Declared,
+}
+
 fn generate(
     commands: &mut Commands,
     assets: &AssetServer,
@@ -4085,10 +4379,27 @@ fn generate(
     state: &mut EditorState,
     placed: &Query<(Entity, &Placement)>,
 ) {
+    generate_from(commands, assets, project, state, placed, Source::Learned);
+}
+
+fn generate_from(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    project: &mut Project,
+    state: &mut EditorState,
+    placed: &Query<(Entity, &Placement)>,
+    source: Source,
+) {
     // One metre: the tile the kits are authored on, and coarse enough that a 32 m map is a grid the
     // solver finishes rather than 4,096 cells of half-metre noise.
 
-    let grammar = match emerge_core::grammar::learn(&project.map, CELL) {
+    let built = match source {
+        Source::Learned => emerge_core::grammar::learn(&project.map, CELL),
+        Source::Declared => {
+            emerge_core::grammar::declared(&project.library, project.policy.divisions, CELL)
+        }
+    };
+    let grammar = match built {
         Ok(g) => g,
         Err(e) => {
             state.status = e;
@@ -4097,7 +4408,34 @@ fn generate(
     };
     state.seed = state.seed.wrapping_add(1);
     let mut n = state.next_id;
-    let solved = match emerge_core::grammar::solve(&project.map, &grammar, CELL, state.seed, || {
+
+    // **The solver has to see the stamps, or an owned group protects nothing.**
+    //
+    // `solve` builds its pinned set from `map.placements.iter().filter(|p| p.owned)`, and stamped
+    // rows are deliberately never in `placements` — so a group an author marked owned, whose whole
+    // documented meaning is *"a generator routes around the whole group"*, was invisible and the
+    // collapser filled straight through it. Expanding into a scratch map is what makes the pin real:
+    // `expand` already propagates `Stamped::owned` to every row it produces, so the cells come back
+    // as the unary constraints they were always supposed to be.
+    //
+    // A scratch copy rather than the real map, because the expansion must not become authored rows —
+    // that invariant is what keeps the reference model a reference.
+    let mut scratch = project.map.clone();
+    if !scratch.stamps.is_empty() {
+        match emerge_core::composition::expand(
+            &project.map,
+            &project.map.stamps,
+            &project.compositions.compositions,
+            &project.library,
+        ) {
+            Ok(e) => scratch.placements.extend(e.placements),
+            Err(e) => {
+                state.status = format!("cannot generate around the stamps: {e}");
+                return;
+            }
+        }
+    }
+    let solved = match emerge_core::grammar::solve(&scratch, &grammar, CELL, state.seed, || {
         n += 1;
         format!("gen@{n}")
     }) {
@@ -4473,6 +4811,8 @@ mod tests {
 
     pub(super) fn project(descriptors: Vec<Descriptor>, placements: Vec<Placed>) -> Project {
         Project {
+            // A test project stamps nothing; empty is the same state as a file with none in it.
+            compositions: emerge_core::composition::Compositions::default(),
             root: std::path::PathBuf::from("."),
             emerge_dir: std::path::PathBuf::from("assets/emerge"),
             library_path: std::path::PathBuf::from("assets/emerge/library.ron"),

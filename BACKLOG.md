@@ -744,22 +744,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 **Done when:** surfaces respond to light (normal + ORM maps against an irradiance environment), the level reads as more than one place (biomes), and the asset library's untapped depth is reachable through the existing data-driven manifest rather than new code.
 
 
-- **FVS-Q-10 — Should authored `edge` tokens feed the solver, or only check it?** · L · *determinism: core*
-  `crates/emerge-core/src/adjacency.rs` reads `SubCell::edge` and reports where a map disagrees with
-  the tokens its tiles declare. It deliberately does **not** generate: `grammar.rs` already learns
-  adjacency from the map, and its module note argues that should be the only way, because *"inventing
-  an adjacency schema would mean asking an author to write down a grammar before they are allowed to
-  draw one."*
-  The open question is whether `grammar::learn`'s `support[dir][p]` table should be built from tokens
-  instead of from observed pairs. **What it would buy:** generation into an *empty* map — a learned
-  grammar knows only the map it was learned from, so `G` on a blank canvas has nothing to continue.
-  **What it costs:** it reverses that documented thesis, and an unauthored library would generate
-  unconstrained noise rather than refusing. Decide on real data — the validator now makes it possible
-  to author tokens and see whether they agree with what you actually draw, which is the evidence this
-  decision was missing. Sandhu, Chen & McCoy 2019 (`10.1145/3337722.3337752`) is the closest prior art:
-  WFC as a constraint solver with design-level constraints layered over local adjacency.
-  · *Deps:* — · *Touches:* `crates/emerge-core/src/{grammar,adjacency}.rs`
-
 - **FVS-Q-7 — The flesh spread: SCP-610 as a growing field, not a standing figure** · L · *determinism: core*
   The Upside Down read — flesh growing down halls. **The engine already exists:** `src/mycelia/` is a GPU Physarum + Gray-Scott field with world-XZ floor *and* wall materials that already forages toward blood pools and nests and "blooms in the unseen dark". Missing only a flesh skin and 610 wired as a source.
   Grounded, because spread on a lattice of rooms is a solved modelling problem: **Mollison 1977** (`10.1111/j.2517-6161.1977.tb01627.x`) decomposes it into *growth* plus a *contact distribution* — exactly the split here — and warns realistic models must be nonlinear and stochastic, against a fixed-radius flood fill. **Ludlam, Gibson, Otten & Gilligan 2011** (`10.1098/rsif.2011.0506`) fit fungal spread across discrete lattice sites and show **synergy is necessary** — nearest-neighbour transmission alone cannot explain real dynamics. **Neri et al. 2011** (`10.1371/journal.pcbi.1002174`) show experimentally that **host heterogeneity lowers invasion probability**, so `dungeon.room_types` becomes a designed brake rather than decoration. Turk 1991 (`10.1145/122718.122749`) is the graphics-side classic behind the Gray-Scott layer already running.

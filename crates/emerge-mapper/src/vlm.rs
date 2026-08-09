@@ -1,8 +1,8 @@
 //! **The VLM labeler's pure core** — config, prompt, transport, and the early gate.
 //!
 //! The Tiles tab's judgement fields (`kind`/`effects`/`look` tags, `offers.surfaces`, `mount`, the
-//! `note` prose, `placement.rooms`/`group`) are hand-authored across 131 library entries and ~319
-//! unlabeled candidates. This module asks a vision model to propose them from two booth renders —
+//! `note` prose, `placement.rooms`/`group`) are hand-authored, entry by entry, across the whole
+//! library. This module asks a vision model to propose them from two booth renders —
 //! under `docs/llm_rule_authoring.md`'s guardrails, which are not negotiable here:
 //!
 //! - **The LLM authors metadata dev-time only; it never runs in the sim.** This crate is the
@@ -749,6 +749,10 @@ mod tests {
                 ("worktop", "a desk or table top"),
             ]),
             capabilities: Vocabulary::of(&[("cook", "prepares food")]),
+            // The lattice axes. A labeller proposes nothing on either, so both are empty here — and
+            // empty is not permissive: an invented token is refused, naming the axis.
+            edge: Vocabulary::default(),
+            anchor: Vocabulary::default(),
         }
     }
 

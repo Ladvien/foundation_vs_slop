@@ -50,6 +50,7 @@ pub fn add_editor_plugins(app: &mut App) -> &mut App {
         crate::editor::EditorPlugin,
         crate::thumbs::ThumbsPlugin,
         crate::tiles::TilesPlugin,
+        crate::compose::ComposePlugin,
         crate::anim_tab::AnimTabPlugin,
         crate::label_booth::LabelBoothPlugin,
         crate::labels::LabelsPlugin,

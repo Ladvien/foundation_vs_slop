@@ -128,4 +128,28 @@
             ( name: "converse", note: "can take part in a talking scene" ),
         ],
     ),
+
+    // ── edge ─────────────────────────────────────────────────────────────────────────────────────
+    //
+    // What one lattice cell presents to whatever abuts it. `adjacency::faults` matches these by
+    // EQUALITY — the rule Merrell & Manocha 2009 §4.3 gives — so an unlisted token does not read as
+    // the wrong answer, it reads as an answer nothing can ever match. Closing the axis is what turns
+    // a typo from a fault the author cannot account for into a refusal that names the file.
+    //
+    // An unlabelled cell is `None`, and `None` equals only `None`. That is deliberately not a
+    // wildcard, and it is why the whole feature stays inert until somebody authors a token.
+    edge: (
+        tokens: [
+            ( name: "wall", note: "a solid run-face — what a wall segment presents end to end" ),
+        ],
+    ),
+
+    // ── anchor ───────────────────────────────────────────────────────────────────────────────────
+    //
+    // A role an ITEM may occupy on a piece, as distinct from `capabilities` (about people) and
+    // `surfaces` (about what holds what up). Nothing in the shipped corpus authors one; the axis is
+    // here so the first one has to be written down rather than invented at a keyboard.
+    anchor: (
+        tokens: [],
+    ),
 )

@@ -36,8 +36,10 @@
 
 use std::collections::HashMap;
 
+use crate::library::Library;
 use crate::map::{Map, Placed};
 use crate::wfc;
+use crate::wfc::{E, N, S, W};
 
 /// One thing a cell can hold: a descriptor at a yaw, or nothing.
 ///
@@ -52,10 +54,17 @@ pub enum Prototype {
     Piece { descriptor: String, yaw: f32 },
 }
 
+/// How far a piece's footprint may be from the solver's cell and still count as one tile, metres.
+///
+/// A tenth of a millimetre: far below anything an author expresses, far above `f32`'s error at
+/// authoring scale. The same reasoning `adjacency::EDGE_EPSILON` gives for its own value.
+pub const CELL_EPSILON: f32 = 1e-4;
+
 /// The most prototypes the solver can carry — `collapse_grid` packs a domain into a `u32`.
 pub const MAX_PROTOTYPES: usize = 32;
 
 /// A learned grammar: what exists, how often, and what may sit beside what.
+#[derive(Debug)]
 pub struct Grammar {
     pub prototypes: Vec<Prototype>,
     /// Selection weight per prototype — how often the author used it.
@@ -283,6 +292,154 @@ pub fn solve(
     })
 }
 
+
+#[cfg(test)]
+mod declared_tests {
+    use super::*;
+    use crate::descriptor::{Descriptor, Extent, SubCell, Subgrid};
+    use crate::library::LIBRARY_VERSION;
+
+    /// A 0.5 m post whose whole lattice presents `token`.
+    fn post(id: &str, token: &str) -> Descriptor {
+        let mut d = Descriptor {
+            id: id.to_owned(),
+            extent: Extent { footprint: Some((0.5, 0.5)), height: Some(0.5) },
+            ..Default::default()
+        };
+        let div = crate::descriptor::divisions(&d, 1).expect("measured");
+        let mut cells = Vec::new();
+        for x in 0..div.0 {
+            for y in 0..div.1 {
+                for z in 0..div.2 {
+                    cells.push(SubCell {
+                        at: (x, y, z),
+                        solid: true,
+                        edge: Some(token.to_owned()),
+                        anchor: None,
+                    });
+                }
+            }
+        }
+        d.subgrid = Some(Subgrid { cells });
+        d
+    }
+
+    fn lib(ds: Vec<Descriptor>) -> Library {
+        Library { version: LIBRARY_VERSION, note: None, descriptors: ds }
+    }
+
+    /// **A library that declares nothing refuses**, and says what to do instead.
+    ///
+    /// The alternative — an empty grammar the solver then fills a room with — is the shape this
+    /// module's own note warns about: it would look like the tool working.
+    #[test]
+    fn a_library_with_no_tokens_refuses_rather_than_generating_noise() {
+        let plain = Descriptor {
+            id: "crate_a".to_owned(),
+            extent: Extent { footprint: Some((0.5, 0.5)), height: Some(0.5) },
+            ..Default::default()
+        };
+        let err = declared(&lib(vec![plain]), 1, 0.5).expect_err("must refuse");
+        assert!(err.contains("no descriptor"), "{err}");
+        assert!(err.contains("Author tokens"), "{err}");
+    }
+
+    /// Tokens that agree may abut; tokens that disagree may not. Equality, not a compatibility table.
+    #[test]
+    fn only_matching_tokens_may_abut() {
+        let g = declared(&lib(vec![post("stone", "stone"), post("glass", "glass")]), 1, 0.5)
+            .expect("builds");
+        let ix = |id: &str| {
+            g.prototypes
+                .iter()
+                .position(|p| matches!(p, Prototype::Piece { descriptor, .. } if descriptor == id))
+                .unwrap_or_else(|| panic!("no {id}"))
+        };
+        let (stone, glass) = (ix("stone"), ix("glass"));
+        assert!(g.support[N][stone] & (1 << stone) != 0, "stone may meet stone");
+        assert!(g.support[N][stone] & (1 << glass) == 0, "stone must not meet glass");
+        // `Empty` is unconstrained in both directions, or the solver could never leave a gap.
+        assert!(g.support[N][stone] & 1 != 0);
+        assert!(g.support[N][0] & (1 << stone) != 0);
+    }
+
+    /// **Turning a symmetric tile produces the same tile.** Keeping both would spend two of the
+    /// solver's thirty-two slots saying one thing.
+    #[test]
+    fn a_symmetric_tile_is_one_prototype_not_four() {
+        let g = declared(&lib(vec![post("stone", "stone")]), 1, 0.5).expect("builds");
+        assert_eq!(g.prototypes.len(), 2, "Empty plus one: {:?}", g.prototypes);
+    }
+
+    /// **Dedup is per descriptor.** Measured against the shipped site kit, where a global pass
+    /// deleted `site/column` because it presents exactly the faces `site/wall` does — and a solver
+    /// that can never place a column is not the kit the author authored.
+    #[test]
+    fn two_tiles_presenting_the_same_faces_are_still_two_tiles() {
+        let g = declared(&lib(vec![post("wall", "stone"), post("column", "stone")]), 1, 0.5)
+            .expect("builds");
+        let ids: Vec<&str> = g
+            .prototypes
+            .iter()
+            .filter_map(|p| match p {
+                Prototype::Piece { descriptor, .. } => Some(descriptor.as_str()),
+                Prototype::Empty => None,
+            })
+            .collect();
+        assert!(ids.contains(&"wall") && ids.contains(&"column"), "{ids:?}");
+    }
+
+    /// **A kit whose tiles are not the grid's size refuses, and names each one with its size.**
+    ///
+    /// Measured on the shipped site kit, which is exactly this case at `cell = 1.0`: every tokened
+    /// piece is some other size, so a solve would lay a 2.06 m doorway and a 0.22 m corner at the
+    /// same 1 m spacing. Every declared adjacency would be satisfied and the geometry would
+    /// interpenetrate — the shape of failure that looks like the tool working.
+    #[test]
+    fn tiles_that_are_not_the_grids_size_refuse_and_name_their_sizes() {
+        // `post` builds 0.5 m pieces; ask for a 1 m grid.
+        let err = declared(&lib(vec![post("stone", "stone")]), 1, 1.0).expect_err("must refuse");
+        assert!(err.contains("wrong size"), "{err}");
+        assert!(err.contains("`stone` is 0.5 x 0.5 m"), "{err}");
+        assert!(err.contains("generate from the map instead"), "{err}");
+    }
+
+    /// Over the ceiling refuses **with the count**, so an author knows how far over they are.
+    #[test]
+    fn more_prototypes_than_the_domain_holds_refuses_with_the_count() {
+        // Each post gets its own token, so nothing dedups across them and each contributes one.
+        let many: Vec<Descriptor> = (0..MAX_PROTOTYPES + 2)
+            .map(|i| post(&format!("p{i:03}"), &format!("t{i:03}")))
+            .collect();
+        let err = declared(&lib(many), 1, 0.5).expect_err("must refuse");
+        assert!(err.contains(&MAX_PROTOTYPES.to_string()), "{err}");
+        assert!(err.contains("narrow the kit"), "{err}");
+    }
+
+    /// The grammar feeds the SAME collapser the learned one does — one solver, two sources.
+    #[test]
+    fn a_declared_grammar_drives_the_shared_collapser() {
+        let g = declared(&lib(vec![post("stone", "stone"), post("glass", "glass")]), 1, 0.5)
+            .expect("builds");
+        let n = g.prototypes.len();
+        let initial = vec![(1u32 << n) - 1; 4 * 4];
+        let out = crate::wfc::collapse_grid(4, 4, &g.weights, &g.support, &initial, 7)
+            .unwrap_or_else(|| panic!("a fully permissive start must collapse"));
+        assert_eq!(out.len(), 16);
+        // Whatever it produced, every abutting pair is one the tokens allow — which is the property
+        // the whole exercise is for.
+        for z in 0..4usize {
+            for x in 0..4usize {
+                let p = out[z * 4 + x];
+                if x + 1 < 4 {
+                    let q = out[z * 4 + x + 1];
+                    assert!(g.support[E][p] & (1 << q) != 0, "({x},{z}) east pair is not allowed");
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,4 +619,183 @@ mod tests {
             .unwrap_or_default();
         assert!(err.contains(&MAX_PROTOTYPES.to_string()), "{err}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The declared half
+// ---------------------------------------------------------------------------------------------
+
+/// **A grammar built from what tiles DECLARE, rather than from what an author has already drawn.**
+///
+/// [`learn`] answers *"more of what is here"* and cannot answer anything on an empty map — there are
+/// no observed pairs to generalise from. This answers *"whatever the kit says may meet"*, which is
+/// the other half of the same algorithm and needs no example at all.
+///
+/// # Two sources, one solver, and neither is a fallback for the other
+///
+/// Karth & Smith (*Addressing the Fundamental Tension of PCGML with Discriminative Learning*, FDG
+/// 2019) name the distinction exactly. Gumin's WFC *"simply allows any tile-compatible overlapping
+/// patterns to be placed adjacent to one another, even if they were never seen adjacent in the single
+/// source image"* — they call this **Most General Generalization**, the inverse of learning from
+/// observation. That is precisely what this function does over the token relation, and what [`learn`]
+/// deliberately does not.
+///
+/// So the author picks a source and gets what that source can express. Neither silently substitutes
+/// for the other: a library with no tokens produces no prototypes here and says so, rather than
+/// quietly falling through to the learned grammar and generating something the author did not ask
+/// for.
+///
+/// # Matching is equality, including the length of a face
+///
+/// `support[dir][p]` holds `q` when `p`'s `dir` face is *the same sequence* as `q`'s facing one —
+/// Merrell & Manocha 2009 §4.3's rule, which [`crate::adjacency`] already applies to a finished map.
+/// Two pieces whose lattices are different sizes present faces of different lengths, and those never
+/// match. That is **conservative rather than permissive**: the pair is refused, not allowed, so this
+/// cannot invent an adjacency the tokens do not state.
+///
+/// An unlabelled cell is `None`, and `None` equals only `None`. It is not a wildcard — which is what
+/// lets a doorway's open middle meet only another open middle, and is why a kit with a single token
+/// still expresses more than that token alone suggests.
+///
+/// # Prototypes are deduplicated by what they present
+///
+/// A wall whose lattice is symmetric presents the same four faces at 0° and at 180°, so those are one
+/// prototype and not two. This is not an optimisation bolted on to fit the ceiling: turning a
+/// symmetric tile produces the same tile, and keeping both would spend two of the solver's thirty-two
+/// saying one thing. Measured on the shipped site kit: 8 tokened descriptors × 4 turns is 32
+/// candidates, and 11 of them are distinct.
+///
+/// **Within one descriptor only.** Deduplicating across the library was tried and was wrong:
+/// `site/column` presents exactly the faces `site/wall` does, so a global pass deleted the column and
+/// the solver could never place one. Identical faces make two tiles interchangeable to the
+/// propagator; they do not make them the same mesh.
+pub fn declared(library: &Library, per_tile: u32, cell: f32) -> Result<Grammar, String> {
+    if per_tile == 0 {
+        return Err("declared grammar: the project divides each tile 0 ways".to_owned());
+    }
+    if !(cell.is_finite() && cell > 0.0) {
+        return Err(format!("declared grammar: a cell of {cell} m is not a grid"));
+    }
+    let mut wrong_size: Vec<String> = Vec::new();
+    // `Empty` is index 0 and permitted everywhere, exactly as in `learn` — a grammar that cannot say
+    // "nothing goes here" cannot leave a doorway.
+    let mut prototypes = vec![Prototype::Empty];
+    let mut faces: Vec<[Vec<Option<String>>; 4]> = vec![Default::default()];
+
+    for d in &library.descriptors {
+        let Some(grid) = &d.subgrid else { continue };
+        if !grid.cells.iter().any(|c| c.edge.is_some()) {
+            continue;
+        }
+        // **A tile grammar is a grammar over tiles of the grid's size.**
+        //
+        // `solve` lays prototypes at `cell` centres, so a piece that is not one cell across is placed
+        // at a spacing that has nothing to do with its extent. Measured on the shipped site kit at
+        // `cell = 1.0`: `site/wall_doorway` is 0.46 x 2.06 m and would overlap its neighbour by about
+        // a metre, while `site/wall_corner` at 0.22 x 0.22 m would leave three quarters of a metre of
+        // gap — every declared adjacency satisfied, and geometry nobody can use.
+        //
+        // Merrell & Manocha's model synthesis and the Wang-tile family both assume a uniform tile;
+        // this is that assumption stated instead of quietly violated. Collected and refused by name
+        // below rather than skipped, because a grammar silently missing half the kit generates
+        // something the author cannot account for.
+        let fits = crate::descriptor::placed_footprint(d).is_some_and(|(w, dep)| {
+            (w - cell).abs() <= CELL_EPSILON && (dep - cell).abs() <= CELL_EPSILON
+        });
+        if !fits {
+            let size = crate::descriptor::placed_footprint(d)
+                .map(|(w, dep)| format!("{w} x {dep} m"))
+                .unwrap_or_else(|| "unmeasured".to_owned());
+            wrong_size.push(format!("`{}` is {size}", d.id));
+            continue;
+        }
+        let div = crate::descriptor::divisions(d, per_tile)?;
+        // **Per descriptor, not across the library.** Deduplicating globally was measured and was
+        // wrong: `site/column` presents exactly the faces `site/wall` does, so a global pass deleted
+        // the column and the solver could never place one. Two tiles that present the same faces are
+        // interchangeable to the *propagator* and are still two different meshes an author asked for.
+        let mine = faces.len();
+        for quarter in 0..4u8 {
+            let turned = grid.rotated(quarter, div);
+            let tdiv = crate::descriptor::rotate_div(div, quarter);
+            let read = |dir: usize| -> Vec<Option<String>> {
+                crate::adjacency::face(&turned, dir, tdiv)
+                    .into_iter()
+                    .map(|t| t.map(str::to_owned))
+                    .collect()
+            };
+            let sig = [read(N), read(E), read(S), read(W)];
+            // Same faces, same tile. Skipping here is what keeps a symmetric piece from spending two
+            // of the solver's thirty-two slots saying one thing.
+            if faces[mine..].iter().any(|f| *f == sig) {
+                continue;
+            }
+            prototypes.push(Prototype::Piece {
+                descriptor: d.id.clone(),
+                yaw: quarter as f32 * 90.0,
+            });
+            faces.push(sig);
+        }
+    }
+
+    if prototypes.len() == 1 {
+        if !wrong_size.is_empty() {
+            wrong_size.sort_unstable();
+            return Err(format!(
+                "declared grammar: every tokened piece is the wrong size for a {cell} m cell, so a \
+                 solve would place them at a spacing unrelated to their extents — {}. A tile grammar \
+                 needs tiles of the grid's size; generate from the map instead, or author a kit on \
+                 the cell.",
+                wrong_size.join(", ")
+            ));
+        }
+        return Err(
+            "declared grammar: no descriptor in this library carries an edge token, so there is \
+             nothing to build a grammar from. Author tokens on the Tiles tab, or generate from the \
+             map instead."
+                .to_owned(),
+        );
+    }
+    if prototypes.len() > MAX_PROTOTYPES {
+        // Named and counted, never sampled: a generator that silently drops tiles produces output
+        // that looks like the kit and is missing a third of it.
+        return Err(format!(
+            "declared grammar: {} prototypes, over the {MAX_PROTOTYPES} the solver's domain holds. \
+             That is {} distinct turned tiles from {} tokened descriptor(s) — narrow the kit rather \
+             than raising the cap, which is a `u32` the dungeon generator shares.",
+            prototypes.len(),
+            prototypes.len() - 1,
+            library
+                .descriptors
+                .iter()
+                .filter(|d| d
+                    .subgrid
+                    .as_ref()
+                    .is_some_and(|g| g.cells.iter().any(|c| c.edge.is_some())))
+                .count()
+        ));
+    }
+
+    let n = prototypes.len();
+    // Every prototype is equally likely. A declared grammar has no observations to count, and
+    // inventing a weight would be a preference nobody stated.
+    let weights = vec![1.0f64; n];
+    let mut support: [Vec<u32>; 4] = [vec![0; n], vec![0; n], vec![0; n], vec![0; n]];
+    for (p, pf) in faces.iter().enumerate() {
+        for (q, qf) in faces.iter().enumerate() {
+            for (dir, opposite) in [(N, S), (E, W), (S, N), (W, E)] {
+                // `Empty` presents nothing and may sit beside anything — the same unconstrained role
+                // it has in `learn`, and what lets the solver leave a gap.
+                let ok = p == 0 || q == 0 || pf[dir] == qf[opposite];
+                if ok {
+                    support[dir][p] |= 1 << q;
+                }
+            }
+        }
+    }
+    Ok(Grammar {
+        prototypes,
+        weights,
+        support,
+    })
 }

@@ -41,19 +41,34 @@
 //! `site67.ron` and `config.ron`, whose prose is a 48-line ASCII floor plan and paragraphs introducing
 //! blocks of records — none of it attached to a record, so none of it with a field to live in.
 //!
-//! # Versioning: refuse, never migrate
+//! # Versioning: refuse what you cannot understand
 //!
-//! `persist.rs` states the rule this follows and the reason it has no `#[serde(default)]` anywhere:
-//! defaulting a missing field is an unreachable compatibility branch wearing a rationale, because the
-//! version check already refused the file. A map from another schema is a loud error.
+//! `persist.rs` states the rule this follows: a map from another schema is a loud error rather than a
+//! guess. What that means precisely is **a floor, not an equality** — a file numbered *above* this
+//! build is refused, and one at or below it is read and re-saved at the current number.
+//!
+//! It was an equality until [`Stamped`] arrived, and the difference is worth stating because it looks
+//! like a loosening and is not. The hazard versioning exists to stop is an **old** build opening a
+//! **new** file, understanding half of it, and writing the other half away — a map silently losing
+//! every stamp in it. That is exactly what the floor still refuses. The equality additionally refused
+//! the harmless direction, where a build that knows about stamps opens a file written before they
+//! existed: that file says `stamps: []`, which is precisely what it meant. Refusing it destroyed a
+//! map to prevent nothing.
+//!
+//! So the rule reads: **refuse if the file's version is greater than [`MAP_VERSION`].** One rule, one
+//! direction, and no compatibility branch — a field added since is `#[serde(default)]` and its default
+//! is what the older file already meant.
 
 use serde::{Deserialize, Serialize};
 
 use crate::descriptor::Descriptor;
 use crate::placement::ir::Guard;
 
-/// Bumped whenever the shape below changes. A mismatch is refused, never migrated.
-pub const MAP_VERSION: u32 = 1;
+/// Bumped whenever the shape below changes. A file numbered above this is refused; at or below it is
+/// read and re-saved here. See the module note on why that is a floor rather than an equality.
+///
+/// `2` added [`Map::stamps`].
+pub const MAP_VERSION: u32 = 2;
 
 /// One authored world.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -91,6 +106,14 @@ pub struct Map {
     #[serde(default = "default_bounds")]
     pub bounds: (f32, f32, f32),
     pub placements: Vec<Placed>,
+    /// **Compositions this map stamps** — a reference each, never the rows they stand for.
+    ///
+    /// Expanded by [`crate::composition::expand`] at render, at validation and at load, and **never**
+    /// written back into [`Self::placements`]. That is what makes editing a composition change every
+    /// map that stamped it, and it is also what keeps this file's undo history addressable: an edit
+    /// somewhere else cannot renumber rows that were never here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stamps: Vec<crate::composition::Stamped>,
     #[serde(default)]
     pub locations: Vec<Location>,
     /// What this map is and why it is laid out this way — the header prose, as data. See the module
@@ -114,6 +137,7 @@ impl Default for Map {
             origin: (0.0, 0.0, 0.0),
             bounds: default_bounds(),
             placements: Vec::new(),
+            stamps: Vec::new(),
             locations: Vec::new(),
             note: None,
         }
@@ -384,10 +408,11 @@ impl Map {
             }
         }
 
-        if self.version != MAP_VERSION {
+        if self.version > MAP_VERSION {
             return Err(format!(
-                "map: version {} but this build reads {MAP_VERSION} — refusing to load rather than \
-                 guess at a migration",
+                "map: version {} but this build reads {MAP_VERSION} — refusing a map written by a \
+                 newer tool. Opening it would mean understanding part of it and writing the rest \
+                 away.",
                 self.version
             ));
         }
@@ -450,6 +475,46 @@ impl Map {
             }
         }
         self.no_stacking_cycles()?;
+
+        // **Stamps share the placement id space.** The rows a stamp expands to are named
+        // `<stamp>/<member>`, so a stamp sharing a name with a placement is a location's `props`
+        // pointing at two different things.
+        for st in &self.stamps {
+            if st.id.is_empty() {
+                return Err("map: a stamp has an empty id".to_owned());
+            }
+            if seen.contains(&st.id.as_str()) {
+                return Err(format!(
+                    "map: stamp `{}` shares its id with a placement. Every row a stamp expands to is \
+                     named after it, so the two id spaces are one.",
+                    st.id
+                ));
+            }
+            if !st.at.0.is_finite() || !st.at.1.is_finite() || !st.yaw.is_finite() {
+                return Err(format!(
+                    "map: stamp `{}` is at a position that is not a number",
+                    st.id
+                ));
+            }
+            if st.owned && st.owned_because.as_ref().is_none_or(|r| r.trim().is_empty()) {
+                return Err(format!(
+                    "map: stamp `{}` is owned but says nothing about why. An owned stamp constrains a \
+                     generator; in six months only that sentence can say whether it still should.",
+                    st.id
+                ));
+            }
+        }
+        let mut stamped: Vec<&str> = Vec::with_capacity(self.stamps.len());
+        for st in &self.stamps {
+            if stamped.contains(&st.id.as_str()) {
+                return Err(format!(
+                    "map: stamp id `{}` is used twice — the rows it expands to are named after it, so \
+                     a duplicate would produce two rows with one id",
+                    st.id
+                ));
+            }
+            stamped.push(&st.id);
+        }
 
         for loc in &self.locations {
             if loc.props.is_empty() {
@@ -540,6 +605,7 @@ mod tests {
             name: "galley".into(),
             origin: (0.0, 0.0, 0.0),
             bounds: default_bounds(),
+            stamps: Vec::new(),
             placements: vec![
                 Placed {
                     id: "table_1".into(),
@@ -591,12 +657,30 @@ mod tests {
         assert_eq!(m.locations[0].interactions.len(), 1);
     }
 
+    /// **A map from a newer tool is refused, never half-read.**
+    ///
+    /// The direction that matters: this build would understand the fields it knows, drop the ones it
+    /// does not, and write the file back without them. A map silently losing every stamp in it is the
+    /// failure the version number exists for.
     #[test]
-    fn a_map_from_another_schema_is_refused_not_migrated() {
+    fn a_map_from_a_newer_schema_is_refused_not_migrated() {
         let mut m = table_map();
         m.version = MAP_VERSION + 1;
         let err = m.validate().expect_err("must refuse");
-        assert!(err.contains("refusing to load"), "{err}");
+        assert!(err.contains("newer tool"), "{err}");
+    }
+
+    /// **A map from before a field existed still loads**, because its absence is what it always meant.
+    ///
+    /// The other half of the floor rule, and the reason it is a floor. Refusing this direction would
+    /// destroy a map to prevent nothing: a file written before [`Map::stamps`] says `stamps: []`,
+    /// which is exactly what it said then.
+    #[test]
+    fn a_map_from_before_a_field_existed_still_loads() {
+        let mut m = table_map();
+        m.version = MAP_VERSION - 1;
+        m.validate().expect("an older map means what it always meant");
+        assert!(m.stamps.is_empty());
     }
 
     #[test]

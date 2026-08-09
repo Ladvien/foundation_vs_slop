@@ -1,5 +1,5 @@
 (
-    version: 1,
+    version: 2,
     name: "break_room",
     origin: (0.0, 0.0, 0.0),
     bounds: (32.0, 4.0, 32.0),

@@ -66,11 +66,13 @@ pub fn install_if_requested(app: &mut App) {
         world
     }) {
         Ok(world) => {
+            // Counted after expansion, so the number is what the world actually holds rather than
+            // what the file happens to list. Counts come from `emerge_core::census`.
+            let counted = emerge_core::census::of_map(&world.map);
+            let catalog = emerge_core::census::of_catalog(&world.library, &[]);
             info!(
                 "emerge_map: loaded `{}` — {} placement(s) from {} descriptor(s)",
-                world.map.name,
-                world.map.placements.len(),
-                world.library.descriptors.len()
+                world.map.name, counted.placements, catalog.descriptors
             );
             app.add_plugins(EmergePlugin).insert_resource(world);
         }
@@ -117,10 +119,17 @@ fn load(name: &str) -> Result<EmergeWorld, String> {
     };
 
     let vocab = Vocabularies::parse(&read("vocab.ron")?)?;
-    // The same call the editor makes: measurements, then this project's policy over them.
-    let library = emerge_core::policy::layered_library(std::path::Path::new(EMERGE_DIR))?.library;
+    // The same call the editor makes: measurements, then this project's policy over them — and the
+    // compositions beside them, validated against the layered library by the same loader. One call,
+    // so the editor and the game cannot disagree about what a project contains.
+    let layered = emerge_core::policy::layered_library(std::path::Path::new(EMERGE_DIR))?;
     let map = Map::parse(&read(&naming::map_file_name(name))?)?;
-    EmergeWorld::new(library, map, vocab)
+    EmergeWorld::with_compositions(
+        layered.library,
+        map,
+        vocab,
+        &layered.compositions.compositions,
+    )
 }
 
 #[cfg(test)]
@@ -161,6 +170,115 @@ mod tests {
         );
         // Every descriptor resolved to a mask, which is what makes a tag query one `&`.
         assert_eq!(world.masks.len(), world.library.descriptors.len());
+    }
+
+    /// **A stamp becomes rows, and its affordance comes with it.**
+    ///
+    /// The loop the reference model was chosen for, checked end to end against the *shipped* files: a
+    /// map holds one line naming `break_table`, and the world it loads holds the table, both chairs
+    /// and the meal location — with the location's props pointing at the rows this stamp produced
+    /// rather than at member names nothing would resolve.
+    ///
+    /// It also pins the thing that would be silently wrong: the rows land at the stamp's position,
+    /// turned by its yaw, not at the composition's own local coordinates.
+    #[test]
+    fn a_stamped_composition_becomes_rows_and_brings_its_affordance() {
+        let vocab = Vocabularies::parse(
+            &std::fs::read_to_string("assets/emerge/vocab.ron").unwrap_or_else(|e| panic!("{e}")),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let layered = emerge_core::policy::layered_library(std::path::Path::new("assets/emerge"))
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        let map = Map {
+            name: "stamped".into(),
+            stamps: vec![emerge_core::composition::Stamped {
+                id: "mess_a".into(),
+                of: "break_table".into(),
+                at: (4.0, 0.0),
+                yaw: 90.0,
+                ..Default::default()
+            }],
+            ..Map::default()
+        };
+        let world = EmergeWorld::with_compositions(
+            layered.library,
+            map,
+            vocab,
+            &layered.compositions.compositions,
+        )
+        .unwrap_or_else(|e| panic!("a shipped composition does not stamp: {e}"));
+
+        let ids: Vec<&str> = world.map.placements.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["mess_a/chair_north", "mess_a/chair_south", "mess_a/table"]);
+
+        // The table sits at the stamp; a chair one metre along the group's +Z lands one metre along
+        // +X of it, because a positive yaw turns +X toward -Z.
+        let table = world
+            .map
+            .placements
+            .iter()
+            .find(|p| p.id == "mess_a/table")
+            .unwrap_or_else(|| panic!("no table"));
+        assert!((table.at.0 - 4.0).abs() < 1e-4 && table.at.1.abs() < 1e-4, "{:?}", table.at);
+        let south = world
+            .map
+            .placements
+            .iter()
+            .find(|p| p.id == "mess_a/chair_south")
+            .unwrap_or_else(|| panic!("no chair"));
+        assert!((south.at.0 - 5.0).abs() < 1e-4 && south.at.1.abs() < 1e-4, "{:?}", south.at);
+
+        // The affordance travelled, repointed, and resolved to real seats — which is the half a
+        // geometry-only stamp would have silently dropped.
+        assert_eq!(world.map.locations.len(), 1);
+        assert_eq!(world.map.locations[0].id, "mess_a/meal");
+        assert_eq!(
+            world.map.locations[0].props,
+            ["mess_a/table", "mess_a/chair_north", "mess_a/chair_south"]
+        );
+        // **The seats are empty, and that is a fact about the corpus rather than about this path.**
+        // `smart::seats_of` builds a seat from a descriptor's `offers.sockets`, and *no descriptor in
+        // the shipped library has one* — measured: zero `role:` entries across the whole file. So the
+        // location resolves, its roles resolve, and it seats nobody, because nobody has yet authored
+        // where a diner stands at a chair.
+        //
+        // Asserted rather than skipped so that authoring the first socket turns this line red and
+        // whoever does it learns immediately that the loop now closes.
+        assert!(
+            world.seats("mess_a/meal").is_empty(),
+            "a descriptor now offers a socket — good. Flip this assertion and the one in \
+             `a_stamped_composition_becomes_rows_and_brings_its_affordance`."
+        );
+    }
+
+    /// A stamp naming a composition nothing defines is refused, not quietly skipped.
+    #[test]
+    fn a_stamp_of_a_composition_that_does_not_exist_is_refused() {
+        let vocab = Vocabularies::parse(
+            &std::fs::read_to_string("assets/emerge/vocab.ron").unwrap_or_else(|e| panic!("{e}")),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let layered = emerge_core::policy::layered_library(std::path::Path::new("assets/emerge"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let map = Map {
+            name: "broken".into(),
+            stamps: vec![emerge_core::composition::Stamped {
+                id: "ghost".into(),
+                of: "no_such_group".into(),
+                ..Default::default()
+            }],
+            ..Map::default()
+        };
+        let err = EmergeWorld::with_compositions(
+            layered.library,
+            map,
+            vocab,
+            &layered.compositions.compositions,
+        )
+        .err()
+        .unwrap_or_else(|| panic!("must refuse"));
+        assert!(err.contains("no_such_group"), "{err}");
     }
 
     /// A map naming a piece the library does not have is refused, not partially loaded.

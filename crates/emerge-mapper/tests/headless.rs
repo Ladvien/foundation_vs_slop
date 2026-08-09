@@ -776,3 +776,102 @@ mod stepped {
         assert!(!err.is_empty(), "opening nothing must say so");
     }
 }
+
+/// **The Compose tab boots, arms a group, and stamps it.**
+///
+/// The question a unit test cannot answer: does this app survive its first frame with a fourth tab
+/// registered. In Bevy 0.19 a missing `Res<T>` panics its system rather than skipping it, and every
+/// run condition is evaluated with no short-circuit — so a plugin that forgets to `init_resource`
+/// something its systems take is a crash on launch, not a feature that quietly does nothing.
+#[cfg(test)]
+mod compose {
+    use emerge_mapper::compose::ComposeState;
+    use emerge_mapper::project::Project;
+    use emerge_mapper::tiles::Mode;
+
+    fn root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap_or_else(|e| panic!("workspace root: {e}"))
+    }
+
+    #[test]
+    fn the_compose_tab_boots_and_sees_the_shipped_groups() {
+        let mut app = emerge_mapper::harness::build_headless(&root(), "compose_probe", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        *app.world_mut().resource_mut::<Mode>() = Mode::Compose;
+        for _ in 0..10 {
+            app.update();
+        }
+        let project = app.world().resource::<Project>();
+        assert!(
+            project
+                .compositions
+                .compositions
+                .iter()
+                .any(|c| c.id == "break_table"),
+            "the shipped compositions.ron did not reach the editor"
+        );
+        // Nothing armed is a real state, and it is the one an editor opens in.
+        assert!(app.world().resource::<ComposeState>().armed.is_none());
+    }
+
+    /// Arming and stamping put a **reference** in the map, not the rows — which is the whole reason
+    /// the reference model was chosen, and the thing a flattening implementation would pass every
+    /// other test while getting wrong.
+    #[test]
+    fn stamping_writes_a_reference_and_undo_takes_it_back() {
+        let mut app = emerge_mapper::harness::build_headless(&root(), "compose_probe", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        for _ in 0..3 {
+            app.update();
+        }
+
+        let before = app.world().resource::<Project>().map.placements.len();
+        app.world_mut().resource_mut::<ComposeState>().armed = Some("break_table".to_owned());
+
+        // Through the same call the click makes, so this cannot pass while the click path is broken.
+        {
+            let world = app.world_mut();
+            world.resource_scope(|world, mut project: bevy::prelude::Mut<Project>| {
+                let mut state = world.resource_mut::<emerge_mapper::editor::EditorState>();
+                let mut compose = ComposeState {
+                    armed: Some("break_table".to_owned()),
+                    ..Default::default()
+                };
+                emerge_mapper::editor::stamp_here_for_test(
+                    &mut project,
+                    &mut state,
+                    &mut compose,
+                    (2.0, 2.0),
+                );
+            });
+        }
+        app.update();
+
+        let project = app.world().resource::<Project>();
+        assert_eq!(project.map.stamps.len(), 1, "no stamp landed");
+        assert_eq!(project.map.stamps[0].of, "break_table");
+        assert_eq!(
+            project.map.placements.len(),
+            before,
+            "expansion must NOT be written into placements — the map holds the reference"
+        );
+
+        // **And it comes back off.** `Undo` is closed under inversion, so a stamp has to invert to
+        // something that inverts back to a stamp; asserting only the forward direction would pass
+        // for an entry that undoes and then cannot be redone.
+        emerge_mapper::editor::undo_for_test(app.world_mut());
+        app.update();
+        assert!(
+            app.world().resource::<Project>().map.stamps.is_empty(),
+            "undo left the stamp in the map"
+        );
+        emerge_mapper::editor::redo_for_test(app.world_mut());
+        app.update();
+        let project = app.world().resource::<Project>();
+        assert_eq!(project.map.stamps.len(), 1, "redo did not put the stamp back");
+        assert_eq!(project.map.stamps[0].of, "break_table");
+    }
+}

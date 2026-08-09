@@ -55,6 +55,11 @@ pub struct Project {
     /// exists to share — and the next load applied the patches again on top of them. A library is
     /// measurements; the architecture is `project.ron`'s, and it must not leak downward.
     pub measured: Library,
+    /// **Every composition this project can stamp**, validated against [`Self::library`] at open.
+    ///
+    /// Read from `compositions.ron` beside the library, or empty when the project has none — which is
+    /// the same state as a file with none in it, not a degraded one.
+    pub compositions: emerge_core::composition::Compositions,
     /// The measurements with [`Self::policy`] applied — what the game would place, and what every
     /// reader here (the palette, the preview, the flood fill, the fault check) uses.
     ///
@@ -129,6 +134,7 @@ impl Project {
             measured,
             library,
             policy,
+            compositions,
         } = emerge_core::policy::layered_library(&emerge_dir)?;
         let library_path = emerge_dir.join(LIBRARY_FILE);
 
@@ -167,11 +173,17 @@ impl Project {
             }
         };
 
+        // Counts come from the one census, never from a `.len()` written here — see
+        // `emerge_core::census` for the drift that discipline exists to prevent.
+        let catalog = emerge_core::census::of_catalog(&library, &compositions.compositions);
+        let counted = emerge_core::census::of_map(&map);
         info!(
-            "project: {} — {} descriptor(s), {} placement(s), map {}",
+            "project: {} — {} descriptor(s), {} composition(s), {} placement(s), {} stamp(s), map {}",
             root.display(),
-            library.descriptors.len(),
-            map.placements.len(),
+            catalog.descriptors,
+            catalog.compositions,
+            counted.placements,
+            counted.stamps,
             map_path.display()
         );
 
@@ -193,6 +205,7 @@ impl Project {
             library_path,
             vocab,
             measured,
+            compositions,
             library,
             policy,
             masks,
@@ -221,6 +234,20 @@ impl Project {
     /// decision was made that way.
     pub fn save(&mut self) -> Result<(), String> {
         self.map.validate()?;
+        // **The save gate has to ask the question the game will ask.** `validate` checks the map's
+        // own shape and stops there; it does not expand stamps, so a map whose group no longer
+        // resolves passed this door and was written with a cheerful "saved" — and then failed at
+        // `FVS_EMERGE_MAP` load with "the map has holes". The editor saying saved while the game says
+        // broken is the exact drift the shared `emerge-core` validation exists to prevent.
+        if !self.map.stamps.is_empty() {
+            emerge_core::composition::expand(
+                &self.map,
+                &self.map.stamps,
+                &self.compositions.compositions,
+                &self.library,
+            )
+            .map_err(|e| format!("not saved — the game could not load this: {e}"))?;
+        }
         // Follow a rename. The path is derived rather than remembered, so the file a map is in is
         // always the file its name says it is.
         // Beside the kit it was authored with, not at the project root's default — a map written
