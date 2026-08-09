@@ -31,6 +31,20 @@ repository = "https://github.com/Ladvien/emerge-mapper"
 # camera — so a mirror never receives the panels. A question about the interface is still a devshot
 # question, and it is still the player-facing Ctrl+P path.
 [features]
+# **On by default, and it should always have been.** This editor is a dev tool — it is never shipped
+# to a player, so there is no build of it that wants the debugger absent. Leaving it opt-in meant
+# every session began with an author being asked to remember a flag, and an agent being unable to see
+# what the author was looking at until they did. That cost a whole afternoon of "there is nothing on
+# the right" against "the palette is there, I checked headless", which is exactly the gap BRP exists
+# to close.
+#
+# The game is the opposite case and stays opt-in: it SHIPS, and `cargo tree -i bevy_debugger_bevy`
+# must find nothing in a release build.
+#
+# **The port is the one caveat.** Both default to 15702, so running the game with its `debugger`
+# feature and this editor at the same time needs `BEVY_BRP_PORT` set on one of them, or the second
+# process fails to bind. That is a loud failure, not a silent one.
+default = ["debugger"]
 debugger = ["bevy/bevy_remote", "dep:bevy_debugger_bevy"]
 
 [dependencies]
