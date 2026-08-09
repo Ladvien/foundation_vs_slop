@@ -41,6 +41,37 @@ use crate::tiles::{ComposeRoot, Mode};
 /// member move.
 pub const COMPOSE_STAGE: Vec3 = crate::stages::COMPOSE;
 
+/// The three lists on this tab, and the order `left`/`right` cycles them.
+///
+/// Groups on the left, then that group's members under it, then the library on the right — reading
+/// order, so cycling forward walks the screen left to right rather than in an order only the code
+/// knows.
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pane {
+    #[default]
+    Groups,
+    Members,
+    Meshes,
+}
+
+impl Pane {
+    pub const ALL: [Pane; 3] = [Pane::Groups, Pane::Members, Pane::Meshes];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Pane::Groups => "GROUPS",
+            Pane::Members => "MEMBERS",
+            Pane::Meshes => "PLACE",
+        }
+    }
+
+    fn step(self, by: i32) -> Pane {
+        let at = Pane::ALL.iter().position(|p| *p == self).unwrap_or(0) as i32;
+        let n = Pane::ALL.len() as i32;
+        Pane::ALL[(at + by).rem_euclid(n) as usize]
+    }
+}
+
 /// Which group the tab is looking at, and which one the map will stamp.
 #[derive(Resource, Default)]
 pub struct ComposeState {
@@ -65,10 +96,14 @@ pub struct ComposeState {
     /// **The name being typed for a new group.** `Some("")` the moment `N` is pressed, so the panel
     /// can show the field before a character exists.
     pub naming: Option<String>,
-    /// **Index into the library while the piece picker is open.** While this is `Some`, the walk keys
-    /// and `Enter` belong to the picker rather than to the group list — one modal, stated in one
-    /// place, which is how every other field in this editor takes the keyboard.
-    pub picking: Option<usize>,
+    /// **Which of the three lists the walk keys move.**
+    ///
+    /// Replaced a modal picker that took the keyboard while open. A mode you cannot see is the
+    /// defect this tab was rebuilt for, so this is drawn — see `rebuild`, which tints the focused
+    /// list's header — and the lists are all on screen at once rather than one at a time.
+    pub focus: Pane,
+    /// Index into the library, for the mesh list on the right.
+    pub mesh: usize,
     /// **The armed group** — by id, never by index.
     ///
     /// An index would silently re-point the moment `compositions.ron` gained a row above it, which is
@@ -94,6 +129,17 @@ struct ComposeLine;
 #[derive(Component)]
 struct ComposeBody;
 
+/// The right-hand mesh list's scroll area, and the header above it that shows the focus.
+#[derive(Component)]
+struct MeshList;
+
+#[derive(Component)]
+struct MeshHeader;
+
+/// One row of the mesh list. Carries its library index so a click can arm it without a second lookup.
+#[derive(Component)]
+struct MeshRow(usize);
+
 pub struct ComposePlugin;
 
 impl Plugin for ComposePlugin {
@@ -103,13 +149,11 @@ impl Plugin for ComposePlugin {
             .add_systems(
                 Update,
                 (
-                    pick_keys,
                     start_new,
-                    start_pick,
                     walk,
                     arm,
                     record,
-                    walk_members,
+                    cycle_focus,
                     seat_member,
                     flush_member,
                     turn_member,
@@ -126,7 +170,8 @@ impl Plugin for ComposePlugin {
             .add_systems(Update, draw_stage.run_if(in_compose_mode))
             // Not gated on the mode: the armed group is shown on the Map tab too, and a panel that
             // stops updating when you leave it is a panel that lies the moment you come back.
-            .add_systems(Update, rebuild.after(keys::Phase::Act));
+            .add_systems(Update, rebuild.after(keys::Phase::Act))
+            .add_systems(Update, rebuild_meshes.after(keys::Phase::Act));
     }
 }
 
@@ -182,28 +227,94 @@ fn spawn_compose_panel(mut commands: Commands) {
         // placed any earlier it pushes every sibling after it down with it.
         crate::chrome::problem_log(p, Mode::Compose);
     });
+
+    // **The mesh list, on the right where the Map tab keeps its palette.**
+    //
+    // Tagged `ComposeRoot` like the panel above, so `tiles::apply_mode` shows and hides it with the
+    // tab and needs no change — it iterates every marker it knows and this is one of them.
+    //
+    // This is the thing the tab was missing: you could not see what you were choosing between. A
+    // modal picker over the same list was tried first and rejected for the reason the whole rebuild
+    // exists — a mode you cannot see is a mode you cannot use.
+    crate::chrome::panel_root(
+        &mut commands,
+        crate::chrome::Side::Right,
+        crate::chrome::LIST_W,
+        true,
+        true,
+    )
+    .insert(ComposeRoot)
+    .with_children(|p| {
+        p.spawn((Text::new("PLACE"), TextColor(LABEL), TextFont::from_font_size(11.0), MeshHeader));
+        crate::chrome::scroll_list(p, MeshList);
+    });
 }
 
 /// Walk the list. Shift steps five, matching every other list in this editor.
-fn walk(mut state: ResMut<ComposeState>, project: Res<Project>, keys: Res<keys::Live>, input: Res<ButtonInput<KeyCode>>) {
-    // The picker owns up/down while it is open.
-    if state.picking.is_some() {
+/// **`left`/`right` choose which list the arrows walk.**
+///
+/// The Tiles tab's own idiom — two keys for three lists, which is what keeps this context inside the
+/// twelve-row census ceiling with everything else it has to say. The focused list is drawn
+/// differently; see `rebuild`.
+fn cycle_focus(
+    mut state: ResMut<ComposeState>,
+    keys: Res<keys::Live>,
+    input: Res<ButtonInput<KeyCode>>,
+) {
+    let by = if keys::just_pressed(&input, keys.0, Action::ComposeMemberNext) {
+        1
+    } else if keys::just_pressed(&input, keys.0, Action::ComposeMemberPrev) {
+        -1
+    } else {
         return;
-    }
-    let n = project.compositions.compositions.len();
+    };
+    state.focus = state.focus.step(by);
+    let focus = state.focus;
+    let said = match focus {
+        Pane::Meshes => format!("{} — Enter drops one into this tile", focus.label()),
+        _ => focus.label().to_owned(),
+    };
+    state.status.note(said);
+}
+
+/// **`up`/`down` walk whichever list has focus.** Shift strides five, as every list here does.
+fn walk(
+    mut state: ResMut<ComposeState>,
+    project: Res<Project>,
+    keys: Res<keys::Live>,
+    input: Res<ButtonInput<KeyCode>>,
+) {
+    let step = if input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight) { 5 } else { 1 };
+    let by = if keys::just_pressed(&input, keys.0, Action::ComposeNext) {
+        step
+    } else if keys::just_pressed(&input, keys.0, Action::ComposePrev) {
+        -step
+    } else {
+        return;
+    };
+    let n = match state.focus {
+        Pane::Groups => project.compositions.compositions.len(),
+        Pane::Members => project
+            .compositions
+            .compositions
+            .get(state.selected)
+            .map_or(0, |c| c.members.len()),
+        Pane::Meshes => project.library.descriptors.len(),
+    };
     if n == 0 {
         return;
     }
-    let step = if input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight) { 5 } else { 1 };
-    let mut at = state.selected as i64;
-    if keys::just_pressed(&input, keys.0, Action::ComposePrev) {
-        at -= step;
-    } else if keys::just_pressed(&input, keys.0, Action::ComposeNext) {
-        at += step;
-    } else {
-        return;
+    let wrap = |at: usize| ((at as i64 + by).rem_euclid(n as i64)) as usize;
+    match state.focus {
+        Pane::Groups => {
+            state.selected = wrap(state.selected);
+            // A different group has different members; leaving the old index would point the seat
+            // verbs at whatever happened to sit there.
+            state.member = 0;
+        }
+        Pane::Members => state.member = wrap(state.member.min(n - 1)),
+        Pane::Meshes => state.mesh = wrap(state.mesh.min(n - 1)),
     }
-    state.selected = at.rem_euclid(n as i64) as usize;
 }
 
 /// Arm the selected group, or disarm it if it was already armed.
@@ -211,13 +322,25 @@ fn walk(mut state: ResMut<ComposeState>, project: Res<Project>, keys: Res<keys::
 /// Toggling rather than a separate disarm verb, for the reason `EditorState::brush` is an `Option`:
 /// **nothing armed has to be a reachable state**, or an author cannot put the cursor over the map
 /// without something following it.
-fn arm(mut state: ResMut<ComposeState>, project: Res<Project>, keys: Res<keys::Live>, input: Res<ButtonInput<KeyCode>>) {
-    // `Enter` adds the picked piece while the picker is open, and arms only when it is not.
-    if state.picking.is_some() {
-        return;
-    }
+/// `Enter` — **adds the highlighted mesh when the library has focus, arms the group otherwise.**
+///
+/// One key, two meanings decided by something visible on screen, rather than a modal that takes the
+/// keyboard and says so only in a status line.
+fn arm(
+    mut state: ResMut<ComposeState>,
+    mut project: ResMut<Project>,
+    keys: Res<keys::Live>,
+    input: Res<ButtonInput<KeyCode>>,
+) {
     if !keys::just_pressed(&input, keys.0, Action::ComposeArm) {
         return;
+    }
+    if state.focus == Pane::Meshes {
+        let Some(d) = project.library.descriptors.get(state.mesh) else {
+            return state.status.problem("the library has no piece there");
+        };
+        let descriptor = d.id.clone();
+        return add_member(&mut state, &mut project, &descriptor);
     }
     toggle_arm(&mut state, &project);
 }
@@ -471,69 +594,7 @@ pub fn new_group(state: &mut ComposeState, project: &mut Project, raw: &str) {
     }
 }
 
-/// `A` — open the picker over the library.
-fn start_pick(
-    mut state: ResMut<ComposeState>,
-    project: Res<Project>,
-    keys: Res<keys::Live>,
-    input: Res<ButtonInput<KeyCode>>,
-) {
-    if !keys::just_pressed(&input, keys.0, Action::AddMember) {
-        return;
-    }
-    if project.compositions.compositions.is_empty() {
-        return state
-            .status
-            .problem("there is no group to add to — press N to make one first");
-    }
-    if project.library.descriptors.is_empty() {
-        return state.status.problem("the library has no pieces to add");
-    }
-    state.picking = Some(0);
-    state.status.note("pick a piece — up/down, Enter to add, Esc to stop");
-}
 
-/// While the picker is open the walk keys and `Enter` belong to it.
-///
-/// Runs before [`walk`] and [`arm`], which both return early while `picking` is set — the focus rule
-/// `docs/ui.md` §3.5 states, and the one `research_room::editor` found the hard way when one `Space`
-/// both clicked a focused button and toggled the pause.
-fn pick_keys(
-    mut state: ResMut<ComposeState>,
-    mut project: ResMut<Project>,
-    keys: Res<keys::Live>,
-    input: Res<ButtonInput<KeyCode>>,
-) {
-    let Some(at) = state.picking else { return };
-    let n = project.library.descriptors.len();
-    if n == 0 {
-        state.picking = None;
-        return;
-    }
-    let step = if input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight) { 5 } else { 1 };
-    if keys::just_pressed(&input, keys.0, Action::ComposePrev) {
-        state.picking = Some((at + n - step % n) % n);
-        return;
-    }
-    if keys::just_pressed(&input, keys.0, Action::ComposeNext) {
-        state.picking = Some((at + step) % n);
-        return;
-    }
-    if keys::just_pressed(&input, keys.0, Action::Cancel) {
-        state.picking = None;
-        state.status.note("nothing added");
-        return;
-    }
-    if keys::just_pressed(&input, keys.0, Action::ComposeArm) {
-        let Some(d) = project.library.descriptors.get(at) else {
-            state.picking = None;
-            return;
-        };
-        let descriptor = d.id.clone();
-        state.picking = None;
-        add_member(&mut state, &mut project, &descriptor);
-    }
-}
 
 /// **Put a library piece into the selected group**, at its centre, through the commit door.
 ///
@@ -586,30 +647,6 @@ fn selected_member<'a>(
     Some((c, i))
 }
 
-/// Walk the members of the selected group. Wraps, like every other list in this editor.
-fn walk_members(
-    mut state: ResMut<ComposeState>,
-    project: Res<Project>,
-    keys: Res<keys::Live>,
-    input: Res<ButtonInput<KeyCode>>,
-) {
-    let Some(c) = project.compositions.compositions.get(state.selected) else {
-        return;
-    };
-    let n = c.members.len();
-    if n == 0 {
-        return;
-    }
-    let mut at = state.member as i64;
-    if keys::just_pressed(&input, keys.0, Action::ComposeMemberPrev) {
-        at -= 1;
-    } else if keys::just_pressed(&input, keys.0, Action::ComposeMemberNext) {
-        at += 1;
-    } else {
-        return;
-    }
-    state.member = at.rem_euclid(n as i64) as usize;
-}
 
 /// **Seat the selected member** — one lattice step per press, written through the door.
 fn seat_member(
@@ -990,6 +1027,65 @@ fn draw_stage(state: Res<ComposeState>, project: Res<Project>, mut gizmos: Gizmo
     }
 }
 
+/// **The mesh list, and the header that says whether it has the arrows.**
+///
+/// Rebuilt wholesale when the selection or the project moves, like every other list here — a diffing
+/// version would be a second opinion about what is on screen.
+fn rebuild_meshes(
+    mut commands: Commands,
+    state: Res<ComposeState>,
+    project: Res<Project>,
+    thumbs: Option<Res<crate::thumbs::Thumbnails>>,
+    list: Query<Entity, With<MeshList>>,
+    mut header: Query<(&mut Text, &mut TextColor), With<MeshHeader>>,
+    rows: Query<Entity, With<MeshRow>>,
+) {
+    if !(state.is_changed() || project.is_changed()) {
+        return;
+    }
+    // **The focus, drawn.** Two lists cannot both look live, and an author who cannot tell which one
+    // the arrows move is back to the modal picker this replaced.
+    let focused = state.focus == Pane::Meshes;
+    for (mut text, mut colour) in &mut header {
+        let want = if focused { "PLACE  <- arrows" } else { "PLACE" };
+        if text.0 != want {
+            text.0 = want.to_owned();
+        }
+        colour.0 = if focused { ACCENT } else { LABEL };
+    }
+    let Ok(root) = list.single() else { return };
+    for e in &rows {
+        commands.entity(e).despawn();
+    }
+    let at = state.mesh.min(project.library.descriptors.len().saturating_sub(1));
+    commands.entity(root).with_children(|p| {
+        for (i, d) in project.library.descriptors.iter().enumerate() {
+            let picked = i == at;
+            let mut row = p.spawn((
+                MeshRow(i),
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(6.0),
+                    ..default()
+                },
+                BackgroundColor(if picked { crate::chrome::ROW_SELECTED } else { crate::chrome::ROW_BG }),
+            ));
+            row.with_children(|r| {
+                // The same thumbnails the Map palette uses — baked once at startup, keyed by id.
+                if let Some(image) = thumbs.as_ref().and_then(|t| t.image(&d.id)) {
+                    r.spawn((ImageNode::new(image), Node { width: Val::Px(28.0), height: Val::Px(28.0), ..default() }));
+                }
+                r.spawn((
+                    Text::new(d.id.clone()),
+                    TextColor(if picked { ACCENT } else { TEXT }),
+                    TextFont::from_font_size(11.0),
+                ));
+            });
+        }
+    });
+}
+
 /// **Everything the panel says, derived on the spot.**
 ///
 /// No count and no badge is stored: staleness and the interface are recomputed from the library and
@@ -1029,26 +1125,9 @@ fn rebuild(
         ));
         rows.push((String::new(), TEXT));
     }
-    if let Some(at) = state.picking {
-        rows.push(("ADD A PIECE".to_owned(), LABEL));
-        let lib = &project.library.descriptors;
-        // A window round the cursor rather than the whole library: the site kit is 45 pieces and the
-        // furniture one is hundreds, and a list that runs off the panel is the bug this tab just had.
-        let first = at.saturating_sub(4);
-        for (i, d) in lib.iter().enumerate().skip(first).take(9) {
-            let marker = if i == at { "> " } else { "  " };
-            rows.push((
-                format!("{marker}{}", d.id),
-                if i == at { ACCENT } else { TEXT },
-            ));
-        }
-        rows.push((
-            format!("    {} of {} — up/down, Enter adds, Esc stops", at + 1, lib.len()),
-            DIM,
-        ));
-        rows.push((String::new(), TEXT));
+    if state.focus == Pane::Groups {
+        rows.push(("GROUPS  <- arrows".to_owned(), ACCENT));
     }
-
     if comps.is_empty() {
         rows.push((
             "No groups. `compositions.ron` beside library.ron defines them; a project with none is \
@@ -1078,7 +1157,14 @@ fn rebuild(
 
     if let Some(c) = comps.get(state.selected) {
         rows.push((String::new(), TEXT));
-        rows.push((format!("MEMBERS OF `{}`", c.id), LABEL));
+        rows.push((
+            format!(
+                "MEMBERS OF `{}`{}",
+                c.id,
+                if state.focus == Pane::Members { "  <- arrows" } else { "" }
+            ),
+            if state.focus == Pane::Members { ACCENT } else { LABEL },
+        ));
         let at = state.member.min(c.members.len().saturating_sub(1));
         for (i, m) in c.members.iter().enumerate() {
             // The seating cursor, in the same `> ` shape the group list above uses — one marker

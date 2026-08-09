@@ -129,7 +129,7 @@ impl Fixture {
 
         std::fs::write(
             emerge.join("project.ron"),
-            "(\n    version: 1,\n    note: None,\n    divisions: 1,\n    patches: [],\n)",
+            "(\n    version: 1,\n    note: None,\n    face_bands: 1,\n    patches: [],\n)",
         )
         .unwrap_or_else(|e| panic!("{e}"));
 

@@ -110,9 +110,6 @@ pub enum Action {
     DropMember,
     /// **Start a new group** on the Compose tab — an empty bounded tile, named as it is made.
     NewGroup,
-    /// **Add a piece from the library** to the selected group. Opens a picker over the library; the
-    /// walk keys and `Enter` belong to it while it is open.
-    AddMember,
     /// Compose's own undo pair. Map, Tiles and Anim each keep one; an editing surface without one
     /// would be the odd tab out.
     UndoCompose,
@@ -531,14 +528,14 @@ pub const BINDINGS: &[Binding] = &[
     // `Context::overlaps` says so, so `up`/`down`/`Enter` mean walk-walk-commit in all three rather
     // than being three arbitrary triples an author has to learn apart. A flat uniqueness rule would
     // force a worse binding here, which is the whole reason contexts exist.
-    b(Action::ComposePrev, KeyCode::ArrowUp, false, Context::Compose, "up", "walk the groups"),
-    b(Action::ComposeNext, KeyCode::ArrowDown, false, Context::Compose, "down", "walk the groups"),
-    b(Action::ComposeArm, KeyCode::Enter, false, Context::Compose, "Enter", "arm this group — the map tab stamps it"),
+    b(Action::ComposePrev, KeyCode::ArrowUp, false, Context::Compose, "up", "walk the focused list"),
+    b(Action::ComposeNext, KeyCode::ArrowDown, false, Context::Compose, "down", "walk the focused list"),
+    b(Action::ComposeArm, KeyCode::Enter, false, Context::Compose, "Enter", "add the picked piece / arm this group"),
     b(Action::ComposeRecord, KeyCode::KeyR, false, Context::Compose, "R", "record what this group's members present now"),
     // Symmetric with the pair above: `up`/`down` walk the groups, `left`/`right` walk the members of
     // the one you are on. Costs no letter, and the two cursors read as one idea.
-    b(Action::ComposeMemberPrev, KeyCode::ArrowLeft, false, Context::Compose, "left", "walk this group's members"),
-    b(Action::ComposeMemberNext, KeyCode::ArrowRight, false, Context::Compose, "right", "walk this group's members"),
+    b(Action::ComposeMemberPrev, KeyCode::ArrowLeft, false, Context::Compose, "left", "which list the arrows walk"),
+    b(Action::ComposeMemberNext, KeyCode::ArrowRight, false, Context::Compose, "right", "which list the arrows walk"),
     // **The Tiles lattice cluster, on the other lattice.** `Context` overlaps by design, so one hand
     // shape means one thing on both surfaces rather than colliding. Declared adjacent to `[` and `]`
     // and sharing their `does`, so `rows()` collapses all six into one row.
@@ -584,7 +581,6 @@ pub const BINDINGS: &[Binding] = &[
     // **The two verbs this tab was missing.** It could refine a group and not make one, so every
     // group had to be captured on the Map first — which is a fine way to work and a bad only way.
     b(Action::NewGroup, KeyCode::KeyN, false, Context::Compose, "N", "new group"),
-    b(Action::AddMember, KeyCode::KeyM, false, Context::Compose, "M", "add a piece from the library"),
     // One row, two chords — the Map, Tiles and Anim pairs again.
     bs(Action::UndoCompose, KeyCode::KeyZ, true, false, Context::Compose, "Z", "undo / redo"),
     bs(Action::RedoCompose, KeyCode::KeyZ, true, true, Context::Compose, "Z", "undo / redo"),
@@ -947,7 +943,7 @@ mod tests {
             Action::TurnMemberLeft, Action::TurnMemberRight,
             Action::TurnMemberLeftFine, Action::TurnMemberRightFine,
             Action::DropMember, Action::UndoCompose, Action::RedoCompose,
-            Action::NewGroup, Action::AddMember,
+            Action::NewGroup,
             Action::Save, Action::Undo, Action::Redo, Action::Shortcuts, Action::EditTile,
             Action::AimLeft, Action::AimRight, Action::AimReset, Action::Cancel,
             Action::Fill, Action::Remove, Action::MoveMode, Action::CloneMode, Action::RenameMap,
