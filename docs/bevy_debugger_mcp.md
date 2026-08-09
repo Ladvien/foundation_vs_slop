@@ -27,6 +27,9 @@ Two things follow, and neither is hidden:
 # 1. The game, with the remote protocol on (default port 15702).
 cargo run --features debugger
 
+# 1b. …or the editor, which speaks the same protocol behind the same feature name.
+cargo run -p emerge-mapper --features debugger
+
 # 2. The MCP server, once, from the copy in this repo.
 cargo install --path crates/bevy_debugger_mcp --locked
 
@@ -39,6 +42,13 @@ claude mcp add bevy-debugger --scope user \
 ```
 
 **Restart Claude Code afterwards** — MCP tools do not appear until it reconnects.
+
+**The game and the editor share the default port**, so only one of them can hold it. Both read
+`BEVY_BRP_PORT` — the editor from its own environment, the MCP server from the registration above —
+so pointing an agent at the second one is a matter of starting it with the variable set and
+registering a second MCP entry against the same port. `emerge-mapper`'s mirror camera renders the
+**map only**: Bevy draws a UI tree to one camera, so a panel, a banner or the error log is still a
+`bevy_devshot` question (`touch screenshot.request` in the editor's working directory).
 
 Then ask the agent to look at the running game. The observation tools ride Bevy's **built-in** BRP methods (`world.query`, `world.get_components`, `world.list_components`, `registry.schema`, …), so they work with nothing in this repo beyond the two plugins.
 

@@ -15,6 +15,24 @@ repository = "https://github.com/Ladvien/emerge-mapper"
 # the headless search, and in here without the three agreeing on a renderer.
 #
 # `docs/2026-08-03-emerge-mapper-plan.md` is the design.
+# **Agent debugging over BRP** (`cargo run -p emerge-mapper --features debugger`).
+#
+# The root `CLAUDE.md` says an agent looking at or driving this project uses `bevy_debugger_mcp` and
+# nothing else, and then carved this crate out as a `bevy_devshot` caller — because it had no BRP of
+# its own. That was true while the debugger was a pinned git dependency; it is vendored now, so the
+# carve-out was a choice rather than a constraint.
+#
+# What it buys over the sentinel file: `bevy_debugger/input` writes into the editor's own
+# `ButtonInput`, so an agent can walk tabs and press keys without touching a real keyboard — which is
+# exactly what `devshot.rs`'s verb list is a hand-built stand-in for. `bevy_debugger/screenshot` also
+# takes a region and a zoom, where `bevy_devshot` is whole-frame only.
+#
+# **`bevy_devshot` stays.** The mirror camera renders the world, and Bevy draws a UI tree to one
+# camera — so a mirror never receives the panels. A question about the interface is still a devshot
+# question, and it is still the player-facing Ctrl+P path.
+[features]
+debugger = ["bevy/bevy_remote", "dep:bevy_debugger_bevy"]
+
 [dependencies]
 emerge-core = { path = "../emerge-core" }
 # The runtime half. The editor spawns pieces through `emerge_bevy::spawn_descriptor` rather than its
@@ -27,10 +45,13 @@ emerge-bevy = { path = "../emerge-bevy" }
 emerge-anim = { path = "../emerge-anim" }
 # The editor is a Bevy app in its own right, not a mode of the game. `sim_harness.rs` is the precedent
 # the plan cites for two binaries over one plugin graph — "not a second code path".
-# `bevy_dev_tools` is what carries `infinite_grid` — verified in the vendored source at
-# `bevy_dev_tools-0.19.0/src/infinite_grid.rs`, reached as `bevy::dev_tools::infinite_grid`.
 # `jpeg` because the shipped kits embed PBR textures as JPEG and Bevy's defaults cover only PNG.
-bevy = { workspace = true, features = ["jpeg", "bevy_dev_tools"] }
+#
+# `bevy_dev_tools` was here for `infinite_grid` and is gone with it: the dev tool's grid drew at 1.0 m
+# while `emerge_core::grid::SNAP` is 0.5, and drew forever, so the ground outside `Map::bounds` looked
+# as buildable as the ground inside. `editor::draw_map_grid` is bounded by the map and spaced by the
+# constant that defines a cell.
+bevy = { workspace = true, features = ["jpeg"] }
 # The screenshot rig, shared with the game so there is one capture path rather than two copies of it.
 bevy_devshot = { path = "../bevy_devshot" }
 ron.workspace = true
@@ -48,3 +69,8 @@ image.workspace = true
 # Cmd+C on the detail pane — the pane's text into the system clipboard, so an author can hand a
 # piece's facts to an agent. Text only; the image-data feature would drag image deps in twice.
 arboard = { version = "3", default-features = false }
+# The debugger's companion plugin. **Optional**, so it is absent from the resolved dependency graph
+# of an ordinary build — `cargo tree -i bevy_debugger_bevy` finds no package without the feature, and
+# neither does `bevy_remote`. A path dep into the vendored copy, never a pinned rev: the pin is what
+# turned a one-line fix into a cross-repo errand, which is why the debugger lives in this tree now.
+bevy_debugger_bevy = { path = "../bevy_debugger_mcp/crates/bevy_debugger_bevy", optional = true }

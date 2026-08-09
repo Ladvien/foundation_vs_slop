@@ -100,6 +100,11 @@ fn main() {
     // test that each assembled their own graph would be two editors, and the tests would be checking
     // the one nobody ships.
     harness::add_editor_plugins(&mut app);
+    // Behind the feature, so an ordinary build has no `bevy_remote` in its dependency graph at all.
+    // Deliberately NOT in `build_headless`: a test app must not bind a socket, and several `App`s
+    // are built per test process — the second would fail on an address already in use.
+    #[cfg(feature = "debugger")]
+    harness::add_debugger_plugins(&mut app);
 
     // **Replace the default face rather than hand a handle to 41 call sites.** `TextFont::default()`
     // names `AssetId::default()`, which is exactly where `TextPlugin` puts the subset

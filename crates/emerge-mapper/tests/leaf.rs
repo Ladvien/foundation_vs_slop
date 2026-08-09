@@ -13,6 +13,14 @@
 //! not a dependency of the game, and `cargo tree -i emerge-mapper` is what would notice if that
 //! changed.
 //!
+//! # Optional dependencies are dependencies
+//!
+//! It reads the `[dependencies]` section as written, so `bevy_debugger_bevy` counts even though it is
+//! `optional = true` and absent from a default build. That is deliberate: the question this test asks
+//! is *"what may this crate reach for"*, and a feature flag decides **when** rather than **whether**.
+//! Adding the debugger tripped this on the first run, which is the ratchet working — the row below is
+//! the deliberate edit it demanded.
+//!
 //! # Parsing
 //!
 //! By hand, over the `[dependencies]` section only. `docs/2026-08-08-handoff.md` records that the
@@ -37,7 +45,13 @@ const ALLOWED: &[(&str, &str)] = &[
     ("ureq", "the VLM transport — one blocking POST from a task-pool thread"),
     ("base64", "data-URI image parts for the booth renders"),
     ("image", "encodes the booth's RGBA readback to PNG"),
-    ("arboard", "Cmd+C on the detail pane"),
+    ("arboard", "Cmd+C copies the live tab's text, problems first, for handing to an agent"),
+    (
+        "bevy_debugger_bevy",
+        "the agent's BRP way in — OPTIONAL, reached only by `--features debugger`, so it is absent \
+         from the resolved graph of an ordinary build (`cargo tree -i` finds no package). It is \
+         what lets an agent press a key in this editor without taking the machine's keyboard",
+    ),
 ];
 
 fn declared_dependencies(manifest: &str) -> BTreeSet<String> {
