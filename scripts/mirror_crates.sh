@@ -57,7 +57,8 @@ CRATES=(
 #
 # `bevy_autogib` is public because nothing in the Bevy ecosystem ships runtime plane-cut prefracture
 # with watertight caps; `bevy_light_grid` because "illuminance the AI can read" is a question a renderer
-# does not answer, and neither needs any of the game to be useful. Both are standalone-buildable and
+# does not answer; `bevy_speech_bubbles` because a world-space balloon is not something Bevy's text
+# stack does. None of the three needs any of the game to be useful. Both are standalone-buildable and
 # both carry a `.github/workflows/ci.yml` that the split lifts to the mirror root, per the note above.
 # `bevy_debugger_mcp` is also public on GitHub, but it was vendored in already-created, so this list
 # never has to make it so.
@@ -67,6 +68,7 @@ CRATES=(
 PUBLIC_CRATES=(
     bevy_autogib
     bevy_light_grid
+    bevy_speech_bubbles
 )
 
 cd "$(git rev-parse --show-toplevel)"
