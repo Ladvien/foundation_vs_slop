@@ -95,6 +95,12 @@ pub enum Action {
     SeatRight,
     SeatDown,
     SeatUp,
+    /// **Put the selected member flush against an envelope face.** The verb a wall wants: its offset
+    /// comes from its own measured thickness, not from a grid step it cannot land on.
+    FlushForward,
+    FlushLeft,
+    FlushBack,
+    FlushRight,
     /// Turn the selected member. A quarter bare, 15° on Shift — see the binding for why that way round.
     TurnMemberLeft,
     TurnMemberRight,
@@ -531,12 +537,26 @@ pub const BINDINGS: &[Binding] = &[
     // **The Tiles lattice cluster, on the other lattice.** `Context` overlaps by design, so one hand
     // shape means one thing on both surfaces rather than colliding. Declared adjacent to `[` and `]`
     // and sharing their `does`, so `rows()` collapses all six into one row.
-    b(Action::SeatForward, KeyCode::KeyT, false, Context::Compose, "T", "seat this member / raise"),
-    b(Action::SeatLeft, KeyCode::KeyF, false, Context::Compose, "F", "seat this member / raise"),
-    b(Action::SeatBack, KeyCode::KeyG, false, Context::Compose, "G", "seat this member / raise"),
-    b(Action::SeatRight, KeyCode::KeyH, false, Context::Compose, "H", "seat this member / raise"),
+    bs(Action::SeatForward, KeyCode::KeyT, false, false, Context::Compose, "T", "seat this member / raise"),
+    bs(Action::SeatLeft, KeyCode::KeyF, false, false, Context::Compose, "F", "seat this member / raise"),
+    bs(Action::SeatBack, KeyCode::KeyG, false, false, Context::Compose, "G", "seat this member / raise"),
+    bs(Action::SeatRight, KeyCode::KeyH, false, false, Context::Compose, "H", "seat this member / raise"),
     b(Action::SeatDown, KeyCode::BracketLeft, false, Context::Compose, "[", "seat this member / raise"),
     b(Action::SeatUp, KeyCode::BracketRight, false, Context::Compose, "]", "seat this member / raise"),
+    // **Flush to a face, which is the verb a wall actually wants.**
+    //
+    // Step 4 measured why: `site/wall` is 0.1 m thick, so seating it flush inside a 1 m tile puts it
+    // at 0.45 — not a multiple of `grid::SNAP`, and so unreachable by the lattice keys above however
+    // many times you press them. A uniform grid is the right primitive for furniture and the wrong
+    // one for architecture; this is the relative split value to those absolute ones (Muller et al.,
+    // CGA Shape, 10.1145/1179352.1141931), and Tutenel's "snapping to the nearest valid location".
+    //
+    // Its own row rather than the seat row's: ten chords collapsed into one line stops being a row
+    // and starts being a paragraph.
+    bs(Action::FlushForward, KeyCode::KeyT, false, true, Context::Compose, "T", "flush to that face"),
+    bs(Action::FlushLeft, KeyCode::KeyF, false, true, Context::Compose, "F", "flush to that face"),
+    bs(Action::FlushBack, KeyCode::KeyG, false, true, Context::Compose, "G", "flush to that face"),
+    bs(Action::FlushRight, KeyCode::KeyH, false, true, Context::Compose, "H", "flush to that face"),
     // **A quarter bare, 15° on Shift — and that order is the argument, not a preference.**
     //
     // A group is a tile. `adjacency::quarter_turns` refuses a yaw that is not a multiple of 90 and
@@ -914,6 +934,7 @@ mod tests {
             Action::ComposeRecord, Action::ComposeMemberPrev, Action::ComposeMemberNext,
             Action::SeatForward, Action::SeatLeft, Action::SeatBack, Action::SeatRight,
             Action::SeatDown, Action::SeatUp,
+            Action::FlushForward, Action::FlushLeft, Action::FlushBack, Action::FlushRight,
             Action::TurnMemberLeft, Action::TurnMemberRight,
             Action::TurnMemberLeftFine, Action::TurnMemberRightFine,
             Action::DropMember, Action::UndoCompose, Action::RedoCompose,

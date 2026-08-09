@@ -101,6 +101,7 @@ impl Plugin for ComposePlugin {
                     record,
                     walk_members,
                     seat_member,
+                    flush_member,
                     turn_member,
                     drop_member,
                     step_history,
@@ -425,6 +426,56 @@ pub fn seat_selected(state: &mut ComposeState, project: &mut Project, nudge: Nud
             "`{member_id}` seated at ({:.2}, {:.2}) lift {:.2}",
             next_at.0, next_at.1, next_lift
         ))
+    });
+}
+
+/// Flush the selected member against a face — `Shift` + a seat key.
+fn flush_member(
+    mut state: ResMut<ComposeState>,
+    mut project: ResMut<Project>,
+    keys: Res<keys::Live>,
+    input: Res<ButtonInput<KeyCode>>,
+) {
+    let to = [
+        (Action::FlushForward, Nudge::Forward),
+        (Action::FlushBack, Nudge::Back),
+        (Action::FlushLeft, Nudge::Left),
+        (Action::FlushRight, Nudge::Right),
+    ]
+    .into_iter()
+    .find(|(a, _)| keys::just_pressed(&input, keys.0, *a));
+    let Some((_, to)) = to else { return };
+    flush_selected(&mut state, &mut project, to);
+}
+
+/// The body, `pub` for the same reason [`seat_selected`] is.
+pub fn flush_selected(state: &mut ComposeState, project: &mut Project, to: Nudge) {
+    let comps = &project.compositions.compositions;
+    let Some((c, i)) = selected_member(state, comps) else {
+        state.status.note("no member to flush");
+        return;
+    };
+    let (envelope, member_id) = (c.envelope, c.members[i].id.clone());
+    let footprint = match member_footprint(&c.members[i], comps, &project.library) {
+        Ok(f) => f,
+        Err(e) => return state.status.problem(e),
+    };
+    let at = c.members[i].at;
+    let next = match flushed(envelope, at, footprint, to) {
+        Ok(v) => v,
+        Err(e) => return state.status.problem(format!("`{member_id}`: {e}")),
+    };
+    if next == at {
+        return;
+    }
+    let selected = state.selected;
+    commit(state, project, |set| {
+        let m = set
+            .get_mut(selected)
+            .and_then(|c| c.members.get_mut(i))
+            .ok_or_else(|| format!("`{member_id}` is no longer there to flush"))?;
+        m.at = next;
+        Ok(format!("`{member_id}` flush at ({:.2}, {:.2})", next.0, next.1))
     });
 }
 
@@ -920,6 +971,61 @@ pub fn seated(
     Ok((next, lift))
 }
 
+/// **Put a member flush against one face of the envelope**, or refuse and say why.
+///
+/// # The verb a wall wants, and why the lattice is not it
+///
+/// Measured on the shipped site kit while authoring real tiles: `site/wall` is **0.1 m** thick, so
+/// sitting it flush inside a 1 m tile puts its centre at **0.45** — not a multiple of
+/// [`emerge_core::grid::SNAP`], and therefore unreachable by [`seated`] however many times you press.
+/// A uniform grid is the right primitive for furniture and the wrong one for architecture.
+///
+/// So the offset comes from the member's **own measured thickness** rather than from a step: this is
+/// the *relative* split value to [`seated`]'s absolute one (Müller et al., *Procedural Modeling of
+/// Buildings*, `10.1145/1179352.1141931`, which types split values absolute or relative for exactly
+/// this reason), and it is Tutenel et al.'s *"snapping to the nearest valid location"*
+/// (`10.1609/aiide.v6i1.12398`).
+///
+/// # It is what makes a group a tile
+///
+/// [`composition::interface`] reads a member on a face when its box edge is within
+/// `adjacency::EDGE_EPSILON` of the envelope's. Flush puts it exactly there, so the group presents
+/// what it is made of — and the envelope stays exactly the tile, which is what lets
+/// `grammar::learn` accept a group of floor-plus-wall where the 0.1 × 1.0 wall alone is refused as
+/// the wrong size for the cell.
+///
+/// Only the axis being flushed to moves; the other is left alone, so flushing north then west is a
+/// corner rather than two competing answers.
+pub fn flushed(
+    envelope: Envelope,
+    at: (f32, f32),
+    footprint: (f32, f32),
+    to: Nudge,
+) -> Result<(f32, f32), String> {
+    let Envelope::Bounded { size } = envelope else {
+        return Err(
+            "this group is anchored, so it claims no tile and has no face to flush against"
+                .to_owned(),
+        );
+    };
+    let (half_x, half_z) = (size.0 * 0.5, size.2 * 0.5);
+    let (fw, fd) = (footprint.0 * 0.5, footprint.1 * 0.5);
+    match to {
+        Nudge::Forward => Ok((at.0, -half_z + fd)),
+        Nudge::Back => Ok((at.0, half_z - fd)),
+        Nudge::Left => Ok((-half_x + fw, at.1)),
+        Nudge::Right => Ok((half_x - fw, at.1)),
+        // Deliberately not answerable. `lift` is a nudge on top of whatever the mount resolves to
+        // rather than an absolute height, so "flush to the floor" would have to invent which datum it
+        // meant — and a ceiling-mounted member's useful lifts are negative.
+        Nudge::Up | Nudge::Down => Err(
+            "there is no face to flush against vertically — lift is a nudge on the mount, not a \
+             height, so the floor and the ceiling are not where a member's `lift` is measured from"
+                .to_owned(),
+        ),
+    }
+}
+
 /// The authoring grid, rounded the way [`crate::editor`] rounds it. One rule, two callers.
 fn snap_to(v: f32) -> f32 {
     (v / emerge_core::grid::SNAP).round() * emerge_core::grid::SNAP
@@ -1320,6 +1426,88 @@ mod seating_tests {
         };
         let err = member_footprint(&bad, &comps, &lib).expect_err("refuses");
         assert!(err.contains("anchored"), "{err}");
+        assert!(err.contains("claims no tile"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod flush_tests {
+    use super::{flushed, Nudge};
+    use emerge_core::composition::Envelope;
+
+    /// **The case step 4 was written to find.** `site/wall` is 0.1 m thick; flush inside a 1 m tile
+    /// puts it at 0.45, which is not a multiple of `grid::SNAP` and so is unreachable by seating.
+    #[test]
+    fn a_thin_wall_lands_where_the_lattice_cannot_put_it() {
+        let tile = Envelope::Bounded { size: (1.0, 2.4, 1.0) };
+        let wall = (0.1, 1.0);
+        let (x, z) = flushed(tile, (0.0, 0.0), wall, Nudge::Left).expect("flushes");
+        assert_eq!((x, z), (-0.45, 0.0));
+        // Its west face is exactly the envelope's, which is what `interface` reads a member on.
+        assert!((x - wall.0 * 0.5 + 0.5).abs() < 1e-6, "west face at {}", x - wall.0 * 0.5);
+        // And it is not on the seating lattice, which is the whole point.
+        assert!(
+            (x / emerge_core::grid::SNAP).fract().abs() > 1e-6,
+            "if this were on the lattice the flush verb would be unnecessary"
+        );
+    }
+
+    /// **A wall has to be turned before it is flushed**, and the footprint carries that.
+    ///
+    /// `site/wall` is 0.1 wide and 1.0 deep, so it runs along Z: flushing it *north* while it still
+    /// points that way just centres it, because it already fills the tile in Z. Turned a quarter its
+    /// footprint is (1.0, 0.1) and the same verb puts it on the north face. `member_footprint`
+    /// applies the member's yaw for exactly this reason — the first draft of this test did not, and
+    /// asserted a wall could be flush across the axis it spans.
+    #[test]
+    fn a_wall_must_be_turned_before_flushing_and_the_footprint_says_so() {
+        let tile = Envelope::Bounded { size: (1.0, 2.4, 1.0) };
+        let along_z = (0.1, 1.0);
+        assert_eq!(
+            flushed(tile, (0.0, 0.0), along_z, Nudge::Forward).expect("flushes"),
+            (0.0, 0.0),
+            "it already spans Z, so north is where it is"
+        );
+        let turned = (1.0, 0.1);
+        assert_eq!(
+            flushed(tile, (0.0, 0.0), turned, Nudge::Forward).expect("flushes"),
+            (0.0, -0.45)
+        );
+    }
+
+    /// Flushing one axis leaves the other alone, so north-then-west is a corner.
+    #[test]
+    fn two_flushes_make_a_corner_rather_than_competing() {
+        let tile = Envelope::Bounded { size: (1.0, 2.4, 1.0) };
+        let north = flushed(tile, (0.0, 0.0), (1.0, 0.1), Nudge::Forward).expect("flushes");
+        assert_eq!(north, (0.0, -0.45));
+        // The west wall of the same tile, still pointing along Z.
+        let corner = flushed(tile, north, (0.1, 1.0), Nudge::Left).expect("flushes");
+        assert_eq!(corner, (-0.45, -0.45), "the first flush survives the second");
+    }
+
+    /// A piece as wide as its tile is already flush on both sides — the answer is the centre.
+    #[test]
+    fn a_full_width_member_is_flush_where_it_stands() {
+        let tile = Envelope::Bounded { size: (1.0, 2.4, 1.0) };
+        assert_eq!(flushed(tile, (0.0, 0.0), (1.0, 1.0), Nudge::Left).expect("flushes"), (0.0, 0.0));
+        assert_eq!(flushed(tile, (0.0, 0.0), (1.0, 1.0), Nudge::Right).expect("flushes"), (0.0, 0.0));
+    }
+
+    /// There is no face to flush against vertically, and it says why rather than guessing a datum.
+    #[test]
+    fn there_is_no_vertical_face_and_it_says_so() {
+        let tile = Envelope::Bounded { size: (1.0, 2.4, 1.0) };
+        let err = flushed(tile, (0.0, 0.0), (0.1, 1.0), Nudge::Up).expect_err("refuses");
+        assert!(err.contains("no face"), "{err}");
+        assert!(err.contains("nudge on the mount"), "{err}");
+    }
+
+    /// An anchored group claims no tile, so it has no face — named, not invented.
+    #[test]
+    fn an_anchored_group_has_no_face() {
+        let err = flushed(Envelope::Anchored, (0.0, 0.0), (0.1, 1.0), Nudge::Left)
+            .expect_err("refuses");
         assert!(err.contains("claims no tile"), "{err}");
     }
 }
