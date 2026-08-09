@@ -748,7 +748,10 @@ pub fn authored() -> WorldGenome {
         &crate::mold::MoldConfig::default(),
         &AlmondWaterDynamics::default(),
         &crate::light::LightingDynamics::default(),
-        &crate::gore::GoreDynamics::from_config(&crate::gore::GoreSettings::default()),
+        &crate::gore::GoreDynamics::from_config(
+            &crate::gore::GoreSettings::default(),
+            &bevy_autogib::FractureSettings::default(),
+        ),
     )
 }
 
@@ -874,7 +877,10 @@ mod tests {
                 &crate::mold::MoldConfig::default(),
                 &almond,
                 &crate::light::LightingDynamics::default(),
-                &crate::gore::GoreDynamics::from_config(&crate::gore::GoreSettings::default()),
+                &crate::gore::GoreDynamics::from_config(
+                    &crate::gore::GoreSettings::default(),
+                    &bevy_autogib::FractureSettings::default(),
+                ),
             );
             base.0
                 .iter()
@@ -922,7 +928,10 @@ mod gore_gene_tests {
     /// guards is the one FVS-I-6 named — a knob that is *documented* as evolved but is not encoded.
     #[test]
     fn the_gore_dials_round_trip_through_the_genome() {
-        let shipped = crate::gore::GoreDynamics::from_config(&crate::gore::GoreSettings::default());
+        let shipped = crate::gore::GoreDynamics::from_config(
+                    &crate::gore::GoreSettings::default(),
+                    &bevy_autogib::FractureSettings::default(),
+                );
         let decoded = decode(&authored()).expect("the authored genome decodes");
         assert_eq!(decoded.gore, shipped, "the authored genome must decode to the shipped gore dials");
     }
@@ -934,7 +943,10 @@ mod gore_gene_tests {
     fn every_encoded_gore_dial_occupies_its_own_knob() {
         let base = authored();
         let idx_of = |perturb: fn(&mut crate::gore::GoreDynamics)| {
-            let mut g = crate::gore::GoreDynamics::from_config(&crate::gore::GoreSettings::default());
+            let mut g = crate::gore::GoreDynamics::from_config(
+                    &crate::gore::GoreSettings::default(),
+                    &bevy_autogib::FractureSettings::default(),
+                );
             perturb(&mut g);
             let probed = encode(
                 &AiTuning::default(),
@@ -973,7 +985,10 @@ mod gore_gene_tests {
     fn decode_orders_an_inverted_autogib_clamp() {
         let base = authored();
         let idx_of = |perturb: fn(&mut crate::gore::GoreDynamics)| {
-            let mut g = crate::gore::GoreDynamics::from_config(&crate::gore::GoreSettings::default());
+            let mut g = crate::gore::GoreDynamics::from_config(
+                    &crate::gore::GoreSettings::default(),
+                    &bevy_autogib::FractureSettings::default(),
+                );
             perturb(&mut g);
             let probed = encode(
                 &AiTuning::default(),
@@ -995,8 +1010,14 @@ mod gore_gene_tests {
         assert_eq!(decoded.autogib_min_pieces, 8);
         assert_eq!(decoded.autogib_max_pieces, 30);
         let mut settings = crate::gore::GoreSettings::default();
-        decoded.apply_to(&mut settings);
+        // The fragment-count clamp now lives with the bake that would panic on it, so the inverted pair
+        // this test constructs has to be validated where it landed: `fracture:`, not `gore:`.
+        let mut fracture = bevy_autogib::FractureSettings::default();
+        decoded.apply_to(&mut settings, &mut fracture);
         crate::gore::validate_settings(&settings)
             .expect("a decoded genome must always produce a config the validator accepts");
+        fracture
+            .validate()
+            .expect("a decoded genome must always produce a fracture clamp the validator accepts");
     }
 }

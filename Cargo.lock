@@ -857,6 +857,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_autogib"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "serde",
+]
+
+[[package]]
 name = "bevy_camera"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3516,6 +3524,7 @@ dependencies = [
  "ab_glyph",
  "avian3d",
  "bevy",
+ "bevy_autogib",
  "bevy_debugger_bevy",
  "bevy_devshot",
  "bevy_light_grid",

@@ -1684,14 +1684,26 @@ fn apply_archive(
                 &ron_slice(&AlmondWaterDynamics::from_config(&base.almond_water))?,
                 &ron_slice(&AlmondWaterDynamics::from_config(&gc.almond_water))?,
             )?;
-            // Same subset trick for `gore:` — only the 8 dials with a causal path to the `deaths` axis
-            // evolve (FVS-I-7); the ~22 cosmetic knobs are authored and must survive the bake untouched.
-            use foundation_vs_slop::gore::GoreDynamics;
+            // The gore dials — 8 knobs with a causal path to the `deaths` axis (FVS-I-7) — now span
+            // **two** blocks: the three fragment-count genes live in `fracture:` (they are bake dials
+            // owned by `bevy_autogib`), the rest in `gore:`. So this is two splices, not one.
+            //
+            // **And they are spliced with the full settings types, not `GoreDynamics`.** The subset type
+            // was the guarantee elsewhere in this function — its field names being a flat subset of one
+            // authored block is what made a cosmetic knob unsplice-able. `GoreDynamics` is no longer a
+            // subset of *either* block, so splicing it into `gore:` would make the three fracture names
+            // unplaceable and fail the bake.
+            //
+            // The guarantee survives by construction rather than by type: `gc` is `base` with `apply_dim`
+            // run over it, and `GoreDynamics::apply_to` is the only thing that writes either block. So
+            // every leaf that differs between `base` and `gc` is a gene, and `splice_block` only edits
+            // leaves that differ. A cosmetic knob still cannot move — there is nothing to move it.
+            cfg_text = splice_block(&cfg_text, "gore", &ron_slice(&base.gore)?, &ron_slice(&gc.gore)?)?;
             cfg_text = splice_block(
                 &cfg_text,
-                "gore",
-                &ron_slice(&GoreDynamics::from_config(&base.gore))?,
-                &ron_slice(&GoreDynamics::from_config(&gc.gore))?,
+                "fracture",
+                &ron_slice(&base.fracture)?,
+                &ron_slice(&gc.fracture)?,
             )?;
             // Same subset trick for `lighting:` — only the two gameplay dials evolve; the visual knobs are
             // authored and must survive the bake untouched.

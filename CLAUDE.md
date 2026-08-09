@@ -16,7 +16,7 @@
 
 ## Workspace & crates
 
-Root package is the game (`foundation_vs_slop`, `src/`). Thirteen members live under `crates/`; eleven mirror to private `Ladvien/*` repos. The exception is `crates/fvs`, the zero-dependency `cargo fvs` dispatcher — its own crate so `--help` doesn't rebuild the game (see its manifest header). The thirteenth is `crates/bevy_debugger_mcp/crates/bevy_debugger_bevy`, nested inside the debugger's own tree and mirrored as part of it rather than on its own.
+Root package is the game (`foundation_vs_slop`, `src/`). Fourteen members live under `crates/`; twelve mirror to `Ladvien/*` repos — all private except `bevy_autogib`, which needs none of the game to be useful and ships nothing the ecosystem already has. The exception is `crates/fvs`, the zero-dependency `cargo fvs` dispatcher — its own crate so `--help` doesn't rebuild the game (see its manifest header). The fourteenth is `crates/bevy_debugger_mcp/crates/bevy_debugger_bevy`, nested inside the debugger's own tree and mirrored as part of it rather than on its own.
 
 Each crate is still reached by the path the game always used. **The facade is the API: changing a call site means editing `src/`, not `crates/`.**
 
@@ -28,6 +28,7 @@ Each crate is still reached by the path the game always used. **The facade is th
 | `bevy_stigmergy` | N influence channels + vectorial rally pheromone | `Stig(StigGrid<CHANNEL_COUNT>)` in `ai::field` (`src/ai/field.rs:134`) |
 | `bevy_light_grid` | CPU illuminance grid creatures read | `LightField { core, dirty }` (`src/light.rs:341`) |
 | `bevy_speech_bubbles` | World-space speech/thought balloons | `dialogue::{bubble, model}` re-exports (`src/dialogue/bubble.rs:15`) |
+| `bevy_autogib` | Runtime mesh fracture: slicer, watertight caps, bake-once cache | `crate::autogib` facade + `squad::{FigurineSource, GunModel}` aliases (`src/autogib.rs`) |
 | `emerge-core` | Engine-free world building: schemas, IR, solvers, WFC, `DetRng` | `crate::{geom, rng, wfc}` (`src/lib.rs:169`), `placement::{ir, …}` (`src/placement/mod.rs:26`) |
 | `emerge-anim` | Pose blender | `crate::anim` (`src/lib.rs:23`) |
 | `emerge-bevy` | Library + map → entities | `src/emerge_map.rs` |

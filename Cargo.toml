@@ -6,6 +6,7 @@ members = [
     "crates/fvs",
     "crates/bevy_orca", "crates/map_elites", "crates/bevy_devshot",
     "crates/bevy_stigmergy", "crates/bevy_light_grid", "crates/bevy_speech_bubbles",
+    "crates/bevy_autogib",
     # The agent debugger, vendored whole so it can be USED and EVOLVED here rather than pinned to a
     # rev of someone else's history. Two members because the repo has two independent halves: the MCP
     # server binary (a separate process, speaks MCP to an agent and BRP to the game) and the companion
@@ -47,7 +48,13 @@ default-run = "foundation_vs_slop"
 # Opt-in test/replay scaffolding: gates the headless `sim_harness`, the deterministic snapshot/hash
 # accessors, and any test-only visual-decoupling hooks. Off by default so the shipped binary carries
 # none of it. Enable with `cargo test --features test-harness`.
-test-harness = ["bevy/debug", "dep:clap", "dep:indicatif", "dep:libc"]
+#
+# It also forwards `bevy_autogib/strict-order`. That crate's vertex-soup sort carries the same
+# runtime tie check `util::sort_total_by_key_at` does, and the check is `debug_assertions`-gated — so
+# without this line a harness run built in release would silently drop the one assertion standing
+# between the fracture bake and a load-order-dependent soup. Same reason the game's own copy keys off
+# this feature.
+test-harness = ["bevy/debug", "dep:clap", "dep:indicatif", "dep:libc", "bevy_autogib/strict-order"]
 # **Agent debugging over BRP** (`cargo run --features debugger`). Turns on Bevy's own Remote Protocol so
 # `bevy_debugger_mcp` — our MCP server, a separate process — can query entities, components and resources
 # in the running game. See `docs/bevy_debugger_mcp.md`.
@@ -100,6 +107,10 @@ bevy_light_grid = { path = "crates/bevy_light_grid" }
 # World-space speech/thought balloons: the CPU text raster and the billboard. The font path stays in
 # `dialogue::bubble`, because that is the one thing a library must not assume.
 bevy_speech_bubbles = { path = "crates/bevy_speech_bubbles" }
+# Runtime mesh fracture: the slicer, the watertight caps, and the bake-once-per-source cache. It hands
+# out a centre and a half-extent per fragment and stops there — `gore::spawn_fragments` is the facade
+# that turns those into avian bodies, and `autogib.rs` is the one that knows VALKYRIE carries a rifle.
+bevy_autogib = { path = "crates/bevy_autogib" }
 # The agent debugger's companion Bevy plugin — custom BRP methods for screenshots and headless input
 # injection. **Optional, pulled in only by the `debugger` feature**, so it is absent from the resolved
 # dependency graph of every default, release and determinism build.

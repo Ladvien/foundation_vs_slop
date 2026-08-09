@@ -69,7 +69,7 @@ characters are under `SCP_Characters/`, for the procedural mushrooms under
 4. **JPEG-enabled textures are fine** (Bevy is built with the `jpeg` feature
    specifically for VALKYRIE's embedded JPEGs — `Cargo.toml:28`).
 5. **Watertight geometry if the model can be gibbed.** Squad units are
-   plane-sliced at death (`src/autogib.rs`); Sutherland–Hodgman clipping caps
+   plane-sliced at death (`crates/bevy_autogib`); Sutherland–Hodgman clipping caps
    each cut, but unclosed caps are silently dropped (never a panic), so an
    open mesh produces gibs with holes. Welded, closed meshes look right.
 6. **No malformed stray geometry.** A 10-metre shelf FBX forced the kit swap to
@@ -122,13 +122,13 @@ Key facts the code relies on:
 | Native height | 1.61 m, feet at origin (×1.13 render scale → 1.82 m in game) | `valkyrie_bevy_integration.md:23` |
 | **Facing** | the rig faces glTF **+Z**, so the character's own **right is −X** (`hand_r`, `foot_r`, `thigh_r` all sit at negative X). The figurine child carries a 180° Y rotation to point that at the unit's −Z | `src/squad.rs` (`spawn_unit`) |
 | Clip count | 20 | `tests/valkyrie_asset.rs` |
-| Rifle | rigid mesh parented to bone **`spine_03`**, node `Name` contains `"rifle"` | `src/squad.rs`, `src/autogib.rs:863` |
+| Rifle | rigid mesh parented to bone **`spine_03`**, node `Name` contains `"rifle"` | `src/squad.rs`, `src/autogib.rs` (`tag_valkyrie_rifle`) |
 | Chest rig accent | node `Name` contains **`"chestrig"`** | `src/squad.rs` (`recolor_units`) |
 | Hair | `AlphaMode::Blend`, double-sided, 2 embedded textures | `valkyrie_bevy_integration.md:141` |
 
 **Why those `Name` substrings matter:** the game walks the spawned scene by `Name`
-to (a) tag the rifle as `GunModel` so `autogib` bakes it as a separate intact
-chunk (`tag_valkyrie_rifle`, `src/autogib.rs:850`), and (b) recolor only the
+to (a) tag the rifle as `GunModel` so the fracture bake prunes it into a separate
+intact chunk (`tag_valkyrie_rifle`, `src/autogib.rs`), and (b) recolor only the
 chest-rig mesh with the per-member outfit colour, leaving the body/gear/hair
 authored materials untouched (`recolor_units`, `src/squad.rs`). If you
 rebuild VALKYRIE or build a sibling character, **keep those node names** or the
@@ -579,8 +579,10 @@ The `bracket` archetypes grow on **walls** (the `WALL_MOUNT_HEIGHT` path in
 
 ### Autogib (character fracture)
 
-Squad units are **plane-sliced at death** from their own bind-pose mesh
-(`src/autogib.rs`). The pipeline:
+Squad units are **plane-sliced at death** from their own bind-pose mesh. The
+slicer is `crates/bevy_autogib`, a standalone crate that knows nothing about this
+game; `src/autogib.rs` is the thin half that knows VALKYRIE carries a rifle. The
+pipeline:
 
 1. Pre-fracture the merged character mesh once (recursive random plane cuts,
    Sutherland–Hodgman clipping, watertight cap per cut, planar cross-section
@@ -751,7 +753,7 @@ them.
 | Furniture spawn + scale | `src/placement/furnish.rs:40`, `:447` |
 | Squad rig + animation | `src/squad.rs:165`, `:283` |
 | VALKYRIE integration doc | `/mnt/codex_fs/game_assets/SCP_Characters/gltf/valkyrie_bevy_integration.md` |
-| Autogib (death fracture) | `src/autogib.rs` |
+| Autogib (death fracture) | `crates/bevy_autogib`, `src/autogib.rs` |
 | Smiley boss (no model) | `src/enemy.rs`, `assets/shaders/smiley.wgsl` |
 | Crab enemy | `src/crab/mod.rs:95` |
 | SCP-150 parasite | `src/parasite.rs:46` |

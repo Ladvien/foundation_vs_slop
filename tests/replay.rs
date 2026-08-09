@@ -743,15 +743,23 @@ fn every_world_config_slice_reaches_the_game_config() {
     assert_eq!(gc.mold.growth, w.mold.growth, "mold slice never applied at the seam");
     assert_eq!(gc.almond_water.strong_seep, w.almond.strong_seep, "almond slice never applied at the seam");
     assert_eq!(gc.lighting.field_intensity, w.lighting.field_intensity, "lighting slice never applied at the seam");
+    // Both halves, because the gore gene group spans two config slices: the three fragment-count genes
+    // land in `fracture:` (read by `bevy_autogib`'s bake) and the rest in `gore:`. Reading only one
+    // would pass while the other was silently frozen at its authored value for every rollout.
     assert_eq!(
-        GoreDynamics::from_config(&gc.gore),
+        GoreDynamics::from_config(&gc.gore, &gc.fracture),
         w.gore,
         "gore slice never applied at the seam"
     );
     assert_eq!(
-        GoreDynamics::from_config(app.world().resource::<GoreSettings>()),
+        GoreDynamics::from_config(
+            app.world().resource::<GoreSettings>(),
+            app.world().resource::<bevy_autogib::FractureSettings>(),
+        ),
         w.gore,
-        "`GorePlugin` cloned `gc.gore` before the seam wrote it — the seam-before-plugins ordering regressed"
+        "a plugin cloned its config slice BEFORE the seam wrote it — the seam-before-plugins ordering \
+         regressed. `GorePlugin` clones `gc.gore` and `autogib::AutogibPlugin` clones `gc.fracture`, \
+         both at plugin build; either one moving ahead of the seam freezes its genes."
     );
 }
 

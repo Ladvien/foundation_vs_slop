@@ -396,12 +396,9 @@
         chunk_restitution: 0.45,   // avian Restitution (bounciness)
         gib_friction: 0.7,         // avian Friction (higher = settles sooner)
 
-        // Autogib (squad crunch: the figurine mesh sliced into flying fragments with meat cut-faces).
-        autogib_pieces_base: 14,   // fragments at autogib_ref_extent; scales with mesh size
-        autogib_ref_extent: 0.5,
-        autogib_min_pieces: 6,
-        autogib_max_pieces: 40,
-        autogib_min_fraction: 0.18,
+        // Autogib LAUNCH (squad crunch: how hard the sliced fragments are thrown). How the mesh is
+        // *cut* is the `fracture:` slice below — those dials belong to `bevy_autogib`, which owns the
+        // bake that reads them.
         autogib_speed_mult: 0.8,
 
         // Meat chunks (any death) + overall physics-chunk cap (fragments + guns + meat).
@@ -417,6 +414,23 @@
         droplet_size: 0.022,
         droplet_life: 2.0,
         droplet_splat_size: 0.12,
+    ),
+
+    // =============================================================================================
+    // fracture — how a character's mesh is CUT (crates/bevy_autogib). The squad crunch: the figurine
+    // mesh recursively plane-sliced into flying fragments with watertight meat cut-faces.
+    //
+    // Its own slice rather than part of `gore:` because the crate owns the bake that reads it. How
+    // hard the resulting chunks are THROWN is `gore.autogib_speed_mult`, which lives with the code
+    // that throws them. Three of these (pieces_base, min_pieces, max_pieces) are evolvable genes —
+    // see `gore::GoreDynamics`.
+    // =============================================================================================
+    fracture: (
+        pieces_base: 14,      // fragments at ref_extent; scales with the mesh's actual bounding size
+        ref_extent: 0.5,      // reference subject half-extent that pieces_base is tuned for
+        min_pieces: 6,
+        max_pieces: 40,       // upper clamp — bounds mesh + entity growth
+        min_fraction: 0.18,   // stop cutting a piece below this fraction of the whole mesh's extent
     ),
 
     // =============================================================================================

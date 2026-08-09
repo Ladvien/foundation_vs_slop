@@ -366,7 +366,18 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
         // and the meat the crabs forage on. `GorePlugin` (registered below) clones `gc.gore` at plugin
         // build, i.e. AFTER this seam, so this write is what a rollout's gib economy is scored against.
         // Guarded by `every_world_config_slice_reaches_the_game_config` (tests/replay.rs).
-        w.gore.apply_to(&mut gc.gore);
+        //
+        // **Two destinations, one gene group.** The three fragment-count genes land in `gc.fracture`
+        // (`bevy_autogib::FractureSettings`, read by the bake) and the launch gene in `gc.gore` (read by
+        // `spawn_fragments`). `autogib::AutogibPlugin` clones `gc.fracture` at plugin build, the same way
+        // and at the same point in the sequence `GorePlugin` clones `gc.gore` — so both halves are still
+        // written before anything reads them. Dropping the second argument here would silently freeze
+        // every fragment-count gene at its authored value for the whole search.
+        //
+        // Reborrowed through the resource guard once, so the two field borrows are disjoint — going
+        // through `DerefMut` twice would be two whole-`GameConfig` borrows and will not compile.
+        let cfg = &mut *gc;
+        w.gore.apply_to(&mut cfg.gore, &mut cfg.fracture);
     }
     if let Some(b) = cfg.behavior {
         // Same seam: install the evolved `behavior:` slice before `AiPlugin` reads `gc.behavior` into the
@@ -1097,11 +1108,11 @@ pub fn field_at(app: &mut App, channel: usize, pos: Vec3) -> f32 {
         .sample(crate::ai::field::FieldId(channel), dungeon, pos)
 }
 
-/// Whether every squad unit's fracture set has finished baking (`autogib::bake_autogib`).
+/// Whether every squad unit's fracture set has finished baking (`bevy_autogib::bake_fractures`).
 ///
-/// A **precondition probe**, not a driver. `bake_autogib` self-gates on the figurine's sub-meshes being
+/// A **precondition probe**, not a driver. `bake_fractures` self-gates on the figurine's sub-meshes being
 /// present in `Assets<Mesh>` — async GLB streaming — so *whether the bake has happened yet* is wall-clock
-/// dependent. Production never notices, and `bake_autogib`'s own doc says why: "combat can't start before
+/// dependent. Production never notices, and the bake's own doc says why: "combat can't start before
 /// scenes load, so the bake is a completed prerequisite of any death." A **test** that kills units a
 /// second into the run breaks that premise, and an unbaked death produces a completely different gib
 /// population — measured at 45 chunks vs 160 for the same seed, under CPU load, on adjacent reps.

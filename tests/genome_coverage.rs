@@ -160,7 +160,24 @@ fn ledger() -> BTreeMap<&'static str, (Coverage, &'static str)> {
                  `chunk_restitution`, `gib_friction`, the four `autogib_*`, `meat_count`). The ~22 \
                  cosmetic knobs are deliberately NOT encoded, scoped by the FVS-I-6 audit -- a gene \
                  no descriptor can see makes the archive worse (FVS-N-21), so `spray_*`, `pool_*`, \
-                 `droplet_*`, `dry_time`, `meat_size` and the colours stay authored.",
+                 `droplet_*`, `dry_time`, `meat_size` and the colours stay authored. NB three of \
+                 those four `autogib_*` genes now WRITE to the `fracture` slice below -- the gene \
+                 group is still one struct, its storage is split by role.",
+            ),
+        ),
+        (
+            "fracture",
+            (
+                Coverage::World,
+                "how the character mesh is CUT (`bevy_autogib::FractureSettings`), split out of the \
+                 `gore` slice when the fracture became its own crate. **The coverage did not change \
+                 with the move**: `pieces_base`, `min_pieces` and `max_pieces` are the same three \
+                 `gore::GoreDynamics` genes the world genome has encoded since FVS-I-7, and they \
+                 still reach here through `GoreDynamics::apply_to`. `ref_extent` and `min_fraction` \
+                 stay authored for the same reason they always were -- `ref_extent` is the reference \
+                 scale `pieces_base` is expressed against, so evolving both would be one gene \
+                 fighting itself, and `min_fraction` is a floor on chunk size that the `max_pieces` \
+                 clamp already bounds from the other end.",
             ),
         ),
         ("hair", (Coverage::Cosmetic, "strand rendering only")),

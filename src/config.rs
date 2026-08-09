@@ -115,6 +115,11 @@ pub struct GameConfig {
     pub dungeon: DungeonConfig,
     pub placement: PlacementConfig,
     pub gore: GoreSettings,
+    /// How the character mesh is **cut** — `bevy_autogib`'s five bake dials. Its own slice rather than
+    /// part of `gore:` because the crate owns the bake that reads it, and a dial with two owners is a
+    /// dial that drifts. The *launch* dial (`autogib_speed_mult`) stays in `gore:`, with the code that
+    /// throws the chunk.
+    pub fracture: bevy_autogib::FractureSettings,
     pub hair: crate::hair::HairSettings,
     pub impact_fx: ImpactFxSettings,
     pub ai_tuning: AiTuning,
@@ -248,6 +253,10 @@ pub fn load_game_config() -> Result<GameConfig, String> {
     manifest::validate_manifest(&cfg.placement.furniture)?;
     validate_density(&cfg.placement.density)?;
     gore::validate_settings(&cfg.gore)?;
+    // The fragment-count clamp. `bake_fractures` feeds these into `i32::clamp(min, max)`, which panics
+    // on an inverted range — so an authored typo is rejected at the door rather than crashing later
+    // mid-combat. The crate owns the invariant because the crate owns the code that would panic.
+    cfg.fracture.validate()?;
     crate::hair::validate_hair(&cfg.hair)?;
     mycelia::validate_config(&cfg.mycelia)?;
     // Cross-slice: the mold's damp table must name exactly the room types the dungeon can emit. Neither

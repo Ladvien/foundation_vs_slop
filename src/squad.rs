@@ -204,8 +204,11 @@ pub struct FacingOverride(pub Option<Vec3>);
 /// `autogib` can bake it as a separate intact chunk instead of folding it into the body fracture. The
 /// Researcher's flashlight carries this marker too — it is the unit's held item, so it inherits the same
 /// recolor-skip and death-fling behavior for free (see the spawn branch below).
-#[derive(Component)]
-pub struct GunModel;
+///
+/// This *is* `bevy_autogib::DetachedPart`, under the name this game already used. The crate cannot call
+/// it a gun — a fracture library is useless to a project that has none — so the game's vocabulary is
+/// restored here rather than at the ~10 call sites.
+pub use bevy_autogib::DetachedPart as GunModel;
 
 /// Marks the Researcher's flashlight sub-model (a sibling of [`GunModel`]'s role) so the windowed-only
 /// cosmetic `SpotLight` system (`light::attach_flashlight_spots`) can find it and give it a real beam.
@@ -223,11 +226,13 @@ pub struct FlashlightModel;
 pub struct FigurineModel;
 
 /// The unit's figurine scene asset, carried on the `Unit` itself as a stable, spawn-time id so death
-/// (`despawn_dead_units`) and fracture baking (`autogib::bake_autogib`) can key the gib source without
-/// reading the async `WorldAssetRoot` (which now lives on the [`FigurineModel`] child). One handle is
-/// loaded once and cloned into both the child's `WorldAssetRoot` and this component — one asset, one path.
-#[derive(Component)]
-pub struct FigurineSource(pub Handle<WorldAsset>);
+/// (`despawn_dead_units`) and fracture baking (`bevy_autogib::bake_fractures`) can key the gib source
+/// without reading the async `WorldAssetRoot` (which now lives on the [`FigurineModel`] child). One handle
+/// is loaded once and cloned into both the child's `WorldAssetRoot` and this component — one asset, one path.
+///
+/// This *is* `bevy_autogib::FractureSubject`: it is what marks a unit as breakable, and its handle is
+/// both the fracture cache's key and the seed the cut planes come from.
+pub use bevy_autogib::FractureSubject as FigurineSource;
 
 /// Marks a [`FigurineModel`] child whose meshes have already been recolored (so the one-shot recolor
 /// runs once). Tagged on the figurine child, never the `Unit`, so recoloring never churns the sim archetype.

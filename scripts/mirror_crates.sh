@@ -47,6 +47,19 @@ CRATES=(
     # same as every other crate but the direction of the FIRST move was inward. Its nested
     # `crates/bevy_debugger_bevy` travels with it — one mirror, both halves.
     bevy_debugger_mcp
+    # Runtime mesh fracture. Extracted from `src/autogib.rs`; the game keeps the rifle tagger, the run
+    # gate and the avian spawning, and this keeps the slicer.
+    bevy_autogib
+)
+
+# Mirrors that are created PUBLIC. Everything absent from this list is created private — see the
+# `gh repo create` call below for why the default sits here rather than in a flag.
+#
+# `bevy_autogib` is public because nothing in the Bevy ecosystem ships runtime plane-cut prefracture
+# with watertight caps, and it needs none of the game to be useful. `bevy_debugger_mcp` is also public
+# on GitHub, but it was vendored in already-created, so this list never has to make it so.
+PUBLIC_CRATES=(
+    bevy_autogib
 )
 
 cd "$(git rev-parse --show-toplevel)"
@@ -103,8 +116,17 @@ for name in "${CRATES[@]}"; do
     url="git@github.com:$ORG/$name.git"
     if ! gh repo view "$ORG/$name" >/dev/null 2>&1; then
         desc=$(sed -n 's/^description = "\(.*\)"$/\1/p' "$prefix/Cargo.toml" | head -1)
-        echo "== creating $ORG/$name (private)"
-        gh repo create "$ORG/$name" --private --description "$desc"
+        # Visibility is per-crate and DEFAULTS TO PRIVATE, so a crate nobody thought about cannot be
+        # published by omission. It is read from PUBLIC_CRATES rather than passed as a flag because this
+        # branch only runs when the repo does not exist yet — on a re-run against a deleted repo, a flag
+        # someone forgot would silently recreate a public mirror as private, and the mirror would then
+        # 404 for everyone who had the link.
+        vis="--private"
+        for pub_name in "${PUBLIC_CRATES[@]}"; do
+            [[ "$name" == "$pub_name" ]] && vis="--public"
+        done
+        echo "== creating $ORG/$name (${vis#--})"
+        gh repo create "$ORG/$name" "$vis" --description "$desc"
     fi
 
     echo "== $name"

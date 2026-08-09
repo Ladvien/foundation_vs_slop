@@ -59,8 +59,8 @@
 //! `FixedUpdate`", and nothing here can. `HairPlugin` is never registered in `sim_harness` (mirrors
 //! `mycelia::MyceliaPlugin`'s precedent, not `vhs::VhsPlugin`'s — see
 //! `lib::run`'s cosmetic-tuple comment), and every [`HairRig`] is a fully TOP-LEVEL entity — never a
-//! `Children`-descendant of `Unit` — so `autogib::bake_autogib`'s fracture-bounding-box DFS
-//! (`autogib.rs`, `bake_autogib`) can never walk into it. That DFS is what flipped held-in seed
+//! `Children`-descendant of `Unit` — so the fracture bake's bounding-box DFS
+//! (`bevy_autogib::bake_fractures`) can never walk into it. That DFS is what flipped held-in seed
 //! `0xD00D`→`0xFEED` after the prior mesh swap (`squad_ai::coevolve`'s `HELD_IN_SEEDS` history), so
 //! this boundary is load-bearing, not decorative — see [`HairRig`]'s doc comment.
 //!
@@ -127,8 +127,9 @@ struct HasHairRig;
 
 /// One squad member's simulated accent hair. **Must stay a fully top-level entity — never a
 /// `Children`-descendant of `Unit`, at any depth, including not a sibling of `FigurineModel`.**
-/// `bake_autogib`'s DFS (`autogib.rs`) starts at `Query<(&FigurineSource, &Children), With<Unit>>` and
-/// walks EVERY descendant of `Unit` into its fracture bounding-box scan, with no opt-out tag today —
+/// The fracture bake's DFS (`bevy_autogib::bake_fractures`) starts at `Query<(&FractureSubject,
+/// &Children)>` — `FigurineSource` IS that component — and walks EVERY descendant of `Unit` into its
+/// fracture bounding-box scan, with no opt-out tag today —
 /// so any child of `Unit` would be folded into that scan and could re-perturb the mesh-extent-derived
 /// gib piece count (the same measurement the prior Valkyrie mesh swap flipped a held-in RL/QD
 /// calibration seed over). This follows `health::HealthBar`'s verified top-level pattern instead: a

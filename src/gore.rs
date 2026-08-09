@@ -492,16 +492,14 @@ pub struct GoreSettings {
     /// Surface friction of a chunk (avian `Friction`; higher = slides less and settles sooner).
     gib_friction: f32,
     // Autogib (unit crunch: the figurine mesh sliced into flying fragments; see `autogib`).
-    /// Fragment count at `autogib_ref_extent`; scaled by the mesh's actual bounding size.
-    pub autogib_pieces_base: i32,
-    /// Reference character half-extent the base piece count is tuned for.
-    pub autogib_ref_extent: f32,
-    /// Clamp on the fragment count (lower / upper — the upper bounds mesh + entity growth).
-    pub autogib_min_pieces: i32,
-    pub autogib_max_pieces: i32,
-    /// Stop cutting a piece once its extent drops below this fraction of the whole mesh's extent.
-    pub autogib_min_fraction: f32,
-    /// Fragment launch speed as a multiple of `gib_speed`.
+    //
+    // **Only the LAUNCH dial lives here.** The five dials that decide how the mesh is *cut* —
+    // `pieces_base`, `ref_extent`, `min_pieces`, `max_pieces`, `min_fraction` — moved into
+    // `bevy_autogib::FractureSettings` with the bake that reads them, and are authored under the
+    // `fracture:` slice of `config.ron`. Split by role, so each dial has exactly one owner and no
+    // system has to copy values between two resources to stay in sync.
+    /// Fragment launch speed as a multiple of `gib_speed`. Read by `spawn_fragments`, which is this
+    /// game's code — the crate hands out geometry and never decides how hard a chunk is thrown.
     pub autogib_speed_mult: f32,
     // Meat chunks (any death) + the overall physics-chunk cap.
     meat_count: i32,
@@ -545,11 +543,6 @@ impl Default for GoreSettings {
             gib_speed: 4.0,
             chunk_restitution: 0.45,
             gib_friction: 0.7,
-            autogib_pieces_base: 14,
-            autogib_ref_extent: 0.5,
-            autogib_min_pieces: 6,
-            autogib_max_pieces: 40,
-            autogib_min_fraction: 0.18,
             autogib_speed_mult: 0.8,
             meat_count: 5,
             meat_size: 0.17,
@@ -1137,7 +1130,7 @@ fn spawn_fragments(
     }
 
     // The blaster: one intact tumbling chunk that keeps its own material, flung a touch faster.
-    if let Some(gun) = cache.gun(source) {
+    if let Some(gun) = cache.detached_chunk(source) {
         let base = seed.wrapping_mul(40_507).wrapping_add(0x00C0_FFEE);
         let h1 = hash_f32(base.wrapping_add(1));
         let h2 = hash_f32(base.wrapping_add(2));
@@ -1663,10 +1656,6 @@ fn despawn_gore(
     }
 }
 
-/// Validate an already-deserialized [`GoreSettings`]. Called by the unified config loader
-/// (`crate::config::load_game_config`) on the `gore:` slice of the master `GameConfig` — one path, no
-/// fallback. `bake_autogib` feeds these straight into `i32::clamp(min, max)`, which panics when
-/// `min > max`; reject an inverted pair loudly at the door instead of crashing later mid-combat.
 /// The **evolvable** slice of [`GoreSettings`] — the knobs with a causal path to the world archive's
 /// `deaths` descriptor axis. Same subset-type shape as [`crate::light::LightingDynamics`] and
 /// [`crate::almond_water::AlmondWaterDynamics`], and for the same reason.
@@ -1707,40 +1696,47 @@ pub struct GoreDynamics {
 }
 
 impl GoreDynamics {
-    /// Read the evolvable slice out of a full settings block.
-    pub fn from_config(c: &GoreSettings) -> Self {
+    /// Read the evolvable slice out of the two settings blocks that own it.
+    ///
+    /// **Two blocks, one gene group, and the group's SHAPE did not move.** Three of the four
+    /// `autogib_*` genes now live in `bevy_autogib::FractureSettings` (they are bake dials) while
+    /// `autogib_speed_mult` stays in [`GoreSettings`] (it is a launch dial). Splitting the *storage*
+    /// while keeping this struct's field order identical is deliberate: `world_genome`'s flat `Vec<f32>`
+    /// is index-addressed and `tests/genome_coverage.rs` pins the layout, so reordering here would move
+    /// every QD golden for a refactor that changes no behaviour.
+    pub fn from_config(c: &GoreSettings, f: &bevy_autogib::FractureSettings) -> Self {
         Self {
             max_gibs: c.max_gibs,
             chunk_restitution: c.chunk_restitution,
             gib_friction: c.gib_friction,
-            autogib_pieces_base: c.autogib_pieces_base,
-            autogib_min_pieces: c.autogib_min_pieces,
-            autogib_max_pieces: c.autogib_max_pieces,
+            autogib_pieces_base: f.pieces_base,
+            autogib_min_pieces: f.min_pieces,
+            autogib_max_pieces: f.max_pieces,
             autogib_speed_mult: c.autogib_speed_mult,
             meat_count: c.meat_count,
         }
     }
 
-    /// Overwrite the evolvable knobs of a full settings block, leaving every cosmetic knob authored.
-    pub fn apply_to(&self, c: &mut GoreSettings) {
+    /// Overwrite the evolvable knobs of both settings blocks, leaving every cosmetic knob authored.
+    pub fn apply_to(&self, c: &mut GoreSettings, f: &mut bevy_autogib::FractureSettings) {
         c.max_gibs = self.max_gibs;
         c.chunk_restitution = self.chunk_restitution;
         c.gib_friction = self.gib_friction;
-        c.autogib_pieces_base = self.autogib_pieces_base;
-        c.autogib_min_pieces = self.autogib_min_pieces;
-        c.autogib_max_pieces = self.autogib_max_pieces;
+        f.pieces_base = self.autogib_pieces_base;
+        f.min_pieces = self.autogib_min_pieces;
+        f.max_pieces = self.autogib_max_pieces;
         c.autogib_speed_mult = self.autogib_speed_mult;
         c.meat_count = self.meat_count;
     }
 }
 
-pub fn validate_settings(settings: &GoreSettings) -> Result<(), String> {
-    if settings.autogib_min_pieces > settings.autogib_max_pieces {
-        return Err(format!(
-            "gore: autogib_min_pieces ({}) > autogib_max_pieces ({}) — fix the RON",
-            settings.autogib_min_pieces, settings.autogib_max_pieces
-        ));
-    }
+/// Validate an already-deserialized [`GoreSettings`].
+///
+/// The autogib fragment-count clamp this used to check moved with its dials — it is
+/// `bevy_autogib::FractureSettings::validate`, called from the same place in `config::load_game_config`.
+/// This is kept as the gore slice's own validator so the config loader keeps one call per slice; it has
+/// no invariant of its own today, and a gore knob that grows one belongs here.
+pub fn validate_settings(_settings: &GoreSettings) -> Result<(), String> {
     Ok(())
 }
 
