@@ -1603,6 +1603,7 @@ checksum = "bff34eb29ff4b8a8688bc7299f14fb6b597461ca80fec03ed7d22939ab33e48f"
 name = "bevy_orca"
 version = "0.1.0"
 dependencies = [
+ "bevy",
  "bevy_math",
 ]
 
