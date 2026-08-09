@@ -273,3 +273,137 @@ fn the_walls_are_flush_and_off_the_seating_lattice() {
         );
     }
 }
+
+/// **A room built from these tiles meets itself without a fault.**
+///
+/// The tests above check each tile alone. This is the half they structurally cannot reach: four
+/// correct tiles can still disagree the moment they abut, which is the whole reason
+/// [`emerge_core::adjacency::faults`] exists and the reason a tile grammar is worth anything.
+///
+/// A 3 x 3 room, walls along the north and west runs and a corner where they meet — stamped, expanded
+/// through exactly the call the game makes, stacked, and then checked seam by seam:
+///
+/// ```text
+///        x=-1      x=0       x=+1
+///  z=-1  corner    wall_n    wall_n
+///  z= 0  wall_w    floor     floor
+///  z=+1  wall_w    floor     floor
+/// ```
+///
+/// The west run is **the same `tile_wall_n` stamped at yaw 90**, not a fifth authored tile. That is
+/// the claim about the cross product being composed rather than enumerated, made concrete: one
+/// authored wall tile serves all four orientations.
+#[test]
+fn a_room_of_tiles_meets_without_a_fault() {
+    let (library, comps) = load();
+
+    let stamp = |id: &str, at: (f32, f32), yaw: f32, n: usize| composition::Stamped {
+        id: format!("s{n}"),
+        of: id.to_owned(),
+        at,
+        yaw,
+        ..Default::default()
+    };
+    let mut stamps = Vec::new();
+    let mut n = 0;
+    for (x, z) in [(-1.0f32, -1.0f32), (0.0, -1.0), (1.0, -1.0), (-1.0, 0.0), (-1.0, 1.0)] {
+        let (id, yaw) = match (x, z) {
+            (-1.0, -1.0) => ("site/tile_corner_nw", 0.0),
+            // The north run.
+            (_, -1.0) => ("site/tile_wall_n", 0.0),
+            // The west run — the SAME tile, turned. Bevy's yaw takes +X toward -Z, so a quarter
+            // carries the north wall onto the west face.
+            _ => ("site/tile_wall_n", 90.0),
+        };
+        stamps.push(stamp(id, (x, z), yaw, n));
+        n += 1;
+    }
+    for (x, z) in [(0.0f32, 0.0f32), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+        stamps.push(stamp("site/tile_floor", (x, z), 0.0, n));
+        n += 1;
+    }
+
+    let map = emerge_core::map::Map {
+        version: emerge_core::map::MAP_VERSION,
+        name: "tile_patch".to_owned(),
+        origin: (0.0, 0.0, 0.0),
+        bounds: (3.0, TILE.1, 3.0),
+        placements: Vec::new(),
+        stamps: stamps.clone(),
+        locations: Vec::new(),
+        note: None,
+    };
+
+    // Exactly the call the game and the editor both make.
+    let expanded = composition::expand(&map, &stamps, &comps, &library)
+        .unwrap_or_else(|e| panic!("a room of shipped tiles must expand: {e}"));
+    assert_eq!(
+        expanded.placements.len(),
+        // 4 floor-only + 4 with one wall + 1 corner with two = 9 floors + 6 walls.
+        15,
+        "expanded to {} rows: {:?}",
+        expanded.placements.len(),
+        expanded.placements.iter().map(|p| &p.id).collect::<Vec<_>>()
+    );
+
+    let mut full = map.clone();
+    full.placements.extend(expanded.placements.iter().cloned());
+    emerge_core::stack::resolve_y(&full, &library)
+        .unwrap_or_else(|e| panic!("every row in the room must have a height: {e}"));
+
+    // **The seam check.** Two pieces that touch must agree about what they present where they touch.
+    let faults = emerge_core::adjacency::faults(&full, &library, 1);
+    assert!(
+        faults.is_empty(),
+        "a room of these tiles disagrees with itself at {} seam(s):\n  {}",
+        faults.len(),
+        faults.iter().map(|f| f.message.clone()).collect::<Vec<_>>().join("\n  ")
+    );
+}
+
+/// **One authored wall tile serves all four orientations**, which is the cross-product claim.
+///
+/// Stamped at each quarter, the north wall lands on north, west, south and east in turn. If this
+/// ever needed four authored tiles instead, the argument that composition beats enumeration would be
+/// materially weaker and step 5's scope would grow.
+#[test]
+fn one_wall_tile_covers_four_orientations() {
+    let (library, comps) = load();
+    let want = [
+        (0.0f32, (0.0f32, -0.45f32)),
+        (90.0, (-0.45, 0.0)),
+        (180.0, (0.0, 0.45)),
+        (270.0, (0.45, 0.0)),
+    ];
+    for (yaw, at) in want {
+        let map = emerge_core::map::Map {
+            version: emerge_core::map::MAP_VERSION,
+            name: "one".to_owned(),
+            origin: (0.0, 0.0, 0.0),
+            bounds: (TILE.0, TILE.1, TILE.2),
+            placements: Vec::new(),
+            stamps: Vec::new(),
+            locations: Vec::new(),
+            note: None,
+        };
+        let stamps = vec![composition::Stamped {
+            id: "s".to_owned(),
+            of: "site/tile_wall_n".to_owned(),
+            at: (0.0, 0.0),
+            yaw,
+            ..Default::default()
+        }];
+        let expanded = composition::expand(&map, &stamps, &comps, &library)
+            .unwrap_or_else(|e| panic!("yaw {yaw}: {e}"));
+        let wall = expanded
+            .placements
+            .iter()
+            .find(|p| p.descriptor == "site/wall")
+            .unwrap_or_else(|| panic!("yaw {yaw} produced no wall"));
+        assert!(
+            (wall.at.0 - at.0).abs() < 1e-5 && (wall.at.1 - at.1).abs() < 1e-5,
+            "at yaw {yaw} the wall landed at {:?}, wanted {at:?}",
+            wall.at
+        );
+    }
+}

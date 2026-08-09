@@ -372,12 +372,59 @@ The authoring surface: show the selected group's envelope subdivided, seat membe
 through the same door. Reuses the Tiles tab's subgrid editor idiom (cell cursor, layer picker,
 verbs). **No schema change**: seating writes `Member::at` / `lift`, which already exist.
 
-## Step 4 — author three or four real site tiles
+## Step 4 — four real site tiles: **done, and the verdict is below**
 
-floor+wall, floor+wall+sconce, a corner, a doorway. Stamp them. **This is the step that produces the
-evidence for step 5**, and the one most likely to say the ergonomics are wrong. If authoring a tile per
-combination is tedious even with nesting, the answer shifts toward Sturgeon's tags — a "lit wall" is a
-wall plus a light tag, not a fifth authored variant — and step 3's UI changes shape.
+Authored in `assets/emerge/site/compositions.ron`; pinned by `tests/site_tiles.rs` (9 tests).
+
+### The claim held
+
+`site/tile_floor`, `site/tile_wall_n`, `site/tile_corner_nw`, `site/tile_doorway_n` — each exactly
+`1.0 × 2.4 × 1.0`, each deriving a clean interface that presents what it is made of. **Not one wall
+piece in the kit is cell-sized** (`site/wall` 0.1 × 1.0, `wall_corner` 0.22 × 0.22, `wall_doorway`
+0.46 × 2.06) and `grammar::learn` refuses every one of them by name. A group of floor-plus-wall is
+exactly the cell. That is the design's central claim, demonstrated on shipped assets rather than
+argued.
+
+A 3 × 3 room of them expands, stacks, and passes `adjacency::faults` with **zero** seam
+disagreements — the half a per-tile test cannot reach, since four correct tiles can still contradict
+each other where they meet.
+
+### It said the ergonomics were wrong, twice, and both are fixed
+
+1. **A 0.5 m lattice cannot seat a 0.1 m wall.** Flush is at `−0.45`, off the lattice by construction.
+   Step 3 had implemented CGA's *absolute* split value only; `Shift`+seat now flushes to a face,
+   which is the *relative* one. Without this the tiles were unauthorable by the tool that exists to
+   author them.
+2. **The shipped map straddles seams.** `site_67` centres walls on the tile boundary, half in each
+   neighbour. Read as a composition such a wall sits on no face at all and the group presents
+   nothing. Tiles inset instead — a real divergence from existing content, recorded as a todo rather
+   than silently reconciled.
+
+### And it argued for tags over variants, three times without being asked
+
+The open question was whether the cross product gets authored or composed. Every time step 4 reached
+for an authored variant, **the assets refused**:
+
+- **The doorway could not be placed, only built.** `site/wall_doorway` is 2.06 m — neither a 1 m cell
+  nor a 2 m one. `wall_header` lifted 2.0 m gives a lintel with the opening beneath, which is a better
+  tile *and* the first shipped thing to produce a vertically banded face — the case step 2 kept
+  representable on the argument that y-uniformity was a property of the descriptors and not of the
+  format. This is the group that proves it.
+- **The corner is two seatings of one piece**, not a fifth mesh.
+- **One wall tile serves all four orientations** — stamped at each quarter, pinned by
+  `one_wall_tile_covers_four_orientations`.
+- **The sconce could not be authored at all**: the Site kit has no wall-mounted piece. `wall_light`
+  lives in the main pack.
+
+Four for four. Sturgeon's tags, Karth & Smith's edge-constrained multi-tile modules and CGA's
+query-time `Shape.occ` all said the cross product need not be enumerated; the kit has now said it
+cannot be.
+
+### The one decision step 5 is still gated on
+
+**Is a lit wall a tag on the wall tile, or a fifth authored variant?** Tag → step 5 shrinks and the
+cross product is never authored. Variant → the kit needs a sconce first, and step 5 stays as scoped.
+Everything above points at *tag*, but it is a schema decision and belongs to the author.
 
 ## Step 5 — the schema
 
