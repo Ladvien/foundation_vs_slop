@@ -233,5 +233,7 @@ constraint IR sits unused next to it.
   arXiv `2406.11824`
 - Cooper (2022). *Sturgeon: Tile-Based Procedural Level Generation via Learned and Designed Constraints.*
   AIIDE. `10.1609/aiide.v18i1.21944`
-- Karth & Smith (2017). *WaveFunctionCollapse is Constraint Solving in the Wild.* FDG — cited in
+- Karth & Smith (2017). *WaveFunctionCollapse is Constraint Solving in the Wild.* FDG.
+  `10.1145/3102071.3110566` — **in the corpus** (confirmed 2026-08-09; this entry carried no stem, so
+  the Stage 4 argument was being made from memory rather than from the library). Cited in
   `ir.rs`'s header; the precedent for Stage 4.

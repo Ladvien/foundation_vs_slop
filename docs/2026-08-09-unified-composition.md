@@ -84,108 +84,135 @@ bed, 0.76 m in front of a seat, 0.61 m in front of shelving); Gregory, *Game Eng
 
 ---
 
-## 3. The model
+## 3. Superseded — read `research/2026-08-09-grid-composition-corpus-check.md` first
 
-**One relation: an attachment.** A piece declares the features it **needs**; a piece declares the
-features it **offers**; a placement records **which feature instance it took**. There is no second
-route.
+Everything above (the measurement in §1, the Tutenel framing in §2) stands. The model that used to
+follow it does not, and neither did four of its five open questions.
 
-The move that makes this cover everything: **the room offers features too.** A room is not a special
-case outside the system, it is the outermost provider.
+The design that replaced it is **lattice composition**: a bounded composition IS a tile, authored on
+the Compose tab by seating meshes into a subdivided volume, and stamped onto the map as one unit. The
+map becomes a grid of tile references; the relation between floor, wall and sconce is baked into the
+tile's local coordinates at authoring time rather than resolved per-placement at runtime.
 
-| Provider | Offers | Where |
-|---|---|---|
-| the room | `floor` | `map.origin.1`, everywhere in bounds |
-| the room | `ceiling` | `origin.1 + bounds.1` |
-| a floor tile | `floor` | its own top — it *provides* floor for its cell |
-| a wall segment | `face` ×2 | its two vertical sides, over a height range |
-| a table | `worktop` | its drawn top |
-| a doorway | `opening` | the hole, with its measured clear size |
+`Envelope::Bounded` already does most of this. `composition::interface` builds a scratch map whose
+bounds ARE the tile — *"the envelope becomes one: a floor at zero, the declared bounds, and the members
+on it, which means `stack::resolve_y` answers here exactly as it will in the game"* — resolves the
+members, and reads edge tokens off their boundary cells. What is missing is the authoring surface and
+the decision to make it primary.
 
-Then every current `Mount` variant is the same thing:
+### What the corpus settled
 
-| Today | Becomes |
-|---|---|
-| `OnFloor` | needs `floor` |
-| `Tiled` | needs `floor`, **and offers `floor`** |
-| `OnWall { height }` | needs `face`, at `height` **along that face** |
-| `OnCeiling` | needs `ceiling` |
-| `OnSurface { class }` | needs `class` (unchanged — this is the shape the rest adopts) |
-| `InOpening` | needs `opening` |
-| `Overlay { on }` | needs a plane feature, claims no volume |
+Read the corpus check for the citations; the conclusions that change this document:
 
-### What this fixes, in the same order as §1
+**The vertical friction was imaginary.** CGA Shape (Müller et al. 2006, `10.1145/1179352.1141931`)
+types split values as **absolute or relative**: `Subdiv("Y", 1.8, 1r)` keeps `1.8` at 1.8 on a 3 m tile
+and on a 4 m one. A layer index is *derived from the split*, never authored, so there is no "1.8 m
+becomes 5.4 of 9 layers" conversion to round. `OnWall { height: 1.8 }` is an absolute split value and
+"third band up" is a relative one — one mechanism, two value types, the type declared where the number
+is written.
 
-1. **A floor tile is not an object standing on the floor — it *is* floor.** It needs `floor` (from the
-   room) and offers `floor` (at its own top). A wall needs `floor` and takes it from *the tile*. So
-   they never contest: one provides, the other consumes. That is the whole "four meshes in one grid
-   unit" confusion, resolved by saying which of them is the ground.
-2. **`Tiled` has nowhere to be dumped**, because there is no stratum enum any more. A barrel needs
-   `floor` like everything else and contests the floor like everything else.
-3. **Every piece has a host**, so deleting a wall can report the sconces that were on it — the same
-   way `stack::group_of` already reports what rides a table.
+**The two levels are a dimension reduction, not a finer grid.** CGA's component split takes a 3-D scope
+to 2-D faces to 1-D edges. The 3-D scope seats meshes; **the 2-D face is where an interface token
+belongs**; the 1-D edge is where corner agreement belongs. That is the fix for `summarise_face`'s noise
+at the root: a face is one component however finely its interior subdivides, so divisions stop leaking
+into the adjacency vocabulary. Merrell & Manocha (`10.1109/tvcg.2010.112`) add the cost argument against
+a uniform 9×9 — small objects need closely spaced planes, large ones need volume, and doing both
+uniformly means "many planes must be created".
 
-### The overlap rule stops being a table
+**The same authors warn where the lattice stops.** *"the strict hierarchy of the split-grammar can no
+longer be enforced… we did not find it suitable for many forms of mass modeling."* The lattice is right
+inside a tile and wrong as the map's mechanism. This design already splits those; the citation says the
+split is not optional.
 
-Two pieces contest space iff they took **the same feature instance** — the room's floor, or
-`wall@3`'s north face, or `table@4`'s top. Not a hand-maintained match over variant pairs; a property
-of the attachment. Tutenel's off-limits/clearance distinction becomes the feature's own type, so
-`Clearance` folds in rather than sitting beside it.
+**§5 was a false dilemma.** Per-cell and one-plane answer different questions. **Ownership** is
+per-cell — Tutenel's typed features and Infinigen's `StableAgainst(Tag.Bottom, Tag.Floor)` both make
+"this cell is floored by a tile" a property the tile carries, which keeps the overlap test local.
+**Alignment** is the global plane registry — CGA's construction planes and snap lines, which is what
+makes *"the floor levels automatically aligned over all solids"*. Take both. Conflating them is what
+made the question feel blocking.
 
-### What must not be lost
+**The cross-product does not have to be authored.** Karth & Smith's multi-tile modules via edge
+constraints (`10.1145/3337722.3341845` fn. 11), Sturgeon's tags and functional/image grid split
+(`10.1609/aiide.v18i1.21944`), and CGA's query-time `Shape.occ(...) ~> door`. So: nest at authoring
+time when the arrangement is one artistic decision that should always travel together; compose at stamp
+time when it is a cross product. Both, doing different jobs.
 
-Everything the relational half already gets right, because it is what the rest is being moved onto:
+**Free placement stays.** No dissent anywhere in the corpus — Merrell 2011, Infinigen and Tutenel all
+place continuously. `Placed::at` is `(f32, f32)` and stays that way. Structure is gridded; dressing is
+not.
 
-- **Height is derived, never authored** — a host's *drawn* top, `scale` and `stretch_y` included.
-- **A reference, not a value** — move the host and the guest follows.
-- **Class matching through the vocabulary**, so a misspelling is refused at library load for everyone
-  at once rather than by failing to stack.
-- **Loops detected and named**, not recursed into.
-- **`Placed::lift`** stays: the one authored amendment on top of a derived Y.
+### Two things to write down before code, both prospective
+
+**The self-occlusion trap is ahead of us, not behind.** CGA's Figure 2 is exactly this project's "four
+meshes in one grid unit" report — *"several unwanted intersections will cut windows in unnatural ways,
+as the volumes are not aware of each other"* — and their fix was an occlusion query with explicit
+scoping, of which `Shape.occ("noparent")` is the one that matters: *"we avoid the querying of parent
+shapes, which, in the case of a split, always occlude their successor shapes."*
+
+Checked against source on 2026-08-09: **`composition::interface` never calls the overlap rule at all** —
+no `blocking`, no `plans_overlap`, no `same_layer`. Its faults are token disagreements between members.
+So the trap does not bite today, and it will the moment the lattice adds an occupancy test, which it
+must. Write the exclusion when the test is written, not after.
+
+**We have the corner problem, by construction.** `emerge_core::adjacency` reads tokens per boundary cell
+on a face — colored edges, i.e. Wang tiles. Lagae & Dutré (2006), `10.1145/1183287.1183296`: *"Wang
+tiles do not directly constrain their diagonal neighbors. This leads to continuity problems near tile
+corners, a problem commonly known as the corner problem. Corner tiles, on the other hand, do impose
+restrictions on their diagonal neighbors."* Four tiles can each satisfy every edge constraint and still
+disagree where they meet. Corner tiles are also *"easier to tile"* and halve the memory. This is the
+same place CGA's 1-D component points at — two independent sources on one gap.
+
+**Not open access**; the abstract above is from CrossRef. `paper_download` failed on 2026-08-09 with no
+OA PDF found. Worth getting through another route before the interface format is fixed, because whether
+a token lives on an edge or a corner is a schema decision and not an easy one to revisit.
 
 ---
 
 ## 4. Blast radius
 
-Measured, not guessed. This is why it is a design and not a branch.
+Unchanged from the measurement, and it is why this is a design and not a branch.
 
 | Touches | What |
 |---|---|
-| `emerge-core/src/descriptor.rs` | `Mount`, `Offers`, `Socket`, `Clearance` — the schema itself |
-| `emerge-core/src/stack.rs` | `datum`, `resolve_y`, `placement_at`, `blocking`, `same_layer`, `plan_box` |
-| `emerge-core/src/adjacency.rs` | edge tokens read off boundary cells |
-| `emerge-core/src/map.rs` | `Placed::on` grows a feature name |
-| `emerge-core/src/placement/` | the solvers that place by mount |
-| `emerge-mapper` | the ghost, the fill, `H`'s target stack, the Tiles lattice |
+| `emerge-core/src/composition.rs` | `Envelope`, `Member`, `interface` — the authoring unit |
+| `emerge-core/src/descriptor.rs` | `Mount` becomes split values; `subgrid` becomes the seating lattice |
+| `emerge-core/src/stack.rs` | `datum`, `resolve_y`, `blocking`, `same_layer` |
+| `emerge-core/src/adjacency.rs` | tokens move from cells to components; edge-vs-corner is open |
+| `emerge-mapper` | the Compose tab gains the lattice authoring surface it was always missing |
 | `src/emerge_map.rs` | the game's loader |
-| **every shipped library RON** | 75 + 45 + 41 + 4 descriptors |
-| **the goldens** | anything that moves a placement moves `snapshot_hash` |
+| **every shipped library RON** and **the goldens** | |
 
 ### Staging
 
-1. **Add features alongside `Mount`**, resolving through the existing code. Nothing changes
-   behaviourally; the schema gains a way to say the new thing.
-2. **Convert one kit** — the site kit, where the wall/floor defect lives — and prove the three defects
-   in §1 go with it.
-3. **Derive `same_layer` from attachments** and delete the table.
-4. **Retire the positional `Mount` variants** once nothing authors them.
+1. **The Compose tab authors a `Bounded` composition into a lattice.** No schema change: seat existing
+   members at existing mounts, and let `interface` keep deriving what it already derives.
+2. **Interface tokens move from cells to the 2-D component.** This is where `summarise_face`'s noise
+   goes away, and it is independent of everything else.
+3. **Split values gain the absolute/relative type**, so a member's Y is one mechanism.
+4. **The occupancy test arrives, with `noparent` scoping written at the same time.**
+5. **Retire the positional `Mount` variants** once nothing authors them.
 
-Each step is a green suite; step 3 is where a golden is expected to move, and it should be re-measured
-rather than re-pinned blind.
+Each step is a green suite. Step 4 is where a golden is expected to move.
 
 ---
 
-## 5. Open questions for the author
+## 5. What is still unproven
 
-1. **Does a wall offer one face feature or two?** Two is honest (a corridor wall has a sconce on each
-   side) and doubles the feature count.
-2. **Should the room's `floor` be one feature or one per cell?** One per cell makes "this cell is
-   floored by a tile" expressible directly and makes the overlap test local; one plane is simpler and
-   pushes that into the tile.
-3. **Is `Socket` a feature too?** It is already an attachment point with a role
-   (`Offers::sockets`, consumed by `smart::seats_of`). Folding it in would mean one concept rather
-   than two — but its own note says *"there is no socket type here, and that is deliberate"* about
-   compositions, and that argument should be re-read before overturning it.
-4. **What reports an orphan?** Once a sconce has a host, deleting the wall can refuse, cascade, or
-   report. The map already refuses to load with a dangling `on`, so "refuse" is the existing answer
-   and probably the right one.
+The corpus argues about **mechanism** and says nothing about whether this project's kits survive it.
+Named honestly because it is the real risk:
+
+- **Nothing in the corpus covers nested tile authoring for game kits.** The nearest hit partitions to
+  shrink a quantum circuit, which neither supports nor contradicts this.
+- **The inversion — a floor tile *provides* floor rather than standing on it — is proved only against
+  the site kit's failure.** The furniture kit and the WFC solvers are untouched by the sweep and by this
+  document.
+- **Edge tokens vs corner tokens is open**, and the paper that settles it is not in the library.
+
+## 6. Open, for the author
+
+1. Does a wall offer one face component or two? Two is honest — a corridor wall takes a sconce on each
+   side.
+2. Is `Offers::sockets` a component too? Its own note says *"there is no socket type here, and that is
+   deliberate"*; that argument should be re-read before overturning it.
+3. What reports an orphan? The map already refuses to load with a dangling `on`, so "refuse" is the
+   existing answer and probably the right one.
