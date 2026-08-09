@@ -2829,3 +2829,19 @@ The original item, for the record:
   decision was missing. Sandhu, Chen & McCoy 2019 (`10.1145/3337722.3337752`) is the closest prior art:
   WFC as a constraint solver with design-level constraints layered over local adjacency.
   · *Deps:* — · *Touches:* `crates/emerge-core/src/{grammar,adjacency}.rs`
+
+
+---
+
+### Push 12 — World-building tools: composition-as-tile
+
+- **FVS-R-1 — The composition gallery** · ✅ **LANDED 2026-08-09, as a carousel rather than a contact sheet**
+  Scoped as a contact sheet — every composition stood up side by side, spacing a parameter. That was built, looked at, and **rejected by the author in favour of a carousel**: one composition full size and pinned to the stage origin, two miniatures either side at a geometric scale ramp (`1 → 0.55 → 0.30`), stepped by `O`/`P`. The wings deliberately do not wrap, so running out of miniatures is how the stage says which end of the list you are at. A click on a miniature brings it to the middle; `view::cursor_ground` makes that arithmetic rather than a raycast, since the strip lies on the ground plane.
+  **`O`/`P` are their own row and not the arrows**, because the arrows belong to whichever of the three lists has focus — stepping while editing a member would otherwise cost `left left up right right`. That row was this context's twelfth: `Context::Compose` is now **at** the ceiling `no_context_carries_more_than_a_learnable_vocabulary` enforces, so the next Compose verb costs a merge or a removal.
+  **Two faults only a captured frame found.** `framing_height` sized the view from the ground footprint alone and cut the tops off 2.4 m tiles — it now takes the tallest group too, which meant `height_of`, the height sibling of `footprint`. And the camera aimed at the floor, so the groups rose out of the top half of the frame; it now aims at `+ Y * tallest * 0.5`, the correction the Tiles arm already made with `want_lift`.
+  **One scratch map per group, not one for the strip** — `composition::interface` derives a group's faces against *its own envelope*, so a shared map would show something other than what the interface beside it was derived from. Miniatures scale through a parent entity carrying the slot's translation and scale, with pieces built at a local origin; scaling them any other way shears the arrangement instead of shrinking it.
+  *Not delivered:* the seam inspector — see **FVS-R-13**. · *Shipped:* `compose::{Slot, Carousel, lay_out, slot_at, footprint, height_of, framing_height}`, 11 unit tests, 2 headless.
+- **FVS-R-3 — The Compose stage does not say what it is showing** · ✅ **LANDED 2026-08-09**
+  Every visible group now carries its id in world space, projected with `Camera::world_to_viewport` — the focal one in `ACCENT` at 12 px, the miniatures dimmer at 9 px, and a trailing `*` for the armed one. Centred by measuring the string, which works because the shipped face is monospace; `TextFont::font_size` is a `FontSize` in Bevy 0.19 and does not divide, so the two sizes are constants both systems read rather than a ratio read back off the component.
+  **`Pickable::IGNORE` and no `Hovered`** — `view::drive` gives the scroll wheel to whatever is under the cursor, so a pickable node floating over the stage would have silently killed zoom.
+  Folded into R-1 rather than done after it, on the author's call: a strip of unlabelled boxes is worse than one labelled box.

@@ -448,7 +448,78 @@ must *replace* its floor rows as well as its wall rows, not add stamps beside th
 cross product is never authored. Variant → the kit needs a sconce first, and step 5 stays as scoped.
 Everything above points at *tag*, but it is a schema decision and belongs to the author.
 
-## Decided 2026-08-09: the composition gallery is a contact sheet, and thumbnails wait
+## Superseded 2026-08-09 (same day): the gallery is a **carousel**, not a contact sheet
+
+**The contact sheet was built, looked at, and rejected by the author.** It is recorded below as
+written, because the reasoning that follows from it — the FVS-R-2 trigger, the thumbnail argument —
+still holds. What changed is the surface.
+
+**What shipped instead.** One composition at a time, full size and pinned to the stage origin, with
+**two miniatures either side** at a geometric scale ramp (`0.55`, so `1 → 0.55 → 0.30`) laid along the
+ground direction that reads horizontally at the default yaw. `O`/`P` step the strip and are their own
+row rather than the arrows, because the arrows belong to whichever of the three lists has focus —
+stepping while editing a member would otherwise cost `left left up right right`. A click on a
+miniature brings it to the middle. Every visible group carries its id in world space, the focal one in
+accent and the miniatures smaller and dimmer, which closes **FVS-R-3**.
+
+**The wings do not wrap**, deliberately: running out of miniatures on one side is how the stage says
+which end of the list you are at, and a wrapping strip would hide that by showing the same group twice.
+
+### What this gives up, and it is not nothing
+
+**The seam inspector is gone.** FVS-R-1's second half — *"at tile pitch with zero gap it stops being a
+gallery and becomes a seam inspector"* — required two tiles laid flush, and a carousel never puts two
+compositions at the same scale next to each other. That capability is **not delivered** and is not
+hidden inside anything that was: it needs either its own surface or FVS-R-7's `agrees()` reporting
+faults as a list. Recorded here rather than quietly dropped, because it was the half that fed the
+enclosure question two steps early.
+
+### Two faults a captured frame found, that no test did
+
+1. **Framing on the floor plan cut the tops off.** `framing_height` sized the view from the ground
+   footprint alone; the tiles are 2.4 m tall and a vertical metre projects to `cos(elevation)` of one,
+   so the envelopes ran off the top and bottom. It now takes the tallest group as a second argument —
+   which meant `height_of`, the height sibling of `footprint`, with the same two-variant match.
+2. **The camera aimed at the floor.** Focus was `COMPOSE_STAGE`, so the groups rose out of the top half
+   of the frame with the bottom empty. It is now `+ Y * tallest * 0.5`, the same correction the Tiles
+   arm already makes with `want_lift`.
+
+### And one bug that predates all of it
+
+**`N` had never worked.** It creates an empty bounded tile and then asks you to fill it, and
+`Composition::validate_shape` refused any composition with no members — so the commit door turned away
+the thing the verb had just been told to make. The refusal's own reason was *"an empty group stamps
+nothing, which looks exactly like a stamp that failed"*, which is an argument about **stamping**; it
+now lives in `composition::expand`, names both the stamp and the composition, and `validate_shape`
+lets an empty composition exist. `restage_group` skips expanding a member-less group rather than
+erroring — its envelope still draws, since that comes off the schema and not off the members.
+
+Pinned by `an_empty_composition_may_exist_but_may_not_be_stamped` in `emerge-core` (both halves, because
+moving a check is only safe if what it caught is still caught) and by
+`a_new_composition_is_created_empty_and_written_to_disk` in the mapper's headless suite.
+
+**That verb cannot be driven by an agent**, which is FVS-R-12 met in anger: `bevy_debugger/input`
+writes `ButtonInput` but not the `KeyboardInput` message stream a text field reads, so the name cannot
+be typed. The test drives `new_group` — the same function the key handler calls.
+
+### The name prompt moved
+
+Two tabs asked for the same thing in two different places — four rows at the top of the COMPOSE panel,
+and a field in the Map's status readout — which made one act look like two and put the question in the
+corner while the whole screen waited for it. Both now open **one centred box** (`chrome::NameBox`,
+`GlobalZIndex(400)`, the tier the shortcuts overlay uses), painted by a single system that picks the
+live tab's field the way `notice::paint_notices` picks the live tab's `Status`. Each tab still formats
+its own value: Compose keeps what you typed, because a composition id carries a kit namespace and
+`to_snake_case` would eat the slash; the Map forces snake_case as you type, so its naming rule teaches
+itself. `Field::Group` is gone from the Map readout — one question, one place.
+
+Along the way the author-facing word **"group" became "composition"** everywhere it is read rather than
+thought: the panel header, the NEW prompt, the stale and interface lines, and every refusal. The
+commit that renamed the type had missed the strings.
+
+---
+
+## Recorded as written, then superseded: the composition gallery is a contact sheet, and thumbnails wait
 
 **Next piece of work on the Compose tab**, recorded here rather than left in a message because this
 thread has already lost an item between two consecutive turns once.
