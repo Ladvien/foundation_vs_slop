@@ -1011,3 +1011,77 @@ fn a_synthetic_project_opens_and_steps() {
     assert_eq!(project.library.descriptors.len(), 2, "two descriptors were written");
     assert_eq!(project.map.placements.len(), 1, "one placement was written");
 }
+
+/// **A captured group reaches disk, and comes back.**
+///
+/// The conversion is unit-tested against hand-built data; this covers the half that cannot be — the
+/// commit door. It validates the whole set, writes atomically, and only then adopts, so a refusal
+/// leaves both the file and the in-memory project as they were.
+///
+/// Driven by calling the door rather than through the editor, because `bevy_debugger/input` carries
+/// no cursor position and the gesture that fills a `CloneSet` is a box DRAG. The keyboard half —
+/// `M` opens the field, Enter commits — is `group_name_keys`, and it calls exactly this.
+#[test]
+fn a_captured_group_is_written_and_reads_back() {
+    let root = Fixture::new("capture")
+        .descriptor("table", "alpha")
+        .descriptor("lamp", "alpha")
+        .build("m");
+    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    app.update();
+
+    let world = app.world_mut();
+    let mut project = world.resource_mut::<emerge_mapper::project::Project>();
+    assert!(project.compositions.compositions.is_empty(), "the fixture writes no groups");
+
+    let set = emerge_mapper::editor::CloneSet {
+        pieces: vec![
+            emerge_mapper::editor::ClonePiece {
+                descriptor: "table".to_owned(),
+                offset: (0.0, 0.0),
+                yaw: 0.0,
+                tip: (0, 0),
+                lift: 0.0,
+                note: None,
+                owned: false,
+                owned_because: None,
+                on: emerge_mapper::editor::CloneHost::Layer,
+            },
+            emerge_mapper::editor::ClonePiece {
+                descriptor: "lamp".to_owned(),
+                offset: (0.5, 0.0),
+                yaw: 90.0,
+                tip: (0, 0),
+                lift: 0.0,
+                note: None,
+                owned: false,
+                owned_because: None,
+                on: emerge_mapper::editor::CloneHost::Layer,
+            },
+        ],
+        centre_off: (0.25, 0.0),
+        half: (0.75, 0.5),
+    };
+    let id = emerge_mapper::editor::keep_as_group(&mut project, &set, "Mess Table")
+        .unwrap_or_else(|e| panic!("the group must be kept: {e}"));
+    assert_eq!(id, "mess_table", "the name is forced into snake_case");
+    assert_eq!(project.compositions.compositions.len(), 1, "it was adopted in memory");
+
+    // And it is on disk, parseable, with the members the set held.
+    let path = root.join("assets/emerge/compositions.ron");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+    let reread = emerge_core::composition::Compositions::parse(&text)
+        .unwrap_or_else(|e| panic!("what was written must parse: {e}"));
+    let c = reread.compositions.first().unwrap_or_else(|| panic!("no group on disk"));
+    assert_eq!(c.id, "mess_table");
+    let ids: Vec<&str> = c.members.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["lamp", "table"], "members are stored sorted by id");
+
+    // A second group of the same name is refused, and nothing changes.
+    let before = std::fs::read_to_string(&path).unwrap_or_default();
+    let e = emerge_mapper::editor::keep_as_group(&mut project, &set, "mess_table")
+        .expect_err("a duplicate id must be refused");
+    assert!(e.contains("already a group"), "{e}");
+    assert_eq!(project.compositions.compositions.len(), 1, "a refusal adopts nothing");
+    assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), before, "and writes nothing");
+}

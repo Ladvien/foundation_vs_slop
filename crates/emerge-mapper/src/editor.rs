@@ -150,6 +150,12 @@ pub struct EditorState {
     /// diff. A canned reason supplied by the editor would be that bool wearing a sentence, so pinning
     /// asks.
     pinning: Option<(usize, String)>,
+    /// **The name being typed for a group being captured**, or `None`.
+    ///
+    /// `pinning`'s shape and for the same reason: a group's name is the author's, and a canned one
+    /// supplied by the editor would be a field nobody reads wearing a name nobody chose. The set it
+    /// names is `CloneDrag::held`, which stays in hand until the name is committed or abandoned.
+    grouping: Option<String>,
     /// The raw text being typed into the name, or `None` when not renaming.
     ///
     /// Raw, with the snake_case spelling applied for display and on commit — so a backspace undoes a
@@ -273,21 +279,21 @@ struct CloneTile;
 /// trip exactly. Everything authored rides along: yaw, tip, lift, note, even the pin, because a
 /// copied barricade is still a barricade.
 #[derive(Clone)]
-struct ClonePiece {
-    descriptor: String,
-    offset: (f32, f32),
-    yaw: f32,
-    tip: (u8, u8),
-    lift: f32,
-    note: Option<String>,
-    owned: bool,
-    owned_because: Option<String>,
-    on: CloneHost,
+pub struct ClonePiece {
+    pub descriptor: String,
+    pub offset: (f32, f32),
+    pub yaw: f32,
+    pub tip: (u8, u8),
+    pub lift: f32,
+    pub note: Option<String>,
+    pub owned: bool,
+    pub owned_because: Option<String>,
+    pub on: CloneHost,
 }
 
 /// What a cloned piece rests on — resolved at capture, applied at stamp.
 #[derive(Clone)]
-enum CloneHost {
+pub enum CloneHost {
     /// Its own layer: floor, wall, ceiling — the map answers, nothing to carry.
     Layer,
     /// Its host was caught in the same box, by index into the set — repointed to the host's fresh
@@ -300,10 +306,10 @@ enum CloneHost {
 
 /// The set in hand, plus the bounds the marker shows: centre offset from the anchor and
 /// half-extents, both from the pieces' own footprints at capture.
-struct CloneSet {
-    pieces: Vec<ClonePiece>,
-    centre_off: (f32, f32),
-    half: (f32, f32),
+pub struct CloneSet {
+    pub pieces: Vec<ClonePiece>,
+    pub centre_off: (f32, f32),
+    pub half: (f32, f32),
 }
 
 /// The clone tool's state: the box being dragged, or the set in hand. Its own resource for the
@@ -416,6 +422,7 @@ impl Default for EditorState {
             seed: 1,
             collapsed: std::collections::HashSet::new(),
             pinning: None,
+            grouping: None,
             renaming: None,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -539,6 +546,8 @@ enum Field {
     /// could be read. Two different questions — "what did I just do" and "why can't I place this" —
     /// so two lines.
     Hint,
+    /// The name being typed for a group being captured. Silent otherwise.
+    Group,
     /// **What the piece-verbs would act on**, and the chord that opens it for editing.
     ///
     /// The readout the panel was missing. `BRUSH` says what a click would *place*; nothing said what
@@ -563,6 +572,7 @@ impl Field {
             Field::Yaw => "YAW",
             Field::Map => "MAP",
             Field::Under => "UNDER",
+            Field::Group => "GROUP",
             Field::Last => "",
             Field::Hint => "",
         }
@@ -635,7 +645,13 @@ impl Plugin for EditorPlugin {
                     // **The fields run last and the actions run first**, so no census action can
                     // fire on a keystroke a field has already swallowed. See `keys::Phase`.
                     rename_keys.in_set(keys::Phase::Text),
-                    pin_reason_keys.in_set(keys::Phase::Text),
+                    // Nested: the tuple is at Bevy 0.19's cap of 20. The two typed fields that ask
+                    // a question about a piece — why it is pinned, what a group is called — ride
+                    // together in `Phase::Text`.
+                    (
+                        pin_reason_keys.in_set(keys::Phase::Text),
+                        group_name_keys.in_set(keys::Phase::Text),
+                    ),
                     size_edit_keys.in_set(keys::Phase::Text),
                     // No `not_typing`, no `in_map_mode`: `keys::just_pressed` now refuses on both
                     // counts, and a run condition repeating it would be a second census. Dropping
@@ -770,6 +786,7 @@ fn spawn_panel(mut commands: Commands) {
                 Field::Yaw,
                 Field::Map,
                 Field::Under,
+                Field::Group,
                 Field::Last,
                 Field::Hint,
                 Field::Edges,
@@ -1560,6 +1577,16 @@ fn refresh_status(
             // ACCENT while something is under the cursor, because it is a live answer that changes
             // as the mouse moves — the same colour the name field uses while it is being typed.
             Field::Under => (under.0.clone(), ACCENT),
+            // A caret while typing, so an empty field reads as "waiting for you" rather than as
+            // nothing happening — the rename field's rule. Forced to snake_case as it is typed, so
+            // the naming rule teaches itself.
+            Field::Group => match &state.grouping {
+                Some(raw) => (
+                    format!("{}_", emerge_core::naming::to_snake_case(raw)),
+                    ACCENT,
+                ),
+                None => (String::new(), DIM),
+            },
             Field::Yaw => (format!("{} deg", state.brush_yaw), TEXT),
             Field::Map => (
                 // Counted by `emerge_core::census`, never here — see
@@ -1628,6 +1655,7 @@ pub fn not_typing(
 ) -> bool {
     state.renaming.is_none()
         && state.pinning.is_none()
+        && state.grouping.is_none()
         && edit.active.is_none()
         && import.renaming.is_none()
         && !filters.typing()
@@ -3221,6 +3249,22 @@ fn keys(
         return;
     }
 
+    // **`M`: keep the set in hand as a group.** It opens a name field rather than inventing a name —
+    // the group is the author's, and the tool's job is to ask. Nothing is captured implicitly, which
+    // is the mixed-initiative rule: suggestions only when requested.
+    if keys::just_pressed(&keyboard, live.0, Action::GroupFromSet) {
+        if clone_drag.holding() {
+            state.grouping = Some(String::new());
+            state.status.note("name the group — Enter to keep it, Esc to leave it alone");
+        } else {
+            state.status.note(format!(
+                "nothing in hand to keep. {} drags a box round what should go in the group first.",
+                keys::chord_text(keys::binding(Action::CloneMode))
+            ));
+        }
+        return;
+    }
+
     if keys::just_pressed(&keyboard, live.0, Action::Save) {
         match project.save() {
             Ok(()) => {
@@ -3958,6 +4002,351 @@ fn redraw_edited(
     }
 }
 
+/// **A set in hand becomes a reusable group.**
+///
+/// The Map tab's half of `docs/2026-08-09-compose-authoring-plan.md` step 1. `Shift+B` already drags a
+/// box and holds a [`CloneSet`] whose pieces carry offset, yaw, tip, lift and a resolved [`CloneHost`]
+/// — which is a member list in all but name. This is the conversion, and it is **pure** so it can be
+/// tested with hand-built data rather than by booting an editor over the shipped corpus.
+///
+/// # Bounded, never anchored
+///
+/// The PCG book's mixed-initiative chapter states the constraint: *"All content that a human can
+/// produce using a mixed-initiative PCG system must be possible for the computer to generate on its
+/// own."* An `Anchored` group has **no derived interface** (`composition::interface` returns `None`
+/// for one), so a solver cannot place it — it would be content the author can make and the generator
+/// cannot. So capture always produces [`Envelope::Bounded`].
+///
+/// # It refuses rather than guessing
+///
+/// Same chapter: *"the human has final say over what is produced by the tool."* Three refusals, each
+/// naming the piece:
+///
+/// * a member the library cannot measure — there is no honest height for the envelope;
+/// * a member whose host stayed **outside** the box — the group cannot carry it, and a member with a
+///   dangling `on` is a group that will not resolve;
+/// * a member mounted against the **ceiling** — `stack::datum` reads `bounds.1` for those, and the
+///   bounds are what this function is deriving. Stating that height is step 3's job.
+pub fn composition_from_set(
+    set: &CloneSet,
+    id: &str,
+    library: &emerge_core::library::Library,
+) -> Result<emerge_core::composition::Composition, String> {
+    use emerge_core::composition::{Body, Composition, Envelope, Member};
+
+    // Forced into snake_case rather than checked — the map-name rule, so there is no spelling the
+    // filesystem and the schema disagree about.
+    let id = emerge_core::naming::to_snake_case(id);
+    if id.is_empty() {
+        return Err("a group needs a name. Names are snake_case — letters, digits, single \
+                    underscores, starting with a letter."
+            .to_owned());
+    }
+    if set.pieces.is_empty() {
+        return Err("that box held nothing, so there is no group to make".to_owned());
+    }
+
+    // **Member ids, stable and unique.** The first of a kind keeps the bare short name; later ones
+    // are numbered. Deterministic in the set's own order, so capturing the same box twice names the
+    // same members — which is what lets an override written against one survive a recapture.
+    let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let member_ids: Vec<String> = set
+        .pieces
+        .iter()
+        .map(|p| {
+            let short = short_id(&p.descriptor);
+            let n = seen.entry(short).or_insert(0);
+            *n += 1;
+            if *n == 1 { short.to_owned() } else { format!("{short}_{n}") }
+        })
+        .collect();
+
+    let mut members: Vec<Member> = Vec::new();
+    for (i, piece) in set.pieces.iter().enumerate() {
+        let d = library.get(&piece.descriptor).ok_or_else(|| {
+            format!(
+                "`{}` is not in this library any more, so it cannot go in a group",
+                piece.descriptor
+            )
+        })?;
+        if emerge_core::descriptor::placed_height(d).is_none() {
+            return Err(format!(
+                "`{}` is unmeasured, so the group has no honest height. Measure it on the tiles tab \
+                 first.",
+                piece.descriptor
+            ));
+        }
+        if mounts_against_the_ceiling(d) {
+            return Err(format!(
+                "`{}` hangs from the ceiling, and a group's ceiling is the height this is deriving. \
+                 Seat it once the group has a size.",
+                piece.descriptor
+            ));
+        }
+        let on = match piece.on {
+            CloneHost::Layer => None,
+            CloneHost::InSet(host) => Some(member_ids.get(host).cloned().ok_or_else(|| {
+                format!("`{}` rests on a piece the set does not hold", piece.descriptor)
+            })?),
+            CloneHost::Outside => {
+                return Err(format!(
+                    "`{}` rests on something outside the box. Draw the box round its host too, or \
+                     leave it out — a group cannot carry a piece whose support stayed behind.",
+                    piece.descriptor
+                ))
+            }
+        };
+        members.push(Member {
+            id: member_ids[i].clone(),
+            body: Body::Descriptor {
+                id: piece.descriptor.clone(),
+                tip: piece.tip,
+                on,
+                patch: None,
+            },
+            // **Relative to the tile's centre, not the drag anchor.** `composition::interface` builds
+            // its scratch map at origin zero with `bounds = size`, and `Map::floor_rect` centres on
+            // zero — so a member positioned against the anchor would sit off-centre in its own tile.
+            at: (
+                piece.offset.0 - set.centre_off.0,
+                piece.offset.1 - set.centre_off.1,
+            ),
+            yaw: piece.yaw,
+            lift: piece.lift,
+            // Unrecorded, which is NOT stale: nothing has measured what these present yet. `R` on the
+            // Compose tab records it, and `of_fingerprint` being an `Option` is what keeps the two
+            // states different.
+            of_fingerprint: None,
+            note: piece.note.clone(),
+        });
+    }
+
+    // **Sorted by id, because the schema requires it rather than prefers it.** One group has one
+    // encoding, or two authors building the same thing produce diffs that differ without meaning to.
+    // `Composition::validate_shape` refuses otherwise and names the order it wants.
+    members.sort_by(|a, b| a.id.cmp(&b.id));
+
+    let size = envelope_size(set, &members, library)?;
+    let comp = Composition {
+        id,
+        envelope: Envelope::Bounded { size },
+        members,
+        locations: Vec::new(),
+        note: Some(
+            "Captured from a map selection. The envelope is the box that was drawn, and the height \
+             is the tallest member's drawn top."
+                .to_owned(),
+        ),
+    };
+    comp.validate_shape()?;
+    Ok(comp)
+}
+
+/// Does this piece's height depend on the ceiling — i.e. on the very bounds being derived?
+fn mounts_against_the_ceiling(d: &emerge_core::descriptor::Descriptor) -> bool {
+    use emerge_core::descriptor::{Mount, OverlayHost};
+    matches!(
+        d.mount,
+        Some(Mount::OnCeiling) | Some(Mount::Overlay { on: OverlayHost::Ceiling })
+    )
+}
+
+/// **The box that was drawn, and how tall what is in it stands.**
+///
+/// Width and depth are the drag's own half-extents doubled — the author drew them, so they are not
+/// this function's to second-guess. The height is resolved rather than assumed: a member may rest on
+/// another (`OnSurface`), so the answer is the tallest **resolved** top, which is what
+/// `stack::resolve_y` already computes. It runs against a provisional envelope of zero height, which
+/// is sound precisely because ceiling-mounted members were refused above — nothing left reads
+/// `bounds.1`.
+fn envelope_size(
+    set: &CloneSet,
+    members: &[emerge_core::composition::Member],
+    library: &emerge_core::library::Library,
+) -> Result<(f32, f32, f32), String> {
+    use emerge_core::composition::Body;
+    use emerge_core::map::{Map, Placed};
+
+    let (w, d) = (set.half.0 * 2.0, set.half.1 * 2.0);
+    let mut scratch = Map {
+        bounds: (w.max(f32::EPSILON), 0.0, d.max(f32::EPSILON)),
+        ..Map::default()
+    };
+    for m in members {
+        let Body::Descriptor { id, tip, on, .. } = &m.body else {
+            continue;
+        };
+        scratch.placements.push(Placed {
+            id: m.id.clone(),
+            descriptor: id.clone(),
+            at: m.at,
+            yaw: m.yaw,
+            tip: *tip,
+            lift: m.lift,
+            on: on.clone(),
+            ..Placed::default()
+        });
+    }
+    let ys = emerge_core::stack::resolve_y(&scratch, library)
+        .map_err(|e| format!("the group's members do not stand up: {e}"))?;
+    let mut top = 0.0f32;
+    for (i, p) in scratch.placements.iter().enumerate() {
+        let (Some(desc), Some(&y)) = (library.get(&p.descriptor), ys.get(i)) else {
+            continue;
+        };
+        let h = emerge_core::descriptor::placed_height(desc).unwrap_or(0.0);
+        top = top.max(y + h);
+    }
+    Ok((w, top, d))
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    use emerge_core::composition::{Body, Envelope};
+    use emerge_core::descriptor::{Descriptor, Extent, Mount};
+    use emerge_core::library::Library;
+
+    /// A measured piece, `w × h × d`, standing on the floor.
+    fn piece_desc(id: &str, w: f32, h: f32, d: f32) -> Descriptor {
+        Descriptor {
+            id: id.to_owned(),
+            mesh: Some(format!("pack/{id}.glb")),
+            extent: Extent { footprint: Some((w, d)), height: Some(h) },
+            mount: Some(Mount::OnFloor),
+            ..Descriptor::default()
+        }
+    }
+
+    fn lib(ds: Vec<Descriptor>) -> Library {
+        Library { version: emerge_core::library::LIBRARY_VERSION, note: None, descriptors: ds }
+    }
+
+    fn held(pieces: Vec<ClonePiece>, centre_off: (f32, f32), half: (f32, f32)) -> CloneSet {
+        CloneSet { pieces, centre_off, half }
+    }
+
+    fn at(descriptor: &str, offset: (f32, f32), on: CloneHost) -> ClonePiece {
+        ClonePiece {
+            descriptor: descriptor.to_owned(),
+            offset,
+            yaw: 0.0,
+            tip: (0, 0),
+            lift: 0.0,
+            note: None,
+            owned: false,
+            owned_because: None,
+            on,
+        }
+    }
+
+    /// **The shape of a captured group**: bounded, centred, sorted, and hosts repointed to members.
+    #[test]
+    fn a_captured_set_becomes_a_bounded_group_centred_on_itself() {
+        let library = lib(vec![piece_desc("table", 1.0, 0.8, 1.0), piece_desc("lamp", 0.2, 0.4, 0.2)]);
+        // A lamp riding the table, and the pair's centre one metre along X from the drag anchor.
+        let set = held(
+            vec![
+                at("table", (1.0, 0.0), CloneHost::Layer),
+                at("lamp", (1.0, 0.0), CloneHost::InSet(0)),
+            ],
+            (1.0, 0.0),
+            (0.5, 0.5),
+        );
+        let c = composition_from_set(&set, "Break Table", &library).expect("captures");
+
+        assert_eq!(c.id, "break_table", "the name is FORCED into snake_case, not checked");
+        assert!(matches!(c.envelope, Envelope::Bounded { .. }), "capture is always bounded");
+        // Sorted by id — the schema's rule, so one group has one encoding.
+        let ids: Vec<&str> = c.members.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["lamp", "table"]);
+        // Positions are relative to the group's own centre, not the drag anchor.
+        for m in &c.members {
+            assert!(m.at.0.abs() < 1e-6 && m.at.1.abs() < 1e-6, "`{}` at {:?}", m.id, m.at);
+        }
+        // The lamp's host is the MEMBER id, not a map placement id.
+        let lamp = c.members.iter().find(|m| m.id == "lamp").expect("lamp");
+        let Body::Descriptor { on, .. } = &lamp.body else { panic!("not a descriptor member") };
+        assert_eq!(on.as_deref(), Some("table"));
+        // Unrecorded is not stale: nothing has measured what these present yet.
+        assert!(c.members.iter().all(|m| m.of_fingerprint.is_none()));
+    }
+
+    /// The envelope is the box the author drew, and as tall as the tallest RESOLVED top — so a piece
+    /// riding another counts from the host's surface, not from the floor.
+    #[test]
+    fn the_envelope_is_the_drawn_box_and_the_tallest_resolved_top() {
+        let mut lamp = piece_desc("lamp", 0.2, 0.4, 0.2);
+        lamp.mount = Some(Mount::OnSurface { class: "worktop".to_owned() });
+        let mut table = piece_desc("table", 1.0, 0.8, 1.0);
+        table.offers.surfaces = vec!["worktop".to_owned()];
+        let library = lib(vec![table, lamp]);
+        let set = held(
+            vec![
+                at("table", (0.0, 0.0), CloneHost::Layer),
+                at("lamp", (0.0, 0.0), CloneHost::InSet(0)),
+            ],
+            (0.0, 0.0),
+            (1.0, 1.5),
+        );
+        let c = composition_from_set(&set, "desk", &library).expect("captures");
+        let Envelope::Bounded { size } = c.envelope else { panic!("not bounded") };
+        assert!((size.0 - 2.0).abs() < 1e-5, "width is the drag's, doubled: {}", size.0);
+        assert!((size.2 - 3.0).abs() < 1e-5, "depth is the drag's, doubled: {}", size.2);
+        // 0.8 table + 0.4 lamp on top of it — not 0.8, and not 0.4.
+        assert!((size.1 - 1.2).abs() < 1e-5, "height must resolve the stack: {}", size.1);
+    }
+
+    /// **Three refusals, each naming the piece.** The tool does not guess — the human has final say,
+    /// and a group built on a guess is one that fails later somewhere else.
+    #[test]
+    fn it_refuses_rather_than_guessing() {
+        let measured = piece_desc("crate", 0.5, 0.5, 0.5);
+        let mut unmeasured = piece_desc("mystery", 0.5, 0.5, 0.5);
+        unmeasured.extent.height = None;
+        let mut ceiling = piece_desc("lamp", 0.2, 0.3, 0.2);
+        ceiling.mount = Some(Mount::OnCeiling);
+        let library = lib(vec![measured, unmeasured, ceiling]);
+
+        let outside = held(vec![at("crate", (0.0, 0.0), CloneHost::Outside)], (0.0, 0.0), (0.5, 0.5));
+        let e = composition_from_set(&outside, "g", &library).expect_err("must refuse");
+        assert!(e.contains("crate") && e.contains("outside"), "{e}");
+
+        let unmeasured = held(vec![at("mystery", (0.0, 0.0), CloneHost::Layer)], (0.0, 0.0), (0.5, 0.5));
+        let e = composition_from_set(&unmeasured, "g", &library).expect_err("must refuse");
+        assert!(e.contains("mystery") && e.contains("unmeasured"), "{e}");
+
+        let hanging = held(vec![at("lamp", (0.0, 0.0), CloneHost::Layer)], (0.0, 0.0), (0.5, 0.5));
+        let e = composition_from_set(&hanging, "g", &library).expect_err("must refuse");
+        assert!(e.contains("lamp") && e.contains("ceiling"), "{e}");
+
+        let empty = held(Vec::new(), (0.0, 0.0), (0.5, 0.5));
+        assert!(composition_from_set(&empty, "g", &library).is_err(), "an empty box is nothing to keep");
+
+        let named = held(vec![at("crate", (0.0, 0.0), CloneHost::Layer)], (0.0, 0.0), (0.5, 0.5));
+        let e = composition_from_set(&named, "!!!", &library).expect_err("must refuse");
+        assert!(e.contains("snake_case"), "{e}");
+    }
+
+    /// Two of a kind get stable, distinct ids — the first keeps the bare name.
+    #[test]
+    fn repeated_pieces_are_numbered_from_the_second() {
+        let library = lib(vec![piece_desc("chair", 0.5, 0.9, 0.5)]);
+        let set = held(
+            vec![
+                at("chair", (-0.5, 0.0), CloneHost::Layer),
+                at("chair", (0.5, 0.0), CloneHost::Layer),
+                at("chair", (0.0, 0.5), CloneHost::Layer),
+            ],
+            (0.0, 0.0),
+            (1.0, 1.0),
+        );
+        let c = composition_from_set(&set, "chairs", &library).expect("captures");
+        let ids: Vec<&str> = c.members.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["chair", "chair_2", "chair_3"]);
+    }
+}
+
 /// `root` and everything that (transitively) rests on it, as indices into the placement list —
 /// what a lift must redraw, because raising the table moves the lamp, and the candle on the lamp.
 fn with_dependents(map: &emerge_core::map::Map, root: usize) -> Vec<usize> {
@@ -4621,6 +5010,100 @@ fn spawn_target_tile(
 }
 
 /// Type the reason a cell is pinned.
+/// **Name a group, and keep it.** `pin_reason_keys`' shape — see `keys::Phase` for why the fields
+/// run before the dispatchers.
+fn group_name_keys(
+    mut events: MessageReader<bevy::input::keyboard::KeyboardInput>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<EditorState>,
+    mut clone_drag: ResMut<CloneDrag>,
+    mut compose: ResMut<crate::compose::ComposeState>,
+) {
+    if state.grouping.is_none() {
+        // Drain before leaving, or the keystroke that OPENED this field is read as its first
+        // character next frame — the `xseam` bug, which every field in this crate now guards.
+        events.clear();
+        return;
+    }
+    for event in events.read() {
+        if !event.state.is_pressed() {
+            continue;
+        }
+        match &event.logical_key {
+            Key::Enter => {
+                let Some(raw) = state.grouping.take() else { return };
+                let Some(set) = clone_drag.held.as_ref() else {
+                    state.status.problem("the set was put down before the name was finished");
+                    return;
+                };
+                match keep_as_group(&mut project, set, &raw) {
+                    Ok(id) => {
+                        // Armed, so the next click on the map stamps what was just made. The whole
+                        // point of capturing is to place it again.
+                        compose.armed = Some(id.clone());
+                        clone_drag.held = None;
+                        state
+                            .status
+                            .note(format!("`{id}` kept — armed, so the next click stamps it"));
+                    }
+                    Err(e) => state.status.problem(e),
+                }
+                return;
+            }
+            Key::Escape => {
+                state.grouping = None;
+                state.status.note("the group was not kept — the set is still in hand");
+                return;
+            }
+            Key::Backspace => {
+                if let Some(raw) = state.grouping.as_mut() {
+                    raw.pop();
+                }
+            }
+            Key::Character(text) => {
+                if let Some(raw) = state.grouping.as_mut() {
+                    raw.push_str(text);
+                }
+            }
+            Key::Space => {
+                if let Some(raw) = state.grouping.as_mut() {
+                    raw.push(' ');
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// **The commit door for a captured group** — `pub` so a test can drive it without a cursor. — validate the whole set, then write, then adopt.
+///
+/// `record_selected`'s discipline: nothing in `project` moves until the file is on disk, and a
+/// refusal leaves both exactly as they were. The validation is deliberately the FULL one
+/// (`composition::validate` over every group, not just this one), because a new group can only break
+/// the set as a whole — a duplicate id, or a nested reference that no longer resolves.
+pub fn keep_as_group(project: &mut Project, set: &CloneSet, raw: &str) -> Result<String, String> {
+    let comp = composition_from_set(set, raw, &project.library)?;
+    let id = comp.id.clone();
+    if project.compositions.compositions.iter().any(|c| c.id == id) {
+        return Err(format!(
+            "`{id}` is already a group. Pick another name — renaming one would strand every map \
+             that stamped it."
+        ));
+    }
+    let mut proposed = project.compositions.clone();
+    proposed.compositions.push(comp);
+    proposed.compositions.sort_by(|a, b| a.id.cmp(&b.id));
+    emerge_core::composition::validate(&proposed.compositions, &project.library)?;
+
+    let path = project
+        .emerge_dir
+        .join(emerge_core::composition::Compositions::FILE);
+    let text = proposed.to_ron()?;
+    emerge_core::ron_surgery::save_atomic(&path, &text).map_err(|e| format!("NOT WRITTEN: {e}"))?;
+    project.compositions = proposed;
+    Ok(id)
+}
+
 fn pin_reason_keys(
     mut events: MessageReader<bevy::input::keyboard::KeyboardInput>,
     mut project: ResMut<Project>,

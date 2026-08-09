@@ -279,3 +279,119 @@ corner/vertex (the dual-grid formulation) — and of the tile-count consequences
 
 **Cited but not indexed:** Lagae & Dutré (2006). *An Alternative for Wang Tiles: Colored Edges versus
 Colored Corners.* ACM TOG 25(4), 1442–1459.
+
+---
+
+## 8. Addendum (same day) — the corner problem is already in the corpus, and it layers
+
+Added after a second pass prompted by the edge-vs-corner schema question.
+
+### 8.1 Merrell assigns states to edges *and* vertices, in one propagation
+
+`continuous` — Merrell & Manocha, *Continuous Model Synthesis* (SIGGRAPH Asia 2008) — is in the corpus
+and states the edge/corner relationship directly:
+
+> "We remove edge and vertex assignments that disagree with their neighboring assignments. **An edge
+> assignment `(e, s_e)` agrees with an adjacent vertex state `s_v` only when `(e, s_e) ∈ s_v`, since
+> vertex states are defined as sets of adjacent edge assignments.**"
+
+and `10.1109_tvcg.2010.112`:
+
+> "We keep track of a list of every possible state that could be assigned to **each edge and each
+> vertex**."
+
+So in model synthesis the corner constraint does not replace the edge vocabulary — the corner state is
+*defined over* edge assignments, and agreement is set membership. Both live in one propagation loop.
+
+**Consequence for staging:** the argument that moving tokens cell → face and then face → corner is "two
+migrations" does not hold on this model. Cell → face is a migration of *where the token is read*. Corner
+is an added *constraint over 4-tuples of the same tokens*. Additive, not a second rewrite of the same
+data. That materially weakens the case for holding face tokens back.
+
+### 8.2 Merrell also names the corner problem, under another name
+
+The **incidence constraint** exists for exactly this reason:
+
+> "Prior model synthesis techniques are limited to shapes which have only **trihedral vertices**...
+> there are many simple shapes such as a pyramid or an octahedron that previous model synthesis
+> techniques cannot generate."
+
+> "States of trihedral vertices do not have this problem. They only use three half-spaces; three
+> half-spaces require three planes to intersect; and **those three planes must intersect somewhere. But
+> four planes may not intersect anywhere.**"
+
+Three constraints always meet; four may not. That is structurally the same failure as four tiles each
+satisfying every edge constraint and still disagreeing where they meet.
+
+### 8.3 The caveat that still requires the paper
+
+Merrell **layers** (vertex state = set of edge assignments). Lagae & Dutré's abstract describes corner
+tiles as "square tiles with **colored corners**", which reads as *replacing* edge colors rather than
+layering over them. If the corner formulation supersedes rather than subsumes the edge vocabulary, the
+migration cost is different. **That — not "edge or corner" — is the question to read the paper for.**
+
+Also note Merrell's setting is continuous half-space planes, not discrete tile tokens; the mapping to a
+tile-token schema is an analogy, not a proof.
+
+### 8.4 Locating the paper
+
+`paper_download` fails because OpenAlex/Crossref report `download_urls: []` — there is no indexed OA
+route. The authors host a copy on the KU Leuven graphics group page:
+
+```
+https://graphics.cs.kuleuven.be/publications/LD06AWTCECC/LD06AWTCECC_paper.pdf
+```
+
+Ingest path (the file must land in the papers directory before `scribe_convert` will see it):
+
+```
+curl -L -o ~/home-still/papers/la/LD06AWTCECC.pdf \
+  https://graphics.cs.kuleuven.be/publications/LD06AWTCECC/LD06AWTCECC_paper.pdf
+# then: scribe_convert(stem="LD06AWTCECC") -> distill_index(stem="LD06AWTCECC")
+```
+
+Abstract, via `paper_get` on `10.1145/1183287.1183296` (OpenAlex `W2051089395`, 125 citations), worth
+having in the meantime:
+
+> "Through their colored edges, Wang tiles enforce continuity with their direct neighbors. However,
+> **Wang tiles do not directly constrain their diagonal neighbors. This leads to continuity problems
+> near tile corners, a problem commonly known as the corner problem.** Corner tiles, on the other hand,
+> do impose restrictions on their diagonal neighbors, and thus are not subject to the corner problem...
+> **corner tiles are easier to tile**, textures synthesized with corner tiles contain more samples from
+> the original texture, corner tiles **reduce the required texture memory by a factor of two**...
+> Corner tiles result in cleaner, simpler, and more efficient applications."
+
+"Easier to tile" cuts against the intuition that corner constraints cost more than edge constraints.
+
+### 8.5 The two smaller schema questions
+
+**Does a wall offer one face component or two? — Two.**
+
+CGA's component split enumerates the faces of a scope; nothing collapses opposing faces
+(`Comp("faces")`, `Comp("sidefaces")`). And CGA rule 15 —
+`wall : Shape.visible("Street") ~ I("frontwall.obj")` — *selects* a face by query, which presupposes
+more than one was available. Tutenel is the same shape one level down: features are plural and typed
+per side, and a bookcase carries one `storage` feature **per shelf**. A corridor taking a sconce per
+side is the same case as a bookcase taking a book per shelf.
+
+The cost is real — a composite containing a wall must decide which of its faces is exterior — and CGA
+answers that with the same mechanism as §3: a face occluded by the composite's own interior is not
+exposed, via `Shape.occ("noparent")` scoping. Two faces plus occlusion scoping is one coherent design;
+one face is a shortcut that has to be undone for the corridor case.
+
+**Is `Offers::sockets` a component? — Apply Tutenel's test rather than deciding by symmetry.**
+
+Tutenel separates **features** (geometric regions carrying layout semantics — *off-limits* overlaps
+nothing, *clearance* overlaps only other clearance) from **services** ("the capacity of an object to
+perform a particular action", queried as *"some object that provides heating"*). The
+`2026-07-24` doc already identified collapsing these two axes as the root cause of the TV-on-bed bug:
+*"An object's purpose and its mountable surfaces are different axes."*
+
+So the criterion is: **does a socket have extent, such that two sockets can conflict spatially?**
+
+- Yes → it is a feature → it is a component, and it belongs in the same overlap test as faces.
+- No — it declares a capability ("this piece can host a light") → it is a service → not a component,
+  and folding it in repeats precisely the collapse that produced the bug.
+
+That gives the existing "and that is deliberate" note a criterion to be re-read against, rather than
+being overturned by symmetry with the face decision.

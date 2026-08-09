@@ -123,6 +123,8 @@ pub enum Action {
     GenerateDeclared,
     /// Step the drawn grid's spacing. A view setting, not an edit — see `editor::GridSpacing`.
     CycleGrid,
+    /// Keep the set in hand as a reusable group — see `editor::composition_from_set`.
+    GroupFromSet,
     PanForward,
     PanBack,
     PanLeft,
@@ -387,8 +389,14 @@ pub const BINDINGS: &[Binding] = &[
     // **The Map context is at its twelve-row ceiling.** There is no headroom left; the next verb
     // here has to share a `does` with a neighbour or take something else's key — which is exactly
     // what the clone tool does: the Cmd+Z shape, one key, the shifted form for the sibling verb.
-    bs(Action::MoveMode, KeyCode::KeyB, false, false, Context::Map, "B", "move / Shift: clone a set"),
-    bs(Action::CloneMode, KeyCode::KeyB, false, true, Context::Map, "B", "move / Shift: clone a set"),
+    bs(Action::MoveMode, KeyCode::KeyB, false, false, Context::Map, "B", "move / clone a set / keep as a group"),
+    bs(Action::CloneMode, KeyCode::KeyB, false, true, Context::Map, "B", "move / clone a set / keep as a group"),
+    // **A third verb on a state that already exists.** `Shift+B` drags a box and leaves a set in
+    // hand; this keeps that set as a reusable group instead of stamping it. Declared adjacent to the
+    // pair above and sharing their `does`, so `rows()` collapses all three into one line — the Map
+    // context is AT its twelve-row ceiling and `no_context_carries_more_than_a_learnable_vocabulary`
+    // enforces it. `M` for module; it is one of four letters this context has left.
+    b(Action::GroupFromSet, KeyCode::KeyM, false, Context::Map, "M", "move / clone a set / keep as a group"),
     b(Action::RenameMap, KeyCode::KeyN, false, Context::Map, "N", "rename map"),
     b(Action::OwnToggle, KeyCode::KeyO, false, Context::Map, "O", "pin / unpin"),
     // **Two sources, one row.** `rows()` collapses adjacent bindings sharing a `does` string, so the
@@ -848,6 +856,7 @@ mod tests {
             Action::AimLeft, Action::AimRight, Action::AimReset, Action::Cancel,
             Action::Fill, Action::Remove, Action::MoveMode, Action::CloneMode, Action::RenameMap,
             Action::OwnToggle, Action::Generate, Action::GenerateDeclared, Action::CycleGrid,
+            Action::GroupFromSet,
             Action::PanForward, Action::PanBack, Action::PanLeft, Action::PanRight,
             Action::TurnViewLeft, Action::TurnViewRight,
             Action::PrevCandidate, Action::NextCandidate, Action::TypeId, Action::CycleMount,

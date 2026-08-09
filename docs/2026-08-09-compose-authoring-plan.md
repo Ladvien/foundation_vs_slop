@@ -56,8 +56,14 @@ verb on a state that already exists rather than a third box-drag.
 - **id** — `naming::to_snake_case`, forced not checked (the map-name rule). Empty after forcing is a
   refusal.
 - **envelope** — `Bounded { size }`. Width/depth from `set.half` doubled. **Height is not in `CloneSet`**
-  and must be computed from the members' drawn tops (`descriptor::placed_height`, which folds `scale`
-  and `stretch_y`). A member the library cannot measure is a refusal, not a guess.
+  and must be computed from the members' **resolved** tops. `descriptor::placed_height` is
+  `extent.height × stretch_y` and **not** `× scale` — its own doc says `extent.height` "is already the
+  post-scale value", and it replaced a `drawn_height` that multiplied by scale a second time. A member
+  the library cannot measure is a refusal, not a guess.
+  Resolved, not summed: a member may rest on another, so the height is the tallest `resolve_y` answer
+  plus that piece's own height. That runs against a provisional zero-height envelope, which is sound
+  only because ceiling-mounted members are refused first — they are the one mount that reads
+  `bounds.1`, the very number being derived.
 - **member ids** — `short_id(descriptor)` plus an index, deduplicated. Must be stable and unique.
 - **`at`** — **relative to the tile centre, not the drag anchor.** `interface` builds its scratch map at
   `origin (0,0,0)` with `bounds = size`, and `Map::floor_rect` centres on zero. So subtract
@@ -90,9 +96,16 @@ just made.
   - `at` is relative to the centre — a set whose pieces straddle the centre has both signs;
   - `Bounded` size covers every piece's footprint and the tallest member's drawn height;
   - an unmeasured member refuses rather than defaulting a height.
-- **Live check over BRP** (`--features debugger`, `BEVY_BRP_PORT` set): place two pieces, `Shift+B`
-  round them, `M`, type an id, `Enter`; then `4` and confirm the Compose panel lists the group with a
-  derived interface and no faults.
+- **The commit door, through a fixture** (`a_captured_group_is_written_and_reads_back`): validates,
+  writes atomically, adopts only on success; a duplicate id refuses and leaves both the file and the
+  in-memory project untouched.
+
+**An agent cannot drive this one end to end, and that is a finding rather than an excuse.**
+`bevy_debugger/input` takes `kind` / `action` / `key` / `button` and scroll `x` / `y` — **no cursor
+position**. The gesture that fills a `CloneSet` is a box *drag*, so no injected input can produce one.
+The keyboard half (`M` opens the field, `Enter` commits) is drivable; the mouse half is not. Either a
+human checks the drag, or `bevy_debugger_bevy` grows cursor positioning — it is a vendored crate now,
+so that is an ordinary edit.
 
 ---
 
