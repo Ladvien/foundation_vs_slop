@@ -27,7 +27,21 @@
 use std::path::{Path, PathBuf};
 
 /// Everything `emerge-core` is allowed to depend on. Data and arithmetic, nothing that draws.
-const ALLOWED_DEPS: &[&str] = &["serde", "serde_json", "ron", "rand", "rand_chacha"];
+///
+/// # `det_rng`, and why it widened nothing
+///
+/// The seeded RNG used to be `emerge-core/src/rng.rs`; it was lifted into a sibling crate so a
+/// permissively-licensed consumer could depend on the generator without taking this crate, and
+/// `emerge-core` re-exports it (`pub use det_rng as rng`) so no call site moved.
+///
+/// It is on this list because **the dependency surface did not actually grow**: `det_rng`'s own
+/// manifest declares `rand` and `rand_chacha` and nothing else, both of which are already here. The
+/// same code is reachable at a different address. It also carries its own `tests/leaf.rs`, so the
+/// boundary is policed on that side rather than taken on trust from here.
+///
+/// That is the argument this list is supposed to cost. A dependency that pulled in anything not
+/// already on this line would need a different one.
+const ALLOWED_DEPS: &[&str] = &["serde", "serde_json", "ron", "rand", "rand_chacha", "det_rng"];
 
 /// Crate names that would mean the boundary has been crossed, checked as substrings so
 /// `bevy_math`/`bevy_ecs` are caught as readily as `bevy`.
