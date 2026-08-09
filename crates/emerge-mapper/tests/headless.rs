@@ -1167,3 +1167,47 @@ fn seating_a_member_is_written_and_reads_back() {
         "a refusal must not touch the file"
     );
 }
+
+/// **The name field takes the keyboard, so typing a name cannot also drive the tab.**
+///
+/// `N`, `T`, `F`, `G`, `H`, `Y`, `U` are all live Compose verbs and all live letters. Typing
+/// "north wall" into an unguarded field would seat, turn and drop things on the way past — which is
+/// exactly what naming a captured set on the Map used to do, because `EditorState::grouping` was
+/// missing from the same guard.
+///
+/// Testable despite the field itself not being: `keys::Live` is a resource, and it is the one thing
+/// standing between a keystroke and a verb. `bevy_debugger/input` writes `ButtonInput` and not the
+/// `KeyboardInput` stream, so an agent cannot type here — but it can assert who owns the keyboard.
+#[test]
+fn naming_a_composition_takes_the_keyboard_from_the_verbs() {
+    let root = fixtures::Fixture::new("naming")
+        .descriptor("wall", "alpha")
+        .bounded_composition("bay", (1.0, 2.4, 1.0), &[("north", "wall", (0.0, 0.0))])
+        .build("m");
+    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    *app.world_mut().resource_mut::<emerge_mapper::tiles::Mode>() =
+        emerge_mapper::tiles::Mode::Compose;
+    app.update();
+    assert_eq!(
+        app.world().resource::<emerge_mapper::keys::Live>().0,
+        emerge_mapper::keys::Context::Compose,
+        "with no field open the tab's verbs are live"
+    );
+
+    app.world_mut().resource_mut::<emerge_mapper::compose::ComposeState>().naming =
+        Some(String::new());
+    app.update();
+    assert_eq!(
+        app.world().resource::<emerge_mapper::keys::Live>().0,
+        emerge_mapper::keys::Context::Typing,
+        "while a name is being typed the keyboard belongs to the text, or every letter is a verb"
+    );
+
+    // And it hands the keyboard back, or the tab is dead after one rename.
+    app.world_mut().resource_mut::<emerge_mapper::compose::ComposeState>().naming = None;
+    app.update();
+    assert_eq!(
+        app.world().resource::<emerge_mapper::keys::Live>().0,
+        emerge_mapper::keys::Context::Compose
+    );
+}

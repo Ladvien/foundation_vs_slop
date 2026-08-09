@@ -448,6 +448,33 @@ must *replace* its floor rows as well as its wall rows, not add stamps beside th
 cross product is never authored. Variant → the kit needs a sconce first, and step 5 stays as scoped.
 Everything above points at *tag*, but it is a schema decision and belongs to the author.
 
+## Decided 2026-08-09: the composition gallery is a contact sheet, and thumbnails wait
+
+**Next piece of work on the Compose tab**, recorded here rather than left in a message because this
+thread has already lost an item between two consecutive turns once.
+
+**Build A: a contact sheet on the stage.** Every composition stood up side by side in 3-D, arrow or
+click to pick, `Enter` to edit that one. `restage_group` already expands and spawns one, so this is
+spawning N of them on a grid.
+
+**The spacing is a parameter, and that is the point rather than a nicety.** At tile pitch with zero
+gap the sheet stops being a gallery and becomes a **seam inspector**: tiles laid touching are
+`summarise_face` rendered, so an interface disagreement arrives as a visible seam instead of as a
+fault list. That is the question §3's enclosure metric asks, by eye and two steps earlier.
+
+**Build B — baked thumbnails in the list — is deliberately second, and not merely on cost.** The
+thumbnail booth bakes per *descriptor*, and a composition is not a descriptor: teaching the booth to
+photograph one means it must call `composition::expand`, which couples a **startup-time asset cache to
+the composition schema**. That schema is moving — `paint` landed today, `seating_divisions` with it,
+and the corner question is still open. A cache keyed to an unsettled schema yields stale thumbnails
+that look right and are not, which is worse than none. A-then-B is additive; B-then-A wastes the booth
+work the moment the schema shifts.
+
+**The trigger for B, named in advance so it is not discovered.** Four tiles read at actual size;
+thirty will not. **When the contact sheet needs scrolling or zooming to read, that is the signal for
+B** — and that N is the same number #25's acceptance asks for, *how many tile kinds the kit actually
+wants*, arriving free from a tool being built anyway.
+
 ## Step 5 — the schema
 
 Only after step 4. Split values typed absolute/relative (CGA); the occupancy test **with
