@@ -186,8 +186,12 @@ Unchanged from the measurement, and it is why this is a design and not a branch.
 
 1. **The Compose tab authors a `Bounded` composition into a lattice.** No schema change: seat existing
    members at existing mounts, and let `interface` keep deriving what it already derives.
-2. **Interface tokens move from cells to the 2-D component.** This is where `summarise_face`'s noise
-   goes away, and it is independent of everything else.
+2. **Interface tokens move from cells to bands.** ~~the 2-D component~~ — measured and corrected: four
+   shipped pieces present `wall` at the jambs and nothing through the opening, so one token per side
+   would have to fault every doorway. A face is its *rectangles* instead, canonical because they are
+   taken strips-then-runs. `summarise_face`'s noise goes away with the cell counts that caused it, and
+   `adjacency::face` turned out to belong to `grammar::learn`'s prototype signature rather than to
+   this. Independent of everything else, and done.
 3. **Split values gain the absolute/relative type**, so a member's Y is one mechanism.
 4. **The occupancy test arrives, with `noparent` scoping written at the same time.**
 5. **Retire the positional `Mount` variants** once nothing authors them.

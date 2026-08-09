@@ -27,7 +27,7 @@
 
 use bevy::prelude::*;
 
-use emerge_core::composition::{self, Composition, Envelope};
+use emerge_core::composition::{self, Band, Composition, Envelope};
 
 use crate::chrome::{ACCENT, DANGER, DIM, LABEL, TEXT};
 use crate::keys::{self, Action};
@@ -450,7 +450,13 @@ fn detail(rows: &mut Vec<(String, Color)>, c: &Composition, comps: &[Composition
                 (emerge_core::wfc::S, "south"),
                 (emerge_core::wfc::W, "west"),
             ] {
-                rows.push((format!("    {name:>5}: {}", summarise_face(&iface.faces[dir])), TEXT));
+                for (i, line) in face_rows(&iface.faces[dir]).into_iter().enumerate() {
+                    // The face is named once and its bands hang under it, so a doorway reads as one
+                    // side that speaks three ways rather than three sides.
+                    let label =
+                        if i == 0 { format!("{name:>5}: ") } else { " ".repeat(7) };
+                    rows.push((format!("    {label}{line}"), TEXT));
+                }
             }
             if iface.is_clean() {
                 rows.push((
@@ -471,33 +477,96 @@ fn detail(rows: &mut Vec<(String, Color)>, c: &Composition, comps: &[Composition
     }
 }
 
-/// A face as one line: the distinct tokens on it, or that it presents nothing.
+/// **A face as its bands** — one row each, or a single word when the whole side says one thing.
 ///
-/// Summarised rather than listed cell by cell, because a 2.4 m wall at the shipped divisions is ten
-/// cells and every one of them says the same word. What an author needs from this line is whether the
-/// face speaks, and with which words.
-fn summarise_face(face: &[Option<String>]) -> String {
-    if face.is_empty() {
-        return "no cells".to_owned();
+/// This summarised a cell vector until 2026-08-09, and had to: a face was a `Vec` whose length was
+/// the project's division setting, so the honest line quoted counts — `wall (8 of 16 cells; the rest
+/// unlabelled)`. Those counts were noise. The same wall divided five ways and fifty presents the same
+/// thing and read two different ways, which is exactly the leak the band form closes. There is
+/// nothing left to summarise here, so this no longer does.
+///
+/// Only the axis that actually varies is quoted. A plain wall is one word; a doorway varies across
+/// and not up, so its rows carry a span and no height; a group mixing a low piece with a tall one
+/// varies up and carries the height instead.
+fn face_rows(bands: &[Band]) -> Vec<String> {
+    let Some(first) = bands.first() else {
+        // Only reachable for a zero-extent envelope, which `interface` derives nothing from.
+        return vec!["no face".to_owned()];
+    };
+    if bands.len() == 1 {
+        return match &first.token {
+            Some(t) => vec![t.clone()],
+            // Not a wildcard — `None` matches only `None`, which is `adjacency`'s rule and the reason
+            // the whole feature stays inert until somebody authors a token.
+            None => vec!["nothing (matches only unlabelled)".to_owned()],
+        };
     }
-    let mut seen: Vec<&str> = Vec::new();
-    let mut silent = 0usize;
-    for cell in face {
-        match cell.as_deref() {
-            Some(t) if !seen.contains(&t) => seen.push(t),
-            Some(_) => {}
-            None => silent += 1,
-        }
+    let varies_across = bands.iter().any(|b| b.lat != first.lat);
+    let varies_up = bands.iter().any(|b| b.y != first.y);
+    bands
+        .iter()
+        .map(|b| {
+            let mut s = format!("{:<10}", b.token.as_deref().unwrap_or("nothing"));
+            if varies_across {
+                s.push_str(&format!(" across {:>6.2} to {:>6.2} m", b.lat.0, b.lat.1));
+            }
+            if varies_up {
+                s.push_str(&format!(" at {:>5.2} to {:>5.2} m up", b.y.0, b.y.1));
+            }
+            s
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod face_row_tests {
+    use super::face_rows;
+    use emerge_core::composition::Band;
+
+    fn band(y: (f32, f32), lat: (f32, f32), token: Option<&str>) -> Band {
+        Band { y, lat, token: token.map(str::to_owned) }
     }
-    if seen.is_empty() {
-        // Not a wildcard — `None` matches only `None`, which is `adjacency`'s rule and the reason the
-        // whole feature stays inert until somebody authors a token.
-        return format!("nothing ({silent} cells unlabelled — matches only unlabelled)");
+
+    /// A side that says one thing is one word — no counts, because there is nothing left to count.
+    #[test]
+    fn a_face_that_says_one_thing_reads_as_one_word() {
+        let rows = face_rows(&[band((0.0, 2.4), (-0.5, 0.5), Some("wall"))]);
+        assert_eq!(rows, vec!["wall".to_owned()]);
     }
-    let tokens = seen.join(", ");
-    if silent == 0 {
-        format!("{tokens} ({} cells)", face.len())
-    } else {
-        format!("{tokens} ({} of {} cells; the rest unlabelled)", face.len() - silent, face.len())
+
+    /// `None` is a token, not a wildcard, and the line has to say so — otherwise "nothing" reads as
+    /// "anything" and an author expects a match that `adjacency` will not make.
+    #[test]
+    fn an_unlabelled_face_says_that_it_matches_only_unlabelled() {
+        let rows = face_rows(&[band((0.0, 2.4), (-0.5, 0.5), None)]);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].contains("matches only unlabelled"), "{}", rows[0]);
+    }
+
+    /// A doorway varies across and not up, so its rows carry a span and no height.
+    #[test]
+    fn a_doorway_reads_across_and_does_not_quote_a_height() {
+        let rows = face_rows(&[
+            band((0.0, 2.0), (-1.5, -0.5), Some("wall")),
+            band((0.0, 2.0), (-0.5, 0.5), None),
+            band((0.0, 2.0), (0.5, 1.5), Some("wall")),
+        ]);
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].contains("across") && rows[0].contains("-1.50"), "{}", rows[0]);
+        assert!(rows[1].trim_start().starts_with("nothing"), "{}", rows[1]);
+        assert!(rows.iter().all(|r| !r.contains("up")), "height quoted where it does not vary: {rows:?}");
+    }
+
+    /// A group mixing a low piece with a tall one varies up and not across, so it quotes the height
+    /// instead. Both axes are quoted only when both actually move.
+    #[test]
+    fn a_parapet_reads_up_and_does_not_quote_a_span() {
+        let rows = face_rows(&[
+            band((0.0, 1.0), (-0.5, 0.5), Some("wall")),
+            band((1.0, 2.0), (-0.5, 0.5), None),
+        ]);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].contains("1.00 m up"), "{}", rows[0]);
+        assert!(rows.iter().all(|r| !r.contains("across")), "span quoted where it does not vary: {rows:?}");
     }
 }

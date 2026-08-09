@@ -153,21 +153,34 @@ across the envelope and skips a member whose `y` span does not contain it, so a 
 distinguishes a doorway from a wall in the learned grammar. And the shipped `compositions.ron` holds
 one `Anchored` group, which has no interface, so nothing shipped exercises `Interface::faces` at all.
 
-### Open — this is a schema choice, so it is the author's
+### Decided: bands
 
-The corpus doc already flagged it: *"whether a token lives on an edge or a corner is a schema decision
-and not an easy one to revisit."* The same is true here. Options, with no default assumed:
+`Interface::faces` is `[Vec<Band>; 4]`, a `Band` being a rectangle of the face that presents one
+token. The decomposition is **strips first, then runs within a strip** — rows that read identically
+across merge, then each strip splits where its token changes. That order is what makes it *canonical*:
+a greedy rectangle cover of the same cells has several valid answers, and one face must have one
+description.
 
-- **Bands.** `Interface::faces` becomes maximal runs sharing a token, positioned as fractions of the
-  face rather than cell counts. Division-independent, so a 2.4 m wall reads the same at 5 divisions or
-  50; keeps the doorway as three bands; keeps vertical variation representable for step 1's groups.
-  `summarise_face` stops needing to summarise because the bands *are* the summary.
-- **Leave it.** The per-cell vector loses nothing, the noise it causes is one display line, and
-  `summarise_face` already handles it. Step 2 becomes a no-op and the effort moves to step 3.
+**Positions are metres, not the fractions the option was written with.** `adjacency::seam` already
+settled that comparing faces is a question about *where two pieces physically touch* rather than about
+whether they are the same shape — it was changed away from whole-face equality for exactly that
+reason — and normalised coordinates would reintroduce the defect for envelopes of different sizes.
+Metres also read better in the panel: `wall across -1.50 to -0.50 m` tells an author the door is 1.2 m
+wide, where `wall 0–25%` needs the tile size to decode. Say the word and the display can quote
+percentages instead; the stored form should stay physical either way.
 
-**Acceptance, once chosen.** `adjacency::faults` still catches a genuine disagreement between abutting
-pieces. Workspace green. **No golden may move** — if one does, stop and re-measure rather than
-re-pinning.
+`summarise_face` became `face_rows` and no longer summarises. It quotes only the axis that varies — a
+plain wall is one word, a doorway carries a span and no height, a group mixing a low piece with a tall
+one carries the height and no span.
+
+**One thing the fixtures taught, worth keeping:** a subgrid is indexed at
+`descriptor::divisions(d, per_tile)`, so authoring at one density and reading at another is not a
+coarser view of the same piece — it is a piece most of whose cells are absent. The first
+division-independence test failed for that reason and was wrong, not the code. `tiled_divided` exists
+so a test comparing two densities authors both.
+
+**Acceptance — met.** `emerge-core` 384 unit tests green, `emerge-mapper` 119 + 26 headless green,
+`adjacency::faults` untouched, and `adjacency::face` deliberately not touched at all.
 
 ---
 

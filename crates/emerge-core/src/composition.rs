@@ -270,6 +270,36 @@ pub struct InterfaceFault {
     pub message: String,
 }
 
+/// **One rectangle of a face that presents a single token**, in metres.
+///
+/// A face is described by its bands rather than by its cells, which is why reading one does not
+/// require knowing how finely the project divides a tile: a 2.4 m wall is one band whether it is
+/// divided five ways or fifty. Positions are **metres, not fractions** — [`crate::adjacency::seam`]
+/// already settled that comparing faces is a question about *where two pieces physically touch*
+/// rather than about whether they are the same shape, and normalised coordinates would reintroduce
+/// exactly the defect it was changed to fix.
+///
+/// The decomposition is the component split of Müller et al.'s CGA Shape (`10.1145/1179352.1141931`)
+/// carried one dimension further than the 2-D face: the face splits into horizontal strips, and each
+/// strip into lateral runs. Taking them in that order is what makes it **canonical** — a greedy
+/// rectangle cover of the same cells has several answers and this has one, so two runs and two `App`
+/// instances agree.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Band {
+    /// Height this band spans, in metres above the composition's floor.
+    pub y: (f32, f32),
+    /// Extent along the face: `x` for a north or south face, `z` for an east or west one.
+    ///
+    /// **In the envelope's own coordinates — the ones [`Member::at`] is written in**, so it runs from
+    /// `-size/2` to `+size/2` rather than from zero. Quoting it on the envelope's axes rather than
+    /// from "the left end" means it does not depend on which side you imagine standing, which is the
+    /// kind of thing that reads fine and mirrors a face.
+    pub lat: (f32, f32),
+    /// What this rectangle presents. `None` is a token in its own right and matches only `None` —
+    /// [`crate::adjacency`]'s rule, so a composition and a plain tile answer the same way.
+    pub token: Option<String>,
+}
+
 /// A `Bounded` composition's derived edge interface — what it presents to whatever abuts it.
 ///
 /// **Read off the members, never authored.** There is no field anywhere for a hand-written interface,
@@ -278,9 +308,16 @@ pub struct InterfaceFault {
 /// a functional one, not a parallel thing to keep in step.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Interface {
-    /// Indexed by [`crate::wfc`]'s `N`/`E`/`S`/`W`. Each is read in the same order
-    /// [`crate::adjacency::face`] uses: vertical outer, lateral inner.
-    pub faces: [Vec<Option<String>>; 4],
+    /// Indexed by [`crate::wfc`]'s `N`/`E`/`S`/`W`. Bands in `y` then `lat` ascending — the same
+    /// order [`crate::adjacency::face`] reads cells in, one dimension up.
+    ///
+    /// **Not one token per side.** Measured across both shipped kits on 2026-08-09: 192 faces carry
+    /// a subgrid and four of them present two tokens at once — `site/wall_doorway`,
+    /// `site/wall_doorway_wide`, `site/wall_window` and `site_greybox`'s `wall_doorway_wide` all read
+    /// `wall` at the jambs and nothing through the opening. A single token per side would have to
+    /// fault every doorway or pick a winner, and picking is exactly what the faults below exist to
+    /// avoid.
+    pub faces: [Vec<Band>; 4],
     /// Members disagreeing about a face. **Derived and reported, never resolved by picking one** — the
     /// call `adjacency::faults` already makes, because silently choosing a winner is how a tool ends up
     /// modelling something other than what the author has in their head.
@@ -1253,7 +1290,7 @@ pub fn interface(
         (0.0, size.1),
         (-half.1, half.1),
     );
-    let mut faces: [Vec<Option<String>>; 4] = Default::default();
+    let mut faces: [Vec<Band>; 4] = Default::default();
     let mut faults = Vec::new();
 
     for dir in [N, E, S, W] {
@@ -1261,10 +1298,14 @@ pub fn interface(
         let lat = if lateral_is_z { env.2 } else { env.0 };
         let steps = |span: (f32, f32)| (((span.1 - span.0) / subunit).round() as u32).max(1);
         let (n_lat, n_y) = (steps(lat), steps(env.1));
-        let mut face: Vec<Option<String>> = Vec::with_capacity((n_lat * n_y) as usize);
+        // A row per sampled height, rather than one flat vector with a stride to remember. The shape
+        // is then carried by the type, so banding it needs no length invariant to check and has no
+        // wrong answer to give if one were ever violated.
+        let mut rows: Vec<Vec<Option<String>>> = Vec::with_capacity(n_y as usize);
 
         for iy in 0..n_y {
             let wy = env.1.0 + (iy as f32 + 0.5) * (env.1.1 - env.1.0) / n_y as f32;
+            let mut row: Vec<Option<String>> = Vec::with_capacity(n_lat as usize);
             for il in 0..n_lat {
                 let wl = lat.0 + (il as f32 + 0.5) * (lat.1 - lat.0) / n_lat as f32;
                 let mut found: Option<(&str, Option<&str>)> = None;
@@ -1318,14 +1359,62 @@ pub fn interface(
                         Some(_) => {}
                     }
                 }
-                face.push(found.and_then(|(_, t)| t.map(str::to_owned)));
+                row.push(found.and_then(|(_, t)| t.map(str::to_owned)));
             }
+            rows.push(row);
         }
-        faces[dir] = face;
+        faces[dir] = into_bands(&rows, lat, env.1);
     }
     faults.sort_by(|p, q| (p.dir, &p.a, &p.b).cmp(&(q.dir, &q.a, &q.b)));
     faults.dedup_by(|p, q| p.dir == q.dir && p.a == q.a && p.b == q.b);
     Ok(Some(Interface { faces, faults }))
+}
+
+/// **Collapse a face's samples into the rectangles that make it up.**
+///
+/// Strips first, then runs within a strip: rows that read identically all the way across merge into
+/// one horizontal strip, and each strip splits at every point its token changes. Doing it in that
+/// order is what makes the answer **canonical** — a greedy rectangle cover of the same cells has
+/// several valid answers and would let two runs describe one face two ways.
+///
+/// The sample count disappears here, which is the point: the same wall divided five ways and fifty
+/// bands identically, so how finely a project subdivides a tile stops leaking into what its pieces
+/// say about each other.
+///
+/// `rows` is outer-to-inner as [`interface`] samples it — one entry per height, each holding one
+/// entry per lateral step. Rows of unequal length compare unequal and therefore simply do not merge,
+/// so there is no shape to assert and no degraded answer to return.
+fn into_bands(rows: &[Vec<Option<String>>], lat: (f32, f32), yspan: (f32, f32)) -> Vec<Band> {
+    let n_y = rows.len();
+    let n_lat = rows.first().map_or(0, Vec::len);
+    if n_y == 0 || n_lat == 0 {
+        return Vec::new();
+    }
+    let y_at = |i: usize| yspan.0 + (yspan.1 - yspan.0) * i as f32 / n_y as f32;
+    let l_at = |i: usize| lat.0 + (lat.1 - lat.0) * i as f32 / n_lat as f32;
+
+    let mut out = Vec::new();
+    let mut iy = 0;
+    while iy < n_y {
+        let Some(row) = rows.get(iy) else { break };
+        let mut ny = 1;
+        while rows.get(iy + ny).is_some_and(|r| r == row) {
+            ny += 1;
+        }
+        let y = (y_at(iy), y_at(iy + ny));
+        let mut il = 0;
+        while il < n_lat {
+            let token = row.get(il).cloned().flatten();
+            let mut nl = 1;
+            while il + nl < n_lat && row.get(il + nl).cloned().flatten() == token {
+                nl += 1;
+            }
+            out.push(Band { y, lat: (l_at(il), l_at(il + nl)), token });
+            il += nl;
+        }
+        iy += ny;
+    }
+    out
 }
 
 fn dir_name(dir: Dir) -> &'static str {
@@ -1429,8 +1518,18 @@ mod tests {
 
     /// A piece that presents `token` on every cell of its lattice.
     fn tiled(id: &str, w: f32, d: f32, h: f32, token: &str) -> Descriptor {
+        tiled_divided(id, w, d, h, token, 1)
+    }
+
+    /// The same piece, with its cells authored at `per_tile` divisions.
+    ///
+    /// A subgrid is indexed at [`crate::descriptor::divisions`] for the project it belongs to, so
+    /// authoring at one density and reading at another is not a finer view of the same piece — it is
+    /// a piece most of whose cells are simply absent. Anything comparing two densities has to author
+    /// both.
+    fn tiled_divided(id: &str, w: f32, d: f32, h: f32, token: &str, per_tile: u32) -> Descriptor {
         let mut p = piece(id, w, d, h);
-        let div = crate::descriptor::divisions(&p, 1).expect("measured");
+        let div = crate::descriptor::divisions(&p, per_tile).expect("measured");
         let mut cells = Vec::new();
         for x in 0..div.0 {
             for y in 0..div.1 {
@@ -2075,8 +2174,102 @@ mod tests {
             .expect("derives")
             .expect("bounded");
         assert!(iface.is_clean(), "{:?}", iface.faults);
-        assert!(
-            iface.faces[E].iter().all(|t| t.as_deref() == Some("wall")),
+        // One band, not one per cell: the whole east side says `wall` and there is nothing to break
+        // it up, so the face is described by the single rectangle that is the face.
+        assert_eq!(iface.faces[E].len(), 1, "east read {:?}", iface.faces[E]);
+        assert_eq!(iface.faces[E][0].token.as_deref(), Some("wall"));
+        assert_eq!(iface.faces[E][0].y, (0.0, 1.0));
+        assert_eq!(iface.faces[E][0].lat, (-0.5, 0.5));
+    }
+
+    /// **The bands do not depend on how finely the project divides a tile.**
+    ///
+    /// This is the whole point of describing a face by its rectangles rather than by its cells. The
+    /// same wall in a project that divides a tile once and in one that divides it eight times has to
+    /// say the same thing, or "what does this face present" is really "what does this face present,
+    /// at this project's settings" — which is what the old cell vector answered, and why its display
+    /// line had to quote counts that changed without anything changing.
+    #[test]
+    fn dividing_a_tile_more_finely_does_not_change_what_a_face_presents() {
+        let comp = Composition {
+            id: "bay".to_owned(),
+            envelope: Envelope::Bounded { size: (1.0, 1.0, 1.0) },
+            members: vec![member("wall", "wall", (0.0, 0.0))],
+            locations: Vec::new(),
+            note: None,
+        };
+        let comps = vec![comp.clone()];
+        let read = |per_tile: u32| {
+            let lib = library(vec![tiled_divided("wall", 1.0, 1.0, 1.0, "wall", per_tile)]);
+            interface(&comp, &comps, &lib, per_tile).expect("derives").expect("bounded").faces
+        };
+        assert_eq!(read(1), read(8), "1 division read differently from 8");
+    }
+
+    /// **A doorway keeps its opening**, which is why a face is not one token.
+    ///
+    /// Measured on the shipped kits: `site/wall_doorway`, `site/wall_doorway_wide`,
+    /// `site/wall_window` and `site_greybox`'s `wall_doorway_wide` all present `wall` at the jambs and
+    /// nothing through the middle. Collapsing a face to a single word would have to fault all four or
+    /// pick a winner, and picking is what [`Interface::faults`] exists to avoid.
+    #[test]
+    fn a_gap_between_two_members_bands_the_face_rather_than_faulting_it() {
+        let lib = library(vec![tiled("jamb", 1.0, 1.0, 2.0, "wall")]);
+        let comp = Composition {
+            id: "doorway".to_owned(),
+            // Three tiles wide, with the middle one empty: a doorway, in the smallest form that has
+            // one.
+            envelope: Envelope::Bounded { size: (1.0, 2.0, 3.0) },
+            members: vec![
+                member("jamb_north", "jamb", (0.0, -1.0)),
+                member("jamb_south", "jamb", (0.0, 1.0)),
+            ],
+            locations: Vec::new(),
+            note: None,
+        };
+        let iface = interface(&comp, &vec![comp.clone()], &lib, 1)
+            .expect("derives")
+            .expect("bounded");
+        assert!(iface.is_clean(), "a gap is not a disagreement: {:?}", iface.faults);
+        let east: Vec<_> = iface.faces[E]
+            .iter()
+            .map(|b| (b.lat, b.token.as_deref()))
+            .collect();
+        assert_eq!(
+            east,
+            vec![
+                ((-1.5, -0.5), Some("wall")),
+                ((-0.5, 0.5), None),
+                ((0.5, 1.5), Some("wall")),
+            ],
+            "east read {:?}",
+            iface.faces[E]
+        );
+    }
+
+    /// **Vertical variation survives too** — which is why the shipped kits' y-uniformity is not a
+    /// property to design around.
+    ///
+    /// All 192 faces in both libraries read the same at every height, but that is a fact about those
+    /// descriptors, not about the format: `interface` skips a member whose height does not reach the
+    /// sample, so the moment a group mixes a low piece with a tall one the face has two strips.
+    #[test]
+    fn a_member_shorter_than_the_envelope_leaves_the_height_above_it_unlabelled() {
+        let lib = library(vec![tiled("low", 1.0, 1.0, 1.0, "wall")]);
+        let comp = Composition {
+            id: "parapet".to_owned(),
+            envelope: Envelope::Bounded { size: (1.0, 2.0, 1.0) },
+            members: vec![member("low", "low", (0.0, 0.0))],
+            locations: Vec::new(),
+            note: None,
+        };
+        let iface = interface(&comp, &vec![comp.clone()], &lib, 1)
+            .expect("derives")
+            .expect("bounded");
+        let east: Vec<_> = iface.faces[E].iter().map(|b| (b.y, b.token.as_deref())).collect();
+        assert_eq!(
+            east,
+            vec![((0.0, 1.0), Some("wall")), ((1.0, 2.0), None)],
             "east read {:?}",
             iface.faces[E]
         );
@@ -2098,12 +2291,10 @@ mod tests {
         let iface = interface(&comp, &vec![comp.clone()], &lib, 1)
             .expect("derives")
             .expect("bounded");
-        assert!(iface.faces[W].iter().all(|t| t.as_deref() == Some("wall")));
-        assert!(
-            iface.faces[E].iter().all(Option::is_none),
-            "east read {:?}",
-            iface.faces[E]
-        );
+        assert_eq!(iface.faces[W].len(), 1, "west read {:?}", iface.faces[W]);
+        assert_eq!(iface.faces[W][0].token.as_deref(), Some("wall"));
+        assert_eq!(iface.faces[E].len(), 1, "east read {:?}", iface.faces[E]);
+        assert_eq!(iface.faces[E][0].token, None, "east read {:?}", iface.faces[E]);
     }
 
     /// **Two members disagreeing about a face is reported, never resolved by picking one.**
@@ -2161,10 +2352,7 @@ mod tests {
         let comps = vec![inner, outer.clone()];
         let iface = interface(&outer, &comps, &lib, 1).expect("derives").expect("bounded");
         assert!(iface.is_clean(), "{:?}", iface.faults);
-        assert!(
-            iface.faces[N].iter().all(|t| t.as_deref() == Some("wall")),
-            "north read {:?}",
-            iface.faces[N]
-        );
+        assert_eq!(iface.faces[N].len(), 1, "north read {:?}", iface.faces[N]);
+        assert_eq!(iface.faces[N][0].token.as_deref(), Some("wall"));
     }
 }
