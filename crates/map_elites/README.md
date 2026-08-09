@@ -6,6 +6,10 @@ A Quality-Diversity kernel: the MAP-Elites archive, three emitter loops (isotrop
 
 > **This repo is a read-only mirror.** It is split out of [`Ladvien/foundation_vs_slop`](https://github.com/Ladvien/foundation_vs_slop) with `git subtree split`, history intact. It depends on a sibling crate by workspace path, so it builds *inside* that workspace, not on its own. Issues and PRs belong upstream.
 
+![A 40x40 grid of behaviour niches filling in over a search: dark unexplored cells give way to a blue-green field with two bright optima emerging, while a coverage bar underneath fills to nearly full](docs/illuminate.gif)
+
+That is `examples/illuminate.rs`, one frame per generation. **It fills outward rather than uniformly** — a new niche is almost always found by mutating a neighbour, so coverage spreads from what already exists, which is the entire argument for keeping mediocre solutions around. And the bright cells arrive late and off-centre: an optimiser would have gone straight at one peak and reported one number, while the archive finds the peaks *and* keeps the whole landscape around them.
+
 ## The idea
 
 MAP-Elites doesn't optimise toward one best point. It keeps the fittest genome found **per behaviour niche**, so what you get back is a map of what your parameterised system can actually do and how — not a single winner and no memory of the search. On deceptive landscapes that also just finds better optima, because the stepping stones are kept instead of being selected away.
@@ -44,10 +48,20 @@ That is also why the one Box–Muller `gaussian` lives at the crate root rather 
 ## Examples
 
 ```sh
-cargo run -p map_elites --example sphere_archive
+cargo run -p map_elites --example sphere_archive          # ASCII archive in the terminal
+cargo run -p map_elites --example illuminate -- /tmp/il   # one PPM frame per generation
 ```
 
-A 4-gene toy problem with a single-peaked fitness and a 2-D behaviour space, printed as an ASCII archive. It then re-runs the whole search from the same seed and compares coverage, QD score and best fitness as raw `f32` bits — not within a tolerance — because reproducibility is the property the crate exists to keep.
+`sphere_archive` is a 4-gene toy problem with a single-peaked fitness and a 2-D behaviour space, printed as an ASCII archive. It then re-runs the whole search from the same seed and compares coverage, QD score and best fitness as raw `f32` bits — not within a tolerance — because reproducibility is the property the crate exists to keep.
+
+`illuminate` produces the animation above from a three-peaked landscape, writing one frame per generation. **It uses nothing but `std` to do it** — binary PPM, no image crate and certainly no renderer — because this crate is engine-free on purpose and `tests/engine_free.rs` fails the build if that stops being true. Encode the frames with whatever you like:
+
+```sh
+ffmpeg -framerate 30 -i /tmp/il/f%04d.ppm \
+  -vf "fps=15,scale=440:-1:flags=neighbor,split[a][b];[a]palettegen[p];[b][p]paletteuse" illuminate.gif
+```
+
+The per-generation callback that writes those frames is the same hook a real search uses to checkpoint, which is worth noticing: the loop hands you the archive every generation and has no opinion about what you do with it.
 
 ## License
 
