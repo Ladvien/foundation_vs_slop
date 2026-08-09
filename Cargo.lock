@@ -1475,6 +1475,7 @@ dependencies = [
 name = "bevy_light_grid"
 version = "0.1.0"
 dependencies = [
+ "bevy",
  "bevy_ecs",
  "bevy_math",
 ]
