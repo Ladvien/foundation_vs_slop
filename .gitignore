@@ -84,3 +84,7 @@ assets/emerge/*.map.ron
 
 # The VLM labeler's endpoint config — carries the API key, never committed.
 .env
+
+# Runtime session state from `bevy-debugger-mcp`, which writes relative to the working
+# directory — so running it from the repo root drops this here. Not source.
+debug_sessions/

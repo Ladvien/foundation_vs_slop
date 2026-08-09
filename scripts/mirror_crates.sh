@@ -43,6 +43,10 @@ CRATES=(
     emerge-anim
     emerge-bevy
     emerge-mapper
+    # Vendored in with `git subtree add` rather than extracted from the game, so the flow here is the
+    # same as every other crate but the direction of the FIRST move was inward. Its nested
+    # `crates/bevy_debugger_bevy` travels with it — one mirror, both halves.
+    bevy_debugger_mcp
 )
 
 cd "$(git rev-parse --show-toplevel)"

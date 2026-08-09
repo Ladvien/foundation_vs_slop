@@ -6,6 +6,13 @@ members = [
     "crates/fvs",
     "crates/bevy_orca", "crates/map_elites", "crates/bevy_devshot",
     "crates/bevy_stigmergy", "crates/bevy_light_grid", "crates/bevy_speech_bubbles",
+    # The agent debugger, vendored whole so it can be USED and EVOLVED here rather than pinned to a
+    # rev of someone else's history. Two members because the repo has two independent halves: the MCP
+    # server binary (a separate process, speaks MCP to an agent and BRP to the game) and the companion
+    # Bevy plugin the game actually links. Both are listed so `cargo test --workspace` covers them —
+    # a crate outside that walk is how `emerge-anim`'s 21 tests once sat outside the gate.
+    "crates/bevy_debugger_mcp",
+    "crates/bevy_debugger_mcp/crates/bevy_debugger_bevy",
 ]
 # Stated rather than inherited. The root package is edition 2024, so "3" is already what Cargo picks —
 # writing it down means a future edition bump cannot move the resolver as a side effect, and it says
@@ -97,11 +104,12 @@ bevy_speech_bubbles = { path = "crates/bevy_speech_bubbles" }
 # injection. **Optional, pulled in only by the `debugger` feature**, so it is absent from the resolved
 # dependency graph of every default, release and determinism build.
 #
-# A git dep pinned to a rev, NOT a vendored copy: a second copy is a second source of truth and the two
-# drift (see `emerge-bevy`'s header on `spawn_descriptor`). To hack on it, clone the repo as a sibling
-# and redirect this with a `[patch]` in the gitignored `.cargo/config.toml` — that recipe is in
-# `docs/bevy_debugger_mcp.md`, and it keeps CI and fresh clones on the reproducible pinned rev.
-bevy_debugger_bevy = { git = "https://github.com/Ladvien/bevy_debugger_mcp", rev = "f3c2347", optional = true }
+# A path dep into the vendored debugger, NOT a pinned git rev. The pin bought reproducibility at the
+# cost of being unable to fix the thing: a bug found while driving the game (`bevy_debugger/input`
+# reported success and moved nothing) could only be repaired by editing another repo, cutting a rev and
+# bumping. The debugger now lives at `crates/bevy_debugger_mcp/` under the same monorepo → mirror flow
+# as the other ten crates, so a fix is an ordinary edit here.
+bevy_debugger_bevy = { path = "crates/bevy_debugger_mcp/crates/bevy_debugger_bevy", optional = true }
 avian3d = "0.7.0"
 # `jpeg`: the SCP_Characters glTFs (e.g. VALKYRIE, the squad body) embed their PBR textures as JPEG to
 # keep the .glb small; Bevy's default image features cover PNG but NOT JPEG, so without this the whole
