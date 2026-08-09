@@ -111,21 +111,63 @@ so that is an ordinary edit.
 
 ## Step 2 — interface tokens: cell → 2-D face component
 
-**Goal.** `Interface::faces` carries **one token per face**, not one per boundary cell.
+**The goal as first written was "one token per face". The data says that is wrong, and the measurement
+is below.** What survives is the *dimension* reduction; what does not survive is collapsing a face to a
+single word.
 
 **Why it is safe to do early, and why I first said otherwise.** I argued this was a migration that a
 later corner formulation would redo. That is wrong on Merrell's model: *Continuous Model Synthesis* and
 `10.1109/tvcg.2010.112` keep edge **and** vertex assignments in one propagation, with vertex state
 *defined as a set of adjacent edge assignments*. A corner constraint is therefore **additive over the
-same tokens**, not a rewrite of them. Cell → face is the only migration of the data.
+same tokens**, not a rewrite of them. That part stands.
 
-**Scope.** `emerge_core::composition::{Interface, interface}`, `emerge_core::adjacency`,
-`compose.rs::summarise_face`. A face becomes one token derived from its cells, with the existing fault
-when they disagree — the fault machinery already exists and does not change.
+### What the shipped kits actually present (measured 2026-08-09, both libraries)
 
-**Acceptance.** `summarise_face` stops needing to summarise. `adjacency::faults` still catches a
-genuine disagreement between abutting pieces. Workspace green. **Expect no golden to move** — if one
-does, stop and re-measure rather than re-pinning.
+**192 faces carry a subgrid. Four of them present two tokens at once**, and they are the four that
+should: `site/wall_doorway`, `site/wall_doorway_wide`, `site/wall_window` and `site_greybox`'s
+`wall_doorway_wide` read `wall` at the jambs and **nothing through the opening**. Their middle columns
+are *absent from the file* rather than authored `edge: None`, which reads the same downstream —
+`Subgrid::at` returns `None` either way.
+
+So a face is not one token. Collapsing it would either fault every doorway or pick a winner, and
+`Interface`'s own doc forbids picking: *"Derived and reported, never resolved by picking one."*
+
+**Every one of the 192 is uniform in y.** The variation is entirely lateral. That is the dimension
+reduction the corpus argued for, landing one level further down than I wrote it: a face is not a 2-D
+cell grid, it is a **1-D lateral run**, and the vertical axis of the shipped kits carries no
+information at all.
+
+**But that uniformity is a property of the descriptors, not of the format.** `interface` samples `wy`
+across the envelope and skips a member whose `y` span does not contain it, so a group mixing
+`site/wall_low` with `site/wall` presents `wall` low and nothing high. Vertical variation is
+*producible the moment step 1's capture is used*, so it may not be designed out.
+
+### What is actually downstream
+
+| Reader | Effect of changing it |
+|---|---|
+| `compose.rs:453` → `summarise_face` | one display line — **the only non-test consumer of `Interface::faces`** |
+| `grammar.rs:722` → `adjacency::face` | the WFC prototype **signature**; collapsing it is what would move a golden |
+
+`adjacency::face` is therefore **out of scope after all** — the per-cell vector is exactly what
+distinguishes a doorway from a wall in the learned grammar. And the shipped `compositions.ron` holds
+one `Anchored` group, which has no interface, so nothing shipped exercises `Interface::faces` at all.
+
+### Open — this is a schema choice, so it is the author's
+
+The corpus doc already flagged it: *"whether a token lives on an edge or a corner is a schema decision
+and not an easy one to revisit."* The same is true here. Options, with no default assumed:
+
+- **Bands.** `Interface::faces` becomes maximal runs sharing a token, positioned as fractions of the
+  face rather than cell counts. Division-independent, so a 2.4 m wall reads the same at 5 divisions or
+  50; keeps the doorway as three bands; keeps vertical variation representable for step 1's groups.
+  `summarise_face` stops needing to summarise because the bands *are* the summary.
+- **Leave it.** The per-cell vector loses nothing, the noise it causes is one display line, and
+  `summarise_face` already handles it. Step 2 becomes a no-op and the effort moves to step 3.
+
+**Acceptance, once chosen.** `adjacency::faults` still catches a genuine disagreement between abutting
+pieces. Workspace green. **No golden may move** — if one does, stop and re-measure rather than
+re-pinning.
 
 ---
 
