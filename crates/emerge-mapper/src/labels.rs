@@ -205,17 +205,18 @@ pub(crate) fn suggest_labels(
     let Some(project) = project else { return };
     // The config check is the verb's gate: fail here, loudly, not after a photo shoot.
     if let Err(remedy) = VlmConfig::load(&project.root) {
-        state.status = remedy;
+        state.status.note(remedy);
         return;
     }
     let Some(target) = state.target() else {
-        state.status = "nothing focused — select a piece to label".to_owned();
+        state.status.note("nothing focused — select a piece to label".to_owned());
         return;
     };
     let Some(d) = state.placed_at_target(&target, &project) else {
         return;
     };
-    state.status = request_photos(target, &d.clone(), &tasks, &mut rig);
+    let asked = request_photos(target, &d.clone(), &tasks, &mut rig);
+    state.status.note(asked);
 }
 
 /// **Script driving, the devshot way**: `echo wall_light > labels.request` queues that library
@@ -239,29 +240,29 @@ pub(crate) fn watch_sentinel(
     let content = std::fs::read_to_string(REQUEST).unwrap_or_default().trim().to_owned();
     let _ = std::fs::remove_file(REQUEST);
     if content == "clear" {
-        state.status = clear_all_labels(
+        state.status.note(clear_all_labels(
             &mut suggestions,
             &mut generation,
             &mut queue,
             &mut tasks,
             &mut rig,
-        );
-        info!("labels sentinel: {}", state.status);
+        ));
+        info!("labels sentinel: {}", state.status.line());
         return;
     }
     let Some(project) = project else { return };
     if let Err(remedy) = VlmConfig::load(&project.root) {
-        state.status = remedy;
-        warn!("labels sentinel: {}", state.status);
+        state.status.note(remedy);
+        warn!("labels sentinel: {}", state.status.line());
         return;
     }
     let Some(d) = project.library.get(&content).cloned() else {
-        state.status = format!("labels sentinel: no library entry named `{content}`");
-        warn!("{}", state.status);
+        state.status.problem(format!("labels sentinel: no library entry named `{content}`"));
+        warn!("{}", state.status.line());
         return;
     };
-    state.status = request_photos(EditTarget::Library(content), &d, &tasks, &mut rig);
-    info!("labels sentinel: {}", state.status);
+    state.status.note(request_photos(EditTarget::Library(content), &d, &tasks, &mut rig));
+    info!("labels sentinel: {}", state.status.line());
 }
 
 /// A booth job finished: build the prompt from the CURRENT descriptor and send the whole exchange
@@ -329,8 +330,7 @@ pub(crate) fn poll_tasks(
                     .placed_at_target(&inflight.target, &project)
                     .is_some_and(|d| d.mesh.as_deref() == Some(inflight.mesh.as_str()));
                 if !still {
-                    state.status =
-                        format!("labels for `{name}` arrived after it changed — dropped");
+                    state.status.problem(format!("labels for `{name}` arrived after it changed — dropped"));
                     continue;
                 }
                 let entry = Entry {
@@ -344,12 +344,12 @@ pub(crate) fn poll_tasks(
                 record_proposals(&project.root, &entry, &name);
                 suggestions.insert(&inflight.target, entry);
                 generation.0 = generation.0.wrapping_add(1);
-                state.status = format!("labels proposed for `{name}` — U applies, Y discards");
+                state.status.note(format!("labels proposed for `{name}` — U applies, Y discards"));
             }
             // The gate's rejection text (axis + legal tokens) or the transport's complaint,
             // verbatim — the author decides what to do with it.
             Err(e) => {
-                state.status = format!("labeling `{name}` failed: {e}");
+                state.status.problem(format!("labeling `{name}` failed: {e}"));
             }
         }
     }
@@ -580,14 +580,14 @@ pub(crate) fn suggest_all(
         queue.queue.clear();
         queue.total = 0;
         let dropped = rig.clear_queue();
-        state.status = format!(
+        state.status.problem(format!(
             "batch cancelled at {done}/{total} ({dropped} unphotographed); pending proposals keep"
-        );
+        ));
         return;
     }
     let Some(project) = project else { return };
     if let Err(remedy) = VlmConfig::load(&project.root) {
-        state.status = remedy;
+        state.status.note(remedy);
         return;
     }
     let mut targets: Vec<EditTarget> = Vec::new();
@@ -603,12 +603,12 @@ pub(crate) fn suggest_all(
     }
     targets.retain(|t| suggestions.get(t).is_none() && !tasks.holds(t));
     if targets.is_empty() {
-        state.status = "nothing is missing labels — L re-asks for a single piece".to_owned();
+        state.status.note("nothing is missing labels — L re-asks for a single piece".to_owned());
         return;
     }
     queue.total = targets.len();
     queue.queue = targets.into_iter().collect();
-    state.status = format!("labeling {} piece(s)... Shift+L cancels", queue.total);
+    state.status.note(format!("labeling {} piece(s)... Shift+L cancels", queue.total));
 }
 
 /// Feed the booth one subject at a time — fully serial, matching the one-subject booth and the
@@ -634,7 +634,7 @@ pub(crate) fn drive_batch(
     let Some(mesh) = d.mesh.clone() else { return };
     let scale = d.align.scale.unwrap_or(1.0);
     let (done, total) = queue.progress();
-    state.status = format!("labeling {done}/{total} - `{}`", name_of(&target));
+    state.status.note(format!("labeling {done}/{total} - `{}`", name_of(&target)));
     rig.push_unique(crate::label_booth::ShotJob { target, mesh, scale });
 }
 

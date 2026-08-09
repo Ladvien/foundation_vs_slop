@@ -75,6 +75,17 @@ pub struct Project {
     pub map_path: PathBuf,
     /// Whether there are edits not yet on disk.
     pub dirty: bool,
+    /// **Descriptor ids whose resolved form changed since the Map last redrew**, and which therefore
+    /// have placements standing on screen built from an older shape.
+    ///
+    /// Written at the one commit door (`tiles::commit_measured`) by **comparing** the rebuilt library
+    /// against the one it replaces — never declared by a call site. Fifteen edit paths reach that
+    /// door and a list each of them had to remember to append to is a list that goes stale on the
+    /// sixteenth; a diff cannot miss one.
+    ///
+    /// Drained by `editor::redraw_edited`. Empty is the normal state, and checking it is one
+    /// `is_empty` per frame.
+    pub touched: Vec<String>,
     /// Triangles per library entry, in library order.
     ///
     /// Measured at open from each GLB's JSON chunk — accessor counts only, no vertex data — rather
@@ -212,6 +223,7 @@ impl Project {
             map,
             map_path,
             dirty: false,
+            touched: Vec::new(),
             triangles,
         })
     }

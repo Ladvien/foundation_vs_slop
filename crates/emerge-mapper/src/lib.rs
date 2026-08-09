@@ -48,6 +48,8 @@ pub mod anim_tab;
 pub mod anim_watch;
 pub mod harness;
 pub mod chrome;
+#[cfg(feature = "debugger")]
+pub mod debug_capture;
 pub mod compose;
 pub mod devshot;
 pub mod editor;
@@ -56,6 +58,7 @@ pub mod filter;
 pub mod keys;
 pub mod label_booth;
 pub mod labels;
+pub mod notice;
 pub mod tiles;
 pub mod project;
 pub mod thumbs;

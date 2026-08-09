@@ -54,9 +54,43 @@ pub fn add_editor_plugins(app: &mut App) -> &mut App {
         crate::anim_tab::AnimTabPlugin,
         crate::label_booth::LabelBoothPlugin,
         crate::labels::LabelsPlugin,
+        crate::notice::NoticePlugin,
         // Two plugins, two jobs: the capture rig is the shared crate, the verbs are ours.
         bevy_devshot::DevShotPlugin,
         crate::devshot::DrivePlugin,
+    ))
+}
+
+/// **The agent's way in, when the feature is on.**
+///
+/// Separate from [`add_editor_plugins`] rather than a `#[cfg]` inside it, because that list is *the*
+/// plugin graph and both entry points share it — this is a graph the harness must be able to build
+/// without, and a conditional inside the shared list would make "the same plugin graph" a claim with
+/// an asterisk on it.
+///
+/// **`DebuggerPlugin` owns `RemotePlugin`.** Its `build` adds `RemotePlugin::default()
+/// .with_method_main(..)` to register the two custom methods, and Bevy rejects a duplicate plugin by
+/// name — so adding `RemotePlugin` here as well panics the moment the feature is switched on. Only
+/// the HTTP transport is ours to add. `docs/bevy_debugger_mcp.md` records this; the game paid for it
+/// first.
+///
+/// The port comes from **`BEVY_BRP_PORT`**, which is the variable `bevy_debugger_mcp`'s own config
+/// already reads — so one knob points both ends at the same socket, and running the editor and the
+/// game with the debugger on at once is a matter of setting it rather than of learning a second
+/// vocabulary.
+#[cfg(feature = "debugger")]
+pub fn add_debugger_plugins(app: &mut App) -> &mut App {
+    let port = std::env::var("BEVY_BRP_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(bevy::remote::http::DEFAULT_PORT);
+    app.add_plugins((
+        bevy_debugger_bevy::DebuggerPlugin,
+        bevy::remote::http::RemoteHttpPlugin::default().with_port(port),
+        // Owns the offscreen camera and image the screenshot method captures. Without it that
+        // method reports a missing target rather than falling back to window capture — which would
+        // need the window raised, and is the whole thing this avoids.
+        crate::debug_capture::DebugCapturePlugin,
     ))
 }
 

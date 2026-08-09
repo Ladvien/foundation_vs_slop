@@ -46,7 +46,11 @@ pub struct ComposeState {
     /// the same argument [`emerge_core::composition::Override`] makes about naming a member. The id
     /// costs one lookup at stamp time and cannot go stale.
     pub armed: Option<String>,
-    pub status: String,
+    /// What this tab has to say — see [`crate::chrome::Status`] for why a refusal and a receipt are
+    /// two slots rather than one string. This panel used to paint every message [`ACCENT`], so
+    /// `cannot record` and `recorded 3 member(s)` were the same colour and the first was gone as soon
+    /// as anything else happened.
+    pub status: crate::chrome::Status,
 }
 
 /// One line of the panel. Rebuilt wholesale when anything it reads changes.
@@ -98,6 +102,9 @@ fn spawn_compose_panel(mut commands: Commands) {
     .insert(ComposeRoot)
     .with_children(|p| {
         crate::chrome::title(p, "COMPOSE");
+        // Directly under the title, above everything a working author reads — a problem that has to
+        // be scrolled to is a problem that gets missed.
+        crate::chrome::problem_banner(p, Mode::Compose);
         crate::chrome::shortcut_hint(p);
         crate::chrome::key_census(p, &[keys::Context::Global, keys::Context::Compose]);
         crate::chrome::section(p, "GROUPS");
@@ -111,7 +118,12 @@ fn spawn_compose_panel(mut commands: Commands) {
                 ..default()
             },
             ComposeBody,
+            crate::notice::CopyPane(Mode::Compose),
         ));
+        // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
+        // the panel, and an auto margin in a column absorbs the free space above it — so
+        // placed any earlier it pushes every sibling after it down with it.
+        crate::chrome::problem_log(p, Mode::Compose);
     });
 }
 
@@ -153,15 +165,15 @@ fn arm(mut state: ResMut<ComposeState>, project: Res<Project>, keys: Res<keys::L
 /// avoid.
 pub fn toggle_arm(state: &mut ComposeState, project: &Project) {
     let Some(c) = project.compositions.compositions.get(state.selected) else {
-        state.status = "no group to arm".to_owned();
+        state.status.note("no group to arm");
         return;
     };
     if state.armed.as_deref() == Some(c.id.as_str()) {
         state.armed = None;
-        state.status = format!("`{}` disarmed", c.id);
+        state.status.note(format!("`{}` disarmed", c.id));
     } else {
         state.armed = Some(c.id.clone());
-        state.status = format!("`{}` armed — the map tab stamps it", c.id);
+        state.status.note(format!("`{}` armed — the map tab stamps it", c.id));
     }
 }
 
@@ -193,19 +205,19 @@ pub fn record_selected(state: &mut ComposeState, project: &mut Project) {
     let snapshot = project.compositions.compositions.clone();
     let library = project.library.clone();
     let Some(target) = project.compositions.compositions.get_mut(at) else {
-        state.status = "no group to record".to_owned();
+        state.status.note("no group to record");
         return;
     };
     let id = target.id.clone();
     let changed = match composition::record_fingerprints(target, &snapshot, &library) {
         Ok(n) => n,
         Err(e) => {
-            state.status = format!("cannot record `{id}`: {e}");
+            state.status.problem(format!("cannot record `{id}`: {e}"));
             return;
         }
     };
     if changed == 0 {
-        state.status = format!("`{id}` was already up to date — nothing written");
+        state.status.note(format!("`{id}` was already up to date — nothing written"));
         return;
     }
     let path = project
@@ -214,15 +226,17 @@ pub fn record_selected(state: &mut ComposeState, project: &mut Project) {
     let text = match project.compositions.to_ron() {
         Ok(t) => t,
         Err(e) => {
-            state.status = format!("NOT WRITTEN: {e}");
+            state.status.problem(format!("NOT WRITTEN: {e}"));
             return;
         }
     };
-    match emerge_core::ron_surgery::save_atomic(&path, &text) {
-        Ok(()) => state.status = format!("recorded {changed} member(s) of `{id}`"),
-        // Replaces the message rather than appending — a refusal must not read like a receipt.
-        Err(e) => state.status = format!("NOT WRITTEN: {e}"),
-    }
+    // A refusal must not read like a receipt — which is now structural rather than a matter of
+    // spelling, because the two go to different slots and only one of them is a red block.
+    state.status.say(
+        emerge_core::ron_surgery::save_atomic(&path, &text)
+            .map(|()| format!("recorded {changed} member(s) of `{id}`"))
+            .map_err(|e| format!("NOT WRITTEN: {e}")),
+    );
 }
 
 /// **Everything the panel says, derived on the spot.**
@@ -287,9 +301,10 @@ fn rebuild(
         detail(&mut rows, c, comps, &project);
     }
 
-    if !state.status.is_empty() {
+    // The receipt only. The refusal is the block under the title — see `chrome::Status`.
+    if !state.status.note_text().is_empty() {
         rows.push((String::new(), TEXT));
-        rows.push((state.status.clone(), ACCENT));
+        rows.push((state.status.note_text().to_owned(), ACCENT));
     }
 
     commands.entity(root).with_children(|p| {

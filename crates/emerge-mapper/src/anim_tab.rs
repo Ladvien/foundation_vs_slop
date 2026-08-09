@@ -58,7 +58,10 @@ pub struct BenchState {
     /// Whether the read has happened. Separate from `rigs.is_none()`, which is also true of a read
     /// that failed — and those two want different words on screen.
     pub loaded: bool,
-    pub status: String,
+    /// See [`crate::chrome::Status`]. This tab used to colour its one line by whether `rigs.ron` had
+    /// loaded — a fact about a file, not about the sentence being shown — so `NOT WRITTEN:` rendered
+    /// in the same grey as `adopted` on every session where the manifest had parsed.
+    pub status: crate::chrome::Status,
     /// One rig, or the whole project.
     pub view: View,
 }
@@ -261,6 +264,7 @@ fn spawn_panels(mut commands: Commands) {
     .insert(AnimRoot)
     .with_children(|p| {
         crate::chrome::title(p, "ANIMATION");
+        crate::chrome::problem_banner(p, crate::tiles::Mode::Anim);
         crate::chrome::shortcut_hint(p);
         p.spawn((
             Text::new(""),
@@ -286,7 +290,14 @@ fn spawn_panels(mut commands: Commands) {
             },
             bevy::ui_widgets::ScrollArea::default(),
             SlotPane,
+            // The declared-beside-measured table — the block an author asking about a gait is
+            // looking at, and the one worth handing to somebody else verbatim.
+            crate::notice::CopyPane(crate::tiles::Mode::Anim),
         ));
+        // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
+        // the panel, and an auto margin in a column absorbs the free space above it — so
+        // placed any earlier it pushes every sibling after it down with it.
+        crate::chrome::problem_log(p, crate::tiles::Mode::Anim);
     });
 
     crate::chrome::panel_root(
@@ -328,7 +339,7 @@ fn load_on_entry(
     match std::fs::read_to_string(&path) {
         Ok(text) => match Rigs::parse(&text) {
             Ok(rigs) => {
-                bench.status = format!("{} rig(s) in {}", rigs.rigs.len(), path.display());
+                bench.status.note(format!("{} rig(s) in {}", rigs.rigs.len(), path.display()));
                 // **Check-all runs on open — for whatever is not already measured.** The audit
                 // should not wait to be asked for: unmeasured rigs enter the queue now (one
                 // measures per frame), so the stale badge and the C summary are warm from the
@@ -344,9 +355,11 @@ fn load_on_entry(
                 bench.rigs = Some(rigs);
                 bench.text = Some(text);
             }
-            Err(e) => bench.status = format!("{}: {e}", path.display()),
+            // The manifest is on disk and unreadable — the tab has nothing to show and the author
+            // has a file to fix. Exactly what the block is for.
+            Err(e) => bench.status.problem(format!("{}: {e}", path.display())),
         },
-        Err(e) => bench.status = format!("cannot read {}: {e}", path.display()),
+        Err(e) => bench.status.problem(format!("cannot read {}: {e}", path.display())),
     }
 }
 
@@ -523,17 +536,18 @@ fn adopt_measured(
         return;
     }
     // A failed write REPLACES the message — an author told "adopted" by a program that could not
-    // write the file has been told something untrue (the `tiles::persist` rule).
-    bench.status = match adopt(&project.root, &mut bench, &exclude) {
+    // write the file has been told something untrue (the `tiles::persist` rule). It now goes to a
+    // different slot as well, so it survives whatever the author does next.
+    match adopt(&project.root, &mut bench, &exclude) {
         Ok(said) => {
             crate::anim_watch::invalidate(&mut reports, &mut generation);
             // The excludes were about the text that just changed; a stale set silently shaping
             // the NEXT adopt would be the two-paths bug in miniature.
             exclude.clear();
-            said
+            bench.status.note(said);
         }
-        Err(e) => format!("NOT WRITTEN: {e}"),
-    };
+        Err(e) => bench.status.problem(format!("NOT WRITTEN: {e}")),
+    }
 }
 
 /// Cmd+Z / Shift+Cmd+Z, in the Anim context. One body for both directions, restored **through**
@@ -555,7 +569,7 @@ fn bench_history_keys(
     }
     let popped = if undo { bench.undo.pop() } else { bench.redo.pop() };
     let Some(target) = popped else {
-        bench.status = format!("nothing to {} on this tab", if undo { "undo" } else { "redo" });
+        bench.status.note(format!("nothing to {} on this tab", if undo { "undo" } else { "redo" }));
         return;
     };
     let now = bench.text.clone();
@@ -571,11 +585,11 @@ fn bench_history_keys(
                     bench.undo.push(now);
                 }
             }
-            bench.status = if undo {
-                "undid the last bench write".to_owned()
+            bench.status.note(if undo {
+                "undid the last bench write"
             } else {
-                "put the bench write back".to_owned()
-            };
+                "put the bench write back"
+            });
         }
         Err(e) => {
             if undo {
@@ -583,7 +597,7 @@ fn bench_history_keys(
             } else {
                 bench.redo.push(target);
             }
-            bench.status = format!("NOT WRITTEN: {e}");
+            bench.status.problem(format!("NOT WRITTEN: {e}"));
         }
     }
 }
@@ -699,11 +713,11 @@ fn check_all_keys(
         queue.push_back_unique(name);
     }
     bench.view = View::All;
-    bench.status = if missing.is_empty() {
+    bench.status.note(if missing.is_empty() {
         "all rigs measured".to_owned()
     } else {
         format!("measuring {} rig(s)...", missing.len())
-    };
+    });
 }
 
 fn rebuild_list(
@@ -904,6 +918,14 @@ fn rebuild_slots(
                 TextColor(ACCENT),
                 TextFont::from_font_size(11.0),
             ));
+            // **The staged figure's controls, directly under the rig they belong to.**
+            //
+            // These were the pane's last block — below the slot table, the plot legend, three
+            // charts, the hover readout and the top-down trace. They are the one part of this pane
+            // an author *drives* rather than reads: which clip is soloed, what is in the mix, where
+            // the scrub sits. Everything they were buried under is a report about the choice they
+            // make here, so the choice goes first and the evidence follows it.
+            crate::anim_stage::spawn_chips(p, rig);
             // **The provenance line** — is the recorded measurement about the file on disk? A
             // standing fact about the rig, so it sits with the mesh path rather than among the
             // findings, and STALE is the one word here allowed to shout.
@@ -1235,28 +1257,30 @@ fn rebuild_slots(
                 ));
             }
 
-            // The staged figure's controls — weight chips and the scrub line.
-            crate::anim_stage::spawn_chips(p, rig);
         });
     }
 }
 
-fn refresh_line(bench: Res<BenchState>, mut lines: Query<(&mut Text, &mut TextColor), With<BenchLine>>) {
+/// The running commentary, and the block above it.
+///
+/// **The colour rule is gone rather than fixed.** It read `bench.rigs.is_none() && bench.loaded` —
+/// a fact about whether a *file* had parsed, standing in for whether the *sentence* was bad news. So
+/// `NOT WRITTEN:` from a failed adopt drew in the same grey as `adopted` whenever `rigs.ron` had
+/// loaded, which is every session in which anyone gets far enough to adopt anything. The write site
+/// says which it is now (`crate::chrome::Status`), and this line is only ever the receipt.
+fn refresh_line(
+    bench: Res<BenchState>,
+    mut lines: Query<(&mut Text, &mut TextColor), With<BenchLine>>,
+) {
     if !bench.is_changed() {
         return;
     }
     for (mut text, mut colour) in &mut lines {
-        if text.0 != bench.status {
-            text.0 = bench.status.clone();
+        if text.0 != bench.status.note_text() {
+            text.0 = bench.status.note_text().to_owned();
         }
-        // A message naming a file that could not be read is a refusal, not a status.
-        let want = if bench.rigs.is_none() && bench.loaded {
-            DANGER
-        } else {
-            DIM
-        };
-        if colour.0 != want {
-            colour.0 = want;
+        if colour.0 != DIM {
+            colour.0 = DIM;
         }
     }
 }

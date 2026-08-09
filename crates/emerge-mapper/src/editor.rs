@@ -29,8 +29,14 @@ use crate::keys::{self, Action};
 use crate::project::Project;
 use crate::view::{cursor_ground, MainCamera};
 
-/// Translation snap, metres. Half a metre is the unit the kits are authored on.
-const SNAP: f32 = 0.5;
+/// **The authoring grid, from the one place that defines it.**
+///
+/// This was `const SNAP: f32 = 0.5` — a second copy of `emerge_core::grid::SNAP`, in the one file
+/// that snaps, while `lift_step` two thousand lines below already used the real one. `grid`'s own
+/// module note says why that is not allowed: *"Nothing here is clever. It is here so there is
+/// exactly one of it."* It had already drifted from a third statement of the same fact — the drawn
+/// grid, which `view.rs` set to 1.0 m under a comment insisting it was the snap.
+use emerge_core::grid::SNAP;
 /// Yaw snap, degrees.
 const YAW_STEP: f32 = 15.0;
 
@@ -39,6 +45,49 @@ const YAW_STEP: f32 = 15.0;
 const UNSORTED: &str = "unsorted";
 /// The map's edge. Dim enough not to compete with the grid, bright enough to find.
 const BOUNDS_LINE: Color = Color::srgb(0.42, 0.38, 0.30);
+
+/// **The editable area's own ground.** Lighter than the void it sits in — `ClearColor` here is
+/// `srgb(0.035, 0.033, 0.030)`, so this reads as a slab laid on nothing rather than as a tint.
+///
+/// A wireframe box said where the bounds were and an author still had to trace it with their eye to
+/// tell inside from outside; `Map::bounds` is the thing every refusal in `fill` and `flood` is about,
+/// and it was the one piece of state the world did not show.
+const BOUNDS_FILL: Color = Color::srgb(0.105, 0.100, 0.092);
+
+/// **The map's grid lines.**
+///
+/// Derived, not chosen: `bevy_dev_tools`' grid drew `srgb(0.2, 0.2, 0.2)` against the `ClearColor`
+/// of `srgb(0.035, ...)`, a separation of about 0.165. [`BOUNDS_FILL`] raised the ground it is read
+/// against to 0.105, so holding that separation puts the lines here. Warm-neutral rather than pure
+/// grey, because every other colour in this editor is.
+const GRID_LINE: Color = Color::srgb(0.270, 0.262, 0.248);
+
+/// The **least** the slab drops below the datum, metres — enough to beat z-fighting against a piece
+/// lying at `y_offset: 0.0`. See [`ground_drop`], which is usually deeper.
+const BOUNDS_FILL_CLEARANCE: f32 = 0.005;
+
+/// **How far under the datum the backdrop sits** — deeper than anything the library can sink.
+///
+/// This was a flat 5 mm, on the assumption that a floor piece rests *on* the datum. It does not:
+/// `stack::datum` adds `align.y_offset` on top of whatever the mount decided, and says why in as
+/// many words — *"a floor grate is 6 cm into its floor"*. The site kit's `site/floor` is authored at
+/// `y_offset: -0.06`, so it sat **below** a 5 mm slab and the backdrop drew over it. Every floor
+/// tile in the map vanished under grey and got sliced by grid lines, while `site/floor_button` at
+/// `+0.002` was untouched — which is exactly how it was reported.
+///
+/// Measured from the library rather than picked, so a kit that sinks something deeper still works
+/// and no constant has to be revisited. The grid lines take the same depth: real geometry should
+/// occlude them, and there is nothing to draw a cell for where a floor already fills it.
+pub fn ground_drop(project: &Project) -> f32 {
+    let deepest = project
+        .library
+        .descriptors
+        .iter()
+        .filter_map(|d| d.align.y_offset)
+        .fold(0.0f32, f32::min);
+    // `deepest` is zero or negative; the slab goes under it by the clearance.
+    -deepest + BOUNDS_FILL_CLEARANCE
+}
 
 /// The removal marker. Red because it is the one destructive tool here, and translucent because the
 /// thing it covers is the thing being asked about — an opaque marker would hide the answer.
@@ -78,7 +127,10 @@ pub struct EditorState {
     /// `BRUSH  none` on the status block.
     pub brush: Option<usize>,
     pub brush_yaw: f32,
-    pub status: String,
+    /// See [`crate::chrome::Status`]. The colour used to be decided here by
+    /// `status.starts_with("NOT SAVED")`, so that one message was red and `stamp refused:`,
+    /// `is not a number of metres` and every `cannot draw it:` were the same grey as a receipt.
+    pub status: crate::chrome::Status,
     /// The ghost's running commentary. Written every frame; never mixed with [`Self::status`].
     pub hint: String,
     /// Monotonic counter behind generated placement ids, so two crates never share a name.
@@ -358,7 +410,7 @@ impl Default for EditorState {
             // nothing selected makes the first click do nothing and reads as broken.
             brush: Some(0),
             brush_yaw: 0.0,
-            status: String::new(),
+            status: crate::chrome::Status::default(),
             hint: String::new(),
             next_id: 0,
             seed: 1,
@@ -487,6 +539,13 @@ enum Field {
     /// could be read. Two different questions — "what did I just do" and "why can't I place this" —
     /// so two lines.
     Hint,
+    /// **What the piece-verbs would act on**, and the chord that opens it for editing.
+    ///
+    /// The readout the panel was missing. `BRUSH` says what a click would *place*; nothing said what
+    /// `H`, `R`/`T`, `Y`/`U`, `[`/`]`, `O` and `Cmd+2` would act *on* — all six read "the placement
+    /// under the cursor", which the author could only learn by trying one. `Cmd+2` was reported as
+    /// missing by someone looking straight at the map for it, which is what this row answers.
+    Under,
     /// **Where the map disagrees with the tokens the tiles declare.**
     ///
     /// See `emerge_core::adjacency`. A standing readout rather than a message, because a fault is a
@@ -503,6 +562,7 @@ impl Field {
             Field::Brush => "BRUSH",
             Field::Yaw => "YAW",
             Field::Map => "MAP",
+            Field::Under => "UNDER",
             Field::Last => "",
             Field::Hint => "",
         }
@@ -520,6 +580,12 @@ impl Plugin for EditorPlugin {
             .init_resource::<MoveDrag>()
             .init_resource::<CloneDrag>()
             .init_resource::<TargetLock>()
+            // Read by `refresh_status`, so this plugin owns it — a missing `Res<T>` panics its
+            // system in Bevy 0.19 rather than skipping it (`CLAUDE.md`).
+            .init_resource::<UnderCursor>()
+            // Read by `draw_map_grid` as a bare `Res<_>`, which panics its system in 0.19 if
+            // nobody registered it.
+            .init_resource::<GridSpacing>()
             .init_resource::<FineAnchor>()
             .init_resource::<PlaceDrag>()
             // **This plugin reads it, so this plugin registers it** (CLAUDE.md's rule, and the
@@ -556,6 +622,7 @@ impl Plugin for EditorPlugin {
                     spawn_palette_panel,
                     spawn_cost_readout,
                     spawn_removal_tile,
+                    spawn_bounds_floor,
                     spawn_clone_tile,
                     spawn_target_tile,
                     spawn_existing,
@@ -582,7 +649,11 @@ impl Plugin for EditorPlugin {
                     drive_removal.run_if(not_typing).run_if(in_map_mode),
                     drive_move.run_if(not_typing).run_if(in_map_mode),
                     drive_clone.run_if(not_typing).run_if(in_map_mode),
-                    drive_target_marker.run_if(in_map_mode),
+                    // Nested for the same reason the pair below is: the tuple is at 20.
+                    // `sense_under_cursor` is gated on the mode for `drive_target_marker`'s reason —
+                    // it reads the MOUSE, which the census does not model, so context is not its
+                    // guard. Both touch `TargetLock`, so they are named together.
+                    (drive_target_marker, sense_under_cursor).run_if(in_map_mode),
                     hide_carried.run_if(in_map_mode),
                     drive_ghost.run_if(in_map_mode),
                     // **Not gated on the mode.** The stamped rows are part of the map, so they stay
@@ -591,7 +662,11 @@ impl Plugin for EditorPlugin {
                     // having failed.
                     // Nested: Bevy 0.19 caps an `add_systems` tuple at 20 and this one is full.
                     (redraw_stamps, fade_ghost),
-                    style_rows,
+                    // Nested: the tuple is at Bevy 0.19's cap of 20. `redraw_edited` is the Map
+                    // side of a Tiles-tab write, so it rides with the other per-frame repaints.
+                    // Nested: the tuple is at Bevy 0.19's cap of 20. `cycle_grid` is a census
+                    // action, so it goes in `Act` with the rest of them.
+                    (style_rows, redraw_edited, cycle_grid.in_set(keys::Phase::Act)),
                     refresh_status,
                     rebuild_palette.run_if(
                         // `or_else`, not the deprecated `or`: 0.19 spells the lazy form this way,
@@ -609,7 +684,14 @@ impl Plugin for EditorPlugin {
                     ),
                     refresh_size,
                     refresh_triangle_total,
-                    draw_bounds,
+                    // Nested: the tuple is at 20. The wireframe edge and the slab inside it are
+                    // one idea, and the slab only moves when the map's size does.
+                    (
+                        draw_bounds,
+                        draw_map_grid,
+                        fit_bounds_floor
+                            .run_if(resource_changed::<Project>.or_else(run_once)),
+                    ),
                     check_edges.run_if(resource_changed::<Project>.or_else(run_once)),
                     draw_edge_faults.run_if(in_map_mode),
                 ),
@@ -667,6 +749,7 @@ fn spawn_panel(mut commands: Commands) {
 
     commands.entity(root).with_children(|p| {
         crate::chrome::title(p, "EMERGE MAPPER");
+        crate::chrome::problem_banner(p, crate::tiles::Mode::Map);
         crate::chrome::shortcut_hint(p);
 
         // The readout, in the same two columns as the keys so the whole panel shares one left edge.
@@ -678,6 +761,7 @@ fn spawn_panel(mut commands: Commands) {
                 ..default()
             },
             StatusBlock,
+            crate::notice::CopyPane(crate::tiles::Mode::Map),
         ))
         .with_children(|s| {
             for field in [
@@ -685,6 +769,7 @@ fn spawn_panel(mut commands: Commands) {
                 Field::Brush,
                 Field::Yaw,
                 Field::Map,
+                Field::Under,
                 Field::Last,
                 Field::Hint,
                 Field::Edges,
@@ -776,6 +861,10 @@ fn spawn_panel(mut commands: Commands) {
             }
         });
 
+        // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
+        // the panel, and an auto margin in a column absorbs the free space above it — so
+        // placed any earlier it pushes every sibling after it down with it.
+        crate::chrome::problem_log(p, crate::tiles::Mode::Map);
     });
 }
 
@@ -1038,11 +1127,11 @@ fn on_row_click(
     // it.
     filters.blur();
     if let Some(d) = project.library.descriptors.get(row.0) {
-        state.status = if was == Tool::Place {
+        state.status.note(if was == Tool::Place {
             format!("{} armed", d.id)
         } else {
             format!("{} armed — {} off", d.id, was.label())
-        };
+        });
     }
 }
 
@@ -1063,10 +1152,10 @@ fn on_size_field_click(
     // same trap and the same answer: a field with no selection model starts blank, and the value it
     // is replacing is still on screen until Enter.
     edit.active = Some((field.0, String::new()));
-    state.status = format!(
+    state.status.note(format!(
         "{} size: type a whole number of metres, Enter to keep it, Esc to leave it alone",
         field.0.label()
-    );
+    ));
 }
 
 /// Digits, and nothing else.
@@ -1093,7 +1182,7 @@ fn size_edit_keys(
                     return;
                 };
                 if raw.is_empty() {
-                    state.status = "nothing typed; the size is unchanged".to_owned();
+                    state.status.note("nothing typed; the size is unchanged".to_owned());
                     return;
                 }
                 // **Metres, not whole metres.** The old +/- nudges stepped Y by 0.5 m; the field that
@@ -1101,12 +1190,12 @@ fn size_edit_keys(
                 // never typed back — the author's only way to change it snapped it to 3 or 4. Bounds
                 // are `f32` in the schema and always were.
                 let Ok(want) = raw.parse::<f32>() else {
-                    state.status = format!("`{raw}` is not a number of metres");
+                    state.status.problem(format!("`{raw}` is not a number of metres"));
                     return;
                 };
                 if !want.is_finite() || !(MIN_BOUND as f32..=MAX_BOUND as f32).contains(&want) {
-                    state.status =
-                        format!("a map axis runs {MIN_BOUND}..{MAX_BOUND} m; `{raw}` is outside it");
+                    state.status.problem(
+                        format!("a map axis runs {MIN_BOUND}..{MAX_BOUND} m; `{raw}` is outside it"));
                     return;
                 }
                 let mut bounds = project.map.bounds;
@@ -1115,16 +1204,16 @@ fn size_edit_keys(
                     project.map.bounds = bounds;
                     project.dirty = true;
                 }
-                state.status = format!(
+                state.status.note(format!(
                     "map is {} x {} x {} m",
                     trim_metres(bounds.0),
                     trim_metres(bounds.1),
                     trim_metres(bounds.2)
-                );
+                ));
             }
             Key::Escape => {
                 edit.active = None;
-                state.status = "size unchanged".to_owned();
+                state.status.note("size unchanged".to_owned());
             }
             Key::Backspace => {
                 if let Some((_, raw)) = edit.active.as_mut() {
@@ -1258,6 +1347,139 @@ fn draw_edge_faults(
 /// the map and the tokens contradicting each other and that is a thing to fix, not a warning.
 const FAULT_LINE: Color = DANGER;
 
+/// **How far apart the drawn grid's lines are, in metres.**
+///
+/// A view setting the author owns, because the one right answer does not exist. `grid::SNAP` is
+/// 0.5 — where a piece can *land* — while the site kit builds on a 1 m module, so `site/floor` and
+/// `ozea/floor_grate` are 1 m pieces. A grid fixed to the snap draws two squares per tile; a grid
+/// fixed to the module hides where the half-steps are. Which of those an author wants depends on
+/// what they are doing, so `J` steps it.
+///
+/// **Defaults to the module, not the snap.** A square that means "one tile of this kit" is what an
+/// author counts in; the half-steps are still reachable and now land on a line rather than halving
+/// every square.
+///
+/// Not persisted: it is about this session's view, not about the map or the kit, and neither file
+/// is a place to keep it.
+#[derive(Resource)]
+pub struct GridSpacing(pub f32);
+
+impl Default for GridSpacing {
+    fn default() -> Self {
+        GridSpacing(1.0)
+    }
+}
+
+/// What `J` steps through. Coarsest last, and nothing finer than the snap — a line where no piece
+/// can land is a line that means nothing.
+const GRID_STEPS: [f32; 4] = [0.5, 1.0, 2.0, 4.0];
+
+/// `J`: the next spacing, wrapping. Says which, because a grid an author cannot name is one they
+/// cannot ask for again.
+fn cycle_grid(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<keys::Live>,
+    mut spacing: ResMut<GridSpacing>,
+    mut state: ResMut<EditorState>,
+) {
+    if !keys::just_pressed(&keyboard, live.0, Action::CycleGrid) {
+        return;
+    }
+    let at = GRID_STEPS
+        .iter()
+        .position(|s| (s - spacing.0).abs() < 1e-4)
+        .unwrap_or(0);
+    spacing.0 = GRID_STEPS[(at + 1) % GRID_STEPS.len()];
+    state
+        .status
+        .note(format!("grid {:.2} m — the snap is still {SNAP:.2} m", spacing.0));
+}
+
+/// The slab that shows how far the map goes. See [`BOUNDS_FILL`].
+#[derive(Component)]
+struct BoundsFloor;
+
+/// Spawned once, at whatever size; [`fit_bounds_floor`] gives it the map's.
+fn spawn_bounds_floor(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.spawn((
+        BoundsFloor,
+        // A unit rectangle, scaled to the bounds below. `Rectangle` is authored in the XY plane and
+        // laid flat by a quarter turn about X — `spawn_removal_tile`'s shape, for the same reason.
+        Mesh3d(meshes.add(Rectangle::new(1.0, 1.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: BOUNDS_FILL,
+            // **Unlit, and opaque.** Unlit because a reference surface that got brighter where a
+            // key light happens to fall would be reporting the lighting rig rather than the bounds.
+            // Opaque because it is ground, not a marker — the three translucent tints in this file
+            // all mean "look at what is under me", and this has nothing under it.
+            unlit: true,
+            ..default()
+        })),
+        Transform::default(),
+    ));
+}
+
+/// **Follow `Map::bounds`.** Cheap, and gated on the project changing, so resizing the map in the
+/// size fields moves the slab with the wireframe rather than leaving the two disagreeing.
+fn fit_bounds_floor(project: Res<Project>, mut slab: Query<&mut Transform, With<BoundsFloor>>) {
+    // Map space, centred on zero — the origin goes back on here, exactly as `draw_bounds` does.
+    let (min_x, min_z, max_x, max_z) = project.map.floor_rect();
+    let (w, _h, d) = project.map.bounds;
+    for mut tf in &mut slab {
+        *tf = Transform::from_xyz(
+            project.map.origin.0 + (min_x + max_x) * 0.5,
+            project.map.origin.1 - ground_drop(&project),
+            project.map.origin.2 + (min_z + max_z) * 0.5,
+        )
+        .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
+        .with_scale(Vec3::new(w, d, 1.0));
+    }
+}
+
+/// **The map's cells, and only over the map.**
+///
+/// Replaces `bevy::dev_tools::infinite_grid`, which was wrong twice. It drew at 1.0 m while [`SNAP`]
+/// is 0.5, so one square was two cells and a 1 m piece looked like it filled one — and it drew
+/// *forever*, so the ground beyond `Map::bounds` looked exactly as buildable as the ground inside
+/// them. Both were invisible until `BOUNDS_FILL` made the ground legible.
+///
+/// `Gizmos::grid` is bounded by construction — a cell count, not a plane — so "stop at the edge"
+/// costs nothing and cannot drift from `draw_bounds`, which reads the same rectangle.
+fn draw_map_grid(project: Res<Project>, spacing: Res<GridSpacing>, mut gizmos: Gizmos) {
+    let (min_x, min_z, max_x, max_z) = project.map.floor_rect();
+    let (w, _h, d) = project.map.bounds;
+    // Guarded rather than trusted: a zero would divide to infinity and ask the gizmo for every cell
+    // there is. `GRID_STEPS` cannot produce one, and this is what keeps that true of a future step.
+    let step = if spacing.0 > 0.0 { spacing.0 } else { 1.0 };
+    // At least one cell each way: a map smaller than a cell still has a floor to draw.
+    let cells = UVec2::new(
+        ((w / step).round() as u32).max(1),
+        ((d / step).round() as u32).max(1),
+    );
+    gizmos.grid(
+        Isometry3d::new(
+            Vec3::new(
+                project.map.origin.0 + (min_x + max_x) * 0.5,
+                // On the backdrop, not above it: a cell an author has already floored does not
+                // need a line drawn through it, and a line that survived the floor would be
+                // drawing the grid on top of the map rather than under it.
+                project.map.origin.1 - ground_drop(&project) + BOUNDS_FILL_CLEARANCE * 0.5,
+                project.map.origin.2 + (min_z + max_z) * 0.5,
+            ),
+            // `grid` draws in the isometry's XY plane; a quarter turn about X lays it on the ground,
+            // the same correction `spawn_bounds_floor` makes for its rectangle.
+            Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+        ),
+        cells,
+        Vec2::splat(step),
+        GRID_LINE,
+    );
+}
+
 fn draw_bounds(project: Res<Project>, mut gizmos: Gizmos) {
     // `floor_rect` is the floor PLAN — map space, centred on zero. Drawing happens in the world, so
     // the origin goes back on here.
@@ -1299,6 +1521,7 @@ fn refresh_status(
     project: Res<Project>,
     faults: Res<EdgeFaults>,
     state: Res<EditorState>,
+    under: Res<UnderCursor>,
     mut fields: Query<(&Field, &mut Text, &mut TextColor)>,
 ) {
     // `none` covers both "nothing armed" and "the armed index no longer exists", which read the same
@@ -1334,6 +1557,9 @@ fn refresh_status(
                 None => (project.map.name.clone(), TEXT),
             },
             Field::Brush => (brush.to_owned(), TEXT),
+            // ACCENT while something is under the cursor, because it is a live answer that changes
+            // as the mouse moves — the same colour the name field uses while it is being typed.
+            Field::Under => (under.0.clone(), ACCENT),
             Field::Yaw => (format!("{} deg", state.brush_yaw), TEXT),
             Field::Map => (
                 // Counted by `emerge_core::census`, never here — see
@@ -1355,14 +1581,12 @@ fn refresh_status(
             // A refusal has to read differently from a success, or "NOT SAVED" scrolls past as if it
             // were a receipt.
             Field::Hint => (state.hint.clone(), ACCENT),
-            Field::Last => (
-                state.status.clone(),
-                if state.status.starts_with("NOT SAVED") {
-                    DANGER
-                } else {
-                    DIM
-                },
-            ),
+            // **The receipt only, and never coloured by guessing.** This read
+            // `status.starts_with("NOT SAVED")`, which made exactly one refusal red and left every
+            // other one — `stamp refused:`, `is not a number of metres`, every `cannot draw it:` —
+            // in the same grey as `stamped 4 piece(s)`. Refusals go to the block above now, and the
+            // write site is what decides, so there is nothing left here to be wrong about.
+            Field::Last => (state.status.note_text().to_owned(), DIM),
         };
         if text.0 != want {
             text.0 = want;
@@ -1489,10 +1713,10 @@ fn rename_keys(
             // typing replaces it; there is no selection model here, so the honest equivalent is to
             // start blank. The old name is still on screen the moment you press Esc.
             state.renaming = Some(String::new());
-            state.status = format!(
+            state.status.note(format!(
                 "type a new name for `{}` — Enter to keep it, Esc to leave it alone",
                 project.map.name
-            );
+            ));
         }
         // Drain before leaving, so the `N` that opened the field is not read as its first character
         // next frame. Same invariant as `tiles::cell_keys`.
@@ -1509,7 +1733,7 @@ fn rename_keys(
                 let raw = state.renaming.take().unwrap_or_default();
                 let name = emerge_core::naming::to_snake_case(&raw);
                 if name.is_empty() {
-                    state.status = "a map needs a name; nothing was changed".to_owned();
+                    state.status.note("a map needs a name; nothing was changed".to_owned());
                 } else if name != project.map.name {
                     let was = std::mem::replace(&mut project.map.name, name.clone());
                     project.dirty = true;
@@ -1517,15 +1741,15 @@ fn rename_keys(
                     // — deleting it here would destroy a file on a keystroke.
                     // The modifier from the census, not typed: this sentence naming a key the build
                     // does not read is the same failure as the panel doing it.
-                    state.status = format!(
+                    state.status.note(format!(
                         "renamed `{was}` to `{name}` ({}+S writes the new file)",
                         keys::MOD_NAME
-                    );
+                    ));
                 }
             }
             Key::Escape => {
                 state.renaming = None;
-                state.status = "name unchanged".to_owned();
+                state.status.note("name unchanged".to_owned());
             }
             Key::Backspace => {
                 if let Some(raw) = state.renaming.as_mut() {
@@ -1711,7 +1935,7 @@ fn box_fill_between(
         Ok(f) => f,
         // A refusal is the answer, not a failure — the same call `flood_from_cursor` makes.
         Err(e) => {
-            state.status = e;
+            state.status.note(e);
             return;
         }
     };
@@ -1726,14 +1950,17 @@ fn box_fill_between(
     // **One entry for the whole box**, the rule `RemovedMany` states: one act the author performed is
     // one act to take back.
     state.record(Undo::Added { count });
-    state.status = if filled.truncated {
-        format!(
+    // **A truncated fill is a partial result, so it is a problem and not a receipt.** The two
+    // branches say different kinds of thing: one reports a box that filled, the other reports a box
+    // that stopped early and looks exactly like the first on screen.
+    if filled.truncated {
+        state.status.problem(format!(
             "filled {count} — stopped at the {} cell cap",
             crate::fill::MAX_CELLS
-        )
+        ));
     } else {
-        format!("filled {count}")
-    };
+        state.status.note(format!("filled {count}"));
+    }
 }
 
 /// The clone tool's marker quad — [`spawn_removal_tile`]'s twin in the clone tint, and spawned
@@ -1858,7 +2085,7 @@ fn drive_clone(
         return;
     };
     if (from.0 - at.0).abs() <= CLICK_EPS && (from.1 - at.1).abs() <= CLICK_EPS {
-        state.status = "drag a box to take a copy of what is inside it".to_owned();
+        state.status.note("drag a box to take a copy of what is inside it".to_owned());
         return;
     }
 
@@ -1875,7 +2102,7 @@ fn drive_clone(
         .map(|(i, _)| i)
         .collect();
     if caught.is_empty() {
-        state.status = "nothing in that box to clone".to_owned();
+        state.status.note("nothing in that box to clone".to_owned());
         return;
     }
 
@@ -1927,8 +2154,8 @@ fn drive_clone(
         centre_off: ((bx0 + bx1) * 0.5, (bz0 + bz1) * 0.5),
         half: ((bx1 - bx0) * 0.5, (bz1 - bz0) * 0.5),
     });
-    state.status =
-        format!("{count} piece(s) in hand — click stamps the set, Esc puts it away");
+    state.status
+        .note(format!("{count} piece(s) in hand — click stamps the set, Esc puts it away"));
 }
 
 /// **Stamp the held set at `target`** — all of it, or none of it, the rule `move_placement` states.
@@ -1948,7 +2175,7 @@ fn stamp_set(
     let ys = match heights(project) {
         Ok(ys) => ys,
         Err(e) => {
-            state.status = e;
+            state.status.problem(e);
             return;
         }
     };
@@ -1966,10 +2193,10 @@ fn stamp_set(
     for (i, piece) in set.pieces.iter().enumerate() {
         let at = (target.0 + piece.offset.0, target.1 + piece.offset.1);
         let Some(d) = project.library.get(&piece.descriptor) else {
-            state.status = format!(
+            state.status.problem(format!(
                 "stamp refused: `{}` is not in the library any more",
                 piece.descriptor
-            );
+            ));
             return;
         };
         let on = match &piece.on {
@@ -1979,11 +2206,11 @@ fn stamp_set(
                 match emerge_core::stack::host_under(&project.map, &project.library, &ys, d, at) {
                     Some((host, _)) => Some(host.id.clone()),
                     None => {
-                        state.status = format!(
+                        state.status.problem(format!(
                             "stamp refused: `{}` needs a surface and nothing offers one where it \
                              would land",
                             new_ids[i]
-                        );
+                        ));
                         return;
                     }
                 }
@@ -1998,10 +2225,10 @@ fn stamp_set(
             piece.tip,
             on.as_deref(),
         ) {
-            state.status = format!(
+            state.status.problem(format!(
                 "stamp refused: `{}` already covers where `{}` would land",
                 block.id, new_ids[i]
-            );
+            ));
             return;
         }
         rows.push(Placed {
@@ -2024,7 +2251,7 @@ fn stamp_set(
     let mut trial = project.map.clone();
     trial.placements.extend(rows.iter().cloned());
     if let Err(e) = emerge_core::stack::resolve_y(&trial, &project.library) {
-        state.status = format!("stamp refused: {e}");
+        state.status.problem(format!("stamp refused: {e}"));
         return;
     }
 
@@ -2036,7 +2263,7 @@ fn stamp_set(
     project.dirty = true;
     // One entry for the whole set: one act the author performed is one act to take back.
     state.record(Undo::Added { count });
-    state.status = format!("stamped {count} piece(s) — click again stamps another");
+    state.status.note(format!("stamped {count} piece(s) — click again stamps another"));
 }
 
 /// **The cell fine placement is confined to** — captured when the platform modifier goes down.
@@ -2147,7 +2374,7 @@ fn spawn_range(
     let ys = match heights(project) {
         Ok(ys) => ys,
         Err(e) => {
-            state.status = e.clone();
+            state.status.problem(e.clone());
             error!("{e}");
             return;
         }
@@ -2299,7 +2526,7 @@ fn drive_removal(
     if (from.0 - at.0).abs() <= CLICK_EPS && (from.1 - at.1).abs() <= CLICK_EPS {
         match pick_at(&project, at) {
             Some(i) => delete_index(&mut commands, i, &mut project, &mut state, &placed),
-            None => state.status = "nothing here to remove".to_owned(),
+            None => state.status.note("nothing here to remove"),
         }
         return;
     }
@@ -2322,7 +2549,7 @@ fn drive_removal(
     doomed.sort_unstable();
     doomed.dedup();
     if doomed.is_empty() {
-        state.status = "nothing inside that box".to_owned();
+        state.status.note("nothing inside that box");
         return;
     }
 
@@ -2346,10 +2573,10 @@ fn drive_removal(
     project.dirty = true;
     // The whole chord, rendered by the census — naming just the modifier told the author to press
     // `Cmd`, which is not a thing anyone can do.
-    state.status = format!(
+    state.status.note(format!(
         "removed {n} placement(s) — {} puts them back",
         keys::chord_text(keys::binding(Action::Undo))
-    );
+    ));
 }
 
 /// Bring up whatever the map already holds.
@@ -2558,7 +2785,7 @@ fn drive_place(
     let ys = match heights(&project) {
         Ok(ys) => ys,
         Err(e) => {
-            state.status = e;
+            state.status.problem(e);
             return;
         }
     };
@@ -2568,7 +2795,7 @@ fn drive_place(
             // Refused, not floored. Dropping it at floor level is the behaviour this replaced: the
             // piece appears, in the wrong place, and looks like an authoring mistake.
             Err(e) => {
-                state.status = e;
+                state.status.note(e);
                 return;
             }
         };
@@ -2587,10 +2814,10 @@ fn drive_place(
         (0, 0),
         on.as_deref(),
     ) {
-        state.status = format!(
+        state.status.note(format!(
             "blocked: `{}` already covers that spot — remove it or place beside it",
             block.id
-        );
+        ));
         return;
     }
 
@@ -2629,10 +2856,10 @@ fn drive_place(
     // happens is the honest alternative: an author who did it by accident finds out immediately, and
     // one who wanted it sees that it worked.
     let how = if free { " free" } else { "" };
-    state.status = match on {
+    state.status.note(match on {
         Some(host) => format!("placed {id} on {host}{how}"),
         None => format!("placed {id} at ({:.2}, {:.2}){how}", at.0, at.1),
-    };
+    });
 }
 
 /// **Put an armed group down** — one line in `map.stamps`, never the rows it stands for.
@@ -2655,7 +2882,7 @@ fn stamp_here(
     };
     let comps = project.compositions.compositions.clone();
     if !comps.iter().any(|c| c.id == of) {
-        state.status = format!("`{of}` is armed but the project no longer defines it");
+        state.status.problem(format!("`{of}` is armed but the project no longer defines it"));
         compose.armed = None;
         return;
     }
@@ -2675,13 +2902,13 @@ fn stamp_here(
     trial.stamps.push(stamped.clone());
     if let Err(e) = emerge_core::composition::expand(&trial, &trial.stamps, &comps, &project.library)
     {
-        state.status = format!("cannot stamp `{of}` here: {e}");
+        state.status.problem(format!("cannot stamp `{of}` here: {e}"));
         return;
     }
     project.map.stamps.push(stamped);
     project.dirty = true;
     state.record(Undo::Stamped { count: 1 });
-    state.status = format!("stamped `{of}` as {id}");
+    state.status.note(format!("stamped `{of}` as {id}"));
 }
 
 /// Draw every stamped row, and nothing else.
@@ -2719,7 +2946,7 @@ fn redraw_stamps(
         // Loud, and only once per change: a map whose stamps stopped resolving is a map that will not
         // load in the game either, and an empty patch of floor is not how anybody should find out.
         Err(e) => {
-            state.status = format!("stamps do not resolve: {e}");
+            state.status.problem(format!("stamps do not resolve: {e}"));
             error!("emerge-mapper: {e}");
             return;
         }
@@ -2733,7 +2960,7 @@ fn redraw_stamps(
     let ys = match emerge_core::stack::resolve_y(&scratch, &project.library) {
         Ok(ys) => ys,
         Err(e) => {
-            state.status = format!("stamped rows have no height: {e}");
+            state.status.problem(format!("stamped rows have no height: {e}"));
             error!("emerge-mapper: {e}");
             return;
         }
@@ -2888,7 +3115,7 @@ fn keys(
         } else {
             Tool::Remove
         };
-        state.status = if state.tool == Tool::Remove {
+        let said = if state.tool == Tool::Remove {
             format!(
                 "removal mode: click a piece, or drag a box. {} or Esc to stop.",
                 keys::binding(Action::Remove).chord
@@ -2896,6 +3123,7 @@ fn keys(
         } else {
             "removal mode off".to_owned()
         };
+        state.status.note(said);
         // Arming one tool puts down whatever the other was holding, rather than leaving a piece in
         // hand that no click can now drop.
         move_drag.held = None;
@@ -2911,7 +3139,7 @@ fn keys(
         } else {
             Tool::Move
         };
-        state.status = if state.tool == Tool::Move {
+        let said = if state.tool == Tool::Move {
             format!(
                 "move mode: click a piece to pick it up, click again to put it down. {} or Esc to stop.",
                 keys::binding(Action::MoveMode).chord
@@ -2919,6 +3147,7 @@ fn keys(
         } else {
             "move mode off".to_owned()
         };
+        state.status.note(said);
         move_drag.held = None;
         clone_drag.held = None;
         return;
@@ -2932,12 +3161,12 @@ fn keys(
         } else {
             Tool::Clone
         };
-        state.status = if state.tool == Tool::Clone {
+        let said = if state.tool == Tool::Clone {
             "clone mode: drag a box to take a copy of what is inside, click to stamp it. Esc to stop."
-                .to_owned()
         } else {
-            "clone mode off".to_owned()
+            "clone mode off"
         };
+        state.status.note(said);
         move_drag.held = None;
         clone_drag.held = None;
         return;
@@ -2945,37 +3174,49 @@ fn keys(
 
     // **One Esc, and it undoes the most specific thing first.**
     //
-    // A piece in hand, then an armed tool, then the armed piece. Each press steps back out one layer,
-    // so `Esc` always means "not that" without the author having to work out which of three states
-    // they are in — and pressing it twice from the move tool leaves them with a clear palette rather
-    // than doing nothing the second time.
-    if keys::just_pressed(&keyboard, live.0, Action::Cancel) {
+    // The problem block, then a piece in hand, then an armed tool, then the armed piece. Each press
+    // steps back out one layer, so `Esc` always means "not that" without the author having to work
+    // out which of four states they are in — and pressing it twice from the move tool leaves them
+    // with a clear palette rather than doing nothing the second time.
+    //
+    // **`*mode == Map` is a real guard here and not a second census.** `Action::Cancel` is
+    // `Context::Global` now, because a problem can be raised on any of the four tabs and every one
+    // of them needs a key that means "I have read that". The *peel* below is still map-only, so this
+    // one branch does need to know which tab is live — and `crate::notice::dismiss` handles the
+    // other three so no tab is without it.
+    if *mode == crate::tiles::Mode::Map && keys::just_pressed(&keyboard, live.0, Action::Cancel) {
+        // The outermost layer. Cleared here rather than in `notice::dismiss` so a single press
+        // cannot both take the block down and peel a tool — the promise this comment makes.
+        if state.status.has_problem() {
+            state.status.dismiss();
+            return;
+        }
         if move_drag.held.is_some() {
             move_drag.held = None;
-            state.status = "put back".to_owned();
+            state.status.note("put back".to_owned());
             return;
         }
         if clone_drag.holding() {
             clone_drag.held = None;
-            state.status = "set put away — the originals never moved".to_owned();
+            state.status.note("set put away — the originals never moved".to_owned());
             return;
         }
         if target.0.is_some() {
             target.0 = None;
-            state.status = "target released".to_owned();
+            state.status.note("target released".to_owned());
             return;
         }
         if state.tool != Tool::Place {
             let leaving = state.tool.label();
             state.tool = Tool::Place;
-            state.status = format!("{leaving} off");
+            state.status.note(format!("{leaving} off"));
             return;
         }
         // **Clearing the selection is a real state**, not a no-op: with nothing armed the ghost goes,
         // a click places nothing, and the palette shows no highlighted row — so the cursor can be over
         // the map without a piece following it.
         if state.brush.take().is_some() {
-            state.status = "selection cleared".to_owned();
+            state.status.note("selection cleared".to_owned());
         }
         return;
     }
@@ -2984,12 +3225,12 @@ fn keys(
         match project.save() {
             Ok(()) => {
                 let path = project.map_path.display().to_string();
-                state.status = format!("saved {path}");
+                state.status.note(format!("saved {path}"));
                 info!("saved {path}");
             }
             // The save refuses on an invalid map rather than writing one, and says which rule.
             Err(e) => {
-                state.status = format!("NOT SAVED: {e}");
+                state.status.problem(format!("NOT SAVED: {e}"));
                 error!("{e}");
             }
         }
@@ -3117,7 +3358,7 @@ fn keys(
     // tapping `Z` has no reason to be keeping count. This is the only absolute among the aim keys.
     if keys::just_pressed(&keyboard, live.0, Action::AimReset) {
         state.brush_yaw = 0.0;
-        state.status = "brush aimed straight again".to_owned();
+        state.status.note("brush aimed straight again".to_owned());
         return;
     }
 
@@ -3151,7 +3392,7 @@ fn delete_index(
     placed: &Query<(Entity, &Placement)>,
 ) {
     if index >= project.map.placements.len() {
-        state.status = "nothing here to remove".to_owned();
+        state.status.note("nothing here to remove".to_owned());
         return;
     }
     // **A stack goes whole.** `Placed::on` is a hard reference, so removing a host on its own left
@@ -3183,10 +3424,10 @@ fn delete_index(
     // first shifts the later ones into place.
     items.reverse();
     project.dirty = true;
-    state.status = match items.len() {
+    state.status.note(match items.len() {
         1 => format!("removed {head}"),
         n => format!("removed {head} and {} on it", n - 1),
-    };
+    });
     state.record(Undo::RemovedMany { items });
 }
 
@@ -3199,7 +3440,7 @@ fn undo(
     placed: &Query<(Entity, &Placement)>,
 ) {
     let Some(op) = state.undo.pop() else {
-        state.status = "nothing to undo".to_owned();
+        state.status.note("nothing to undo".to_owned());
         return;
     };
     if let Some(inverse) = apply(commands, assets, project, state, placed, op) {
@@ -3216,7 +3457,7 @@ fn redo(
     placed: &Query<(Entity, &Placement)>,
 ) {
     let Some(op) = state.redo.pop() else {
-        state.status = "nothing to redo".to_owned();
+        state.status.note("nothing to redo".to_owned());
         return;
     };
     // **`undo.push`, not `record`.** `record` clears the redo stack, which is right for a *new* edit
@@ -3257,7 +3498,7 @@ fn apply(
                     commands.entity(entity).despawn();
                 }
             }
-            state.status = format!("undid {} placement(s)", gone.len());
+            state.status.note(format!("undid {} placement(s)", gone.len()));
             Undo::RemovedMany { items: taken }
         }
         Undo::Moved { moved } => {
@@ -3308,7 +3549,7 @@ fn apply(
                     }
                 }
                 Err(e) => {
-                    state.status = format!("put back, but cannot draw it: {e}");
+                    state.status.problem(format!("put back, but cannot draw it: {e}"));
                     error!("{e}");
                     // `restore_moved` above ALREADY moved the rows, so the map has changed whatever
                     // happened to the drawing — skipping the shared dirty write at the tail here left
@@ -3319,7 +3560,7 @@ fn apply(
                     return None;
                 }
             }
-            state.status = format!("put back {} placement(s)", moved.was.len());
+            state.status.note(format!("put back {} placement(s)", moved.was.len()));
             Undo::Moved { moved: now }
         }
         Undo::RemovedMany { items } => {
@@ -3352,10 +3593,10 @@ fn apply(
                             commands.entity(e).insert(Placement(id));
                         }
                     }
-                    state.status = format!("restored {n} placement(s)");
+                    state.status.problem(format!("restored {n} placement(s)"));
                 }
                 Err(e) => {
-                    state.status = format!("restored {n} but cannot draw them: {e}");
+                    state.status.problem(format!("restored {n} but cannot draw them: {e}"));
                     error!("{e}");
                 }
             }
@@ -3382,7 +3623,7 @@ fn apply(
                 items.push((*i, Box::new(removed)));
             }
             items.reverse();
-            state.status = format!("removed {} placement(s) again", items.len());
+            state.status.note(format!("removed {} placement(s) again", items.len()));
             Undo::RemovedMany { items }
         }
         Undo::Turned { index, yaw } => {
@@ -3411,10 +3652,10 @@ fn apply(
                             commands.entity(e).insert(Placement(id.clone()));
                         }
                     }
-                    state.status = format!("{id} back to {yaw:.0} deg");
+                    state.status.problem(format!("{id} back to {yaw:.0} deg"));
                 }
                 Err(e) => {
-                    state.status = format!("turned {id} back but cannot draw it: {e}");
+                    state.status.problem(format!("turned {id} back but cannot draw it: {e}"));
                     error!("{e}");
                 }
             }
@@ -3431,14 +3672,14 @@ fn apply(
             let group = with_dependents(&project.map, index);
             match redraw_placements(commands, assets, project, placed, &group) {
                 Ok(()) => {
-                    state.status = if lift == 0.0 {
+                    state.status.note(if lift == 0.0 {
                         format!("{id} back on its datum")
                     } else {
                         format!("{id} back to {lift:+.2} m of lift")
-                    };
+                    });
                 }
                 Err(e) => {
-                    state.status = format!("lifted {id} back but cannot draw it: {e}");
+                    state.status.problem(format!("lifted {id} back but cannot draw it: {e}"));
                     error!("{e}");
                 }
             }
@@ -3452,14 +3693,14 @@ fn apply(
             let id = p.id.clone();
             match redraw_placements(commands, assets, project, placed, &[index]) {
                 Ok(()) => {
-                    state.status = if tip == (0, 0) {
+                    state.status.note(if tip == (0, 0) {
                         format!("{id} upright again")
                     } else {
                         format!("{id} back to {}/4 about X, {}/4 about Z", tip.0, tip.1)
-                    };
+                    });
                 }
                 Err(e) => {
-                    state.status = format!("tipped {id} back but cannot draw it: {e}");
+                    state.status.problem(format!("tipped {id} back but cannot draw it: {e}"));
                     error!("{e}");
                 }
             }
@@ -3499,7 +3740,7 @@ fn apply(
             if items.is_empty() {
                 return None;
             }
-            state.status = format!("took back {} stamp(s)", items.len());
+            state.status.note(format!("took back {} stamp(s)", items.len()));
             Undo::UnstampedMany { items }
         }
         Undo::UnstampedMany { items } => {
@@ -3509,7 +3750,7 @@ fn apply(
                 let at = at.min(project.map.stamps.len());
                 project.map.stamps.insert(at, *st);
             }
-            state.status = format!("put {count} stamp(s) back");
+            state.status.note(format!("put {count} stamp(s) back"));
             Undo::Stamped { count }
         }
         Undo::Pinned {
@@ -3522,11 +3763,11 @@ fn apply(
             };
             let was_owned = std::mem::replace(&mut p.owned, owned);
             let was_because = std::mem::replace(&mut p.owned_because, because);
-            state.status = format!(
+            state.status.note(format!(
                 "{} {}",
                 p.id,
                 if owned { "pinned again" } else { "unpinned" }
-            );
+            ));
             Undo::Pinned {
                 index,
                 owned: was_owned,
@@ -3549,7 +3790,7 @@ fn toggle_pin(
     lock: &mut TargetLock,
 ) {
     let Some(index) = under_cursor_target(lock, window, camera, project) else {
-        state.status = "nothing here to pin".to_owned();
+        state.status.note("nothing here to pin".to_owned());
         return;
     };
     let Some(p) = project.map.placements.get_mut(index) else {
@@ -3565,11 +3806,11 @@ fn toggle_pin(
             because,
         });
         project.dirty = true;
-        state.status = format!("unpinned {}", p.id);
+        state.status.note(format!("unpinned {}", p.id));
     } else {
         let id = p.id.clone();
         state.pinning = Some((index, String::new()));
-        state.status = format!("why is {id} pinned? Enter to keep it, Esc to cancel");
+        state.status.note(format!("why is {id} pinned? Enter to keep it, Esc to cancel"));
     }
 }
 
@@ -3591,7 +3832,7 @@ fn turn_under_cursor(
     step: f32,
 ) {
     let Some(index) = under_cursor_target(lock, window, camera, project) else {
-        state.status = "nothing here to turn".to_owned();
+        state.status.note("nothing here to turn".to_owned());
         return;
     };
     let Some(p) = project.map.placements.get_mut(index) else {
@@ -3622,12 +3863,12 @@ fn turn_under_cursor(
             }
         }
         Err(e) => {
-            state.status = format!("turned {id} but cannot draw it: {e}");
+            state.status.problem(format!("turned {id} but cannot draw it: {e}"));
             error!("{e}");
             return;
         }
     }
-    state.status = format!("{id} now at {yaw:.0} deg");
+    state.status.note(format!("{id} now at {yaw:.0} deg"));
 }
 
 /// Despawn and redraw the placements at `indices` from the finished map — the shared tail of the
@@ -3664,6 +3905,57 @@ fn redraw_placements(
         }
     }
     Ok(())
+}
+
+/// **A library edit reaches the pieces already standing on the map.**
+///
+/// Without this, changing a descriptor's size, mount, `y_offset` or mesh rotation on the Tiles tab
+/// updated `project.library`, the palette row and the ghost — and every entity already placed kept
+/// the shape it was spawned with until the editor restarted. `spawn_existing` runs at `Startup`
+/// only, and the four `redraw_placements` callers each redraw one group after a *map* edit, so
+/// nothing on this side was watching the library at all. Stamped rows were never affected:
+/// `redraw_stamps` already rebuilds on `project.is_changed()`.
+///
+/// **Dependents come too.** A piece that got taller moves everything resting on it, which is the
+/// same argument `lift_under_cursor` makes for using [`with_dependents`] — and `redraw_placements`
+/// re-resolves the whole map's heights anyway, so the only question is which entities to respawn.
+///
+/// Not gated on the mode: the map stays drawn while an author works on Tiles, which is the entire
+/// point — the edit is made on one tab and has to be visible on the other.
+fn redraw_edited(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<EditorState>,
+    placed: Query<(Entity, &Placement)>,
+) {
+    // The common case, and it costs one `is_empty` — read through `Deref`, so it does not mark
+    // `Project` changed and cannot start the palette rebuilding every frame.
+    if project.touched.is_empty() {
+        return;
+    }
+    let touched = std::mem::take(&mut project.touched);
+    let mut indices: Vec<usize> = Vec::new();
+    for (i, p) in project.map.placements.iter().enumerate() {
+        if touched.iter().any(|id| id == &p.descriptor) {
+            indices.extend(with_dependents(&project.map, i));
+        }
+    }
+    indices.sort_unstable();
+    indices.dedup();
+    if indices.is_empty() {
+        return;
+    }
+    let count = indices.len();
+    match redraw_placements(&mut commands, &assets, &project, &placed, &indices) {
+        // Quiet on success. This fires while the author is on the Tiles tab looking at something
+        // else, and a receipt about the map arriving under a tile edit would read as a report about
+        // the tile.
+        Ok(()) => info!("redrew {count} placement(s) after a library edit"),
+        Err(e) => state
+            .status
+            .problem(format!("a library edit did not reach the map: {e}")),
+    }
 }
 
 /// `root` and everything that (transitively) rests on it, as indices into the placement list —
@@ -3716,7 +4008,7 @@ fn lift_under_cursor(
     sign: f32,
 ) {
     let Some(index) = under_cursor_target(lock, window, camera, project) else {
-        state.status = "nothing here to lift".to_owned();
+        state.status.note("nothing here to lift".to_owned());
         return;
     };
     let step = lift_step(project);
@@ -3737,14 +4029,14 @@ fn lift_under_cursor(
     let group = with_dependents(&project.map, index);
     match redraw_placements(commands, assets, project, placed, &group) {
         Ok(()) => {
-            state.status = if want == 0.0 {
+            state.status.note(if want == 0.0 {
                 format!("{id} back on its datum")
             } else {
                 format!("{id} lifted {want:+.2} m")
-            };
+            });
         }
         Err(e) => {
-            state.status = format!("lifted {id} but cannot draw it: {e}");
+            state.status.problem(format!("lifted {id} but cannot draw it: {e}"));
             error!("{e}");
         }
     }
@@ -3770,7 +4062,7 @@ fn tip_under_cursor(
     about_x: bool,
 ) {
     let Some(index) = under_cursor_target(lock, window, camera, project) else {
-        state.status = "nothing here to tip".to_owned();
+        state.status.note("nothing here to tip".to_owned());
         return;
     };
     let Some(p) = project.map.placements.get(index) else {
@@ -3783,10 +4075,10 @@ fn tip_under_cursor(
         .filter(|q| q.on.as_deref() == Some(p.id.as_str()))
         .count();
     if resting > 0 {
-        state.status = format!(
+        state.status.problem(format!(
             "`{}` holds {resting} piece(s) up — a tipped surface holds nothing; move them first",
             p.id
-        );
+        ));
         return;
     }
     let want = if about_x {
@@ -3798,10 +4090,10 @@ fn tip_under_cursor(
         return;
     };
     if emerge_core::descriptor::tipped_extents(d, want).is_none() {
-        state.status = format!(
+        state.status.problem(format!(
             "`{}` is unmeasured — a tip cannot be seated. Measure it on the tiles tab first.",
             p.id
-        );
+        ));
         return;
     }
     let Some(p) = project.map.placements.get_mut(index) else {
@@ -3813,14 +4105,14 @@ fn tip_under_cursor(
     state.record(Undo::Tipped { index, tip: was });
     match redraw_placements(commands, assets, project, placed, &[index]) {
         Ok(()) => {
-            state.status = if want == (0, 0) {
+            state.status.note(if want == (0, 0) {
                 format!("{id} upright again")
             } else {
                 format!("{id} tipped {}/4 about X, {}/4 about Z", want.0, want.1)
-            };
+            });
         }
         Err(e) => {
-            state.status = format!("tipped {id} but cannot draw it: {e}");
+            state.status.problem(format!("tipped {id} but cannot draw it: {e}"));
             error!("{e}");
         }
     }
@@ -3887,7 +4179,7 @@ fn send_to_tiles(
     import: &mut crate::tiles::ImportState,
 ) {
     let Some(index) = nearest_placement(window, camera, project) else {
-        state.status = "nothing here to edit".to_owned();
+        state.status.note("nothing here to edit".to_owned());
         return;
     };
     let Some(id) = project.map.placements.get(index).map(|p| p.descriptor.clone()) else {
@@ -3896,16 +4188,16 @@ fn send_to_tiles(
     // A placement naming a descriptor the library does not have is a map/library mismatch, and
     // switching tabs to show an empty pane would report it as nothing happening.
     if project.library.get(&id).is_none() {
-        state.status = format!("`{id}` is not in this library, so there is nothing to edit");
+        state.status.problem(format!("`{id}` is not in this library, so there is nothing to edit"));
         return;
     }
     // `selected_library_id` is the discriminant `ImportState::editing` follows, so setting it is the
     // whole of "focus this piece" — the detail pane, the preview, the lattice and the fields all read
     // through that one accessor.
     import.selected_library_id = Some(id.clone());
-    import.status = format!("editing `{id}`, sent from the map");
+    import.status.note(format!("editing `{id}`, sent from the map"));
     *mode = crate::tiles::Mode::Tiles;
-    state.status = format!("`{id}` — opened on the tiles tab");
+    state.status.note(format!("`{id}` — opened on the tiles tab"));
 }
 
 /// **Pick a piece up, and put it down** — the whole of [`Tool::Move`].
@@ -3958,14 +4250,14 @@ fn drive_move(
         None => {
             let probe = project.map.to_map_space((hit.x, hit.z));
             let Some(index) = pick_at(&project, probe) else {
-                state.status = "nothing here to move".to_owned();
+                state.status.note("nothing here to move".to_owned());
                 return;
             };
             let Some(p) = project.map.placements.get(index) else {
                 return;
             };
             let id = p.id.clone();
-            state.status = format!("{id} in hand — click to put it down, Esc to put it back");
+            state.status.note(format!("{id} in hand — click to put it down, Esc to put it back"));
             drag.held = Some(id);
         }
         // **Drop.** Snapped like a placement, and free with the modifier held, so a move lands on the
@@ -3975,7 +4267,7 @@ fn drive_move(
             // row, and it may have removed it outright.
             let Some(index) = project.map.placements.iter().position(|p| p.id == id) else {
                 drag.held = None;
-                state.status = format!("`{id}` is gone — nothing was moved");
+                state.status.problem(format!("`{id}` is gone — nothing was moved"));
                 return;
             };
             let free = keys::mod_held(&keyboard);
@@ -3994,7 +4286,7 @@ fn drive_move(
                 // avoid: the piece would land somewhere its mount does not hold and read as an
                 // authoring mistake. Keeping hold of it means the next click is another try.
                 Err(e) => {
-                    state.status = e;
+                    state.status.note(e);
                     return;
                 }
             };
@@ -4035,7 +4327,7 @@ fn drive_move(
                     }
                 }
                 Err(e) => {
-                    state.status = format!("moved, but cannot draw it: {e}");
+                    state.status.problem(format!("moved, but cannot draw it: {e}"));
                     error!("{e}");
                     state.record(Undo::Moved { moved });
                     return;
@@ -4046,11 +4338,11 @@ fn drive_move(
             state.record(Undo::Moved { moved });
             let head = ids.first().cloned().unwrap_or_default();
             let how = if free { " free" } else { "" };
-            state.status = if carried > 1 {
+            state.status.note(if carried > 1 {
                 format!("moved {head} and {} riding on it{how}", carried - 1)
             } else {
                 format!("moved {head}{how}")
-            };
+            });
         }
     }
 }
@@ -4137,6 +4429,46 @@ fn nearest_placement(
     pick_at(project, project.map.to_map_space((hit.x, hit.z)))
 }
 
+/// **What the piece-verbs would act on right now**, already written as the readout line.
+///
+/// **Its own resource, not an `EditorState` field.** This is rewritten every time the cursor crosses
+/// onto a different piece, and `rebuild_palette` runs on `resource_changed::<EditorState>` — the
+/// trap [`EditorState::hint`] documents, where a per-frame write tears the whole palette down and
+/// rebuilds it at frame rate.
+#[derive(Resource, Default)]
+pub struct UnderCursor(String);
+
+/// Name what the verbs would act on, through **the same resolver the verbs use**.
+///
+/// [`under_cursor_target`] and not a second pick: a readout that named a different piece than `R`
+/// turned would be worse than no readout, because it would be believed. That is the whole argument
+/// its own doc comment makes for being one resolver, extended to the line that reports it.
+fn sense_under_cursor(
+    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    project: Res<Project>,
+    mut lock: ResMut<TargetLock>,
+    mut under: ResMut<UnderCursor>,
+) {
+    let want = match under_cursor_target(&mut lock, window, camera, &project) {
+        // The chord comes from the census, never retyped — `keys.rs`'s one rule, and the reason
+        // this line cannot come to name a key the build does not read.
+        Some(i) => project.map.placements.get(i).map_or_else(String::new, |p| {
+            format!(
+                "{}  — {} edits it",
+                p.id,
+                keys::chord_text(keys::binding(Action::EditTile))
+            )
+        }),
+        // Empty over bare floor. A row saying "nothing" would be a row that is never blank, and the
+        // eye stops reading a line that always has something in it.
+        None => String::new(),
+    };
+    if under.0 != want {
+        under.0 = want;
+    }
+}
+
 /// **The placement the piece-verbs act on** — the locked target while it holds, else the nearest
 /// pick. One resolver for every verb, so `H`'s lock cannot mean different pieces to `R` and `]`.
 ///
@@ -4181,7 +4513,7 @@ fn cycle_target(
     };
     let (cam, cam_tf) = *camera;
     let Some(hit) = cursor_ground(&window, cam, cam_tf) else {
-        state.status = "nothing under the cursor to target".to_owned();
+        state.status.note("nothing under the cursor to target".to_owned());
         return;
     };
     let at = project.map.to_map_space((hit.x, hit.z));
@@ -4202,7 +4534,7 @@ fn cycle_target(
         .collect();
     if stack.is_empty() {
         lock.0 = None;
-        state.status = "nothing here to target".to_owned();
+        state.status.note("nothing here to target".to_owned());
         return;
     }
     // SORT-OK: editor-side pick, total by unique placement id tiebreak.
@@ -4222,12 +4554,12 @@ fn cycle_target(
     };
     let (index, _) = stack[next];
     let id = project.map.placements[index].id.clone();
-    state.status = format!(
+    state.status.note(format!(
         "targeting `{id}` ({} of {} here) — turn / tip / lift act on it, {} steps up, Esc releases",
         next + 1,
         stack.len(),
         keys::binding(Action::CycleTarget).chord,
-    );
+    ));
     lock.0 = Some((id, cell));
 }
 
@@ -4313,7 +4645,7 @@ fn pin_reason_keys(
                 };
                 let reason = reason.trim().to_owned();
                 if reason.is_empty() {
-                    state.status = "a pin needs a reason; nothing was pinned".to_owned();
+                    state.status.note("a pin needs a reason; nothing was pinned".to_owned());
                     return;
                 }
                 // Unpinned is what it was — this field only opens for a piece being pinned.
@@ -4329,12 +4661,12 @@ fn pin_reason_keys(
                 });
                 if let Some(id) = pinned_id {
                     project.dirty = true;
-                    state.status = format!("pinned {id}: {reason}");
+                    state.status.note(format!("pinned {id}: {reason}"));
                 }
             }
             Key::Escape => {
                 state.pinning = None;
-                state.status = "nothing pinned".to_owned();
+                state.status.note("nothing pinned".to_owned());
             }
             Key::Backspace => {
                 if let Some((_, r)) = state.pinning.as_mut() {
@@ -4402,7 +4734,7 @@ fn generate_from(
     let grammar = match built {
         Ok(g) => g,
         Err(e) => {
-            state.status = e;
+            state.status.problem(e);
             return;
         }
     };
@@ -4430,7 +4762,7 @@ fn generate_from(
         ) {
             Ok(e) => scratch.placements.extend(e.placements),
             Err(e) => {
-                state.status = format!("cannot generate around the stamps: {e}");
+                state.status.problem(format!("cannot generate around the stamps: {e}"));
                 return;
             }
         }
@@ -4441,7 +4773,7 @@ fn generate_from(
     }) {
         Ok(s) => s,
         Err(e) => {
-            state.status = e;
+            state.status.problem(e);
             return;
         }
     };
@@ -4489,11 +4821,11 @@ fn generate_from(
             Undo::RemovedMany { items: removed },
         ],
     });
-    state.status = format!(
+    state.status.note(format!(
         "continued the layout: {count} placed around {} pinned cell(s), from {} prototype(s)",
         solved.owned_cells,
         grammar.len() - 1
-    );
+    ));
 }
 
 /// The `F` handler, split out so `keys` stays readable.
@@ -4519,7 +4851,7 @@ fn flood_from_cursor(
         .and_then(|ix| project.library.descriptors.get(ix))
         .cloned()
     else {
-        state.status = "nothing armed to fill with — pick a piece from the palette".to_owned();
+        state.status.note("nothing armed to fill with — pick a piece from the palette".to_owned());
         return;
     };
 
@@ -4540,7 +4872,7 @@ fn flood_from_cursor(
         // A refusal is the answer, not a failure: "outside the map" and "something is already here"
         // are both things the author needs told rather than worked around.
         Err(e) => {
-            state.status = e;
+            state.status.note(e);
             return;
         }
     };
@@ -4557,15 +4889,16 @@ fn flood_from_cursor(
     if count > 0 {
         state.record(Undo::Added { count });
     }
-    // A cap that stopped the fill has to say so — a truncated fill looks exactly like a finished one.
-    state.status = if filled.truncated {
-        format!(
+    // A cap that stopped the fill has to say so — a truncated fill looks exactly like a finished one,
+    // which is the whole argument for it being the loud slot rather than the quiet one.
+    if filled.truncated {
+        state.status.problem(format!(
             "filled {count} and STOPPED at the {} cell cap — fill again to continue",
             crate::fill::MAX_CELLS
-        )
+        ));
     } else {
-        format!("filled {count} with {}", brush.id)
-    };
+        state.status.note(format!("filled {count} with {}", brush.id));
+    }
 }
 
 // ── the ghost ────────────────────────────────────────────────────────────────────────────────────
@@ -4839,6 +5172,7 @@ mod tests {
             },
             map_path: std::path::PathBuf::from("test_map.map.ron"),
             dirty: false,
+            touched: Vec::new(),
             triangles: Vec::new(),
         }
     }

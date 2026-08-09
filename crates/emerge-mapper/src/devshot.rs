@@ -70,11 +70,11 @@ fn watch_drive(
             // The same call the key handler makes, toggle included — never a second copy of it.
             "arm" => {
                 crate::compose::toggle_arm(&mut compose, &project);
-                info!("drive.request: arm — {}", compose.status);
+                info!("drive.request: arm — {}", compose.status.line());
             }
             "record" => {
                 crate::compose::record_selected(&mut compose, &mut project);
-                info!("drive.request: record — {}", compose.status);
+                info!("drive.request: record — {}", compose.status.line());
             }
             "stamp" => {
                 crate::editor::stamp_here_for_test(
@@ -83,7 +83,7 @@ fn watch_drive(
                     &mut compose,
                     (0.0, 0.0),
                 );
-                info!("drive.request: stamp — {}", editor.status);
+                info!("drive.request: stamp — {}", editor.status.line());
             }
             "down" | "up" => {
                 let delta: isize = if verb == "down" { 1 } else { -1 };

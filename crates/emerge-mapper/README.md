@@ -6,11 +6,27 @@ A standalone world-building editor: open a project directory, author a map from 
 
 > **This repo is a read-only mirror.** It is split out of [`Ladvien/foundation_vs_slop`](https://github.com/Ladvien/foundation_vs_slop) with `git subtree split`, history intact. It depends on sibling crates by workspace path, so it builds *inside* that workspace, not on its own. Issues and PRs belong upstream.
 
-## Three tabs
+## Four tabs
 
 - **Map** — palette, ghost, place, fill, undo.
 - **Tiles** — mesh import, measurement review, descriptor authoring, and a vision-LLM labeler whose suggestions stage behind the same commit door a human edit goes through.
-- **Anim** — a rig bench: measure GLB clips, compare against `rigs.ron`, plot diagnostics, and scrub a staged figure driven by the **real** `emerge-anim` blender rather than a preview copy of it.
+- **Compose** — reusable groups a map holds a *reference* to rather than a copy of: members, the edge tokens their boundary derives, where those members disagree, and which were built against a descriptor that has since changed.
+- **Anim** — a rig bench: measure GLB clips, compare against `rigs.ron`, plot diagnostics, and scrub a staged figure driven by the **real** `emerge-anim` blender rather than a preview copy of it. Last, because the other three are three views of building a level and this is a different job.
+
+## Every refusal sticks, and can be copied
+
+Each tab keeps a list of what has gone wrong on it. The newest is a filled block under the title; the
+run is a bulleted log at the bottom of the panel. Severity is declared at the ~210 write sites rather
+than guessed at render time — which is how `NOT WRITTEN:` used to draw in the same grey as a receipt.
+`Cmd/Ctrl+C` copies the live tab's text, problems first, for handing to somebody else; `Esc` clears
+them.
+
+## Driveable by an agent, without taking your screen
+
+`--features debugger` adds the companion BRP plugin and an offscreen mirror camera, so an agent can
+press keys and take framed captures of the map with no window raised and no OS screen capture. The
+mirror renders the map only — Bevy draws a UI tree to one camera — so `bevy_devshot`'s whole-frame
+sentinel capture (`touch screenshot.request`) remains the way to see a panel.
 
 ## Testable without a GPU
 

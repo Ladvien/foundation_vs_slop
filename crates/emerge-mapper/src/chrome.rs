@@ -47,6 +47,14 @@ pub const LABEL: Color = Color::srgb(0.46, 0.44, 0.42);
 /// A refusal, a blocking finding, an expensive number.
 pub const DANGER: Color = Color::srgb(0.86, 0.36, 0.30);
 
+/// **The problem banner's fill.** Deeper and more saturated than [`DANGER`], which is a text colour —
+/// red text at [`DANGER`] on [`PANEL_BG`] is legible and quiet, and quiet is the failure being fixed
+/// here. A filled block is read before it is parsed, which a line of coloured prose is not.
+pub const PROBLEM_BG: Color = Color::srgb(0.52, 0.13, 0.10);
+/// What is written on [`PROBLEM_BG`]. Warm rather than pure white, so it belongs to the same palette
+/// as everything else in the panel.
+pub const PROBLEM_TEXT: Color = Color::srgb(1.0, 0.93, 0.90);
+
 /// **Machine-proposed, human-unconfirmed** — the VLM labeler's third state. A cool slate,
 /// deliberately neither [`ACCENT`] (amber = a live edit, yours) nor [`DANGER`] (red = wrong):
 /// a proposal is a question, and it must not read as either an answer or an alarm.
@@ -176,6 +184,261 @@ pub fn title(parent: &mut ChildSpawnerCommands, text: &str) {
         Text::new(text.to_owned()),
         TextColor(ACCENT),
         TextFont::from_font_size(15.0),
+    ));
+}
+
+// ── what a tab has to say ────────────────────────────────────────────────────────────────────────
+
+/// **A tab's voice: the running commentary, and the thing that went wrong.**
+///
+/// # The renderer was guessing at severity, and each tab guessed differently
+///
+/// Every tab used to hold one `status: String` written from ~215 places, and decided at *render* time
+/// whether it was bad news. The Map tab sniffed `status.starts_with("NOT SAVED")`; the Anim tab
+/// coloured by whether `rigs.ron` had loaded, which is a fact about a file rather than about the
+/// sentence; the Compose tab painted everything [`ACCENT`]; the Tiles tab had no colour rule at all,
+/// so a refusal was byte-identical to a receipt. `stamp refused:`, `is not a number of metres` and
+/// `NOT WRITTEN:` all rendered in the same grey as `stamped 4 piece(s)`.
+///
+/// **Severity is known at the write site and nowhere else.** So the write site states it, and no
+/// renderer is allowed an opinion — the same move `crate::keys` makes for bindings and this module
+/// makes for panels, for the third time and the same reason: a fact stated in two places drifts.
+///
+/// # Two slots, because one cannot both stick and stay current
+///
+/// A problem **survives every note**. That is the whole point — a refusal used to vanish the moment
+/// the cursor moved, because half of these messages fire on ordinary hovering. But a single slot that
+/// refused to be overwritten would swallow the receipts too: an author who fixes the problem and saves
+/// would watch the old error sit there and never learn the save worked.
+///
+/// So a note and a problem are different things with different lifetimes, and the panel shows both.
+/// `editor.rs`'s `Field::Edges` had already reached this conclusion for the one readout it owns —
+/// *"a fault is a state the map is in — it does not happen once and stop being true, so putting it on
+/// `Last` would let the next action erase it"*. This generalises that line to every tab.
+///
+/// # The banner and the log are one list seen twice
+///
+/// A problem does not replace the last one — it joins it. The banner shows the newest, because that
+/// is what just happened; the log down the bottom shows the run, because *"what has gone wrong on
+/// this tab"* is a different question from *"what went wrong just now"*, and the second one was
+/// unanswerable: each new refusal erased the one before it, so a session that raised five could only
+/// ever show the fifth.
+///
+/// One list means one clearing rule. [`Status::dismiss`] — `Esc` — takes down the banner **and** the
+/// log, because they are two views of the same thing and two clearing rules for one datum is the
+/// drift this module exists to prevent.
+///
+/// Not a `Resource`: each tab holds one inside the state it already owns, so there is nothing to
+/// register and no question about which tab a bare `Res<Status>` would have meant.
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub struct Status {
+    note: String,
+    problems: Vec<Problem>,
+    /// How many fell off the front of [`Self::problems`] at [`MAX_PROBLEMS`].
+    ///
+    /// Counted rather than forgotten. This crate's caps *"refuse and name rather than truncate"*,
+    /// and a log cannot refuse — the newest problem is the one most worth having — so it names what
+    /// it dropped instead. A log that silently forgot its first entries would be a log that reads
+    /// complete and is not.
+    dropped: usize,
+}
+
+/// One problem, and how many times it has been raised back to back.
+///
+/// **Consecutive repeats collapse.** A refusal fires per gesture, and gestures repeat: an author
+/// clicking four times at a blocked cell would otherwise push four identical lines and bury
+/// everything else on the tab. Only *consecutive* ones fold, so the order stays honest — the same
+/// rule `keys::rows` uses to collapse adjacent bindings that share a description.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Problem {
+    pub text: String,
+    pub count: usize,
+}
+
+impl Problem {
+    /// How it reads in the log: the text, and the tally only when there is one worth showing.
+    pub fn line(&self) -> String {
+        if self.count > 1 {
+            format!("{}  (x{})", self.text, self.count)
+        } else {
+            self.text.clone()
+        }
+    }
+}
+
+/// How many problems a tab keeps. Past this the oldest is dropped and counted — see
+/// [`Status::dropped`].
+///
+/// Sized to a panel rather than to memory: this is a list somebody reads down, and past a dozen or
+/// so a list stops being read and starts being scrolled, which is the same argument
+/// `keys::no_context_carries_more_than_a_learnable_vocabulary` makes one panel over.
+pub const MAX_PROBLEMS: usize = 12;
+
+impl Status {
+    /// **What just happened, and went as asked.** Replaces the last note; never touches the problem.
+    ///
+    /// This is the right call for a refusal the author is not owed an alarm about — clicking bare
+    /// ground with the remove tool armed, dragging a box round nothing. Those are answers, not
+    /// failures, and a red block for each would teach an author to stop reading red blocks.
+    pub fn note(&mut self, text: impl Into<String>) {
+        self.note = text.into();
+    }
+
+    /// **The editor could not do what was asked, or did only part of it.**
+    ///
+    /// The line, in practice: a write that did not reach disk, a refusal handed back by `emerge-core`,
+    /// input that would not parse, a piece that changed underneath the author, or an edit that
+    /// succeeded and then failed to redraw. Anything a person would want to still be on screen a
+    /// minute later.
+    pub fn problem(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        if let Some(last) = self.problems.last_mut() {
+            if last.text == text {
+                last.count += 1;
+                return;
+            }
+        }
+        self.problems.push(Problem { text, count: 1 });
+        if self.problems.len() > MAX_PROBLEMS {
+            self.problems.remove(0);
+            self.dropped += 1;
+        }
+    }
+
+    /// **A call that either worked or refused**, routed by which it did.
+    ///
+    /// For the helpers that return `Result<String, String>` — `Ok` is the receipt, `Err` is the
+    /// refusal. Written once here so no call site can talk itself into stringifying an error into a
+    /// note, which is exactly how `NOT WRITTEN:` ended up rendering grey.
+    pub fn say(&mut self, outcome: Result<String, String>) {
+        match outcome {
+            Ok(receipt) => self.note(receipt),
+            Err(refusal) => self.problem(refusal),
+        }
+    }
+
+    /// **Take the notices down** — the banner and the log together, because they are one list.
+    ///
+    /// `Esc`'s last layer, and the only thing that clears a problem without another replacing it.
+    pub fn dismiss(&mut self) {
+        self.problems.clear();
+        self.dropped = 0;
+    }
+
+    pub fn note_text(&self) -> &str {
+        &self.note
+    }
+
+    /// **The newest problem** — what the banner shows. Empty when there is none.
+    pub fn problem_text(&self) -> &str {
+        self.problems.last().map_or("", |p| p.text.as_str())
+    }
+
+    /// The whole run, oldest first — what the log shows and what a copy carries.
+    pub fn problems(&self) -> &[Problem] {
+        &self.problems
+    }
+
+    /// How many fell off the front at [`MAX_PROBLEMS`].
+    pub fn dropped(&self) -> usize {
+        self.dropped
+    }
+
+    pub fn has_problem(&self) -> bool {
+        !self.problems.is_empty()
+    }
+
+    /// **The one thing to say, when only one thing fits** — the problem if there is one, else the
+    /// note.
+    ///
+    /// For a log line and for the sentinel driver, whose whole job is to make a refusal visible in a
+    /// captured frame. Printing the note there would report `stamped 4 piece(s)` from an earlier verb
+    /// while the verb being logged had just refused.
+    pub fn line(&self) -> &str {
+        if self.has_problem() {
+            self.problem_text()
+        } else {
+            &self.note
+        }
+    }
+
+    /// Nothing to say at all — neither a receipt nor a refusal.
+    pub fn is_empty(&self) -> bool {
+        self.note.is_empty() && self.problems.is_empty()
+    }
+}
+
+/// The banner one tab shows its newest problem in. Carries which tab, so a shared painter cannot
+/// write another tab's block.
+#[derive(Component, Clone, Copy)]
+pub struct ProblemBanner(pub crate::tiles::Mode);
+
+/// **The problem block: filled, not tinted, and directly under the title.**
+///
+/// Spawned once per panel and hidden until there is something to say — `Display::None` rather than a
+/// zero-height node, so a quiet panel has no gap where the banner would be.
+///
+/// The glyph is `▲` and not `⚠`: the shipped face is `FiraMono-Regular.ttf`, which **has no U+26A0**
+/// (measured), and a missing codepoint draws as a tofu box — the same class of trap `CLAUDE.md`
+/// records for Bevy's own 95-codepoint default font, one font along.
+pub fn problem_banner(parent: &mut ChildSpawnerCommands, tab: crate::tiles::Mode) {
+    parent.spawn((
+        Node {
+            display: Display::None,
+            padding: UiRect::axes(Val::Px(GAP_ROW + 1.0), Val::Px(GAP_ROW)),
+            margin: UiRect::top(Val::Px(GAP_ROW)).with_bottom(Val::Px(GAP_TIGHT)),
+            ..default()
+        },
+        BackgroundColor(PROBLEM_BG),
+        Text::new(String::new()),
+        TextColor(PROBLEM_TEXT),
+        TextFont::from_font_size(11.0),
+        ProblemBanner(tab),
+    ));
+}
+
+/// A tab's error log, and which tab it belongs to.
+#[derive(Component, Clone, Copy)]
+pub struct ProblemLog(pub crate::tiles::Mode);
+
+/// One line of it. Rebuilt wholesale, so it carries nothing — `compose::ComposeLine`'s argument.
+#[derive(Component)]
+pub struct ProblemLogLine;
+
+/// **Everything that has gone wrong on this tab, at the bottom of its panel.**
+///
+/// The banner answers *"what just happened"*; this answers *"what has gone wrong here"*, which was
+/// unanswerable — each refusal replaced the last, so a session that raised five could only show the
+/// fifth. Bulleted and one line each, because it is a list to scan rather than prose to read.
+///
+/// `margin-top: auto` pushes it to the bottom of whatever panel holds it, which is the bottom-left
+/// of the screen for the panels pinned `full_height` and the end of the panel for the one that is
+/// not — without this needing to know which is which.
+pub fn problem_log(parent: &mut ChildSpawnerCommands, tab: crate::tiles::Mode) {
+    parent.spawn((
+        Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(GAP_TIGHT),
+            margin: UiRect::top(Val::Auto),
+            padding: UiRect::top(Val::Px(GAP_ROW)),
+            display: Display::None,
+            ..default()
+        },
+        ProblemLog(tab),
+    ));
+}
+
+/// One bullet. `•` and not `-`: the shipped face has U+2022 (checked, as U+26A0 was not), and a
+/// bullet reads as a list where a hyphen reads as a range.
+pub fn problem_log_line(parent: &mut ChildSpawnerCommands, text: &str, colour: Color) {
+    parent.spawn((
+        Text::new(format!("• {text}")),
+        TextColor(colour),
+        TextFont::from_font_size(10.0),
+        // A wrapped continuation restarts at column zero and breaks the bullet column — the same
+        // thing that set the Compose panel's width. The full text is on the banner and in `Cmd+C`.
+        TextLayout::new(Justify::Left, LineBreak::NoWrap),
+        ProblemLogLine,
     ));
 }
 
@@ -362,6 +625,120 @@ fn drive_shortcuts_overlay(
             // who learned the old list finds the rows where they were.
             key_census(p, &[tab.context(), Context::Global]);
         });
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    /// **The whole point.** A refusal survives every receipt that follows it — which is what the
+    /// single `status: String` could not do, because half these messages fire on ordinary hovering
+    /// and the next one along overwrote the last.
+    #[test]
+    fn a_problem_outlives_every_note() {
+        let mut s = Status::default();
+        s.problem("NOT SAVED: read-only file system");
+        for receipt in ["placed crate@7", "removal mode off", "saved", "filled 12"] {
+            s.note(receipt);
+            assert_eq!(
+                s.problem_text(),
+                "NOT SAVED: read-only file system",
+                "`{receipt}` erased the refusal"
+            );
+        }
+        assert_eq!(s.note_text(), "filled 12", "the receipt line stopped being current");
+    }
+
+    /// The other half, and the reason there are two slots rather than one that refuses to be
+    /// overwritten: an author who fixes the problem and saves has to be able to see the save work.
+    #[test]
+    fn a_note_is_still_shown_while_a_problem_stands() {
+        let mut s = Status::default();
+        s.problem("cannot record `break_table`: no such member");
+        s.note("`break_table` armed");
+        assert_eq!(s.note_text(), "`break_table` armed");
+        assert!(s.has_problem());
+    }
+
+    /// **A problem joins the last one; it does not replace it.** The banner shows the newest, the
+    /// log shows the run — which is the question that was unanswerable when a new refusal erased
+    /// the one before it.
+    #[test]
+    fn problems_accumulate_and_the_newest_is_the_banner() {
+        let mut s = Status::default();
+        s.problem("first");
+        s.problem("second");
+        assert_eq!(s.problem_text(), "second", "the banner shows the newest");
+        assert_eq!(s.problems().len(), 2, "and the log keeps both");
+        // One list, one clearing rule.
+        s.dismiss();
+        assert!(!s.has_problem());
+        assert!(s.problems().is_empty());
+        assert!(s.is_empty(), "dismissing left something behind");
+    }
+
+    /// **Consecutive repeats fold.** A refusal fires per gesture and gestures repeat; four identical
+    /// lines would bury everything else on the tab.
+    #[test]
+    fn a_repeated_problem_folds_into_a_count() {
+        let mut s = Status::default();
+        for _ in 0..4 {
+            s.problem("blocked: `floor@3` already covers that spot");
+        }
+        assert_eq!(s.problems().len(), 1);
+        assert_eq!(s.problems()[0].count, 4);
+        assert!(s.problems()[0].line().ends_with("(x4)"));
+
+        // Only CONSECUTIVE ones, so the order stays honest.
+        s.problem("NOT SAVED: read-only file system");
+        s.problem("blocked: `floor@3` already covers that spot");
+        assert_eq!(s.problems().len(), 3, "a repeat after something else is a new entry");
+    }
+
+    /// **The cap names what it dropped.** This crate's caps refuse and name rather than truncate; a
+    /// log cannot refuse the newest entry, so it counts the ones it let go instead.
+    #[test]
+    fn the_log_caps_and_says_how_many_it_dropped() {
+        let mut s = Status::default();
+        for i in 0..MAX_PROBLEMS + 5 {
+            s.problem(format!("problem {i}"));
+        }
+        assert_eq!(s.problems().len(), MAX_PROBLEMS);
+        assert_eq!(s.dropped(), 5);
+        assert_eq!(
+            s.problem_text(),
+            format!("problem {}", MAX_PROBLEMS + 4),
+            "the newest must survive the cap — it is the one worth having"
+        );
+        s.dismiss();
+        assert_eq!(s.dropped(), 0, "dismissing clears the tally with the list");
+    }
+
+    /// `say` is the one place a `Result` becomes a message, so no call site can stringify an error
+    /// into the quiet slot — the bug that had `NOT WRITTEN:` rendering as a receipt at nine
+    /// `tiles::persist` call sites.
+    #[test]
+    fn say_routes_by_the_result_and_not_by_the_wording() {
+        let mut s = Status::default();
+        s.say(Ok("recorded 3 member(s)".to_owned()));
+        assert_eq!(s.note_text(), "recorded 3 member(s)");
+        assert!(!s.has_problem());
+
+        // Deliberately worded like a receipt: routing must not depend on how it reads.
+        s.say(Err("everything went fine, honestly".to_owned()));
+        assert_eq!(s.problem_text(), "everything went fine, honestly");
+        assert_eq!(s.note_text(), "recorded 3 member(s)", "an Err overwrote the receipt");
+    }
+
+    /// One line for a log or a captured frame, and it must be the bad news when there is any.
+    #[test]
+    fn the_one_line_form_prefers_the_problem() {
+        let mut s = Status::default();
+        s.note("stamped 4 piece(s)");
+        assert_eq!(s.line(), "stamped 4 piece(s)");
+        s.problem("stamp refused: nothing offers a surface");
+        assert_eq!(s.line(), "stamp refused: nothing offers a surface");
     }
 }
 

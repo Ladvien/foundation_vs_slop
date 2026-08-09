@@ -7,10 +7,11 @@
 //!
 //! # The grid is Bevy's, not ours
 //!
-//! `bevy::dev_tools::infinite_grid` (0.19) draws the ground plane in a fullscreen shader, computed
-//! per pixel and faded with distance so the horizon does not alias. Verified in the vendored source
-//! at `bevy_dev_tools-0.19.0/src/infinite_grid.rs`; it needs the `bevy_dev_tools` feature, which this
-//! crate's manifest turns on.
+//! **The ground is the map's, not a dev tool's.** This used `bevy::dev_tools::infinite_grid`, whose
+//! own settings block promised *"one metre between minor lines, so the grid IS the snap"* — and
+//! `emerge_core::grid::SNAP` is 0.5, so every square was two cells. It also drew forever, which made
+//! the ground outside `Map::bounds` look exactly as buildable as the ground inside it. Both are now
+//! `editor::draw_map_grid`, bounded by the map and spaced by the constant that defines a cell.
 //!
 //! # One camera, and it carries a marker
 //!
@@ -21,7 +22,6 @@
 
 use std::f32::consts::TAU;
 
-use bevy::dev_tools::infinite_grid::{InfiniteGrid, InfiniteGridPlugin, InfiniteGridSettings};
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
 
@@ -95,8 +95,7 @@ pub struct ViewPlugin;
 
 impl Plugin for ViewPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(InfiniteGridPlugin)
-            .init_resource::<Rig>()
+        app.init_resource::<Rig>()
             .add_systems(Startup, setup)
             .add_systems(Update, drive.in_set(keys::Phase::Act));
     }
@@ -119,19 +118,6 @@ fn setup(mut commands: Commands, rig: Res<Rig>) {
         AmbientLight {
             brightness: 320.0,
             ..default()
-        },
-    ));
-
-    commands.spawn((
-        Name::new("ground grid"),
-        InfiniteGrid,
-        InfiniteGridSettings {
-            // One metre between minor lines, so the grid IS the snap: an author counting squares is
-            // counting the same units the map records. A grid at some other scale is a decoration
-            // that happens to be near the truth, which is worse than none.
-            scale: 1.0,
-            fadeout_distance: 140.0,
-            ..InfiniteGridSettings::default()
         },
     ));
 

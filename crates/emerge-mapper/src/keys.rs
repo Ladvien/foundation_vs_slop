@@ -121,6 +121,8 @@ pub enum Action {
     Generate,
     /// Fill from what the kit's tiles DECLARE, rather than from what the map already shows.
     GenerateDeclared,
+    /// Step the drawn grid's spacing. A view setting, not an edit — see `editor::GridSpacing`.
+    CycleGrid,
     PanForward,
     PanBack,
     PanLeft,
@@ -271,8 +273,12 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::NextTab, KeyCode::Tab, false, Context::Global, "Tab", "next tab"),
     b(Action::MapTab, KeyCode::Digit1, false, Context::Global, "1", "map tab"),
     b(Action::TilesTab, KeyCode::Digit2, false, Context::Global, "2", "tiles tab"),
-    b(Action::AnimTab, KeyCode::Digit3, false, Context::Global, "3", "animation tab"),
-    b(Action::ComposeTab, KeyCode::Digit4, false, Context::Global, "4", "compose tab"),
+    // **The digits follow the strip, and the strip is `Mode::ALL`.** A number key that jumped to
+    // the third tab while the third tab on screen was a different one would be the census
+    // disagreeing with the thing it describes — which is the whole failure this file exists to
+    // prevent, one layer up from key allocation.
+    b(Action::ComposeTab, KeyCode::Digit3, false, Context::Global, "3", "compose tab"),
+    b(Action::AnimTab, KeyCode::Digit4, false, Context::Global, "4", "animation tab"),
     // **The modified tab key: go there, and take this with you.**
     //
     // Beside `2` because it is the same destination with a subject — `Cmd+2` reads as "the Tiles tab,
@@ -283,12 +289,40 @@ pub const BINDINGS: &[Binding] = &[
     // `Global` rather than `Map` because the Map context is at its twelve-row ceiling and this is a
     // navigation verb, which is what the rest of this block is. On the other two tabs there is simply
     // nothing under the cursor to send, and it says so.
-    b(Action::EditTile, KeyCode::Digit2, true, Context::Global, "2", "edit this tile"),
+    // **"this tile" named nothing an author could point at.** The row read `Cmd+2  edit this tile`,
+    // in the Global block, which on the Map tab renders below eleven map rows inside an overlay you
+    // have to hold `K` to see — so the verb was reported missing by someone looking straight at it.
+    // Every other row in this census names its subject; this one said "this" and left the reader to
+    // guess whether it meant the armed brush, the selected row, or what the mouse was over.
+    b(Action::EditTile, KeyCode::Digit2, true, Context::Global, "2", "edit the piece under the cursor"),
     // **Held, not toggled**, and read with `keys::pressed`. The list is a thing you glance at with a
     // thumb down, not a mode you enter and have to leave — and a modal you can forget you opened is a
     // modal that eats the next keystroke.
     b(Action::Shortcuts, KeyCode::KeyK, false, Context::Global, "K", "hold for shortcuts"),
     b(Action::Save, KeyCode::KeyS, true, Context::Global, "S", "save"),
+    // **The agent's read-out, and it is Global because a problem is.**
+    //
+    // It was `Context::Tiles`, copying that tab's detail pane. Every tab can now refuse, and a refusal
+    // an agent cannot get out of the window is one that has to be retyped from a screenshot — bevy_ui
+    // has no selectable text. So the verb follows the thing it is for: on any tab this copies what
+    // that tab is showing, with the problem first. Leaving Tiles also gives that context back the row
+    // it was over, which is what made `Esc` affordable below.
+    //
+    // Legal against the three bare `C` bindings (aim right, cell anchor, check all rigs) on the same
+    // rule as `S`/`Cmd+S`: `just_pressed` refuses a bare binding while the modifier is down.
+    b(Action::CopyInfo, KeyCode::KeyC, true, Context::Global, "C", "copy this tab's text"),
+    // **One key for "not that", now on every tab** — and the problem banner is its outermost layer.
+    //
+    // It was `Context::Map`, where it peeled back one layer per press: a piece in hand, then the armed
+    // tool, then the armed piece. A problem now sits outside all three, because a message that sticks
+    // until something clears it needs something to clear it, and on the other three tabs there was no
+    // key that meant "I have read that" at all.
+    //
+    // **Global, not four bindings.** `Action` must resolve to exactly one row
+    // (`every_action_has_exactly_one_binding`), so a per-tab dismiss would be three more actions
+    // spelling one idea. The map keeps its peel by handling the banner first and returning — the
+    // layering the census promises, with one more layer on top.
+    b(Action::Cancel, KeyCode::Escape, false, Context::Global, "Esc", "put back / stop / clear / dismiss"),
     // **Undo is the MAP's.** It was `Global`, and `keys` had lost its `in_map_mode` run condition, so
     // `Cmd+Z` on the Tiles tab silently despawned a flood fill — up to ~1,400 placements — while every
     // `MapRoot` panel was `Display::None` and nothing on screen changed. An undo you cannot see the
@@ -334,6 +368,12 @@ pub const BINDINGS: &[Binding] = &[
     // the Map), and vertically suggestive in a way no letter is. One subgrid unit per press, held
     // repeat for a long ride up; the authored offset is `Placed::lift`, the one amendment to
     // "height is never the author's".
+    // **`J` steps the grid.** A setting rather than a verb, and the only free letter under the right
+    // hand — it sits beside `H`, which is the other key about how you are reading the map rather
+    // than about changing it. The kit's module is what an author counts in, and that is not the same
+    // number as the snap: the site kit builds on 1 m while `grid::SNAP` is 0.5, so a grid fixed to
+    // either one is wrong for somebody. This makes it theirs.
+    b(Action::CycleGrid, KeyCode::KeyJ, false, Context::Map, "J", "grid: 0.5 / 1 / 2 / 4 m"),
     b(Action::LiftDown, KeyCode::BracketLeft, false, Context::Map, "[", "lift / lower this"),
     b(Action::LiftUp, KeyCode::BracketRight, false, Context::Map, "]", "lift / lower this"),
     b(Action::Fill, KeyCode::KeyF, false, Context::Map, "F", "flood fill"),
@@ -349,10 +389,6 @@ pub const BINDINGS: &[Binding] = &[
     // what the clone tool does: the Cmd+Z shape, one key, the shifted form for the sibling verb.
     bs(Action::MoveMode, KeyCode::KeyB, false, false, Context::Map, "B", "move / Shift: clone a set"),
     bs(Action::CloneMode, KeyCode::KeyB, false, true, Context::Map, "B", "move / Shift: clone a set"),
-    // **One key for "not that"**, stepping back out one layer per press: a piece in hand, then the
-    // armed tool, then the armed piece. One binding rather than one per state — an author pressing
-    // `Esc` does not first work out which of the three they are in.
-    b(Action::Cancel, KeyCode::Escape, false, Context::Map, "Esc", "put back / stop / clear"),
     b(Action::RenameMap, KeyCode::KeyN, false, Context::Map, "N", "rename map"),
     b(Action::OwnToggle, KeyCode::KeyO, false, Context::Map, "O", "pin / unpin"),
     // **Two sources, one row.** `rows()` collapses adjacent bindings sharing a `does` string, so the
@@ -384,10 +420,6 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::NextCandidate, KeyCode::ArrowDown, false, Context::Tiles, "down", "walk the lists / Shift: x5"),
     b(Action::FocusCandidates, KeyCode::ArrowLeft, false, Context::Tiles, "left", "walk the lists / Shift: x5"),
     b(Action::FocusLibrary, KeyCode::ArrowRight, false, Context::Tiles, "right", "walk the lists / Shift: x5"),
-    // **Cmd+C copies the detail pane** — its text, top to bottom, into the system clipboard.
-    // bevy_ui has no selectable text, and an author who wants a piece's facts in a message should
-    // not have to retype what is already on screen.
-    b(Action::CopyInfo, KeyCode::KeyC, true, Context::Tiles, "C", "copy the pane's text"),
     b(Action::TypeId, KeyCode::KeyI, false, Context::Tiles, "I", "type an id"),
     // **"mount", not "layer".** It cycles `Descriptor::mount` — what the piece stands on — and the
     // subgrid below has its own `layer y` picker for the lattice slice. One panel said "layer" twice
@@ -815,7 +847,7 @@ mod tests {
             Action::Save, Action::Undo, Action::Redo, Action::Shortcuts, Action::EditTile,
             Action::AimLeft, Action::AimRight, Action::AimReset, Action::Cancel,
             Action::Fill, Action::Remove, Action::MoveMode, Action::CloneMode, Action::RenameMap,
-            Action::OwnToggle, Action::Generate, Action::GenerateDeclared,
+            Action::OwnToggle, Action::Generate, Action::GenerateDeclared, Action::CycleGrid,
             Action::PanForward, Action::PanBack, Action::PanLeft, Action::PanRight,
             Action::TurnViewLeft, Action::TurnViewRight,
             Action::PrevCandidate, Action::NextCandidate, Action::TypeId, Action::CycleMount,
@@ -929,7 +961,16 @@ mod tests {
     /// list stops being memorised and starts being read.
     #[test]
     fn no_context_carries_more_than_a_learnable_vocabulary() {
-        for context in [Context::Global, Context::Map, Context::Tiles, Context::Anim] {
+        for context in [
+            Context::Global,
+            Context::Map,
+            Context::Tiles,
+            Context::Anim,
+            // **Compose was missing from both of these lists**, so the fourth tab's rows were
+            // neither counted against the ceiling nor checked for surviving the collapse. A tab
+            // absent from the test that polices the tabs is a tab the policing does not reach.
+            Context::Compose,
+        ] {
             let n = rows(context).len();
             assert!(
                 n <= 12,
@@ -1004,7 +1045,16 @@ mod tests {
     /// Collapsing must not lose a binding — every one still appears in exactly one row.
     #[test]
     fn collapsing_rows_loses_nothing() {
-        for context in [Context::Global, Context::Map, Context::Tiles, Context::Anim] {
+        for context in [
+            Context::Global,
+            Context::Map,
+            Context::Tiles,
+            Context::Anim,
+            // **Compose was missing from both of these lists**, so the fourth tab's rows were
+            // neither counted against the ceiling nor checked for surviving the collapse. A tab
+            // absent from the test that polices the tabs is a tab the policing does not reach.
+            Context::Compose,
+        ] {
             let chords: String = rows(context)
                 .iter()
                 .map(|r| r.chord.clone())

@@ -3253,6 +3253,7 @@ dependencies = [
  "arboard",
  "base64 0.22.1",
  "bevy",
+ "bevy_debugger_bevy",
  "bevy_devshot",
  "emerge-anim",
  "emerge-bevy",

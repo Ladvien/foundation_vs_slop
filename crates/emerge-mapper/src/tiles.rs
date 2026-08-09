@@ -48,9 +48,15 @@ pub enum Mode {
 }
 
 impl Mode {
-    /// The tabs, in the order they are shown. Map first: it is the job, and configuring tiles is
-    /// what you do in order to do it.
-    pub const ALL: [Mode; 4] = [Mode::Map, Mode::Tiles, Mode::Anim, Mode::Compose];
+    /// **The tabs, in the order they are shown** — and the order `Tab` cycles, and the order the
+    /// number keys run in. One list, so the strip and the keyboard cannot disagree.
+    ///
+    /// Map first: it is the job, and configuring tiles is what you do in order to do it. **Anim
+    /// last**, because it is the odd one out — Map, Tiles and Compose are three views of building a
+    /// level, and the rig bench is a different job that happens to live in the same binary. Grouping
+    /// the three that share a subject puts the boundary where the work changes rather than where the
+    /// tabs were added.
+    pub const ALL: [Mode; 4] = [Mode::Map, Mode::Tiles, Mode::Compose, Mode::Anim];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -99,8 +105,10 @@ pub struct ImportState {
     /// support" the moment anyone did anything, and the one number that says whether you have seen
     /// the whole list was gone for the rest of the session.
     pub summary: String,
-    /// The last thing that happened. Transient, and lives at the bottom where a changing line belongs.
-    pub status: String,
+    /// The last thing that happened, and the last thing that went wrong — see
+    /// [`crate::chrome::Status`]. This tab had **no colour rule at all**: the action line was drawn
+    /// in one fixed colour, so `NOT WRITTEN:` and `added \`crate\`` were byte-identical.
+    pub status: crate::chrome::Status,
     /// The candidate being renamed and the raw text typed so far, or `None` when not renaming.
     /// Snake case is applied for display and on commit, exactly as the map's name is — one rule, one
     /// behaviour.
@@ -472,7 +480,7 @@ fn on_note_click(
         return;
     };
     edit.active = Some((target, now));
-    state.status = "describe it — Enter to keep it, Esc to leave it".to_owned();
+    state.status.note("describe it — Enter to keep it, Esc to leave it".to_owned());
 }
 
 /// Typing a description. Free text, so unlike an id nothing is forced as you type.
@@ -495,7 +503,7 @@ fn note_keys(
                 // The piece this field was opened on, not whatever has the focus now.
                 let before = state.snapshot(&project);
                 let Some((d, where_to)) = state.at_target(&target, &mut project.measured) else {
-                    state.status = "the description was not kept — that tile is gone".to_owned();
+                    state.status.problem("the description was not kept — that tile is gone".to_owned());
                     return;
                 };
                 // Empty clears, the same rule the edge and anchor tokens follow — one keystroke path
@@ -507,11 +515,11 @@ fn note_keys(
                 } else {
                     format!("described: {text}")
                 };
-    state.status = persist(&mut project, where_to, said);
+    state.status.say(persist(&mut project, where_to, said));
             }
             Key::Escape => {
                 edit.active = None;
-                state.status = "description unchanged".to_owned();
+                state.status.note("description unchanged".to_owned());
             }
             Key::Backspace => {
                 if let Some((_, raw)) = edit.active.as_mut() {
@@ -659,9 +667,8 @@ fn on_scale_click(
     // seeding it with the current number meant the first digit appended to it, and it looked like it
     // had worked. The value being replaced stays on screen until Enter.
     edit.active = Some((target, String::new()));
-    state.status =
-        "width: type the metres this piece should stand at, Enter to keep it, Esc to leave it alone"
-            .to_owned();
+    state.status.note("width: type the metres this piece should stand at, Enter to keep it, Esc to leave it alone"
+            .to_owned());
 }
 
 /// Digits and a single point, filtered at the keystroke.
@@ -688,17 +695,17 @@ fn scale_keys(
                 };
                 let text = raw.trim().to_owned();
                 if text.is_empty() {
-                    state.status = "width unchanged — nothing typed".to_owned();
+                    state.status.note("width unchanged — nothing typed".to_owned());
                     return;
                 }
                 let Ok(want) = text.parse::<f32>() else {
-                    state.status = format!("`{text}` is not a number of metres");
+                    state.status.problem(format!("`{text}` is not a number of metres"));
                     return;
                 };
                 // Taken before the write, which is the only moment the old value still exists.
                 let before = state.snapshot(&project);
                 let Some((d, where_to)) = state.at_target(&target, &mut project.measured) else {
-                    state.status = "the width was not kept — that tile is gone".to_owned();
+                    state.status.problem("the width was not kept — that tile is gone".to_owned());
                     return;
                 };
                 let id = d.id.clone();
@@ -707,13 +714,13 @@ fn scale_keys(
                 let r = match bake_width(d, want) {
                     Ok(r) => r,
                     Err(e) => {
-                        state.status = format!("`{id}`: {e}");
+                        state.status.problem(format!("`{id}`: {e}"));
                         return;
                     }
                 };
                 // The width it already stands at: nothing changed, so nothing to record or write.
                 if r == 1.0 {
-                    state.status = format!("{id} already stands {want:.2} m wide");
+                    state.status.note(format!("{id} already stands {want:.2} m wide"));
                     return;
                 }
                 let (w, dep) = d.extent.footprint.unwrap_or((want, 0.0));
@@ -722,11 +729,11 @@ fn scale_keys(
                     None => format!("{id} — {w:.2} x {dep:.2} m, back at its authored size"),
                 };
                 state.record(before);
-                state.status = persist(&mut project, where_to, said);
+                state.status.say(persist(&mut project, where_to, said));
             }
             Key::Escape => {
                 edit.active = None;
-                state.status = "width unchanged".to_owned();
+                state.status.note("width unchanged".to_owned());
             }
             Key::Backspace => {
                 if let Some((_, raw)) = edit.active.as_mut() {
@@ -801,8 +808,7 @@ fn on_mount_height_click(
     // Starts empty, the same call `on_size_field_click` and `on_scale_click` make — seeding it means
     // the first digit appends to the number already there.
     edit.active = Some((target, String::new()));
-    state.status =
-        "height: type the metres up the wall, Enter to keep it, Esc to leave it alone".to_owned();
+    state.status.note("height: type the metres up the wall, Enter to keep it, Esc to leave it alone".to_owned());
 }
 
 /// Digits and a single point, filtered at the keystroke — the rule `size_edit_keys` states.
@@ -824,17 +830,17 @@ fn mount_height_keys(
                 };
                 let text = raw.trim().to_owned();
                 if text.is_empty() {
-                    state.status = "height unchanged — nothing typed".to_owned();
+                    state.status.note("height unchanged — nothing typed".to_owned());
                     return;
                 }
                 let Ok(want) = text.parse::<f32>() else {
-                    state.status = format!("`{text}` is not a number of metres");
+                    state.status.problem(format!("`{text}` is not a number of metres"));
                     return;
                 };
                 // **Zero is legal, below the floor is not.** A wall marking at skirting height is a
                 // real thing to author; a negative one is under the floor, where no wall is.
                 if !want.is_finite() || want < 0.0 {
-                    state.status = format!("a wall mount cannot sit at {text} m");
+                    state.status.problem(format!("a wall mount cannot sit at {text} m"));
                     return;
                 }
                 let found = state
@@ -843,29 +849,28 @@ fn mount_height_keys(
                         d.mount.as_ref().map(|m| (d.id.clone(), m.clone(), where_to))
                     });
                 let Some((id, mount, where_to)) = found else {
-                    state.status = "the height was not kept — that tile is gone".to_owned();
+                    state.status.problem("the height was not kept — that tile is gone".to_owned());
                     return;
                 };
                 // Refused by name rather than silently ignored: the field is only drawn for mounts
                 // that carry a height, so reaching here means the mount changed under an open field.
                 let Some(next) = emerge_core::descriptor::with_mount_height(&mount, want) else {
-                    state.status =
-                        format!("`{id}` is not on a wall, so it has no height to set");
+                    state.status.problem(format!("`{id}` is not on a wall, so it has no height to set"));
                     return;
                 };
                 let before = state.snapshot(&project);
                 let Some((d, _)) = state.at_target(&target, &mut project.measured) else {
-                    state.status = "the height was not kept — that tile is gone".to_owned();
+                    state.status.problem("the height was not kept — that tile is gone".to_owned());
                     return;
                 };
                 d.mount = Some(next);
                 state.record(before);
                 let said = format!("{id} — {want:.2} m up the wall");
-    state.status = persist(&mut project, where_to, said);
+    state.status.say(persist(&mut project, where_to, said));
             }
             Key::Escape => {
                 edit.active = None;
-                state.status = "height unchanged".to_owned();
+                state.status.note("height unchanged".to_owned());
             }
             Key::Backspace => {
                 if let Some((_, raw)) = edit.active.as_mut() {
@@ -911,7 +916,7 @@ fn tile_history_keys(
     let verb = if back { "undo" } else { "redo" };
     let taken = if back { state.undo.pop() } else { state.redo.pop() };
     let Some(want) = taken else {
-        state.status = format!("nothing to {verb} on this tab");
+        state.status.note(format!("nothing to {verb} on this tab"));
         return;
     };
 
@@ -938,9 +943,9 @@ fn tile_history_keys(
         } else {
             state.redo.push(want);
         }
-        state.status = format!(
+        state.status.problem(format!(
             "cannot {verb}: the map still places `{named}` — remove or undo those placements first"
-        );
+        ));
         return;
     }
 
@@ -957,10 +962,10 @@ fn tile_history_keys(
             state.selected = state.selected.min(state.candidates.len().saturating_sub(1));
             if back {
                 state.redo.push(now);
-                state.status = "undid the last tile edit".to_owned();
+                state.status.note("undid the last tile edit".to_owned());
             } else {
                 state.undo.push(now);
-                state.status = "put the tile edit back".to_owned();
+                state.status.note("put the tile edit back".to_owned());
             }
         }
         Err(e) => {
@@ -969,7 +974,7 @@ fn tile_history_keys(
             } else {
                 state.redo.push(want);
             }
-            state.status = format!("could not {verb}: {e}");
+            state.status.problem(format!("could not {verb}: {e}"));
         }
     }
 }
@@ -1086,7 +1091,7 @@ fn apply_verb(
     state: &mut ImportState,
 ) {
     let Some(at) = edit.at else {
-        state.status = "pick a cell first".to_owned();
+        state.status.note("pick a cell first".to_owned());
         return;
     };
     apply_verb_to(verb, &[at], edit, project, state);
@@ -1154,21 +1159,21 @@ impl RotateAxis {
 /// not trigger one.
 fn rotate_mesh(axis: RotateAxis, force: bool, project: &mut Project, state: &mut ImportState) -> bool {
     let Some(d) = state.editing(&project.measured) else {
-        state.status = "no tile is selected".to_owned();
+        state.status.note("no tile is selected".to_owned());
         return false;
     };
     let Some(mesh) = d.mesh.clone() else {
-        state.status = format!("`{}` has no mesh to turn", d.id);
+        state.status.problem(format!("`{}` has no mesh to turn", d.id));
         return false;
     };
     let authored_cells = d.subgrid.as_ref().map_or(0, |g| g.cells.len());
     if axis != RotateAxis::Y && authored_cells > 0 && !force {
-        state.status = format!(
+        state.status.problem(format!(
             "`{}` has {authored_cells} authored cell(s). A {} turn swaps its height with a floor \
              axis and there is no mapping for that — hold Shift to turn it anyway and clear them.",
             d.id,
             axis.label()
-        );
+        ));
         return false;
     }
     // **Before the extent moves.** A Y turn maps the cells onto the turned piece, and the mapping
@@ -1178,7 +1183,7 @@ fn rotate_mesh(axis: RotateAxis, force: bool, project: &mut Project, state: &mut
     let glb = match emerge_core::glb::Glb::open(&path) {
         Ok(glb) => glb,
         Err(why) => {
-            state.status = format!("{mesh}: {why}");
+            state.status.problem(format!("{mesh}: {why}"));
             return false;
         }
     };
@@ -1195,7 +1200,7 @@ fn rotate_mesh(axis: RotateAxis, force: bool, project: &mut Project, state: &mut
     d.align.rotate = (want != (0, 0, 0)).then_some(want);
     if let Err(why) = emerge_core::import::remeasure_rotated(d, &glb, before) {
         d.align.rotate = before;
-        state.status = why;
+        state.status.problem(why);
         return false;
     }
     // The lattice, moved or dropped. Both halves of a Y turn together — the cells and the divisions —
@@ -1223,7 +1228,7 @@ fn rotate_mesh(axis: RotateAxis, force: bool, project: &mut Project, state: &mut
         d.id, want.0, want.1, want.2
     );
     state.record(history_before);
-    state.status = persist(project, where_to, said);
+    state.status.say(persist(project, where_to, said));
     true
 }
 
@@ -1266,7 +1271,7 @@ fn scan_mesh(project: &mut Project, state: &mut ImportState) {
     let div = match focused_div(state, project) {
         Ok(div) => div,
         Err(why) => {
-            state.status = why;
+            state.status.problem(why);
             return;
         }
     };
@@ -1274,7 +1279,7 @@ fn scan_mesh(project: &mut Project, state: &mut ImportState) {
         return;
     };
     let Some(mesh) = d.mesh.clone() else {
-        state.status = format!("`{}` has no mesh to scan", d.id);
+        state.status.problem(format!("`{}` has no mesh to scan", d.id));
         return;
     };
     // **The rotation the divisions were derived with.** `div` comes from the piece's `extent`, which
@@ -1286,7 +1291,7 @@ fn scan_mesh(project: &mut Project, state: &mut ImportState) {
         Some(r) => match emerge_core::descriptor::quarter_turns_xyz(r, &d.id) {
             Ok(q) => q,
             Err(why) => {
-                state.status = why;
+                state.status.problem(why);
                 return;
             }
         },
@@ -1299,7 +1304,7 @@ fn scan_mesh(project: &mut Project, state: &mut ImportState) {
     {
         Ok(cells) => cells,
         Err(why) => {
-            state.status = format!("{mesh}: {why}");
+            state.status.problem(format!("{mesh}: {why}"));
             return;
         }
     };
@@ -1320,7 +1325,7 @@ fn scan_mesh(project: &mut Project, state: &mut ImportState) {
         cells.len()
     );
     state.record(history_before);
-    state.status = persist(project, where_to, said);
+    state.status.say(persist(project, where_to, said));
 }
 
 /// **Scan a candidate the moment it is selected**, so the common case needs no keypress at all.
@@ -1411,7 +1416,7 @@ fn apply_verb_to(
     let div = match focused_div(state, project) {
         Ok(div) => div,
         Err(why) => {
-            state.status = why;
+            state.status.problem(why);
             return;
         }
     };
@@ -1439,7 +1444,7 @@ fn apply_verb_to(
             };
             d.settle_lattice();
     state.record(history_before);
-    state.status = persist(project, where_to, said);
+    state.status.say(persist(project, where_to, said));
         }
         CellVerb::Clear => {
             // Taken before the write — the only moment the old value still exists.
@@ -1459,7 +1464,7 @@ fn apply_verb_to(
                 format!("cell {},{},{} cleared", first.0, first.1, first.2)
             };
     state.record(history_before);
-    state.status = persist(project, where_to, said);
+    state.status.say(persist(project, where_to, said));
         }
         CellVerb::Edge | CellVerb::Anchor => {
             let field = if verb == CellVerb::Edge {
@@ -1477,7 +1482,7 @@ fn apply_verb_to(
             // the edit — or, once that was noticed, refused it and threw away what had been typed.
             // Neither is what the author asked for; the cell they opened the field on is.
             edit.pending = Some(cells.to_vec());
-            state.status = if many {
+            state.status.note(if many {
                 format!(
                     "type a {} token for {} cells, Enter to keep it (empty clears), Esc to leave it",
                     verb.label(),
@@ -1488,7 +1493,7 @@ fn apply_verb_to(
                     "type a {} token, Enter to keep it (empty clears), Esc to leave it",
                     verb.label()
                 )
-            };
+            });
         }
     }
 }
@@ -1616,7 +1621,7 @@ fn click_lattice(
     // The face is named because it is the useful half: it says which neighbour will read whatever
     // token goes here. `SubCell::edge` is one token per cell, so this picks the cell — a corner cell
     // sits on two faces and presents the same token to both, which is the schema's own design.
-    state.status = match face {
+    state.status.note(match face {
         Some(f) => format!(
             "cell {},{},{} — {} face, the side a neighbour reads",
             at.0,
@@ -1625,7 +1630,7 @@ fn click_lattice(
             f.label()
         ),
         None => format!("cell {},{},{} — picked from above", at.0, at.1, at.2),
-    };
+    });
 }
 
 /// Outline the cell under the cursor, so pointing at the piece has an answer before clicking.
@@ -1772,13 +1777,11 @@ fn cell_keys(
                 // target was never opened by a verb, so there is nothing it could mean; that is a
                 // bug rather than an author error, and it says so instead of guessing at a cell.
                 let Some(targets) = edit.pending.take() else {
-                    state.status =
-                        format!("`{raw}` was not kept — this field was opened without a cell.");
+                    state.status.problem(format!("`{raw}` was not kept — this field was opened without a cell."));
                     return;
                 };
                 let Some(target) = edit.target.take() else {
-                    state.status =
-                        format!("`{raw}` was not kept — this field was opened without a tile.");
+                    state.status.problem(format!("`{raw}` was not kept — this field was opened without a tile."));
                     return;
                 };
                 let token = emerge_core::naming::to_snake_case(&raw);
@@ -1792,7 +1795,7 @@ fn cell_keys(
                 {
                     Ok(div) => div,
                     Err(why) => {
-                        state.status = why;
+                        state.status.problem(why);
                         return;
                     }
                 };
@@ -1801,7 +1804,7 @@ fn cell_keys(
                 // destroyed it along with whichever edit the snapshot actually belonged to.
                 let history_before = state.snapshot(&project);
                 let Some((d, where_to)) = state.at_target(&target, &mut project.measured) else {
-                    state.status = format!("`{raw}` was not kept — that tile is gone.");
+                    state.status.problem(format!("`{raw}` was not kept — that tile is gone."));
                     return;
                 };
                 let mut wrote = 0usize;
@@ -1823,17 +1826,19 @@ fn cell_keys(
                     (n, false, _) => format!("{n} cells = `{token}`"),
                 };
                 // Nothing landed means nothing to write, and nothing to remember either.
-                state.status = if wrote == 0 {
-                    said
+                // Nothing landed means nothing to write, and nothing to remember either.
+                if wrote == 0 {
+                    state.status.note(said);
                 } else {
                     state.record(history_before);
-                    persist(&mut project, where_to, said)
-                };
+                    let wrote = persist(&mut project, where_to, said);
+                    state.status.say(wrote);
+                }
             }
             Key::Escape => {
                 edit.active = None;
                 edit.pending = None;
-                state.status = "cell unchanged".to_owned();
+                state.status.note("cell unchanged".to_owned());
             }
             Key::Backspace => {
                 if let Some((_, raw)) = edit.active.as_mut() {
@@ -2233,6 +2238,13 @@ fn commit_measured(
     let text = measured.to_ron()?;
     emerge_core::ron_surgery::save_atomic(&path, &text)?;
 
+    // **What the Map has to redraw, worked out by comparison.** The already-placed entities were
+    // built from the shapes in `project.library`; anything whose resolved descriptor differs in the
+    // library replacing it is now standing on screen in a form the project no longer describes.
+    // Derived here rather than declared by the fifteen edit paths that reach this door — see
+    // `Project::touched`.
+    project.touched.extend(changed_ids(&project.library, &library));
+
     project.measured = measured;
     project.library = library;
     project.masks = masks;
@@ -2240,17 +2252,85 @@ fn commit_measured(
     Ok(path)
 }
 
+/// Ids in `new` that `old` did not have, or had differently.
+///
+/// `Descriptor` derives `PartialEq`, so this is the whole of "did this piece change". An id that
+/// only exists in `old` is a removal, and a removed descriptor has no placements left to redraw —
+/// `commit_measured` refuses a removal the map still uses.
+fn changed_ids(old: &emerge_core::library::Library, new: &emerge_core::library::Library) -> Vec<String> {
+    new.descriptors
+        .iter()
+        .filter(|d| old.get(&d.id) != Some(*d))
+        .map(|d| d.id.clone())
+        .collect()
+}
+
+#[cfg(test)]
+mod changed_ids_tests {
+    use super::*;
+    use emerge_core::descriptor::Descriptor;
+    use emerge_core::library::Library;
+
+    fn lib(ds: Vec<Descriptor>) -> Library {
+        Library { version: 1, note: None, descriptors: ds }
+    }
+
+    fn piece(id: &str, y_offset: Option<f32>) -> Descriptor {
+        let mut d = Descriptor { id: id.to_owned(), ..Descriptor::default() };
+        d.align.y_offset = y_offset;
+        d
+    }
+
+    /// **A descriptor that changed is named; one that did not is not.**
+    ///
+    /// The whole reason this is a comparison rather than a list the edit paths append to: fifteen
+    /// of them reach `commit_measured`, and the sixteenth would forget.
+    #[test]
+    fn only_the_pieces_that_actually_moved_are_named() {
+        let before = lib(vec![piece("floor", Some(-0.06)), piece("wall", None)]);
+        let after = lib(vec![piece("floor", Some(-0.12)), piece("wall", None)]);
+        assert_eq!(changed_ids(&before, &after), vec!["floor".to_owned()]);
+    }
+
+    /// Nothing changed means nothing to redraw — the case that runs on every write that only
+    /// touched a candidate, and the one that must not repaint the map.
+    #[test]
+    fn an_identical_library_names_nothing() {
+        let a = lib(vec![piece("floor", Some(-0.06)), piece("wall", None)]);
+        let b = lib(vec![piece("floor", Some(-0.06)), piece("wall", None)]);
+        assert!(changed_ids(&a, &b).is_empty());
+    }
+
+    /// A newly accepted candidate is named. Harmless — nothing is placed under an id the map has
+    /// never seen — and cheaper to allow than to special-case.
+    #[test]
+    fn an_added_piece_is_named_and_a_removed_one_is_not() {
+        let before = lib(vec![piece("floor", None)]);
+        let after = lib(vec![piece("floor", None), piece("crate", None)]);
+        assert_eq!(changed_ids(&before, &after), vec!["crate".to_owned()]);
+        // The other direction names nothing: a removal leaves no entry to redraw, and
+        // `commit_measured` refuses one the map still places.
+        assert!(changed_ids(&after, &before).is_empty());
+    }
+}
+
 /// Persist a lattice edit if it landed on a library entry, and fold the outcome into the status line.
 ///
 /// Takes the message the edit already composed, so a successful write reads as the edit rather than
 /// as a file operation — and a failed one **replaces** it, because an author told "cell 1,0,2 is
 /// solid" by a program that could not write the file has been told something untrue.
-fn persist(project: &mut Project, where_to: Persist, said: String) -> String {
+/// **A receipt or a refusal, and the type says which.**
+///
+/// This returned a bare `String` that was sometimes `NOT WRITTEN: {e}`, and all nine call sites
+/// handed it to the status line as though it were a receipt — so an edit that never reached
+/// `library.ron` read exactly like one that did, in the same colour, and was gone as soon as the
+/// author moved the cursor. See [`crate::chrome::Status`].
+fn persist(project: &mut Project, where_to: Persist, said: String) -> Result<String, String> {
     match where_to {
-        Persist::InMemory => said,
+        Persist::InMemory => Ok(said),
         Persist::Library => match write_library(project) {
-            Ok(_) => said,
-            Err(e) => format!("NOT WRITTEN: {e}"),
+            Ok(_) => Ok(said),
+            Err(e) => Err(format!("NOT WRITTEN: {e}")),
         },
     }
 }
@@ -2486,7 +2566,6 @@ impl Plugin for TilesPlugin {
                     tile_history_keys.in_set(crate::keys::Phase::Act),
                     demote_tile.in_set(crate::keys::Phase::Act),
                     disarm_demote.run_if(resource_changed::<ImportState>),
-                    copy_info.in_set(crate::keys::Phase::Act),
                     refresh_cells,
                 ),
             )
@@ -2676,6 +2755,7 @@ fn spawn_tiles_panel(mut commands: Commands) {
     .insert(TilesRoot)
     .with_children(|p| {
         crate::chrome::title(p, "TILE CONFIGURATION");
+        crate::chrome::problem_banner(p, Mode::Tiles);
         crate::chrome::shortcut_hint(p);
 
         p.spawn((
@@ -2705,6 +2785,7 @@ fn spawn_tiles_panel(mut commands: Commands) {
             },
             ScrollArea::default(),
             DetailPane,
+            crate::notice::CopyPane(Mode::Tiles),
         ));
 
         p.spawn((
@@ -2717,6 +2798,10 @@ fn spawn_tiles_panel(mut commands: Commands) {
             },
             ActionLine,
         ));
+        // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
+        // the panel, and an auto margin in a column absorbs the free space above it — so
+        // placed any earlier it pushes every sibling after it down with it.
+        crate::chrome::problem_log(p, Mode::Tiles);
     });
 
     // **The candidate list, in its own panel against the right edge** — the same shape, the same
@@ -2762,27 +2847,153 @@ fn toggle_mode(
     }
 }
 
+/// **Which mesh directories the open map actually places from.**
+///
+/// A pack is "in use" when a row of this map names a descriptor whose mesh lives in it. Stamped
+/// groups count: a stamp is a reference to rows, and the rows name descriptors like any other — a
+/// map built entirely from compositions would otherwise report every pack unused.
+///
+/// A composition set that will not expand is **reported, not swallowed**. It means `compositions.ron`
+/// and the library disagree, which is worth knowing on its own; the fold is only a view preference,
+/// so the scan carries on with what the placements alone say rather than refusing to open the tab.
+fn packs_the_map_builds_from(
+    project: &Project,
+    state: &mut ImportState,
+) -> std::collections::HashSet<String> {
+    let dir_of = |id: &str| -> Option<String> {
+        let mesh = project.library.get(id)?.mesh.as_deref()?;
+        Some(mesh.rsplit_once('/').map_or(".", |(dir, _)| dir).to_owned())
+    };
+    let mut used: std::collections::HashSet<String> = project
+        .map
+        .placements
+        .iter()
+        .filter_map(|p| dir_of(&p.descriptor))
+        .collect();
+    if project.map.stamps.is_empty() {
+        return used;
+    }
+    match emerge_core::composition::expand(
+        &project.map,
+        &project.map.stamps,
+        &project.compositions.compositions,
+        &project.library,
+    ) {
+        Ok(expansion) => {
+            used.extend(expansion.placements.iter().filter_map(|p| dir_of(&p.descriptor)));
+        }
+        Err(e) => state.status.problem(format!(
+            "the stamped groups do not resolve, so the packs behind them are not counted as in \
+             use: {e}"
+        )),
+    }
+    used
+}
+
+#[cfg(test)]
+mod pack_fold_tests {
+    use super::*;
+    use emerge_core::descriptor::Descriptor;
+    use emerge_core::library::Library;
+    use emerge_core::map::{Map, Placed};
+
+    /// A piece named `id` whose mesh lives in `pack`.
+    fn piece(id: &str, pack: &str) -> Descriptor {
+        Descriptor {
+            id: id.to_owned(),
+            mesh: Some(format!("{pack}/{id}.glb")),
+            ..Descriptor::default()
+        }
+    }
+
+    /// **A synthetic project — no files, no meshes, no shipped corpus.**
+    ///
+    /// A test that read the real `assets/` would fail the day somebody imports a kit, and importing
+    /// kits is the thing this editor exists to do. Everything the rule under test reads is plain
+    /// data: a library, and a map naming rows in it.
+    fn project_placing(placed: &[&str]) -> Project {
+        let measured = Library {
+            version: emerge_core::library::LIBRARY_VERSION,
+            note: None,
+            descriptors: vec![piece("wall", "alpha"), piece("crate", "beta"), piece("lamp", "beta")],
+        };
+        Project {
+            root: std::path::PathBuf::from("/nonexistent"),
+            emerge_dir: std::path::PathBuf::from("/nonexistent"),
+            library_path: std::path::PathBuf::from("/nonexistent/library.ron"),
+            vocab: emerge_core::vocab::Vocabularies::default(),
+            compositions: emerge_core::composition::Compositions::default(),
+            library: measured.clone(),
+            measured,
+            policy: emerge_core::policy::Policy::default(),
+            masks: Vec::new(),
+            map: Map {
+                placements: placed
+                    .iter()
+                    .enumerate()
+                    .map(|(i, d)| Placed {
+                        id: format!("{d}@{i}"),
+                        descriptor: (*d).to_owned(),
+                        ..Placed::default()
+                    })
+                    .collect(),
+                ..Map::default()
+            },
+            map_path: std::path::PathBuf::from("/nonexistent/m.map.ron"),
+            dirty: false,
+            touched: Vec::new(),
+            triangles: Vec::new(),
+        }
+    }
+
+    /// **Open exactly the packs this map places from.** The rule used to be library membership,
+    /// which is the wrong question by one step: every pack here is fully in the library, and only
+    /// the ones the map draws on should be open.
+    #[test]
+    fn a_pack_counts_as_in_use_only_when_the_map_places_from_it() {
+        let mut state = ImportState::default();
+        let used = packs_the_map_builds_from(&project_placing(&["crate"]), &mut state);
+        assert!(used.contains("beta"), "`beta` holds the placed piece");
+        assert!(!used.contains("alpha"), "`alpha` is in the library but this map never places it");
+    }
+
+    /// A map that places nothing draws on no pack — the state a fresh map opens into.
+    #[test]
+    fn an_empty_map_builds_from_no_pack_at_all() {
+        let mut state = ImportState::default();
+        assert!(packs_the_map_builds_from(&project_placing(&[]), &mut state).is_empty());
+    }
+
+    /// One pack, two pieces, counted once — the rule is about directories, not rows.
+    #[test]
+    fn two_pieces_from_one_pack_name_it_once() {
+        let mut state = ImportState::default();
+        let used = packs_the_map_builds_from(&project_placing(&["crate", "lamp"]), &mut state);
+        assert_eq!(used.len(), 1);
+        assert!(used.contains("beta"));
+    }
+}
+
 pub(crate) fn scan(project: &Project, state: &mut ImportState) {
     let root = project.root.join("assets");
     match import::scan(&root, &root, &project.library) {
         Ok(found) => {
-            // **On the first look, untouched packs start folded.** A pack the library holds nothing
-            // from is a kit nobody has started on, and a dozen of them open is an alphabet to
-            // scroll past on the way to the work in progress. Packs with even one import stay
-            // open. Only the FIRST scan seeds this — a rescan mid-session must not stomp the
-            // folds the author has since toggled by hand.
+            // **On the first look, only the packs THIS MAP builds from are open.**
+            //
+            // This keyed off library membership, which is the wrong question by one step: a kit can
+            // be fully imported and have nothing to do with the map open in front of you. The site
+            // kit and the furniture kit are both in `library.ron`; a session spent on `site_67` wants
+            // the one it is placing from, and a dozen open packs is an alphabet to scroll past on the
+            // way to the work in progress.
+            //
+            // Only the FIRST scan seeds this — a rescan mid-session must not stomp the folds the
+            // author has since toggled by hand.
             if !state.scanned {
-                let imported: std::collections::HashSet<&str> = project
-                    .library
-                    .descriptors
-                    .iter()
-                    .filter_map(|d| d.mesh.as_deref())
-                    .map(|m| m.rsplit_once('/').map_or(".", |(dir, _)| dir))
-                    .collect();
+                let used = packs_the_map_builds_from(project, state);
                 state.folded_packs = packs(&found)
                     .into_iter()
                     .map(|(pack, _)| pack)
-                    .filter(|pack| !imported.contains(pack.as_str()))
+                    .filter(|pack| !used.contains(pack.as_str()))
                     .collect();
             }
             let blocked = found.iter().filter(|c| c.blocked()).count();
@@ -2833,16 +3044,16 @@ fn rename_candidate(
     if state.renaming.is_none() {
         if keys::just_pressed(&keyboard, live.0, Action::TypeId) {
             if let Some(id) = state.selected_library_id.clone() {
-                state.status = format!(
+                state.status.problem(format!(
                     "`{id}` is in the library — renaming it would strand every placement that names it"
-                );
+                ));
             } else if let Some(mesh) = state.current().map(|c| c.mesh.clone()) {
                 // The target, captured now. See `ImportState::renaming`.
                 state.renaming = Some(Rename {
                     mesh,
                     raw: String::new(),
                 });
-                state.status = "type an id — Enter to keep it, Esc to leave it alone".to_owned();
+                state.status.note("type an id — Enter to keep it, Esc to leave it alone".to_owned());
             }
         }
         // **Drain before leaving**, so the `I` that opened the field is not still waiting to be read
@@ -2862,7 +3073,7 @@ fn rename_candidate(
                 };
                 let id = emerge_core::naming::to_snake_case(&rename.raw);
                 if id.is_empty() {
-                    state.status = "an id cannot be empty; nothing was changed".to_owned();
+                    state.status.note("an id cannot be empty; nothing was changed".to_owned());
                 } else {
                     // The candidate this field was opened on, found by the mesh it names rather than
                     // by wherever the selection has since moved to.
@@ -2877,22 +3088,22 @@ fn rename_candidate(
                         Some(c) => {
                             c.proposed.id = id.clone();
                             state.record(history_before);
-                            state.status = format!("id is `{id}`");
+                            state.status.note(format!("id is `{id}`"));
                         }
                         // Only reachable if a rescan dropped the mesh mid-rename, which is a real
                         // thing `R` can do. Saying so beats renaming whatever is selected now.
                         None => {
-                            state.status = format!(
+                            state.status.problem(format!(
                                 "`{id}` was not kept — `{}` is no longer in the scan.",
                                 rename.mesh
                             )
-                        }
+                        )}
                     }
                 }
             }
             Key::Escape => {
                 state.renaming = None;
-                state.status = "id unchanged".to_owned();
+                state.status.note("id unchanged".to_owned());
             }
             Key::Backspace => {
                 if let Some(r) = state.renaming.as_mut() {
@@ -2967,7 +3178,7 @@ fn cycle_mount(
     d.mount = Some(want);
     let said = format!("mount: {}", mount_label(d.mount.as_ref()));
     state.record(history_before);
-    state.status = persist(&mut project, where_to, said);
+    state.status.say(persist(&mut project, where_to, said));
 }
 
 /// **`U` applies / `Y` discards the VLM's pending proposal** — the review verbs, through the
@@ -2989,13 +3200,13 @@ fn suggestion_keys(
 ) {
     // `Shift+Y`: the whole labeler emptied at once — proposals, batch, booth queue, in-flight.
     if keys::just_pressed(&keyboard, live.0, Action::DiscardAllSuggestions) {
-        state.status = crate::labels::clear_all_labels(
+        state.status.note(crate::labels::clear_all_labels(
             &mut suggestions,
             &mut generation,
             &mut label_queue,
             &mut label_tasks,
             &mut rig,
-        );
+        ));
         return;
     }
     let apply = keys::just_pressed(&keyboard, live.0, Action::ApplySuggestion);
@@ -3004,21 +3215,21 @@ fn suggestion_keys(
         return;
     }
     let Some(target) = state.target() else {
-        state.status = "nothing focused".to_owned();
+        state.status.note("nothing focused".to_owned());
         return;
     };
     let name = crate::labels::name_of(&target).to_owned();
     if discard {
         if suggestions.remove(&target).is_some() {
             generation.0 = generation.0.wrapping_add(1);
-            state.status = format!("discarded the proposed labels for `{name}`");
+            state.status.note(format!("discarded the proposed labels for `{name}`"));
         } else {
-            state.status = "no proposed labels here".to_owned();
+            state.status.note("no proposed labels here".to_owned());
         }
         return;
     }
     let Some(entry) = suggestions.get(&target).cloned() else {
-        state.status = "no proposed labels here — L asks the model".to_owned();
+        state.status.note("no proposed labels here — L asks the model".to_owned());
         return;
     };
     // **A lying-down piece is righted FIRST, and the labels are re-asked** — the model judged a
@@ -3036,30 +3247,32 @@ fn suggestion_keys(
                 return;
             };
             let said = crate::labels::request_photos(target, &d, &label_tasks, &mut rig);
-            state.status = format!("righted about {} — {said}", turn.axis.to_uppercase());
+            state.status.note(format!("righted about {} — {said}", turn.axis.to_uppercase()));
         }
         return;
     }
     let project = &mut *project;
     let history_before = state.snapshot(project);
     let Some((d, where_to)) = state.at_target(&target, &mut project.measured) else {
-        state.status = "not applied — that piece is gone".to_owned();
+        state.status.problem("not applied — that piece is gone".to_owned());
         return;
     };
     if d.mesh.as_deref() != Some(entry.mesh.as_str()) {
-        state.status = "not applied — the mesh changed under the proposal".to_owned();
+        state.status.problem("not applied — the mesh changed under the proposal".to_owned());
         return;
     }
     crate::labels::apply_fields(d, &entry.suggestion);
     state.record(history_before);
     let said = persist(project, where_to, format!("applied proposed labels to `{name}`"));
-    // `persist`'s refusal contract: a failed library write REPLACES the message with
-    // `NOT WRITTEN: ...`. A refused write keeps the proposal staged for another try.
-    if !said.starts_with("NOT WRITTEN") {
+    // A refused write keeps the proposal staged for another try. This used to ask
+    // `said.starts_with("NOT WRITTEN")` — a control-flow decision made by sniffing a message for a
+    // prefix the function it came from was free to reword. `persist` returns a `Result` now, so the
+    // question is asked of the type.
+    if said.is_ok() {
         suggestions.remove(&target);
         generation.0 = generation.0.wrapping_add(1);
     }
-    state.status = said;
+    state.status.say(said);
 }
 
 /// **Accept a candidate into the library.**
@@ -3081,24 +3294,23 @@ fn commit_candidate(
         return;
     }
     if let Some(id) = state.selected_library_id.clone() {
-        state.status =
-            format!("`{id}` is already in the library — pick a candidate below to add one");
+        state.status.note(format!("`{id}` is already in the library — pick a candidate below to add one"));
         return;
     }
     let Some(candidate) = state.current().cloned() else {
         return;
     };
     if candidate.blocked() {
-        state.status = "this mesh cannot be measured, so there is nothing to add".to_owned();
+        state.status.problem("this mesh cannot be measured, so there is nothing to add".to_owned());
         return;
     }
     let descriptor = candidate.proposed.clone();
     if descriptor.id.trim().is_empty() {
-        state.status = "give it an id first (I)".to_owned();
+        state.status.note("give it an id first (I)".to_owned());
         return;
     }
     if project.library.get(&descriptor.id).is_some() {
-        state.status = format!("`{}` is already in the library — rename it (I)", descriptor.id);
+        state.status.note(format!("`{}` is already in the library — rename it (I)", descriptor.id));
         return;
     }
 
@@ -3122,16 +3334,16 @@ fn commit_candidate(
             state.selected = at.min(state.candidates.len().saturating_sub(1));
             state.summary = format!("{} mesh(es) left to import", state.candidates.len());
             state.record(before);
-            state.status = format!(
+            state.status.note(format!(
                 "added `{}` — it is in the palette now",
                 descriptor.id
-            );
+            ));
             info!("added `{}` to {}", descriptor.id, path.display());
         }
         Err(e) => {
             // Nothing was added and nothing was written — `commit_measured` refuses before it
             // touches the disk — so this says the one thing that is true of both.
-            state.status = format!("not added: {e}");
+            state.status.problem(format!("not added: {e}"));
             error!("{e}");
         }
     }
@@ -3157,7 +3369,7 @@ fn remove_tile(
         return;
     }
     let Some(id) = state.selected_library_id.clone() else {
-        state.status = "select a library tile to remove it".to_owned();
+        state.status.note("select a library tile to remove it".to_owned());
         return;
     };
     let before = state.snapshot(&project);
@@ -3165,10 +3377,10 @@ fn remove_tile(
         Ok(path) => {
             state.selected_library_id = None;
             state.record(before);
-            state.status = format!("removed `{id}` from the library");
+            state.status.note(format!("removed `{id}` from the library"));
             info!("removed `{id}` from {}", path.display());
         }
-        Err(e) => state.status = format!("not removed: {e}"),
+        Err(e) => state.status.problem(format!("not removed: {e}")),
     }
 }
 
@@ -3260,16 +3472,16 @@ fn demote_tile(
         return;
     }
     let Some(id) = state.selected_library_id.clone() else {
-        state.status = "select a library tile to send it back".to_owned();
+        state.status.note("select a library tile to send it back".to_owned());
         return;
     };
     if arm.0.as_deref() != Some(id.as_str()) {
         arm.0 = Some(id.clone());
-        state.status = format!(
+        state.status.problem(format!(
             "sending `{id}` back to the candidates loses its tags, note and mount — \
              Shift+{} again sends it",
             crate::keys::REMOVE_NAME
-        );
+        ));
         return;
     }
     arm.0 = None;
@@ -3283,10 +3495,10 @@ fn demote_tile(
         .find(|d| d.id == id)
         .and_then(|d| d.mesh.clone())
     else {
-        state.status = format!(
+        state.status.problem(format!(
             "`{id}` has no mesh — nothing to send back ({} removes it outright)",
             crate::keys::REMOVE_NAME
-        );
+        ));
         return;
     };
     let before = state.snapshot(&project);
@@ -3307,11 +3519,10 @@ fn demote_tile(
                 generation.0 = generation.0.wrapping_add(1);
             }
             state.record(before);
-            state.status =
-                format!("sent `{id}` back to the candidates — measured fresh, stripped");
+            state.status.note(format!("sent `{id}` back to the candidates — measured fresh, stripped"));
             info!("demoted `{id}` out of {}", path.display());
         }
-        Err(e) => state.status = format!("not sent back: {e}"),
+        Err(e) => state.status.problem(format!("not sent back: {e}")),
     }
 }
 
@@ -3324,51 +3535,6 @@ fn disarm_demote(state: Res<ImportState>, mut arm: ResMut<DemoteArm>) {
     };
     if state.selected_library_id.as_deref() != Some(armed.as_str()) {
         arm.0 = None;
-    }
-}
-
-/// **`Cmd+C` puts the detail pane on the clipboard** — its text, top to bottom, as it reads.
-///
-/// bevy_ui has no selectable text, and an author who wants a piece's facts in a message — to an
-/// agent, a teammate, a bug report — should not have to retype what is already on screen. The copy
-/// IS the pane: the text is collected from the pane's own nodes in hierarchy order, so there is no
-/// second formatter to drift from what the eye just read.
-///
-/// `NonSendMarker` pins the system to the main thread — macOS's pasteboard is not promised to
-/// tolerate any other, and a clipboard that works four times in five is worse than none.
-fn copy_info(
-    _main_thread: bevy::ecs::system::NonSendMarker,
-    keyboard: Res<ButtonInput<KeyCode>>,
-    live: Res<crate::keys::Live>,
-    panes: Query<Entity, With<DetailPane>>,
-    children: Query<&Children>,
-    texts: Query<&Text>,
-    mut state: ResMut<ImportState>,
-) {
-    if !keys::just_pressed(&keyboard, live.0, Action::CopyInfo) {
-        return;
-    }
-    let mut lines = Vec::new();
-    for pane in &panes {
-        collect_text(pane, &children, &texts, &mut lines);
-    }
-    // The two lines the pane does NOT hold and the author is usually chasing: the scan summary and
-    // the status line. The error message lives in the status — a copy that gets everything but the
-    // error got everything but what was wanted.
-    if !state.summary.is_empty() {
-        lines.push(format!("summary: {}", state.summary));
-    }
-    if !state.status.is_empty() {
-        lines.push(format!("status: {}", state.status));
-    }
-    if lines.is_empty() {
-        state.status = "nothing on the pane to copy".to_owned();
-        return;
-    }
-    let text = lines.join("\n");
-    match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
-        Ok(()) => state.status = format!("copied the pane — {} line(s)", lines.len()),
-        Err(e) => state.status = format!("could not reach the clipboard: {e}"),
     }
 }
 
@@ -3387,24 +3553,6 @@ fn holds_a_mesh(
         .unwrap_or(false)
 }
 
-/// Depth-first text harvest under one UI node, in child order — which is the order the pane reads.
-fn collect_text(
-    root: Entity,
-    children: &Query<&Children>,
-    texts: &Query<&Text>,
-    out: &mut Vec<String>,
-) {
-    if let Ok(t) = texts.get(root) {
-        if !t.0.trim().is_empty() {
-            out.push(t.0.clone());
-        }
-    }
-    if let Ok(kids) = children.get(root) {
-        for kid in kids {
-            collect_text(*kid, children, texts, out);
-        }
-    }
-}
 
 /// Toggle one token on one axis.
 fn on_tag_chip(
@@ -3454,7 +3602,7 @@ fn on_tag_chip(
     }
     let said = format!("{} tags updated", chip.axis.label().to_lowercase());
     state.record(history_before);
-    state.status = persist(&mut project, where_to, said);
+    state.status.say(persist(&mut project, where_to, said));
 }
 
 fn move_selection(
@@ -3482,7 +3630,7 @@ fn move_selection(
     // discriminant the detail pane reads, so this sets it and everything else follows.
     if to_candidates {
         state.selected_library_id = None;
-        state.status = "candidates".to_owned();
+        state.status.note("candidates".to_owned());
     }
     if to_library {
         match library_ids(project.as_ref(), &filters).first() {
@@ -3490,9 +3638,9 @@ fn move_selection(
                 if state.selected_library_id.is_none() {
                     state.selected_library_id = Some(first.clone());
                 }
-                state.status = "library".to_owned();
+                state.status.note("library".to_owned());
             }
-            None => state.status = "the library is empty".to_owned(),
+            None => state.status.note("the library is empty".to_owned()),
         }
     }
     if !down && !up {
@@ -3513,7 +3661,7 @@ fn move_selection(
             let want = if down { at + stride } else { at.saturating_sub(stride) };
             if let Some(next) = ids.get(want.min(ids.len().saturating_sub(1))) {
                 state.selected_library_id = Some(next.clone());
-                state.status = format!("`{next}` selected — {} removes it", keys::binding(Action::RemoveTile).chord);
+                state.status.note(format!("`{next}` selected — {} removes it", keys::binding(Action::RemoveTile).chord));
             }
         }
         None => {
@@ -3722,7 +3870,7 @@ fn on_library_click(
 ) {
     if let Ok(row) = rows.get(activate.entity) {
         state.selected_library_id = Some(row.0.clone());
-        state.status = format!("`{}` selected — Del removes it", row.0);
+        state.status.note(format!("`{}` selected — Del removes it", row.0));
     }
 }
 
@@ -3881,22 +4029,22 @@ fn drive_preview(
         Err(e) => {
             if said.as_ref() != Some(&(mesh.clone(), "failed")) {
                 *said = Some((mesh.clone(), "failed"));
-                state.status = format!("NOT DRAWN — {}: {e}", leaf(&mesh));
+                state.status.problem(format!("NOT DRAWN — {}: {e}", leaf(&mesh)));
                 error!("preview of {mesh}: {e}");
             }
         }
         Ok(false) => {
             if said.as_ref() != Some(&(mesh.clone(), "loading")) {
                 *said = Some((mesh.clone(), "loading"));
-                state.status = loading_line.clone();
+                state.status.note(loading_line.clone());
             }
         }
         Ok(true) => {
             if said.as_ref() != Some(&(mesh.clone(), "ready")) {
                 let was_loading = said.as_ref() == Some(&(mesh.clone(), "loading"));
                 *said = Some((mesh.clone(), "ready"));
-                if was_loading && state.status == loading_line {
-                    state.status = format!("{} staged", leaf(&mesh));
+                if was_loading && state.status.note_text() == loading_line {
+                    state.status.note(format!("{} staged", leaf(&mesh)));
                 }
             }
         }
@@ -3951,11 +4099,11 @@ fn drive_preview(
                         );
                         respawn_now = true;
                     } else if *frames == HEAL_GRACE_FRAMES + 1 {
-                        state.status = format!(
+                        state.status.problem(format!(
                             "NOT DRAWN — {}: loaded, but no mesh materialized after \
                              {HEAL_ATTEMPTS} respawns",
                             leaf(&mesh)
-                        );
+                        ));
                     }
                 }
             } else {
@@ -4161,7 +4309,12 @@ fn draw_preview_footprint(state: Res<ImportState>, project: Res<Project>, mut gi
     }
 }
 
-/// The two one-line readouts. Cheap enough every frame, and guarded so they only write on change.
+/// The two one-line readouts, plus the block above them. Cheap enough every frame, and guarded so
+/// they only write on change.
+///
+/// The action line is the **receipt** only. It had no colour rule of its own — one fixed colour for
+/// everything it was ever handed — which is why `NOT WRITTEN:` from a failed `persist` looked
+/// exactly like `added \`crate\``. Refusals go to the banner now.
 fn refresh_lines(
     state: Res<ImportState>,
     mut summaries: Query<&mut Text, (With<ScanSummary>, Without<ActionLine>)>,
@@ -4173,8 +4326,8 @@ fn refresh_lines(
         }
     }
     for mut t in &mut actions {
-        if t.0 != state.status {
-            t.0 = state.status.clone();
+        if t.0 != state.status.note_text() {
+            t.0 = state.status.note_text().to_owned();
         }
     }
 }
@@ -5528,6 +5681,7 @@ mod write_library_tests {
             },
             map_path: dir.join("t.map.ron"),
             dirty: false,
+            touched: Vec::new(),
             triangles: vec![0],
         }
     }
