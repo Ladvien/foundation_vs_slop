@@ -1,5 +1,6 @@
 - Use home still and lookup research on whatever you are implementing BEFORE you implement it.  We want SOTA and best practices.  And it is filled with game development research and best practices.
 - Do not use hardbreaks when writing markdown.  Markdown should be easy for humans to read when rendered.
+- When given git commands, it should be for all edittable repos in this project.
 - When creating new features, attempt to use Bevy's plugin pattern as much as possible.  Create separate workspace crates.  Create their own Github repo with idiomatic name.  This is to ensure reusable components are generated during our work. Ensure each respective crate has a warning label of "Vibe Coded" a the top of the README.md. Please refer to [bevy_plugins.md](docs/bevy_plugins.md).  Each separate create must include examples (1-3) demoing the crate.  This is allow inspection of crate behavior without inclusion in this game.  If you discover debugging needs, make recommendations on adding it to this plugin, ever evolving.
 - Do not use unwrap() or anything that'd lead to a panic.  Code safe.  Handle errors.
 - Leave academic paper references in comments, if a paper was used in writing the code.
