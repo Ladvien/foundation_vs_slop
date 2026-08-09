@@ -133,7 +133,7 @@ fn main() {
     }
 
     println!(
-        "\nNone of this is a render. The GPU already knows what colour each pixel is — but a crab\n\
+        "\nNone of this is a render. The GPU already knows what colour each pixel is — but a creature\n\
          deciding whether to scuttle into shadow cannot read a framebuffer."
     );
 }

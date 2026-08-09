@@ -12,7 +12,7 @@ That is `examples/beam.rs`. Every lit cell is one `f32` this crate computed on t
 
 ## This is not a renderer
 
-That distinction is the whole point. Your GPU lighting pass already knows how bright every pixel is — but the answer lives in a framebuffer, and a crab deciding whether to scuttle into shadow cannot read a framebuffer. This crate computes the same question on the CPU, at cell resolution, in a form gameplay can sample and differentiate.
+That distinction is the whole point. Your GPU lighting pass already knows how bright every pixel is — but the answer lives in a framebuffer, and a creature deciding whether to scuttle into shadow cannot read a framebuffer. This crate computes the same question on the CPU, at cell resolution, in a form gameplay can sample and differentiate.
 
 ```rust
 use bevy_light_grid::{LightGrid, FlashlightCone, light_push_at};

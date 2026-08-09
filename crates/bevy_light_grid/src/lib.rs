@@ -1,7 +1,7 @@
 //! **An illuminance grid creatures can read.**
 //!
 //! Not a renderer. This is a CPU scalar field over cells that answers "how bright is it here, and which
-//! way is brighter" — the thing a light-avoiding crab or a light-seeking mushroom actually needs, and
+//! way is brighter" — the thing a light-avoiding creature or a light-seeking plant actually needs, and
 //! which a GPU lighting pass cannot tell you because its results live in a framebuffer.
 //!
 //! The field is two layers:

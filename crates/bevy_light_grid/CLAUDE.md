@@ -14,7 +14,7 @@ A leaf — `bevy_math` plus `bevy_ecs` (the latter *only* for the three taxis ma
 
 `tests/leaf.rs` is the ratchet. Allowed: `bevy_math`, `bevy_ecs`. Forbidden by name: `bevy_app`, `bevy_render`, `bevy_pbr`, `avian`, `wgpu`, `winit`, `emerge`, `foundation_vs_slop`.
 
-`bevy_render`/`bevy_pbr` are forbidden for a reason worth stating out loud: **the day this crate reaches for a renderer is the day somebody has confused "how bright is this cell for the AI" with "what colour is this pixel".** Those are different questions with different answers. The GPU lighting pass already knows the second one, but the answer lives in a framebuffer, and a crab deciding whether to scuttle into shadow cannot read a framebuffer.
+`bevy_render`/`bevy_pbr` are forbidden for a reason worth stating out loud: **the day this crate reaches for a renderer is the day somebody has confused "how bright is this cell for the AI" with "what colour is this pixel".** Those are different questions with different answers. The GPU lighting pass already knows the second one, but the answer lives in a framebuffer, and a creature deciding whether to scuttle into shadow cannot read a framebuffer.
 
 `bevy_app` is forbidden too, because a field is only reusable if the **caller** owns the schedule — when the bake runs, and where it sits relative to the agents reading it, are gameplay decisions. This crate registers no system and no plugin.
 
