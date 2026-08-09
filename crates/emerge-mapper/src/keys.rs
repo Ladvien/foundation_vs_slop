@@ -114,6 +114,10 @@ pub enum Action {
     PaintDown,
     /// **Start a new group** on the Compose tab — an empty bounded tile, named as it is made.
     NewGroup,
+    /// Step the Compose carousel — the previous or next composition becomes the focal one. Its own
+    /// keys rather than the arrows, which belong to whichever of the three lists has focus.
+    CarouselPrev,
+    CarouselNext,
     /// Compose's own undo pair. Map, Tiles and Anim each keep one; an editing surface without one
     /// would be the odd tab out.
     UndoCompose,
@@ -593,6 +597,19 @@ pub const BINDINGS: &[Binding] = &[
     // **The two verbs this tab was missing.** It could refine a group and not make one, so every
     // group had to be captured on the Map first — which is a fine way to work and a bad only way.
     b(Action::NewGroup, KeyCode::KeyN, false, Context::Compose, "N", "new composition"),
+    // **The carousel, and this tab's TWELFTH row — the last one it has.** The focal composition stands
+    // full size with its neighbours either side as miniatures; these step the strip.
+    //
+    // Its own pair rather than the arrows, because the arrows belong to whichever of the three lists
+    // has focus: stepping to the next group while editing a member would otherwise cost
+    // `left left up right right`.
+    //
+    // `O`/`P` are adjacent and free — `Context::Compose` overlaps nothing but `Global` (see
+    // `Context::overlaps`), so the Map's own `O` is no obstacle. After this row,
+    // `no_context_carries_more_than_a_learnable_vocabulary` is AT its ceiling for this context: a new
+    // Compose verb now costs a merge or a removal, not an addition.
+    b(Action::CarouselPrev, KeyCode::KeyO, false, Context::Compose, "O", "previous / next composition"),
+    b(Action::CarouselNext, KeyCode::KeyP, false, Context::Compose, "P", "previous / next composition"),
     // One row, two chords — the Map, Tiles and Anim pairs again.
     bs(Action::UndoCompose, KeyCode::KeyZ, true, false, Context::Compose, "Z", "undo / redo"),
     bs(Action::RedoCompose, KeyCode::KeyZ, true, true, Context::Compose, "Z", "undo / redo"),
@@ -956,6 +973,7 @@ mod tests {
             Action::TurnMemberLeftFine, Action::TurnMemberRightFine,
             Action::DropMember, Action::UndoCompose, Action::RedoCompose,
             Action::NewGroup, Action::PaintUp, Action::PaintDown,
+            Action::CarouselPrev, Action::CarouselNext,
             Action::Save, Action::Undo, Action::Redo, Action::Shortcuts, Action::EditTile,
             Action::AimLeft, Action::AimRight, Action::AimReset, Action::Cancel,
             Action::Fill, Action::Remove, Action::MoveMode, Action::CloneMode, Action::RenameMap,

@@ -155,7 +155,7 @@ pub struct EditorState {
     /// `pinning`'s shape and for the same reason: a group's name is the author's, and a canned one
     /// supplied by the editor would be a field nobody reads wearing a name nobody chose. The set it
     /// names is `CloneDrag::held`, which stays in hand until the name is committed or abandoned.
-    grouping: Option<String>,
+    pub grouping: Option<String>,
     /// The raw text being typed into the name, or `None` when not renaming.
     ///
     /// Raw, with the snake_case spelling applied for display and on commit — so a backspace undoes a
@@ -546,8 +546,6 @@ enum Field {
     /// could be read. Two different questions — "what did I just do" and "why can't I place this" —
     /// so two lines.
     Hint,
-    /// The name being typed for a group being captured. Silent otherwise.
-    Group,
     /// **What the piece-verbs would act on**, and the chord that opens it for editing.
     ///
     /// The readout the panel was missing. `BRUSH` says what a click would *place*; nothing said what
@@ -572,7 +570,6 @@ impl Field {
             Field::Yaw => "YAW",
             Field::Map => "MAP",
             Field::Under => "UNDER",
-            Field::Group => "GROUP",
             Field::Last => "",
             Field::Hint => "",
         }
@@ -786,7 +783,6 @@ fn spawn_panel(mut commands: Commands) {
                 Field::Yaw,
                 Field::Map,
                 Field::Under,
-                Field::Group,
                 Field::Last,
                 Field::Hint,
                 Field::Edges,
@@ -1580,13 +1576,6 @@ fn refresh_status(
             // A caret while typing, so an empty field reads as "waiting for you" rather than as
             // nothing happening — the rename field's rule. Forced to snake_case as it is typed, so
             // the naming rule teaches itself.
-            Field::Group => match &state.grouping {
-                Some(raw) => (
-                    format!("{}_", emerge_core::naming::to_snake_case(raw)),
-                    ACCENT,
-                ),
-                None => (String::new(), DIM),
-            },
             Field::Yaw => (format!("{} deg", state.brush_yaw), TEXT),
             Field::Map => (
                 // Counted by `emerge_core::census`, never here — see
@@ -3265,10 +3254,10 @@ fn keys(
     if keys::just_pressed(&keyboard, live.0, Action::GroupFromSet) {
         if clone_drag.holding() {
             state.grouping = Some(String::new());
-            state.status.note("name the group — Enter to keep it, Esc to leave it alone");
+            state.status.note("name the composition — Enter to keep it, Esc to leave it alone");
         } else {
             state.status.note(format!(
-                "nothing in hand to keep. {} drags a box round what should go in the group first.",
+                "nothing in hand to keep. {} drags a box round what should go in the composition first.",
                 keys::chord_text(keys::binding(Action::CloneMode))
             ));
         }
@@ -4053,7 +4042,7 @@ pub fn composition_from_set(
             .to_owned());
     }
     if set.pieces.is_empty() {
-        return Err("that box held nothing, so there is no group to make".to_owned());
+        return Err("that box held nothing, so there is no composition to make".to_owned());
     }
 
     // **Member ids, stable and unique.** The first of a kind keeps the bare short name; later ones
@@ -4075,7 +4064,7 @@ pub fn composition_from_set(
     for (i, piece) in set.pieces.iter().enumerate() {
         let d = library.get(&piece.descriptor).ok_or_else(|| {
             format!(
-                "`{}` is not in this library any more, so it cannot go in a group",
+                "`{}` is not in this library any more, so it cannot go in a composition",
                 piece.descriptor
             )
         })?;

@@ -48,7 +48,9 @@ const ISO_DISTANCE: f32 = 20.784_609; // |(12, 12, 12)| = 12 * sqrt 3
 const ROTATION_STEPS: u32 = 4;
 
 const MIN_ZOOM: f32 = 4.0;
-const MAX_ZOOM: f32 = 80.0;
+/// The furthest out the rig goes. `pub(crate)` because the Compose sheet has to know it: a gallery
+/// that needs more than this to be seen whole is cropped, and cropped silently reads as complete.
+pub(crate) const MAX_ZOOM: f32 = 80.0;
 const ZOOM_STEP: f32 = 2.0;
 /// Metres a second, matching the game's `src/camera.rs` so the two feel the same.
 const PAN_SPEED: f32 = 16.0;

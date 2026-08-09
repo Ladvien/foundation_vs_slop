@@ -202,6 +202,7 @@ fn stage_camera(
     state: Res<ImportState>,
     project: Res<Project>,
     preset: Option<Res<crate::anim_stage::BenchCamera>>,
+    carousel: Res<crate::compose::StagedCarousel>,
     mut rig: ResMut<crate::view::Rig>,
     mut saved: ResMut<MapView>,
     mut staged: ResMut<StagedLift>,
@@ -217,7 +218,11 @@ fn stage_camera(
     // A preset cycle is a discrete event on the Anim tab, exactly like a lift on the Tiles tab.
     let preset_moved =
         *mode == Mode::Anim && preset.as_ref().is_some_and(|p| p.is_changed());
-    if !mode.is_changed() && !lift_moved && !preset_moved {
+    // And a re-laid strip is one on the Compose tab. `StagedCarousel` is written only when the strip
+    // actually changes — a carousel step, a group added, an envelope resized — so this is the same
+    // discrete-event shape and not a per-frame write that would take panning away.
+    let strip_moved = *mode == Mode::Compose && carousel.is_changed();
+    if !mode.is_changed() && !lift_moved && !preset_moved && !strip_moved {
         return;
     }
     if lift_moved {
@@ -278,6 +283,10 @@ fn stage_camera(
         // than a camera jump. The worry it names is also already answered elsewhere — the Tiles tab
         // has jumped to a stage and restored on the way back for as long as it has existed, and
         // arming still switches nothing by itself.
+        //
+        // **The focal group is pinned to the stage origin**, so stepping the carousel slides the
+        // strip past a fixed centre rather than moving the thing being edited. The camera frames the
+        // whole strip, miniatures included, and re-frames only when the strip is re-laid.
         Mode::Compose => {
             if saved.0.is_none() {
                 saved.0 = Some(crate::view::Rig {
@@ -288,8 +297,13 @@ fn stage_camera(
                     elevation: rig.elevation,
                 });
             }
-            rig.focus = crate::compose::COMPOSE_STAGE;
-            rig.height = TILE_VIEW_HEIGHT;
+            // **Focused halfway up, not on the floor.** The groups rise from the ground plane, so
+            // aiming at it put a 2.4 m tile in the top half of the frame with the bottom empty —
+            // seen in a captured frame, and the same correction the Tiles arm makes with `want_lift`.
+            rig.focus =
+                crate::compose::COMPOSE_STAGE + Vec3::Y * carousel.0.tallest * 0.5;
+            rig.height = crate::compose::framing_height(carousel.0.extent, carousel.0.tallest)
+                .min(crate::view::MAX_ZOOM);
             rig.elevation = crate::view::ISO_ELEVATION;
         }
         Mode::Map => {
@@ -306,7 +320,10 @@ fn stage_camera(
 
 /// Orthographic viewport height on the stage, metres. About three grid cells, so a 1-cell piece has
 /// room around it and a 3-cell one still fits.
-const TILE_VIEW_HEIGHT: f32 = 4.0;
+///
+/// `pub(crate)` because it is also the Compose sheet's floor — see `compose::framing_height`. One
+/// tile should read the same size whichever tab is looking at it.
+pub(crate) const TILE_VIEW_HEIGHT: f32 = 4.0;
 
 /// **The divisions readout** — derived, not typed.
 ///

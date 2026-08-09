@@ -924,6 +924,238 @@ mod compose {
         assert_eq!(project.map.stamps.len(), 1, "redo did not put the stamp back");
         assert_eq!(project.map.stamps[0].of, "break_table");
     }
+
+    /// **Making a composition and then filling it** — the two halves of the same act.
+    ///
+    /// Reported from the running editor: "I can create a new one, but I can't place any meshes on it."
+    #[test]
+    fn a_piece_can_be_placed_into_a_composition_that_was_just_created() {
+        let root = Fixture::new("add_after_new")
+            .descriptor("floor", "alpha")
+            .bounded_composition("tile_a", (1.0, 2.4, 1.0), &[("floor", "floor", (0.0, 0.0))])
+            .build("m");
+        let mut app = emerge_mapper::harness::build_headless(&root, "m", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        *app.world_mut().resource_mut::<Mode>() = Mode::Compose;
+        for _ in 0..3 {
+            app.update();
+        }
+
+        app.world_mut().resource_scope(|world, mut project: bevy::prelude::Mut<Project>| {
+            let mut state = world.resource_mut::<ComposeState>();
+            emerge_mapper::compose::new_group(&mut state, &mut project, "test");
+            assert!(state.status.problems().is_empty(), "creating: {}", state.status.line());
+
+            // **The receipt has to name the verb that actually adds a piece.** It said "press A",
+            // and `A` is `PanLeft` — so following it slid the camera and added nothing, which is
+            // indistinguishable from "you cannot place meshes here". Reported by an author.
+            let told = state.status.line();
+            let arm = emerge_mapper::keys::chord(emerge_mapper::keys::Action::ComposeArm);
+            assert!(
+                told.contains(&arm),
+                "the new-composition receipt does not name the add verb (`{arm}`): {told}"
+            );
+
+            // The library's first piece, the way the PLACE list offers it.
+            let first = project.library.descriptors[0].id.clone();
+            emerge_mapper::compose::add_member(&mut state, &mut project, &first);
+            assert!(
+                state.status.problems().is_empty(),
+                "placing a piece into the new composition: {}",
+                state.status.line()
+            );
+        });
+        app.update();
+
+        let made = app
+            .world()
+            .resource::<Project>()
+            .compositions
+            .compositions
+            .iter()
+            .find(|c| c.id == "test")
+            .cloned()
+            .unwrap_or_else(|| panic!("`test` is gone"));
+        assert_eq!(made.members.len(), 1, "the piece never landed in the composition");
+    }
+
+    /// **An observer fires for every `Activate`, so it has to ask which entity was activated.**
+    ///
+    /// `on_new_group_click` tested `buttons.is_empty()` — whether a `NewGroupButton` exists anywhere,
+    /// and one always does — so clicking any row of the PLACE list opened the new-composition name
+    /// field. An author picking a mesh was asked to name a composition instead. Reported from the
+    /// running editor; no test could see it, because the arithmetic was never wrong.
+    #[test]
+    fn activating_something_else_does_not_open_the_name_field() {
+        use bevy::ui_widgets::Activate;
+        use emerge_mapper::compose::NewGroupButton;
+
+        let root = Fixture::new("activate")
+            .descriptor("floor", "alpha")
+            .bounded_composition("tile_a", (1.0, 2.4, 1.0), &[("floor", "floor", (0.0, 0.0))])
+            .build("m");
+        let mut app = emerge_mapper::harness::build_headless(&root, "m", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        *app.world_mut().resource_mut::<Mode>() = Mode::Compose;
+        for _ in 0..3 {
+            app.update();
+        }
+
+        // Anything that is not the NEW button — a PLACE row is one, and so is a bare entity.
+        let other = app.world_mut().spawn_empty().id();
+        app.world_mut().trigger(Activate { entity: other });
+        app.update();
+        assert!(
+            app.world().resource::<ComposeState>().naming.is_none(),
+            "activating something else opened the name field"
+        );
+
+        // And the button itself still does open it, or the fix would have been a removal.
+        let button = app
+            .world_mut()
+            .query_filtered::<bevy::prelude::Entity, bevy::prelude::With<NewGroupButton>>()
+            .iter(app.world())
+            .next()
+            .unwrap_or_else(|| panic!("the NEW button was never spawned"));
+        app.world_mut().trigger(Activate { entity: button });
+        app.update();
+        assert_eq!(
+            app.world().resource::<ComposeState>().naming.as_deref(),
+            Some(""),
+            "the NEW button has to open an empty name field"
+        );
+    }
+
+    /// **`N` makes a composition that survives the commit door**, which it could not before.
+    ///
+    /// The verb creates an *empty* bounded tile and then asks you to fill it — and `validate_shape`
+    /// refused an empty composition, so the door turned away the thing it had just been asked to
+    /// make. An author saw `composition: `test` has no members`, and the verb was unusable.
+    ///
+    /// Driven through `new_group`, which is the function the key handler calls: `bevy_debugger/input`
+    /// writes `ButtonInput` and not the `KeyboardInput` stream a text field reads, so a name cannot
+    /// be typed by an agent (`FVS-R-12`) and this is the level the verb can be tested at.
+    #[test]
+    fn a_new_composition_is_created_empty_and_written_to_disk() {
+        let root = Fixture::new("new_group")
+            .descriptor("floor", "alpha")
+            .bounded_composition("tile_a", (1.0, 2.4, 1.0), &[("floor", "floor", (0.0, 0.0))])
+            .build("m");
+        let mut app = emerge_mapper::harness::build_headless(&root, "m", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        *app.world_mut().resource_mut::<Mode>() = Mode::Compose;
+        for _ in 0..3 {
+            app.update();
+        }
+
+        app.world_mut().resource_scope(|world, mut project: bevy::prelude::Mut<Project>| {
+            let mut state = world.resource_mut::<ComposeState>();
+            emerge_mapper::compose::new_group(&mut state, &mut project, "test");
+            assert!(
+                state.status.problems().is_empty(),
+                "the commit door refused its own verb: {}",
+                state.status.line()
+            );
+        });
+        app.update();
+
+        let project = app.world().resource::<Project>();
+        let made = project
+            .compositions
+            .compositions
+            .iter()
+            .find(|c| c.id == "test")
+            .unwrap_or_else(|| panic!("`test` was not adopted into the project"));
+        assert!(made.members.is_empty(), "N makes an EMPTY tile — filling it is the next verb");
+        assert_eq!(app.world().resource::<ComposeState>().selected, {
+            let comps = &app.world().resource::<Project>().compositions.compositions;
+            comps.iter().position(|c| c.id == "test").unwrap_or(usize::MAX)
+        }, "the new composition has to be selected, or the next verb acts on the wrong one");
+
+        // **On disk, not only in memory.** `compositions.ron` is written on the keypress — this file
+        // has no staging buffer — so a reload has to find it.
+        let text = std::fs::read_to_string(
+            project.emerge_dir.join(emerge_core::composition::Compositions::FILE),
+        )
+        .unwrap_or_else(|e| panic!("compositions.ron: {e}"));
+        let back = emerge_core::composition::Compositions::parse(&text)
+            .unwrap_or_else(|e| panic!("what was written does not parse: {e}"));
+        assert!(
+            back.compositions.iter().any(|c| c.id == "test"),
+            "the new composition never reached disk"
+        );
+    }
+
+    /// **The focal group stands up with its neighbours either side** — the carousel, asked of a
+    /// running app rather than of the layout function.
+    ///
+    /// The layout is unit-tested; what no unit test can see is the schedule. `restage_group` gained a
+    /// resource, a change-guard and a parent-per-group hierarchy, and in Bevy 0.19 a system whose
+    /// `Res<T>` was never `init_resource`d panics rather than skipping.
+    #[test]
+    fn the_carousel_stands_the_focal_group_up_with_its_neighbours() {
+        let root = Fixture::new("sheet")
+            .descriptor("floor", "alpha")
+            .descriptor("wall", "alpha")
+            .bounded_composition("tile_a", (1.0, 2.4, 1.0), &[("floor", "floor", (0.0, 0.0))])
+            .bounded_composition(
+                "tile_b",
+                (1.0, 2.4, 1.0),
+                &[("floor", "floor", (0.0, 0.0)), ("wall", "wall", (0.0, -0.4))],
+            )
+            .bounded_composition("tile_c", (1.0, 2.4, 1.0), &[("floor", "floor", (0.0, 0.0))])
+            .build("m");
+        let mut app = emerge_mapper::harness::build_headless(&root, "m", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        *app.world_mut().resource_mut::<Mode>() = Mode::Compose;
+        for _ in 0..5 {
+            app.update();
+        }
+
+        // Three groups, all within the wings of the first, so all three stand.
+        let strip = app.world().resource::<emerge_mapper::compose::StagedCarousel>();
+        assert_eq!(strip.0.slots.len(), 3, "the strip did not stand every neighbour up");
+        assert_eq!(strip.0.focal().map(|s| s.index), Some(0), "the focal group is the selected one");
+        assert!(strip.0.tallest > 0.0, "a strip of no height frames nothing");
+
+        // Four rows across three groups — so this counts the whole strip standing, not one group.
+        let staged = app
+            .world_mut()
+            .query_filtered::<bevy::prelude::Entity, bevy::prelude::With<emerge_mapper::compose::StagedMember>>()
+            .iter(app.world())
+            .count();
+        assert_eq!(staged, 4, "every member of every visible group has to stand up");
+
+        // **Nothing respawns while nothing changes.** `restage_group` writes `status.problem` on a
+        // bad group, which re-marks its own resource changed — an unbounded despawn/respawn loop
+        // before the staging key closed it.
+        let ids: Vec<_> = app
+            .world_mut()
+            .query_filtered::<bevy::prelude::Entity, bevy::prelude::With<emerge_mapper::compose::StagedMember>>()
+            .iter(app.world())
+            .collect();
+        for _ in 0..5 {
+            app.update();
+        }
+        let after: Vec<_> = app
+            .world_mut()
+            .query_filtered::<bevy::prelude::Entity, bevy::prelude::With<emerge_mapper::compose::StagedMember>>()
+            .iter(app.world())
+            .collect();
+        assert_eq!(ids, after, "the sheet was rebuilt with nothing having changed");
+
+        // Stepping the carousel re-lays it: a different group becomes focal, and the wings change.
+        app.world_mut().resource_mut::<ComposeState>().selected = 1;
+        for _ in 0..3 {
+            app.update();
+        }
+        let strip = app.world().resource::<emerge_mapper::compose::StagedCarousel>();
+        assert_eq!(strip.0.focal().map(|s| s.index), Some(1), "stepping did not move the focus");
+        assert!(
+            strip.0.slots.iter().any(|s| s.offset == -1),
+            "the group before the focal one has to appear once there is one"
+        );
+    }
 }
 
 /// **The backdrop goes under the floor, and the floor is not where you would guess.**

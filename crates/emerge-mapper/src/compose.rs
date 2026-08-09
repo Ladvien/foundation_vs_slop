@@ -75,7 +75,7 @@ impl Pane {
 }
 
 /// Which group the tab is looking at, and which one the map will stamp.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct ComposeState {
     /// Index into `project.compositions.compositions`. Clamped on rebuild rather than stored as an
     /// `Option`, because the list is never empty while a selection exists.
@@ -112,11 +112,41 @@ pub struct ComposeState {
     /// the same argument [`emerge_core::composition::Override`] makes about naming a member. The id
     /// costs one lookup at stamp time and cannot go stale.
     pub armed: Option<String>,
+    /// **What was last stood up**, so nothing is respawned unless the picture actually changed.
+    ///
+    /// This exists for a defect rather than for speed. [`restage_group`] takes `ResMut<ComposeState>`
+    /// and writes `status.problem` when a group will not resolve — which re-marks the resource
+    /// changed, which re-triggers its own gate, which writes again. That is an unbounded
+    /// despawn/respawn every frame for as long as the error is on screen, and the strip multiplies it
+    /// by five. Comparing what was staged closes the loop at its source.
+    ///
+    /// The focal index is part of the key because stepping the carousel restages everything: the
+    /// neighbours change and the scales move.
+    pub staged: Option<(usize, Vec<Composition>)>,
     /// What this tab has to say — see [`crate::chrome::Status`] for why a refusal and a receipt are
     /// two slots rather than one string. This panel used to paint every message [`ACCENT`], so
     /// `cannot record` and `recorded 3 member(s)` were the same colour and the first was gone as soon
     /// as anything else happened.
     pub status: crate::chrome::Status,
+}
+
+/// Written out rather than derived, so adding a field costs a compile error here — which is the right
+/// place to be asked whether its zero value is the one this tab should open in.
+impl Default for ComposeState {
+    fn default() -> Self {
+        ComposeState {
+            selected: 0,
+            member: 0,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            naming: None,
+            focus: Pane::default(),
+            mesh: 0,
+            armed: None,
+            staged: None,
+            status: crate::chrome::Status::default(),
+        }
+    }
 }
 
 /// One line of the panel. Rebuilt wholesale when anything it reads changes.
@@ -143,14 +173,18 @@ struct MeshHeader;
 struct MeshRow(usize);
 
 /// The **NEW** button, top right. The `N` key does the same thing through the same call.
+///
+/// `pub` for the same reason [`StagedMember`] is: whether an observer fires for the *right* entity is
+/// a question about the schedule, and only `tests/headless.rs` can ask it.
 #[derive(Component)]
-struct NewGroupButton;
+pub struct NewGroupButton;
 
 pub struct ComposePlugin;
 
 impl Plugin for ComposePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ComposeState>()
+            .init_resource::<StagedCarousel>()
             .add_systems(Startup, spawn_compose_panel)
             .add_systems(
                 Update,
@@ -166,6 +200,8 @@ impl Plugin for ComposePlugin {
                     drop_member,
                     paint_member,
                     step_history,
+                    step_carousel,
+                    pick_slot,
                 )
                     .in_set(keys::Phase::Act)
                     .run_if(in_compose_mode),
@@ -174,7 +210,17 @@ impl Plugin for ComposePlugin {
             // despawned when the tab is left, and a system that stops running cannot despawn it.
             .add_systems(Update, new_group_keys.in_set(keys::Phase::Text))
             .add_systems(Update, restage_group.after(keys::Phase::Act))
-            .add_systems(Update, draw_stage.run_if(in_compose_mode))
+            // After the strip is published, so nothing is drawn against last frame's layout.
+            .add_systems(
+                Update,
+                draw_stage.after(restage_group).run_if(in_compose_mode),
+            )
+            // Labels are NOT gated on the mode: `place_labels` owns their visibility and hides them
+            // off-tab, which a system that has stopped running cannot do.
+            .add_systems(
+                Update,
+                (rebuild_labels, place_labels).chain().after(restage_group),
+            )
             // Not gated on the mode: the armed group is shown on the Map tab too, and a panel that
             // stops updating when you leave it is a panel that lies the moment you come back.
             .add_systems(Update, rebuild.after(keys::Phase::Act))
@@ -523,7 +569,7 @@ fn commit(
 /// **Bounded, not anchored**, because a group that claims a tile is the thing this whole effort is
 /// for: `grammar::learn` refuses a piece that is not the cell's size, and not one wall piece in the
 /// Site kit is. One metre square by the height the kit's walls stand at.
-const NEW_TILE: (f32, f32, f32) = (1.0, 2.4, 1.0);
+pub(crate) const NEW_TILE: (f32, f32, f32) = (1.0, 2.4, 1.0);
 
 /// `N` — start naming a new group.
 fn start_new(
@@ -597,8 +643,8 @@ pub fn new_group(state: &mut ComposeState, project: &mut Project, raw: &str) {
     }
     if project.compositions.compositions.iter().any(|c| c.id == id) {
         return state.status.problem(format!(
-            "`{id}` is already a group. Pick another name — renaming one would strand every map that \
-             stamped it."
+            "`{id}` is already a composition. Pick another name — renaming one would strand every map \
+             that stamped it."
         ));
     }
     let made = id.clone();
@@ -612,7 +658,15 @@ pub fn new_group(state: &mut ComposeState, project: &mut Project, raw: &str) {
         });
         // Sorted, because the file has one encoding — the same rule members follow.
         set.sort_by(|a, b| a.id.cmp(&b.id));
-        Ok(format!("`{made}` — empty; press A to add a piece"))
+        // **Built from the census, not written out.** This said "press A to add a piece", and there
+        // is no `A` verb on this tab — `A` is `PanLeft`, so an author following the receipt slid the
+        // camera and concluded pieces could not be placed at all. A chord in a message has to come
+        // from the same table the key handler reads, or it is a claim nothing checks.
+        Ok(format!(
+            "`{made}` — empty. Click a piece in PLACE (or {} to walk to that list), then {} to add it.",
+            keys::chord(Action::ComposeMemberNext),
+            keys::chord(Action::ComposeArm),
+        ))
     });
     // Select what was just made, so the next verb acts on it rather than on whatever was selected
     // before. Looked up by id rather than remembered as an index, because the sort above moved things.
@@ -640,7 +694,7 @@ pub fn add_member(state: &mut ComposeState, project: &mut Project, descriptor: &
     commit(state, project, move |set| {
         let c = set
             .get_mut(selected)
-            .ok_or_else(|| "that group is no longer there".to_owned())?;
+            .ok_or_else(|| "that composition is no longer there".to_owned())?;
         // A member id from the piece's own name, numbered from the second — the rule capture uses.
         let short = what.rsplit('/').next().unwrap_or(&what).to_owned();
         let mut id = short.clone();
@@ -891,7 +945,7 @@ fn drop_member(
     commit(&mut state, &mut project, |set| {
         let c = set
             .get_mut(selected)
-            .ok_or_else(|| format!("`{member_id}`'s group is no longer there"))?;
+            .ok_or_else(|| format!("`{member_id}`'s composition is no longer there"))?;
         if i >= c.members.len() {
             return Err(format!("`{member_id}` is no longer there to drop"));
         }
@@ -954,165 +1008,763 @@ fn step_history(
 // ------------------------------------------------------------------------------------------------
 
 /// A mesh standing on the Compose stage. Despawned wholesale, never diffed.
+///
+/// `pub` for the same reason [`ComposeState`]'s fields are: whether every group actually stood up is
+/// a question about the schedule, which only `tests/headless.rs` can ask.
 #[derive(Component)]
-struct StagedMember;
+pub struct StagedMember;
 
-/// **Stand the selected group up, through `composition::expand`.**
+/// One whole group on the strip — the parent carrying its slot's position and miniature scale.
+///
+/// Despawning this takes its members with it: `ChildOf` is `linked_spawn` in Bevy 0.19, so the
+/// hierarchy owns the lifetime and there is no second list of what to clean up.
+#[derive(Component)]
+pub struct StagedGroup;
+
+// ------------------------------------------------------------------------------------------------
+// The carousel — one group at a time, with its neighbours either side
+// ------------------------------------------------------------------------------------------------
+
+/// How many groups stand either side of the focal one.
+///
+/// **The wings do not wrap.** With fewer groups than the carousel could show, the strip is simply
+/// shorter — so running out of miniatures on one side is how the stage says "this is the end of the
+/// list", which a wrapping strip would hide by showing the same group twice.
+pub const WINGS: i32 = 2;
+
+/// What each remove from the focal group multiplies its scale by.
+///
+/// Geometric rather than a table, so adding a wing needs no new number: the focal group stands at 1,
+/// its neighbours at this, theirs at this squared.
+pub(crate) const MINIATURE: f32 = 0.55;
+
+/// **The strip's direction across the ground**, as a unit vector in XZ.
+///
+/// The rig looks along the XZ diagonal (`view::ISO_OFFSET` is `(12, 12, 12)`), so this is the ground
+/// direction that reads as *horizontal on screen* at the default yaw — which is what makes a filmstrip
+/// look like a filmstrip rather than a staircase. It is a constant and not a camera read on purpose:
+/// the layout stays pure and testable, and turning the view with `Q`/`E` tilts the strip the same way
+/// it tilts everything else on the stage.
+const STRIP: (f32, f32) = (
+    std::f32::consts::FRAC_1_SQRT_2,
+    -std::f32::consts::FRAC_1_SQRT_2,
+);
+
+/// Air between one slot and the next, in metres. `SNAP`, so the strip's own pitch is on the lattice
+/// everything else here already uses rather than being a second quantum.
+const SLOT_GAP: f32 = emerge_core::grid::SNAP;
+
+/// Where one composition stands on the carousel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Slot {
+    /// Index into `project.compositions.compositions`.
+    pub index: usize,
+    /// Remove from the focal group: `0` is the one being edited, negative is earlier in the list.
+    pub offset: i32,
+    /// Centre on the ground, relative to the stage origin, in metres.
+    pub at: (f32, f32),
+    /// Uniform scale the whole group is drawn at. `1.0` for the focal one.
+    pub scale: f32,
+    /// Footprint **at that scale** — what it occupies on the strip and what a click tests against.
+    pub size: (f32, f32),
+    /// How tall it stands at that scale. The camera has to fit this, not just the floor plan.
+    pub height: f32,
+}
+
+/// The focal group and its neighbours, laid out along the strip.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Carousel {
+    /// Ascending by `offset`, so the strip reads in list order.
+    pub slots: Vec<Slot>,
+    /// Ground bounding box of everything standing, in metres.
+    pub extent: (f32, f32),
+    /// The tallest thing standing, at its own scale.
+    pub tallest: f32,
+}
+
+impl Carousel {
+    /// The group being edited — the only one that gets a lattice, a ring and full-strength colour.
+    pub fn focal(&self) -> Option<&Slot> {
+        self.slots.iter().find(|s| s.offset == 0)
+    }
+}
+
+/// **How much floor one group takes**, or why that cannot be answered.
+///
+/// The two-variant match the schema already forces, and the same one [`member_footprint`] makes:
+///
+/// - `Bounded` answers with its **declared claim, unmodified**. Not a measurement — the declared size
+///   is the tile it says it fills, and rounding or padding it would make the drawn envelope disagree
+///   with the one `interface` reads faces off.
+/// - `Anchored` claims no tile, so it is measured: the union of its members' own footprints. A member
+///   that cannot be measured is a refusal naming the group, never a guessed box — the rule
+///   [`member_footprint`] and [`crate::editor::composition_from_set`] already apply.
+///
+/// The measured branch is floored at one `SNAP`. A group with no members yet is the ordinary state
+/// right after `N`, and a cell smaller than the editor's own quantum can be neither seen nor clicked.
+pub fn footprint(
+    c: &Composition,
+    comps: &[Composition],
+    library: &emerge_core::library::Library,
+) -> Result<(f32, f32), String> {
+    match c.envelope {
+        Envelope::Bounded { size } => Ok((size.0, size.2)),
+        Envelope::Anchored => {
+            let mut span: Option<(f32, f32, f32, f32)> = None;
+            for m in &c.members {
+                let (w, d) = member_footprint(m, comps, library)
+                    .map_err(|e| format!("`{}` cannot be sized for the stage: {e}", c.id))?;
+                let (x0, x1) = (m.at.0 - w * 0.5, m.at.0 + w * 0.5);
+                let (z0, z1) = (m.at.1 - d * 0.5, m.at.1 + d * 0.5);
+                span = Some(match span {
+                    None => (x0, x1, z0, z1),
+                    Some((lo_x, hi_x, lo_z, hi_z)) => {
+                        (lo_x.min(x0), hi_x.max(x1), lo_z.min(z0), hi_z.max(z1))
+                    }
+                });
+            }
+            let (w, d) = span.map_or((0.0, 0.0), |(x0, x1, z0, z1)| (x1 - x0, z1 - z0));
+            let floor = emerge_core::grid::SNAP;
+            Ok((w.max(floor), d.max(floor)))
+        }
+    }
+}
+
+/// **How tall one group stands**, which the camera needs and the floor plan does not say.
+///
+/// Framing on the footprint alone was measured to be wrong: four 1 × 1 tiles are 2.4 m tall, and a
+/// view sized to their floor plan cut their tops off. Same two-variant match as [`footprint`] — a
+/// `Bounded` group declares its height, an `Anchored` one is measured from what stands in it.
+pub fn height_of(
+    c: &Composition,
+    comps: &[Composition],
+    library: &emerge_core::library::Library,
+) -> Result<f32, String> {
+    match c.envelope {
+        Envelope::Bounded { size } => Ok(size.1),
+        Envelope::Anchored => {
+            let mut tallest = 0.0f32;
+            for m in &c.members {
+                let top = match &m.body {
+                    composition::Body::Descriptor { id, patch, .. } => {
+                        let base = library.get(id).ok_or_else(|| {
+                            format!(
+                                "`{}` places descriptor `{id}`, which the library does not define",
+                                c.id
+                            )
+                        })?;
+                        let d = match patch {
+                            Some(p) => base.patched_with(p),
+                            None => base.clone(),
+                        };
+                        emerge_core::descriptor::placed_height(&d).ok_or_else(|| {
+                            format!("`{}` holds `{}`, which is unmeasured", c.id, m.id)
+                        })?
+                    }
+                    composition::Body::Composition { id } => {
+                        let child = comps.iter().find(|k| k.id == *id).ok_or_else(|| {
+                            format!("`{}` nests `{id}`, which is not a composition here", c.id)
+                        })?;
+                        match child.envelope {
+                            Envelope::Bounded { size } => size.1,
+                            // The same refusal `member_footprint` makes, for the same reason: an
+                            // anchored child declares no box, so a parent cannot bound it.
+                            Envelope::Anchored => {
+                                return Err(format!(
+                                    "`{}` nests `{id}`, which is anchored and so declares no height",
+                                    c.id
+                                ))
+                            }
+                        }
+                    }
+                };
+                tallest = tallest.max(m.lift + top);
+            }
+            Ok(tallest.max(emerge_core::grid::SNAP))
+        }
+    }
+}
+
+/// **Lay the focal group out with its neighbours either side.**
+///
+/// Walks outward from the focal group, so its position never depends on how many neighbours happen to
+/// exist — stepping to the next composition slides the strip past a fixed centre rather than
+/// re-centring a block that changed width.
+pub fn lay_out(
+    comps: &[Composition],
+    library: &emerge_core::library::Library,
+    selected: usize,
+) -> Result<Carousel, String> {
+    if comps.is_empty() {
+        return Ok(Carousel::default());
+    }
+    let selected = selected.min(comps.len() - 1);
+
+    // Measure first, so a group that cannot be sized refuses before anything is positioned.
+    let mut measured: Vec<(usize, i32, f32, (f32, f32), f32)> = Vec::new();
+    for offset in -WINGS..=WINGS {
+        let Some(index) = selected.checked_add_signed(offset as isize) else {
+            continue;
+        };
+        let Some(c) = comps.get(index) else { continue };
+        let scale = MINIATURE.powi(offset.abs());
+        let (w, d) = footprint(c, comps, library)?;
+        let h = height_of(c, comps, library)?;
+        measured.push((index, offset, scale, (w * scale, d * scale), h * scale));
+    }
+
+    /// A box's reach from its own centre along the strip — half the projection of an axis-aligned
+    /// `w × d` onto [`STRIP`].
+    fn reach(size: (f32, f32)) -> f32 {
+        (size.0 * STRIP.0.abs() + size.1 * STRIP.1.abs()) * 0.5
+    }
+
+    let Some(&focal) = measured.iter().find(|m| m.1 == 0) else {
+        return Ok(Carousel::default());
+    };
+    let slot = |(index, offset, scale, size, height): (usize, i32, f32, (f32, f32), f32),
+                distance: f32| Slot {
+        index,
+        offset,
+        at: (distance * STRIP.0, distance * STRIP.1),
+        scale,
+        size,
+        height,
+    };
+
+    // The focal group sits at zero whatever its neighbours do, so stepping to the next composition
+    // slides the strip past a fixed centre instead of re-centring a block that changed width.
+    let mut slots = vec![slot(focal, 0.0)];
+    for side in [1i32, -1] {
+        let mut edge = reach(focal.3);
+        for step in 1..=WINGS {
+            let Some(&m) = measured.iter().find(|m| m.1 == side * step) else {
+                continue;
+            };
+            let distance = edge + SLOT_GAP + reach(m.3);
+            edge = distance + reach(m.3);
+            slots.push(slot(m, distance * side as f32));
+        }
+    }
+    slots.sort_by_key(|s| s.offset);
+
+    // **Symmetric about the focal group, deliberately.** The camera is pinned to the stage origin so
+    // that the group being edited never moves, so what it has to cover is the box centred there that
+    // contains every slot — not the strip's own bounding box, which drifts when one wing is short.
+    let mut extent = (0.0f32, 0.0f32);
+    let mut tallest = 0.0f32;
+    for s in &slots {
+        extent.0 = extent.0.max((s.at.0.abs() + s.size.0 * 0.5) * 2.0);
+        extent.1 = extent.1.max((s.at.1.abs() + s.size.1 * 0.5) * 2.0);
+        tallest = tallest.max(s.height);
+    }
+    Ok(Carousel { slots, extent, tallest })
+}
+
+/// **Which slot a point on the ground belongs to** — the inverse of [`lay_out`], for clicks.
+///
+/// Returns the *composition* index, which is what a click is for: putting the miniature you pointed
+/// at into the focal position. Slots never overlap, so `position` picking the first match is
+/// deterministic rather than incidental.
+pub fn slot_at(carousel: &Carousel, at: (f32, f32)) -> Option<usize> {
+    carousel
+        .slots
+        .iter()
+        .find(|s| {
+            (at.0 - s.at.0).abs() <= s.size.0 * 0.5 && (at.1 - s.at.1).abs() <= s.size.1 * 0.5
+        })
+        .map(|s| s.index)
+}
+
+/// **The orthographic viewport height that shows the whole strip.**
+///
+/// Two extents matter and the first draft only had one. The rig looks along the XZ diagonal, so a
+/// `w × d` ground rectangle spreads `(w + d) / √2` across the screen; but the groups also *stand up*,
+/// and a vertical metre projects to `cos(elevation)` of one. Framing on the floor plan alone cut the
+/// tops off four 2.4 m tiles — measured in a captured frame, not predicted.
+///
+/// The horizontal fit assumes a square viewport, which is exact for the debugger's mirror camera and
+/// conservative for a window with two panels eating its width.
+///
+/// Returned unclamped: the caller decides what to do when it exceeds [`crate::view::MAX_ZOOM`],
+/// because that is a thing to say out loud rather than to silently crop.
+pub fn framing_height(extent: (f32, f32), tallest: f32) -> f32 {
+    /// A little air around the strip, so the outermost miniature is not flush with the window edge.
+    const MARGIN: f32 = 1.15;
+    let spread = (extent.0 + extent.1) * std::f32::consts::FRAC_1_SQRT_2;
+    let elevation = crate::view::ISO_ELEVATION;
+    let vertical = spread * elevation.sin() + tallest * elevation.cos();
+    (vertical.max(spread) * MARGIN).max(crate::tiles::TILE_VIEW_HEIGHT)
+}
+
+/// **The carousel as it currently stands**, written by [`restage_group`] and read by everything that
+/// has to agree with it — the gizmos, the labels, the click, the camera.
+///
+/// A resource rather than four calls to [`lay_out`], because four callers computing the same layout is
+/// four chances for them to disagree about where a group is. One writer, one answer.
+#[derive(Resource, Default)]
+pub struct StagedCarousel(pub Carousel);
+
+/// The envelope of a group that is not the focal one.
+///
+/// [`ACCENT`] at half luminance: the same hue, so a reader sees one kind of thing at two weights,
+/// rather than a second colour to learn.
+const ENVELOPE_IDLE: Color = Color::srgb(0.45, 0.33, 0.12);
+
+/// One group's id, floating over its slot. Carries the slot's index into the carousel.
+#[derive(Component)]
+struct SlotLabel(usize);
+
+/// How far below the slot's projected centre the label sits, in logical pixels.
+const LABEL_DROP: f32 = 4.0;
+
+/// Label type sizes: the focal group's, then a miniature's.
+///
+/// Two constants rather than one with a factor, because [`place_labels`] has to centre a string it
+/// did not set the size of — deriving the advance from the same pair keeps the two systems from
+/// disagreeing about how wide a label is. `TextFont::font_size` is a `FontSize` in Bevy 0.19 and does
+/// not divide, so reading it back is not the shortcut it looks like.
+const LABEL_PX: (f32, f32) = (12.0, 9.0);
+
+/// Advance of one glyph at `LABEL_PX.0`, in logical pixels.
+///
+/// The shipped face is `FiraMono-Regular.ttf` — **monospace** — so a string's width is its length
+/// times this, and centring needs no text-layout round trip. If the face is ever changed to a
+/// proportional one, labels drift off-centre; they do not break.
+const LABEL_CHAR_W: f32 = 6.6;
+
+/// **Stand the focal group up, with its neighbours either side, each through `composition::expand`.**
 ///
 /// The same three calls `editor::redraw_stamps` makes — build a scratch map, expand a stamp of the
 /// group against it, `stack::resolve_y` over a map carrying both — so **what this tab shows is what a
 /// stamp produces**. A second interpretation of a composition would be a preview that lies, which is
 /// the argument `spawn_piece` itself was written for.
 ///
-/// Rebuilt wholesale whenever the project or the selection changes. A diffing version would be faster
-/// and would be a second opinion about what is on screen.
+/// # One scratch map per group, not one for the strip
+///
+/// `expand` takes a slice, so staging all of them in a single map was the obvious shape and it is the
+/// wrong one. [`composition::interface`] derives a group's faces against **its own envelope as a
+/// scratch map** — origin at zero, `bounds` the declared size. A shared map would give every group the
+/// strip's bounds instead, so a ceiling-mounted member would hang from a ceiling belonging to whatever
+/// else happened to be on screen, and the stage would be showing something other than what the
+/// interface beside it was derived from. Per-group maps keep the picture and the tokens answering the
+/// same question, and they make a failure local: a group that will not resolve says so by name and the
+/// others still stand.
+///
+/// # The miniatures are scaled by a parent, and that is why the origin is zero
+///
+/// Each group is spawned under one parent carrying its slot's translation *and* scale, with the pieces
+/// themselves built at a local origin. Scaling a group any other way would mean scaling each piece
+/// about the stage rather than about its own group, which shears the arrangement rather than shrinking
+/// it. Despawning the parent takes the pieces with it — `ChildOf` is `linked_spawn` in Bevy 0.19.
 fn restage_group(
     mut commands: Commands,
     assets: Res<AssetServer>,
     mode: Res<Mode>,
     mut state: ResMut<ComposeState>,
+    mut carousel_out: ResMut<StagedCarousel>,
     project: Res<Project>,
-    drawn: Query<Entity, With<StagedMember>>,
+    drawn: Query<Entity, With<StagedGroup>>,
 ) {
     if !(project.is_changed() || state.is_changed() || mode.is_changed()) {
+        return;
+    }
+    if *mode != Mode::Compose {
+        // Left the tab. A system that stops running cannot despawn what it drew, so this is not
+        // gated on the mode — but it also must not re-despawn an empty stage every frame.
+        if state.staged.is_some() {
+            for e in &drawn {
+                commands.entity(e).despawn();
+            }
+            state.staged = None;
+        }
+        return;
+    }
+    let comps = &project.compositions.compositions;
+    // **The loop-breaker.** See `ComposeState::staged`: writing a problem below re-marks this
+    // resource changed, which re-triggers the gate above. Claiming the key before staging means a
+    // group that cannot resolve is reported once rather than respawning the strip every frame.
+    if state
+        .staged
+        .as_ref()
+        .is_some_and(|(sel, c)| *sel == state.selected && c == comps)
+    {
         return;
     }
     for e in &drawn {
         commands.entity(e).despawn();
     }
-    if *mode != Mode::Compose {
-        return;
+    state.staged = Some((state.selected, comps.clone()));
+
+    let carousel = match lay_out(comps, &project.library, state.selected) {
+        Ok(c) => c,
+        Err(e) => {
+            // Nothing can be laid out, so nothing can be drawn over it either.
+            carousel_out.0 = Carousel::default();
+            return state.status.problem(e);
+        }
+    };
+    for slot in &carousel.slots {
+        let Some(c) = comps.get(slot.index) else { continue };
+        let size = match c.envelope {
+            Envelope::Bounded { size } => size,
+            // An anchored group claims no tile. It still stands up — it is furniture somewhere — and
+            // the scratch map just needs to be big enough not to clip it.
+            Envelope::Anchored => (64.0, 8.0, 64.0),
+        };
+        // **Origin zero**: the pieces come out in the group's own space, and the parent below puts
+        // that space on the strip at the slot's scale.
+        let scratch = emerge_core::map::Map {
+            version: emerge_core::map::MAP_VERSION,
+            name: "compose_stage".to_owned(),
+            origin: (0.0, 0.0, 0.0),
+            bounds: size,
+            placements: Vec::new(),
+            stamps: Vec::new(),
+            locations: Vec::new(),
+            note: None,
+        };
+        // **Nothing to expand is not an error here.** A composition with no members yet is the
+        // ordinary state right after `N`; `expand` refuses to *stamp* one, which is right for a map
+        // and wrong for the stage that is showing you the one you are filling. Its envelope still
+        // draws — `draw_stage` reads that off the schema, not off the members.
+        if c.members.is_empty() {
+            continue;
+        }
+        let stamp = emerge_core::composition::Stamped {
+            id: "staged".to_owned(),
+            of: c.id.clone(),
+            at: (0.0, 0.0),
+            ..Default::default()
+        };
+        let expanded = match composition::expand(&scratch, &[stamp], comps, &project.library) {
+            Ok(e) => e,
+            // Loud. An empty patch of floor where a composition should be, with nothing saying why,
+            // is the failure this editor's own notes call the worst it had.
+            Err(e) => {
+                state.status.problem(format!("`{}` does not resolve: {e}", c.id));
+                continue;
+            }
+        };
+        let mut with_rows = scratch.clone();
+        with_rows.placements.extend(expanded.placements.iter().cloned());
+        let ys = match emerge_core::stack::resolve_y(&with_rows, &project.library) {
+            Ok(ys) => ys,
+            Err(e) => {
+                state.status.problem(format!("`{}` has no height: {e}", c.id));
+                continue;
+            }
+        };
+        let parent = commands
+            .spawn((
+                Name::new(format!("staged {}", c.id)),
+                StagedGroup,
+                Transform::from_translation(
+                    COMPOSE_STAGE + Vec3::new(slot.at.0, 0.0, slot.at.1),
+                )
+                .with_scale(Vec3::splat(slot.scale)),
+                Visibility::Inherited,
+            ))
+            .id();
+        for (k, p) in expanded.placements.iter().enumerate() {
+            let Some(base) = project.library.get(&p.descriptor) else {
+                continue;
+            };
+            let d = match &p.patch {
+                Some(patch) => base.patched_with(patch),
+                None => base.clone(),
+            };
+            let Some(&y) = ys.get(k) else { continue };
+            if let Some(e) = crate::editor::spawn_piece(
+                &mut commands,
+                &assets,
+                &d,
+                p.at,
+                p.yaw,
+                p.tip,
+                scratch.origin,
+                y,
+            ) {
+                commands.entity(e).insert(StagedMember);
+                // The stage must show what the map will: paint decides what is seen where two members
+                // coincide, and a preview that ignores it is a preview that lies.
+                if p.paint != 0 {
+                    commands.entity(e).insert(emerge_bevy::Paint(p.paint));
+                }
+                commands.entity(parent).add_child(e);
+            }
+        }
     }
-    let Some(c) = project.compositions.compositions.get(state.selected) else {
-        return;
-    };
-    let size = match c.envelope {
-        Envelope::Bounded { size } => size,
-        // An anchored group claims no tile. It still stands up — it is furniture somewhere — and the
-        // scratch map just needs to be big enough not to clip it.
-        Envelope::Anchored => (64.0, 8.0, 64.0),
-    };
-    let scratch = emerge_core::map::Map {
-        version: emerge_core::map::MAP_VERSION,
-        name: "compose_stage".to_owned(),
-        origin: (COMPOSE_STAGE.x, COMPOSE_STAGE.y, COMPOSE_STAGE.z),
-        bounds: size,
-        placements: Vec::new(),
-        stamps: Vec::new(),
-        locations: Vec::new(),
-        note: None,
-    };
-    let stamp = emerge_core::composition::Stamped {
-        id: "staged".to_owned(),
-        of: c.id.clone(),
-        at: (0.0, 0.0),
-        ..Default::default()
-    };
-    let expanded = match composition::expand(
-        &scratch,
-        &[stamp],
-        &project.compositions.compositions,
-        &project.library,
-    ) {
-        Ok(e) => e,
-        // Loud. An empty patch of floor where a composition should be, with nothing saying why, is the
-        // failure this editor's own notes call the worst it had.
-        Err(e) => return state.status.problem(format!("`{}` does not resolve: {e}", c.id)),
-    };
-    let mut with_rows = scratch.clone();
-    with_rows.placements.extend(expanded.placements.iter().cloned());
-    let ys = match emerge_core::stack::resolve_y(&with_rows, &project.library) {
-        Ok(ys) => ys,
-        Err(e) => return state.status.problem(format!("`{}` has no height: {e}", c.id)),
-    };
-    for (k, p) in expanded.placements.iter().enumerate() {
-        let Some(base) = project.library.get(&p.descriptor) else {
+    // **A strip too big to be seen whole says so.** The rig stops at `MAX_ZOOM`, so past that the
+    // outer miniatures are cropped — and cropped read as complete is exactly the silent truncation
+    // `fill::box_fill` grew its `truncated` flag to avoid.
+    let want = framing_height(carousel.extent, carousel.tallest);
+    if want > crate::view::MAX_ZOOM {
+        state.status.problem(format!(
+            "this composition and its neighbours need a {want:.0} m view and the camera stops at \
+             {:.0} m \
+             — the outer miniatures are cropped.",
+            crate::view::MAX_ZOOM,
+        ));
+    }
+    // Published last, so everything drawn over the strip is drawn over the one that just went up.
+    carousel_out.0 = carousel;
+}
+
+/// **Every visible group's envelope, and the lattice the focal one seats on.**
+///
+/// Drawn rather than spawned: these are not things in the world, they are the tiles the compositions
+/// claim. An anchored group gets neither box nor lattice, because it claims none — an invented box
+/// would be exactly the guess `seated` refuses to make.
+///
+/// The miniatures draw their boxes at [`ENVELOPE_IDLE`] so the strip reads as *claimed tiles* rather
+/// than floating meshes; only the focal group draws at full [`ACCENT`], and only it gets the lattice
+/// and the member ring, because those answer "what am I seating, and where" about one group.
+fn draw_stage(
+    state: Res<ComposeState>,
+    project: Res<Project>,
+    carousel: Res<StagedCarousel>,
+    mut gizmos: Gizmos,
+) {
+    let step = emerge_core::grid::SNAP;
+    for slot in &carousel.0.slots {
+        let Some(c) = project.compositions.compositions.get(slot.index) else {
             continue;
         };
-        let d = match &p.patch {
-            Some(patch) => base.patched_with(patch),
-            None => base.clone(),
+        let Envelope::Bounded { size } = c.envelope else {
+            continue;
         };
-        let Some(&y) = ys.get(k) else { continue };
-        if let Some(e) = crate::editor::spawn_piece(
-            &mut commands,
-            &assets,
-            &d,
-            p.at,
-            p.yaw,
-            p.tip,
-            scratch.origin,
-            y,
-        ) {
-            commands.entity(e).insert(StagedMember);
-            // The stage must show what the map will: paint decides what is seen where two members
-            // coincide, and a preview that ignores it is a preview that lies.
-            if p.paint != 0 {
-                commands.entity(e).insert(emerge_bevy::Paint(p.paint));
+        let base = COMPOSE_STAGE + Vec3::new(slot.at.0, 0.0, slot.at.1);
+        let focal = slot.offset == 0;
+        // Scaled with its group, so the box stays the tile the miniature is actually drawing.
+        let size = (size.0 * slot.scale, size.1 * slot.scale, size.2 * slot.scale);
+        gizmos.cube(
+            Transform::from_translation(base + Vec3::new(0.0, size.1 * 0.5, 0.0))
+                .with_scale(Vec3::new(size.0, size.1, size.2)),
+            if focal { crate::chrome::ACCENT } else { ENVELOPE_IDLE },
+        );
+        if !focal {
+            continue;
+        }
+        // The seating lattice on its floor — `grid::SNAP`, the same quantum `seated` steps by and the
+        // Map snaps to. Drawing anything else here would be the drawn-grid-disagrees-with-the-snap bug
+        // that `GridSpacing`'s note records. The focal group is always at scale 1, so this is the
+        // lattice a seat step actually lands on rather than a scaled picture of one.
+        let cells = (
+            (size.0 / step).round().max(1.0) as u32,
+            (size.2 / step).round().max(1.0) as u32,
+        );
+        gizmos
+            .grid(
+                Isometry3d::new(
+                    base + Vec3::Y * 0.002,
+                    Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                ),
+                UVec2::new(cells.0, cells.1),
+                Vec2::splat(step),
+                crate::editor::GRID_LINE,
+            )
+            .outer_edges();
+        // The member being seated, ringed where it stands.
+        if let Some(m) = c.members.get(state.member.min(c.members.len().saturating_sub(1))) {
+            gizmos.circle(
+                Isometry3d::new(
+                    base + Vec3::new(m.at.0, 0.01, m.at.1),
+                    Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                ),
+                step * 0.75,
+                crate::chrome::ACCENT,
+            );
+        }
+    }
+}
+
+/// **Which group is which, said in the viewport rather than only in the panel.**
+///
+/// Rebuilt whenever the strip or the selection changes; positioned every frame by [`place_labels`].
+///
+/// The label carries the group's **state**, not just its id, and that is a lesson someone else paid
+/// for. `pcgbook_chapter11` on Tanagra: *"Later versions of Tanagra altered the UI to make it clearer
+/// what geometry was 'pinned' and what was not."* This tab has the same latent gap — `armed` and the
+/// focal group are distinguished in the panel by a `>*` marker and nowhere on the stage — so the tint
+/// says focal and the trailing `*` says armed, matching the marks the list already uses.
+fn rebuild_labels(
+    mut commands: Commands,
+    carousel: Res<StagedCarousel>,
+    state: Res<ComposeState>,
+    project: Res<Project>,
+    existing: Query<Entity, With<SlotLabel>>,
+) {
+    if !(carousel.is_changed() || state.is_changed() || project.is_changed()) {
+        return;
+    }
+    for e in &existing {
+        commands.entity(e).despawn();
+    }
+    for (k, slot) in carousel.0.slots.iter().enumerate() {
+        let Some(c) = project.compositions.compositions.get(slot.index) else {
+            continue;
+        };
+        let armed = state.armed.as_deref() == Some(c.id.as_str());
+        commands.spawn((
+            SlotLabel(k),
+            Text::new(if armed { format!("{} *", c.id) } else { c.id.clone() }),
+            // The miniatures name themselves in smaller type, so the strip reads as one focal group
+            // among neighbours rather than as five equal things.
+            TextFont::from_font_size(if slot.offset == 0 { LABEL_PX.0 } else { LABEL_PX.1 }),
+            TextColor(if slot.offset == 0 { ACCENT } else { DIM }),
+            Node {
+                position_type: PositionType::Absolute,
+                // Hidden until `place_labels` has a projection to put it at — a label at (0,0) for
+                // one frame is a label in the wrong place.
+                display: Display::None,
+                ..default()
+            },
+            // **Never steal the wheel.** `view::drive` gives scroll to whatever is under the cursor by
+            // testing `Hovered`, so a pickable node floating over the stage would silently kill zoom.
+            bevy::picking::Pickable::IGNORE,
+        ));
+    }
+}
+
+/// **Put each label under its slot**, in logical window pixels.
+///
+/// The single owner of a label's `display`, so there is one rule for when a label is on screen rather
+/// than two systems disagreeing about it. Hidden when the tab is not live and when the projection has
+/// no answer.
+fn place_labels(
+    mode: Res<Mode>,
+    carousel: Res<StagedCarousel>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<crate::view::MainCamera>>>,
+    mut labels: Query<(&SlotLabel, &Text, &mut Node)>,
+) {
+    let Some(camera) = camera.filter(|_| *mode == Mode::Compose) else {
+        for (_, _, mut node) in &mut labels {
+            if node.display != Display::None {
+                node.display = Display::None;
+            }
+        }
+        return;
+    };
+    let (cam, cam_tf) = *camera;
+    for (label, text, mut node) in &mut labels {
+        let placed = carousel.0.slots.get(label.0).and_then(|slot| {
+            let advance = LABEL_CHAR_W
+                * if slot.offset == 0 { 1.0 } else { LABEL_PX.1 / LABEL_PX.0 };
+            cam.world_to_viewport(cam_tf, COMPOSE_STAGE + Vec3::new(slot.at.0, 0.0, slot.at.1))
+                .ok()
+                .map(|p| (p, advance))
+        });
+        match placed {
+            // Centred by measuring the string, which works because the shipped face is monospace —
+            // see `LABEL_CHAR_W`.
+            Some((p, advance)) => {
+                let half = text.0.chars().count() as f32 * advance * 0.5;
+                let (left, top) = (Val::Px(p.x - half), Val::Px(p.y + LABEL_DROP));
+                // **Guarded against the no-op write**, the way `editor::refresh_status` is: `Node` is
+                // change-detected, and touching it every frame makes Bevy re-lay the whole UI tree
+                // on every frame the camera happens to be still.
+                if node.display != Display::Flex || node.left != left || node.top != top {
+                    node.display = Display::Flex;
+                    node.left = left;
+                    node.top = top;
+                }
+            }
+            None => {
+                if node.display != Display::None {
+                    node.display = Display::None;
+                }
             }
         }
     }
 }
 
-/// **The envelope and the lattice a member seats on.**
+/// **Step the carousel — the previous or next composition becomes the focal one.**
 ///
-/// Drawn rather than spawned: it is not a thing in the world, it is the tile the composition claims. An
-/// anchored group gets neither, because it claims none — an invented box would be exactly the guess
-/// `seated` refuses to make.
-fn draw_stage(state: Res<ComposeState>, project: Res<Project>, mut gizmos: Gizmos) {
-    let Some(c) = project.compositions.compositions.get(state.selected) else {
+/// Takes the twelfth and last row of this tab's key census. Its own keys rather than the arrows
+/// because the arrows belong to whichever of the three lists has focus: stepping the strip while
+/// editing a member would otherwise cost `left left up right right`, and the whole point of the
+/// carousel is that moving between groups is one keypress from wherever you are.
+///
+/// Wraps, like [`walk`] does, so the list is a ring to move through even though the strip itself does
+/// not wrap — running out of miniatures is how the stage says which end you are at.
+fn step_carousel(
+    keys: Res<ButtonInput<KeyCode>>,
+    live: Res<keys::Live>,
+    project: Res<Project>,
+    mut state: ResMut<ComposeState>,
+) {
+    let by = match (
+        keys::just_pressed(&keys, live.0, Action::CarouselNext),
+        keys::just_pressed(&keys, live.0, Action::CarouselPrev),
+    ) {
+        (true, false) => 1i64,
+        (false, true) => -1,
+        _ => return,
+    };
+    let n = project.compositions.compositions.len();
+    if n == 0 {
+        return;
+    }
+    state.selected = ((state.selected as i64 + by).rem_euclid(n as i64)) as usize;
+    // A different group has different members; leaving the old index would point the seat verbs at
+    // whatever happened to sit there — the same reason `walk` resets it.
+    state.member = 0;
+}
+
+/// **Click a miniature to bring it to the middle** — the strip lies on the ground plane, so this is
+/// arithmetic rather than a raycast.
+///
+/// Reads [`crate::view::Pointer`] and never the `Window`: a system that asks the window directly is
+/// undrivable by an agent and is a second opinion about where the cursor is.
+fn pick_slot(
+    buttons: Res<ButtonInput<MouseButton>>,
+    pointer: Res<crate::view::Pointer>,
+    carousel: Res<StagedCarousel>,
+    hovered_ui: Query<&Hovered>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<crate::view::MainCamera>>>,
+    mut state: ResMut<ComposeState>,
+) {
+    if !buttons.just_pressed(MouseButton::Left) {
+        return;
+    }
+    // A click that lands on a panel belongs to the panel, the same test `view::drive` uses for scroll.
+    if hovered_ui.iter().any(|h| h.0) {
+        return;
+    }
+    let Some(camera) = camera else { return };
+    let (cam, cam_tf) = *camera;
+    let Some(ground) = crate::view::cursor_ground(pointer.0, cam, cam_tf) else {
         return;
     };
-    let Envelope::Bounded { size } = c.envelope else {
-        return;
-    };
-    let base = COMPOSE_STAGE;
-    // The envelope, as the box it is.
-    gizmos.cube(
-        Transform::from_translation(base + Vec3::new(0.0, size.1 * 0.5, 0.0))
-            .with_scale(Vec3::new(size.0, size.1, size.2)),
-        crate::chrome::ACCENT,
-    );
-    // The seating lattice on its floor — `grid::SNAP`, the same quantum `seated` steps by and the
-    // Map snaps to. Drawing anything else here would be the drawn-grid-disagrees-with-the-snap bug
-    // that `GridSpacing`'s note records.
-    let step = emerge_core::grid::SNAP;
-    let cells = (
-        (size.0 / step).round().max(1.0) as u32,
-        (size.2 / step).round().max(1.0) as u32,
-    );
-    gizmos
-        .grid(
-            Isometry3d::new(base + Vec3::Y * 0.002, Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
-            UVec2::new(cells.0, cells.1),
-            Vec2::splat(step),
-            crate::editor::GRID_LINE,
-        )
-        .outer_edges();
-    // The member being seated, ringed where it stands.
-    if let Some(m) = c.members.get(state.member.min(c.members.len().saturating_sub(1))) {
-        gizmos.circle(
-            Isometry3d::new(
-                base + Vec3::new(m.at.0, 0.01, m.at.1),
-                Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
-            ),
-            step * 0.75,
-            crate::chrome::ACCENT,
-        );
+    let at = (ground.x - COMPOSE_STAGE.x, ground.z - COMPOSE_STAGE.z);
+    let Some(i) = slot_at(&carousel.0, at) else { return };
+    if state.selected != i {
+        state.selected = i;
+        state.member = 0;
     }
 }
 
 /// Clicking **NEW** opens the same name field `N` opens — never a second copy of the verb.
+///
+/// # It has to ask *which* entity was activated
+///
+/// This took `On<Activate>` and then tested `buttons.is_empty()` — which asks whether a
+/// `NewGroupButton` exists **anywhere in the world**, and one always does. An observer fires for every
+/// `Activate` regardless of target, so clicking any row of the PLACE list on the right opened the
+/// name field: an author picking a mesh was asked to name a new composition instead. `on_mesh_click`
+/// directly below has always done it right, which is the shape to copy — `get(activate.entity)`
+/// answers "was it this one", and an empty result is the answer "no", not an error.
 fn on_new_group_click(
-    _activate: On<Activate>,
+    activate: On<Activate>,
     buttons: Query<&NewGroupButton>,
     mut state: ResMut<ComposeState>,
 ) {
-    if buttons.is_empty() {
+    if buttons.get(activate.entity).is_err() {
         return;
     }
     state.naming = Some(String::new());
-    state.status.note("name the new group, then Enter — Esc to abandon it");
+    state.status.note("name the new composition, then Enter — Esc to abandon it");
 }
 
 /// Clicking a mesh row selects it **and takes the focus**, so `Enter` then means "add this one".
@@ -1220,20 +1872,26 @@ fn rebuild(
 
     // **The two modal blocks first**, because while one is open it is the only thing the keyboard
     // reaches, and a field you cannot see is a field you cannot finish.
-    if let Some(raw) = &state.naming {
-        rows.push(("NEW GROUP".to_owned(), LABEL));
-        rows.push((format!("    {raw}_"), ACCENT));
+    // The name field is not drawn here any more — it is `chrome::NameBox`, centred over the
+    // viewport, shared with the Map's own capture verb. Two places asking for the same thing made one
+    // act look like two.
+    if state.focus == Pane::Groups {
+        rows.push((format!("{}  <- arrows", Pane::Groups.label()), ACCENT));
+    }
+    // **Where you are in the list, and how to move.** The stage shows the focal group among its
+    // neighbours, but not how many there are or how far in you have got — and `status.note` says it
+    // on the keypress and is then replaced by the next message, which is the wrong lifetime for it.
+    if !comps.is_empty() {
         rows.push((
             format!(
-                "    Enter makes an empty {:.0}x{:.0} m tile. Esc stops.",
-                NEW_TILE.0, NEW_TILE.2
+                "  {} of {}   {} / {}",
+                state.selected.min(comps.len() - 1) + 1,
+                comps.len(),
+                keys::chord(Action::CarouselPrev),
+                keys::chord(Action::CarouselNext),
             ),
             DIM,
         ));
-        rows.push((String::new(), TEXT));
-    }
-    if state.focus == Pane::Groups {
-        rows.push(("GROUPS  <- arrows".to_owned(), ACCENT));
     }
     if comps.is_empty() {
         rows.push((
@@ -1357,7 +2015,7 @@ pub fn member_footprint(
             let child = comps
                 .iter()
                 .find(|c| c.id == *id)
-                .ok_or_else(|| format!("`{}` nests `{id}`, which is not a group here", m.id))?;
+                .ok_or_else(|| format!("`{}` nests `{id}`, which is not a composition here", m.id))?;
             match child.envelope {
                 Envelope::Bounded { size } => Ok(turned_footprint((size.0, size.2), m.yaw)),
                 Envelope::Anchored => Err(format!(
@@ -1414,7 +2072,7 @@ pub fn seated(
     }
     let Envelope::Bounded { size } = envelope else {
         return Err(
-            "this group is anchored, so it claims no tile and has no lattice to seat inside. \
+            "this composition is anchored, so it claims no tile and has no lattice to seat inside. \
              Anchored groups are furniture standing somewhere; a bounded one is a module that has to \
              meet a wall."
                 .to_owned(),
@@ -1478,7 +2136,7 @@ pub fn flushed(
 ) -> Result<(f32, f32), String> {
     let Envelope::Bounded { size } = envelope else {
         return Err(
-            "this group is anchored, so it claims no tile and has no face to flush against"
+            "this composition is anchored, so it claims no tile and has no face to flush against"
                 .to_owned(),
         );
     };
@@ -1621,7 +2279,7 @@ fn detail(rows: &mut Vec<(String, Color)>, c: &Composition, comps: &[Composition
                 .collect();
             if !drifted.is_empty() {
                 rows.push((
-                    format!("STALE — {} member(s) changed underneath this group", drifted.len()),
+                    format!("STALE — {} member(s) changed underneath this composition", drifted.len()),
                     DANGER,
                 ));
                 for s in drifted {
@@ -1674,7 +2332,7 @@ fn detail(rows: &mut Vec<(String, Color)>, c: &Composition, comps: &[Composition
             }
             if iface.is_clean() {
                 rows.push((
-                    "    clean — this group can constrain a neighbour".to_owned(),
+                    "    clean — this composition can constrain a neighbour".to_owned(),
                     DIM,
                 ));
             } else {
@@ -2072,6 +2730,226 @@ mod paint_tests {
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(out.placements.len(), 1);
         assert_eq!(out.placements[0].paint, 2, "paint has to reach the row the game spawns");
+    }
+}
+
+#[cfg(test)]
+mod carousel_tests {
+    use super::{footprint, framing_height, height_of, lay_out, slot_at, MINIATURE, WINGS};
+    use emerge_core::composition::{Body, Composition, Envelope, Member};
+    use emerge_core::grid::SNAP;
+
+    fn lib() -> emerge_core::library::Library {
+        emerge_core::library::Library {
+            version: emerge_core::library::LIBRARY_VERSION,
+            note: None,
+            descriptors: vec![super::tests_support::wall()],
+        }
+    }
+
+    /// A 1 × 1 × 1 member of the fixture library, standing at `at`.
+    fn member(id: &str, of: &str, at: (f32, f32)) -> Member {
+        Member {
+            id: id.to_owned(),
+            body: Body::Descriptor { id: of.to_owned(), tip: (0, 0), on: None, patch: None },
+            at,
+            yaw: 0.0,
+            lift: 0.0,
+            paint: 0,
+            of_fingerprint: None,
+            note: None,
+        }
+    }
+
+    fn tile(id: &str, w: f32, d: f32) -> Composition {
+        Composition {
+            id: id.to_owned(),
+            envelope: Envelope::Bounded { size: (w, 2.4, d) },
+            members: Vec::new(),
+            locations: Vec::new(),
+            note: None,
+        }
+    }
+
+    fn anchored(id: &str, members: Vec<Member>) -> Composition {
+        Composition {
+            id: id.to_owned(),
+            envelope: Envelope::Anchored,
+            members,
+            locations: Vec::new(),
+            note: None,
+        }
+    }
+
+    fn kit(n: usize) -> Vec<Composition> {
+        (0..n).map(|i| tile(&format!("t{i}"), 1.0, 1.0)).collect()
+    }
+
+    /// **The property the carousel rests on**: the group being edited never moves. Stepping slides
+    /// the strip past a fixed centre, so a seat verb's effect is not confused with the stage shifting.
+    #[test]
+    fn the_focal_group_stands_at_the_centre_wherever_it_is_in_the_list() {
+        let comps = kit(7);
+        for selected in 0..comps.len() {
+            let c = lay_out(&comps, &lib(), selected).unwrap_or_else(|e| panic!("{e}"));
+            let focal = c.focal().unwrap_or_else(|| panic!("no focal slot at {selected}"));
+            assert_eq!(focal.index, selected);
+            assert_eq!(focal.at, (0.0, 0.0), "the focal group moved at {selected}");
+            assert_eq!(focal.scale, 1.0, "the focal group is never a miniature");
+        }
+    }
+
+    /// The scale ramp is geometric, so adding a wing needs no new number.
+    #[test]
+    fn each_remove_from_the_focal_group_is_one_step_smaller() {
+        let comps = kit(9);
+        let c = lay_out(&comps, &lib(), 4).unwrap_or_else(|e| panic!("{e}"));
+        for s in &c.slots {
+            let want = MINIATURE.powi(s.offset.abs());
+            assert!((s.scale - want).abs() < 1e-6, "offset {} scaled {}", s.offset, s.scale);
+        }
+        assert!(c.slots.iter().all(|s| s.offset.abs() <= WINGS), "a slot beyond the wings");
+    }
+
+    /// **The wings do not wrap**, so running out of miniatures is how the stage says which end of the
+    /// list you are at. A wrapping strip would show the same group twice and say nothing.
+    #[test]
+    fn the_ends_of_the_list_are_visible_as_missing_miniatures() {
+        let comps = kit(6);
+        let first = lay_out(&comps, &lib(), 0).unwrap_or_else(|e| panic!("{e}"));
+        assert!(first.slots.iter().all(|s| s.offset >= 0), "nothing stands before the first group");
+        assert_eq!(first.slots.len(), 1 + WINGS as usize);
+
+        let last = lay_out(&comps, &lib(), comps.len() - 1).unwrap_or_else(|e| panic!("{e}"));
+        assert!(last.slots.iter().all(|s| s.offset <= 0), "nothing stands after the last group");
+
+        // A kit smaller than the strip is simply a shorter strip, not a repeated one.
+        let small = kit(2);
+        let c = lay_out(&small, &lib(), 0).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(c.slots.len(), 2);
+        let mut seen: Vec<usize> = c.slots.iter().map(|s| s.index).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), c.slots.len(), "a group appeared twice on the strip");
+    }
+
+    /// Slots are laid end to end with air between them, never overlapping — which is what makes a
+    /// click unambiguous and the strip readable.
+    #[test]
+    fn neighbours_stand_clear_of_one_another_along_the_strip() {
+        let comps = kit(9);
+        let c = lay_out(&comps, &lib(), 4).unwrap_or_else(|e| panic!("{e}"));
+        for pair in c.slots.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            assert!(b.offset == a.offset + 1, "slots must come out in strip order");
+            let apart = ((b.at.0 - a.at.0).powi(2) + (b.at.1 - a.at.1).powi(2)).sqrt();
+            let touching = (a.size.0 + a.size.1) * 0.5 * std::f32::consts::FRAC_1_SQRT_2
+                + (b.size.0 + b.size.1) * 0.5 * std::f32::consts::FRAC_1_SQRT_2;
+            assert!(apart > touching, "offsets {} and {} overlap", a.offset, b.offset);
+        }
+    }
+
+    /// `slot_at` inverts `lay_out`, which is what makes a click a lookup rather than a raycast — and
+    /// it answers with the *composition* index, because a click's whole job is choosing the next
+    /// focal group.
+    #[test]
+    fn clicking_a_miniature_names_the_group_drawn_there() {
+        let comps = kit(9);
+        let c = lay_out(&comps, &lib(), 4).unwrap_or_else(|e| panic!("{e}"));
+        for s in &c.slots {
+            assert_eq!(slot_at(&c, s.at), Some(s.index), "the centre of offset {}", s.offset);
+        }
+        // The air between two slots belongs to neither.
+        let a = c.slots.iter().find(|s| s.offset == 0).unwrap_or_else(|| panic!("no focal"));
+        let b = c.slots.iter().find(|s| s.offset == 1).unwrap_or_else(|| panic!("no +1"));
+        let between = ((a.at.0 + b.at.0) * 0.5, (a.at.1 + b.at.1) * 0.5);
+        assert_eq!(slot_at(&c, between), None, "a click between slots picks neither");
+        assert_eq!(slot_at(&c, (1000.0, 1000.0)), None, "and off the strip picks nothing");
+    }
+
+    /// A bounded group declares its box; an anchored one is measured from what stands in it.
+    #[test]
+    fn an_anchored_group_is_measured_and_a_bounded_one_is_taken_at_its_word() {
+        let comps = vec![
+            tile("bounded", 3.0, 2.0),
+            anchored("table", vec![member("l", "wall", (-1.0, 0.0)), member("r", "wall", (1.0, 0.0))]),
+        ];
+        let l = lib();
+        assert_eq!(footprint(&comps[0], &comps, &l).unwrap_or_else(|e| panic!("{e}")), (3.0, 2.0));
+        assert_eq!(height_of(&comps[0], &comps, &l).unwrap_or_else(|e| panic!("{e}")), 2.4);
+        // Two 1 × 1 × 1 pieces two metres apart span 3 m in x, 1 m in z, and stand 1 m tall.
+        assert_eq!(footprint(&comps[1], &comps, &l).unwrap_or_else(|e| panic!("{e}")), (3.0, 1.0));
+        assert_eq!(height_of(&comps[1], &comps, &l).unwrap_or_else(|e| panic!("{e}")), 1.0);
+    }
+
+    /// A group that cannot be measured **refuses and names itself**, rather than being given a box
+    /// nobody authored — the rule `member_footprint` and `composition_from_set` already apply.
+    #[test]
+    fn a_group_that_cannot_be_measured_refuses_and_names_itself() {
+        let comps = vec![anchored("mystery", vec![member("m", "absent", (0.0, 0.0))])];
+        let err = footprint(&comps[0], &comps, &lib()).expect_err("refuses");
+        assert!(err.contains("mystery"), "{err}");
+        let err = height_of(&comps[0], &comps, &lib()).expect_err("refuses");
+        assert!(err.contains("mystery"), "{err}");
+        // And `lay_out` propagates rather than substituting a slot.
+        let err = lay_out(&comps, &lib(), 0).expect_err("refuses");
+        assert!(err.contains("mystery"), "{err}");
+    }
+
+    /// **The ordinary state right after `N`.** A group with nothing in it yet must still be clickable
+    /// and visible, so it floors at the editor's own quantum rather than collapsing to a point.
+    #[test]
+    fn a_group_with_nothing_in_it_still_gets_a_slot_the_lattice_can_express() {
+        let comps = vec![anchored("fresh", Vec::new())];
+        let l = lib();
+        assert_eq!(footprint(&comps[0], &comps, &l).unwrap_or_else(|e| panic!("{e}")), (SNAP, SNAP));
+        assert_eq!(height_of(&comps[0], &comps, &l).unwrap_or_else(|e| panic!("{e}")), SNAP);
+        let c = lay_out(&comps, &lib(), 0).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(c.slots.len(), 1);
+        assert_eq!(slot_at(&c, (0.0, 0.0)), Some(0), "a fresh group has to be clickable");
+    }
+
+    /// No groups is an empty stage, not a panic. A selection past the end clamps rather than dropping
+    /// the strip — the panel and the stage must never disagree about what is focal.
+    #[test]
+    fn an_empty_set_lays_out_to_nothing_and_a_stale_selection_clamps() {
+        let empty = lay_out(&[], &lib(), 3).unwrap_or_else(|e| panic!("{e}"));
+        assert!(empty.slots.is_empty());
+        assert_eq!(empty.extent, (0.0, 0.0));
+
+        let comps = kit(3);
+        let c = lay_out(&comps, &lib(), 99).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(c.focal().map(|s| s.index), Some(2));
+    }
+
+    /// **The bug a captured frame found.** Framing on the floor plan alone cut the tops off four
+    /// 2.4 m tiles, because a group that stands up occupies screen the footprint says nothing about.
+    #[test]
+    fn the_framing_accounts_for_how_tall_the_groups_stand() {
+        let flat = framing_height((4.0, 4.0), 0.1);
+        let tall = framing_height((4.0, 4.0), 6.0);
+        assert!(tall > flat, "height has to widen the view: {tall} vs {flat}");
+        // It never frames tighter than one tile's worth of view …
+        assert_eq!(framing_height((0.0, 0.0), 0.0), crate::tiles::TILE_VIEW_HEIGHT);
+        // … and a big enough strip outruns the rig, which is the condition `restage_group` reports.
+        assert!(
+            framing_height((80.0, 50.0), 2.4) > crate::view::MAX_ZOOM,
+            "a strip this size is exactly what the crop report is for"
+        );
+    }
+
+    /// The extent is symmetric about the focal group, because the camera is pinned there — a strip
+    /// with one short wing must still be framed without shifting the thing being edited.
+    #[test]
+    fn the_extent_is_measured_from_the_focal_group_not_from_the_strips_own_middle() {
+        let comps = kit(6);
+        let c = lay_out(&comps, &lib(), 0).unwrap_or_else(|e| panic!("{e}"));
+        let (hw, hd) = (c.extent.0 * 0.5, c.extent.1 * 0.5);
+        for s in &c.slots {
+            assert!(s.at.0.abs() + s.size.0 * 0.5 <= hw + 1e-4, "offset {} off the x edge", s.offset);
+            assert!(s.at.1.abs() + s.size.1 * 0.5 <= hd + 1e-4, "offset {} off the z edge", s.offset);
+        }
+        assert!(c.tallest >= 2.4 - 1e-4, "the focal tile stands 2.4 m and the strip has to say so");
     }
 }
 

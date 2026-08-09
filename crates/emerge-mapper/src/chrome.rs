@@ -520,6 +520,152 @@ pub fn scroll_list(parent: &mut ChildSpawnerCommands, marker: impl Bundle) {
 // tabs, differing only in the label column's width. It is not written yet because nothing has been
 // moved onto it, and a builder with no caller is a stub.
 
+/// **The name box** — the centred prompt for naming a new composition.
+///
+/// Two tabs ask for the same thing: `N` on Compose makes an empty tile, `M` on the Map keeps the set
+/// in hand as one. It used to be answered in two different places — four rows at the top of the
+/// COMPOSE panel and a field in the Map's status readout — which made one act look like two, and put
+/// the question in the corner of the screen while the whole screen waited for it.
+///
+/// One box, painted by [`paint_name_box`], which picks the live tab's field the way
+/// `notice::paint_notices` picks the live tab's `Status`. That is the established shape here for
+/// "one widget, several owners", and the alternative — a projection resource each tab writes every
+/// frame — is a third copy of a string that already has two homes.
+#[derive(Component)]
+pub struct NameBox;
+
+#[derive(Component)]
+struct NameBoxTitle;
+
+#[derive(Component)]
+struct NameBoxValue;
+
+#[derive(Component)]
+struct NameBoxHint;
+
+fn spawn_name_box(mut commands: Commands) {
+    commands
+        .spawn((
+            NameBox,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                top: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                display: Display::None,
+                ..default()
+            },
+            // **Per `docs/ui.md` §5 trap 7.** A full-screen container without this eats every world
+            // click. It also means a click while naming falls through to the stage, which is right:
+            // the box is a prompt, not a modal that has to be dismissed before anything else works.
+            bevy::picking::Pickable::IGNORE,
+            // Above the panels and the tab strip (101), below nothing else — the same tier the
+            // shortcuts overlay uses, because both are "the screen is asking you something".
+            GlobalZIndex(400),
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.72)),
+        ))
+        .with_children(|p| {
+            p.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    padding: UiRect::all(Val::Px(PAD * 1.5)),
+                    row_gap: Val::Px(GAP_ROW * 2.0),
+                    min_width: Val::Px(360.0),
+                    ..default()
+                },
+                BackgroundColor(PANEL_BG),
+            ))
+            .with_children(|b| {
+                b.spawn((
+                    Text::new(String::new()),
+                    TextFont::from_font_size(11.0),
+                    TextColor(LABEL),
+                    NameBoxTitle,
+                ));
+                b.spawn((
+                    Text::new(String::new()),
+                    TextFont::from_font_size(18.0),
+                    TextColor(ACCENT),
+                    NameBoxValue,
+                ));
+                b.spawn((
+                    Text::new(String::new()),
+                    TextFont::from_font_size(11.0),
+                    TextColor(DIM),
+                    NameBoxHint,
+                ));
+            });
+        });
+}
+
+/// **Show the live tab's name field, or nothing.**
+///
+/// Reads each tab's own state rather than a shared projection, and formats the value the way that tab
+/// commits it — Compose keeps what you typed, because a composition id carries a kit namespace and
+/// `to_snake_case` would eat the slash; the Map forces snake_case as you type, so its own naming rule
+/// teaches itself. Relocating the prompt must not quietly change what either one will save.
+fn paint_name_box(
+    mode: Res<crate::tiles::Mode>,
+    compose: Res<crate::compose::ComposeState>,
+    editor: Res<crate::editor::EditorState>,
+    mut roots: Query<&mut Node, With<NameBox>>,
+    mut titles: Query<&mut Text, (With<NameBoxTitle>, Without<NameBoxValue>, Without<NameBoxHint>)>,
+    mut values: Query<&mut Text, (With<NameBoxValue>, Without<NameBoxTitle>, Without<NameBoxHint>)>,
+    mut hints: Query<&mut Text, (With<NameBoxHint>, Without<NameBoxTitle>, Without<NameBoxValue>)>,
+) {
+    let asking: Option<(&str, String, String)> = match *mode {
+        crate::tiles::Mode::Compose => compose.naming.as_ref().map(|raw| {
+            (
+                "NEW COMPOSITION",
+                format!("{raw}_"),
+                format!(
+                    "Enter makes an empty {:.0}x{:.0} m tile.   Esc stops.",
+                    crate::compose::NEW_TILE.0,
+                    crate::compose::NEW_TILE.2
+                ),
+            )
+        }),
+        crate::tiles::Mode::Map => editor.grouping.as_ref().map(|raw| {
+            (
+                "NAME THIS COMPOSITION",
+                format!("{}_", emerge_core::naming::to_snake_case(raw)),
+                "Enter keeps it.   Esc leaves the set in hand.".to_owned(),
+            )
+        }),
+        _ => None,
+    };
+    let display = if asking.is_some() { Display::Flex } else { Display::None };
+    for mut node in &mut roots {
+        if node.display != display {
+            node.display = display;
+        }
+    }
+    let Some((title, value, hint)) = asking else {
+        return;
+    };
+    // Guarded against the no-op write, like `editor::refresh_status`: this runs every frame and
+    // `Text` is change-detected, so writing an unchanged string would re-lay the box continuously.
+    // Three separate loops rather than one over a tuple: the queries have different filters, so they
+    // are different types and cannot share an array.
+    fn set(text: &mut Text, want: &str) {
+        if text.0 != want {
+            text.0 = want.to_owned();
+        }
+    }
+    for mut t in titles.iter_mut() {
+        set(&mut t, title);
+    }
+    for mut t in values.iter_mut() {
+        set(&mut t, &value);
+    }
+    for mut t in hints.iter_mut() {
+        set(&mut t, &hint);
+    }
+}
+
 /// The held-key overlay's root. `Display::None` when it is not being asked for.
 #[derive(Component)]
 pub struct ShortcutsOverlay;
@@ -550,8 +696,11 @@ pub struct ChromePlugin;
 impl Plugin for ChromePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShowingFor>()
-            .add_systems(Startup, spawn_shortcuts_overlay)
-            .add_systems(Update, drive_shortcuts_overlay.in_set(keys::Phase::Act));
+            .add_systems(Startup, (spawn_shortcuts_overlay, spawn_name_box))
+            .add_systems(Update, drive_shortcuts_overlay.in_set(keys::Phase::Act))
+            // **After `Phase::Text`, not in it.** The field consumes the keystroke there; painting
+            // before it would show the box one character behind what has been typed.
+            .add_systems(Update, paint_name_box.after(keys::Phase::Text));
     }
 }
 
