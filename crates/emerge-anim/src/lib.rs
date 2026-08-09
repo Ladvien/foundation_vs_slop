@@ -468,9 +468,28 @@ pub fn apply_pose_blenders(
                 continue; // only reachable if something else stopped the clip
             };
             active.set_weight(blender.weight[i]);
-            if let Playback::Gait { duration, phase_offset, .. } = slot.playback {
-                // `set_seek_time` (not `seek_to`) so the jump never replays events between the two times.
-                active.set_seek_time(wrap01(phase + phase_offset) * duration);
+            match slot.playback {
+                Playback::Gait { duration, phase_offset, .. } => {
+                    // `set_seek_time` (not `seek_to`) so the jump never replays events between the two times.
+                    active.set_seek_time(wrap01(phase + phase_offset) * duration);
+                }
+                // **A held phase has to reach the free clips too.**
+                //
+                // A gait is a *paused* clip whose seek time this module owns outright, so pinning φ
+                // pins it. A free clip is the opposite by design — Bevy's `advance_animations` ticks
+                // it at `speed` and this module only ever touches its weight — so [`hold_phase`] did
+                // not reach it at all, and the bench's `Space` froze the walk while the idle kept
+                // going. Measured in `emerge-mapper`: two captures 2 s apart differed by ~150,000
+                // pixels with the phase held.
+                //
+                // Speed, not a seek: a free clip has no φ to hold it at, and rewinding one is the
+                // thing this whole module exists to never do. Zero stops it where it stands and the
+                // authored speed puts it back, so a scrub leaves the idle exactly as it found it.
+                Playback::Free { speed } => {
+                    active.set_speed(if blender.held { 0.0 } else { speed });
+                }
+                // One-shots are triggered rather than continuous; there is nothing running to hold.
+                Playback::OneShot { .. } => {}
             }
         }
     }
@@ -688,6 +707,53 @@ mod tests {
     /// **A held phase freezes while everything else keeps working** — the bench's scrub contract.
     /// `set_ground_speed(0.0)` cannot pause: the cadence clamp floors at half the nominal rate,
     /// deliberately. Holding pins φ; weights still ease and the seek times follow the formula.
+    /// **A held phase stops the free clips too, and releasing puts them back.**
+    ///
+    /// The half `hold_phase` did not cover. A gait is a paused clip whose seek time this module
+    /// owns, so pinning φ pins it; a free clip is ticked by Bevy at its authored speed and never
+    /// looked at φ at all. The bench's `Space` therefore froze the walk and left the idle running —
+    /// measured in `emerge-mapper` as ~150,000 pixels of change per two seconds with the phase held.
+    ///
+    /// Asserted on `speed` rather than on the pose, because speed is the thing this module writes
+    /// and a rewind is what it must never do: the clip stops where it stands.
+    #[test]
+    fn a_held_phase_stops_the_free_clips_and_releasing_restores_them() {
+        let (mut app, blender, player_entity) = harness();
+        // Slot 0 is the free idle; give it the floor so it is the thing being watched.
+        set(&mut app, blender, &[1.0, 0.0, 0.0, 0.0], 0.0);
+        for _ in 0..20 {
+            tick(&mut app);
+        }
+        let idle = |app: &App| {
+            app.world()
+                .get::<AnimationPlayer>(player_entity)
+                .expect("player")
+                .animation(AnimationNodeIndex::new(1))
+                .expect("idle")
+                .speed()
+        };
+        let authored = idle(&app);
+        assert!(authored > 0.0, "the idle must be running before it can be held");
+
+        app.world_mut()
+            .get_mut::<PoseBlender>(blender)
+            .expect("blender")
+            .hold_phase(0.25);
+        tick(&mut app);
+        assert_eq!(idle(&app), 0.0, "a held phase left the free clip ticking");
+
+        app.world_mut()
+            .get_mut::<PoseBlender>(blender)
+            .expect("blender")
+            .release_phase();
+        tick(&mut app);
+        assert!(
+            (idle(&app) - authored).abs() < 1.0e-6,
+            "releasing must put the authored speed back, not a guess at it: {}",
+            idle(&app)
+        );
+    }
+
     #[test]
     fn a_held_phase_freezes_while_weights_still_ease() {
         let (mut app, blender, player_entity) = harness();

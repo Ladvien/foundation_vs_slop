@@ -22,6 +22,8 @@ That is what keeps feet planted through a walk→run crossover — a transition 
 
 **Gait clips are authored in place**, with zero root motion and an honest per-cycle ground distance. The blender derives speed from that distance; a clip that translates its root will read as the wrong speed and skate.
 
+**A held phase reaches the free clips too, and only by their speed.** `hold_phase` is the editor bench's scrub, and it used to pin only the gait slots — those are *paused* clips whose seek time this module owns, so φ freezes them. A `Playback::Free` slot is the deliberate opposite: Bevy's `advance_animations` ticks it and this module touches only its weight. So the bench's `Space` froze the walk and left the idle running, measured as ~150,000 pixels of change per two seconds with the phase held. While `held`, a free slot's speed goes to zero and returns to its authored value on release. **Speed, never a seek** — a free clip has no φ to be held at, and rewinding one is the thing this module exists to never do.
+
 ## Rules
 
 - **Bevy 0.19 is pinned.** Read the vendored source (`~/.cargo/registry/src/index.crates.io-*/bevy-0.19.0/`, and its `examples/`), not bevy.org — that documents `main` and has been wrong for this pin more than once.
