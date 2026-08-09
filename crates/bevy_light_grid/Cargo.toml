@@ -15,3 +15,10 @@ bevy_math = { version = "0.19.0", default-features = false, features = ["nostd-l
 # system and owns no schedule, because when the field bakes and where that sits relative to the agents
 # reading it are the caller's decisions. `bevy_ecs` alone drags in no renderer.
 bevy_ecs = { version = "0.19.0" }
+
+# **Examples only.** The crate itself takes `bevy_math` and `bevy_ecs` and nothing that draws — that is
+# the entire point of it, and `tests/leaf.rs` enforces it by reading `[dependencies]` only, deliberately.
+# The `beam` example needs a window, an event loop and a 2D camera to show the field being read, so it
+# takes the full umbrella here, where it cannot reach a consumer's dependency graph.
+[dev-dependencies]
+bevy = { version = "0.19.0" }

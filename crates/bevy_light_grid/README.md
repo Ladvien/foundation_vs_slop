@@ -4,6 +4,10 @@
 
 An illuminance grid your **creatures** can read: a CPU scalar field over cells that answers "how bright is it here, and which way is brighter".
 
+![A dark top-down room where a sweeping flashlight wedge lights cells and pillars throw travelling shadows; pale dots scatter out of the beam while amber dots move into it](docs/beam.gif)
+
+That is `examples/beam.rs`. Every lit cell is one `f32` this crate computed on the CPU, drawn flat so you can look at the number rather than at a lighting pass. The pale dots and the amber dots run **identical code** against **the same field** — the only difference between fleeing and chasing is the sign of one argument to `light_push_at`. Watch a pale dot reach shadow and stop: the gradient there is flat, so an unlit creature is left unbiased instead of shoved somewhere arbitrary. Then the beam rotates off its hiding place and it runs again.
+
 > **This repo is a read-only mirror.** It is split out of [`Ladvien/foundation_vs_slop`](https://github.com/Ladvien/foundation_vs_slop) with `git subtree split`, history intact. Issues and PRs belong upstream.
 
 ## This is not a renderer
@@ -51,14 +55,15 @@ Rock cells hold exactly 0.0 forever (both writers gate on the floor mask), so th
 
 ## Examples
 
-Both print the field as ASCII in the terminal — no window, no GPU.
-
 ```sh
-cargo run -p bevy_light_grid --example shadow  # bake + compose, with real occlusion behind pillars
-cargo run -p bevy_light_grid --example taxis   # photophobic / photophilic / phototropic, side by side
+cargo run -p bevy_light_grid --example shadow  # terminal: bake + compose, occlusion behind pillars
+cargo run -p bevy_light_grid --example taxis   # terminal: photophobic / philic / tropic, side by side
+cargo run -p bevy_light_grid --example beam    # the gif above. Needs a GPU.
 ```
 
-`shadow` supplies a Bresenham line-of-sight closure and sweeps a flashlight cone over a cached static bake. `taxis` releases a photophobic walker into the light and prints it descending the gradient, then eases a phototropic body toward a lamp under its per-tick rate cap.
+`shadow` and `taxis` print the field as ASCII — no window, no GPU, so they run anywhere. `shadow` supplies a Bresenham line-of-sight closure and sweeps a flashlight cone over a cached static bake. `taxis` releases a photophobic walker into the light and prints it descending the gradient, then eases a phototropic body toward a lamp under its per-tick rate cap.
+
+`beam` is the same three ideas on screen at once, with a legend: the static bake, the moving wedge composed on top of it every frame, and sixteen photophobic plus five photophilic creatures steering on nothing but `light_push_at`. It is the only example here that opens a window, and it is a **dev-dependency** that gives it one — the crate itself still takes `bevy_math` and `bevy_ecs` and nothing that draws, which `tests/leaf.rs` enforces by reading `[dependencies]` only.
 
 ## License
 

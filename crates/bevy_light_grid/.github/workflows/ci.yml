@@ -1,0 +1,54 @@
+# CI for the standalone `bevy_light_grid` mirror.
+#
+# **This path is inert upstream and live here.** GitHub only reads workflows from `.github/` at a
+# repository root, so in the monorepo this file is an ordinary text file that nothing runs. The
+# `git subtree split` that produces the mirror lifts `crates/bevy_light_grid/` to the root — and this
+# file with it — so it becomes the mirror's CI without the monorepo ever gaining a second workflow.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (standalone) + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The crate itself needs none of these — it takes `bevy_math` and `bevy_ecs` and draws nothing.
+      # They are here for the `beam` example, whose dev-dependency is the full Bevy umbrella.
+      - name: Install Bevy build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # **The load-bearing step, and it is `build` rather than `test` deliberately.**
+      #
+      # `cargo test` compiles dev-dependencies, and this crate's dev-dependency is the FULL `bevy`
+      # umbrella (the `beam` example needs a window and a 2D camera). Cargo unifies features across a
+      # build, so under `cargo test` the crate silently receives every Bevy feature there is — which
+      # means a hole in its own `[dependencies]` feature list cannot fail.
+      #
+      # The sibling crate `bevy_autogib` shipped exactly that hole: it reached for a type behind a
+      # feature it never declared, every test passed, and the published crate did not compile for
+      # anyone. A plain `cargo build` takes no dev-dependencies, so it compiles exactly the feature set
+      # a consumer gets.
+      - name: Build with only the declared features
+        run: cargo build --release
+
+      # `tests/leaf.rs` is the boundary ratchet: it fails if `src/` ever names an engine crate or if
+      # `[dependencies]` grows beyond `bevy_math` + `bevy_ecs`. That check is the crate's whole thesis.
+      - name: Test
+        run: cargo test
+
+      - name: Build examples
+        run: cargo build --examples

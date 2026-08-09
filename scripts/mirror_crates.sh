@@ -56,10 +56,17 @@ CRATES=(
 # `gh repo create` call below for why the default sits here rather than in a flag.
 #
 # `bevy_autogib` is public because nothing in the Bevy ecosystem ships runtime plane-cut prefracture
-# with watertight caps, and it needs none of the game to be useful. `bevy_debugger_mcp` is also public
-# on GitHub, but it was vendored in already-created, so this list never has to make it so.
+# with watertight caps; `bevy_light_grid` because "illuminance the AI can read" is a question a renderer
+# does not answer, and neither needs any of the game to be useful. Both are standalone-buildable and
+# both carry a `.github/workflows/ci.yml` that the split lifts to the mirror root, per the note above.
+# `bevy_debugger_mcp` is also public on GitHub, but it was vendored in already-created, so this list
+# never has to make it so.
+#
+# NB this list only drives repo CREATION. A repo that already exists is not touched here — flipping an
+# existing mirror's visibility is `gh repo edit <name> --visibility public`, deliberately a hand action.
 PUBLIC_CRATES=(
     bevy_autogib
+    bevy_light_grid
 )
 
 cd "$(git rev-parse --show-toplevel)"
