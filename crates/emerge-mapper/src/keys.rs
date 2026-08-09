@@ -81,6 +81,31 @@ pub enum Action {
     ComposeArm,
     /// Write down what this group's members present now, so later drift is measurable.
     ComposeRecord,
+    /// Walk the selected group's members. A second cursor, under the one that walks the groups.
+    ComposeMemberPrev,
+    ComposeMemberNext,
+    /// **Seat the selected member** — one lattice step, in the frame `Member::at` is written in.
+    ///
+    /// Not a cursor that a verb is then applied to, which is what the Tiles lattice keys are. Here the
+    /// movement *is* the verb, so the member is seen to move; Merrell's furniture layout calls that
+    /// progressively pinning a layout down, and it is why seating is per-member rather than a solve.
+    SeatForward,
+    SeatLeft,
+    SeatBack,
+    SeatRight,
+    SeatDown,
+    SeatUp,
+    /// Turn the selected member. A quarter bare, 15° on Shift — see the binding for why that way round.
+    TurnMemberLeft,
+    TurnMemberRight,
+    TurnMemberLeftFine,
+    TurnMemberRightFine,
+    /// Take the selected member out of the group.
+    DropMember,
+    /// Compose's own undo pair. Map, Tiles and Anim each keep one; an editing surface without one
+    /// would be the odd tab out.
+    UndoCompose,
+    RedoCompose,
     Save,
     Undo,
     Redo,
@@ -499,6 +524,41 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::ComposeNext, KeyCode::ArrowDown, false, Context::Compose, "down", "walk the groups"),
     b(Action::ComposeArm, KeyCode::Enter, false, Context::Compose, "Enter", "arm this group — the map tab stamps it"),
     b(Action::ComposeRecord, KeyCode::KeyR, false, Context::Compose, "R", "record what this group's members present now"),
+    // Symmetric with the pair above: `up`/`down` walk the groups, `left`/`right` walk the members of
+    // the one you are on. Costs no letter, and the two cursors read as one idea.
+    b(Action::ComposeMemberPrev, KeyCode::ArrowLeft, false, Context::Compose, "left", "walk this group's members"),
+    b(Action::ComposeMemberNext, KeyCode::ArrowRight, false, Context::Compose, "right", "walk this group's members"),
+    // **The Tiles lattice cluster, on the other lattice.** `Context` overlaps by design, so one hand
+    // shape means one thing on both surfaces rather than colliding. Declared adjacent to `[` and `]`
+    // and sharing their `does`, so `rows()` collapses all six into one row.
+    b(Action::SeatForward, KeyCode::KeyT, false, Context::Compose, "T", "seat this member / raise"),
+    b(Action::SeatLeft, KeyCode::KeyF, false, Context::Compose, "F", "seat this member / raise"),
+    b(Action::SeatBack, KeyCode::KeyG, false, Context::Compose, "G", "seat this member / raise"),
+    b(Action::SeatRight, KeyCode::KeyH, false, Context::Compose, "H", "seat this member / raise"),
+    b(Action::SeatDown, KeyCode::BracketLeft, false, Context::Compose, "[", "seat this member / raise"),
+    b(Action::SeatUp, KeyCode::BracketRight, false, Context::Compose, "]", "seat this member / raise"),
+    // **A quarter bare, 15° on Shift — and that order is the argument, not a preference.**
+    //
+    // A group is a tile. `adjacency::quarter_turns` refuses a yaw that is not a multiple of 90 and
+    // names the piece, so a member carrying edge tokens turned 45° makes the whole group's interface
+    // underivable. It only bites a tokened member — `interface` skips the rest — so 15° stays
+    // reachable for a chair drawn up to a table, behind a modifier where it cannot be hit by accident.
+    //
+    // `Y`/`U` rather than the Map's `R`/`T`, which are both spoken for here — `R` records and `T`
+    // seats. They keep the whole surface under one hand (`T F G H` seat, `Y U` turn, `[ ]` raise), and
+    // the Map's own row for `Y`/`U` is "turn / tip this", so the family is the same one.
+    //
+    // **Not `,` and `.`, and the test is why.** `rows()` joins a collapsed row's chords with `", "`,
+    // so a chord that *is* a comma comes out as `, , .` and cannot be read back —
+    // `collapsing_rows_loses_nothing` failed on exactly that, naming the vanished chord.
+    bs(Action::TurnMemberLeft, KeyCode::KeyY, false, false, Context::Compose, "Y", "turn a quarter / Shift: 15"),
+    bs(Action::TurnMemberRight, KeyCode::KeyU, false, false, Context::Compose, "U", "turn a quarter / Shift: 15"),
+    bs(Action::TurnMemberLeftFine, KeyCode::KeyY, false, true, Context::Compose, "Y", "turn a quarter / Shift: 15"),
+    bs(Action::TurnMemberRightFine, KeyCode::KeyU, false, true, Context::Compose, "U", "turn a quarter / Shift: 15"),
+    b(Action::DropMember, REMOVE_KEY, false, Context::Compose, REMOVE_NAME, "drop this member"),
+    // One row, two chords — the Map, Tiles and Anim pairs again.
+    bs(Action::UndoCompose, KeyCode::KeyZ, true, false, Context::Compose, "Z", "undo / redo"),
+    bs(Action::RedoCompose, KeyCode::KeyZ, true, true, Context::Compose, "Z", "undo / redo"),
     // One row, two chords, same as the Map and Tiles undo pairs.
     bs(Action::UndoBench, KeyCode::KeyZ, true, false, Context::Anim, "Z", "undo / redo the last write"),
     bs(Action::RedoBench, KeyCode::KeyZ, true, true, Context::Anim, "Z", "undo / redo the last write"),
@@ -851,7 +911,12 @@ mod tests {
         let actions = [
             Action::NextTab, Action::MapTab, Action::TilesTab, Action::AnimTab,
             Action::ComposeTab, Action::ComposePrev, Action::ComposeNext, Action::ComposeArm,
-            Action::ComposeRecord,
+            Action::ComposeRecord, Action::ComposeMemberPrev, Action::ComposeMemberNext,
+            Action::SeatForward, Action::SeatLeft, Action::SeatBack, Action::SeatRight,
+            Action::SeatDown, Action::SeatUp,
+            Action::TurnMemberLeft, Action::TurnMemberRight,
+            Action::TurnMemberLeftFine, Action::TurnMemberRightFine,
+            Action::DropMember, Action::UndoCompose, Action::RedoCompose,
             Action::Save, Action::Undo, Action::Redo, Action::Shortcuts, Action::EditTile,
             Action::AimLeft, Action::AimRight, Action::AimReset, Action::Cancel,
             Action::Fill, Action::Remove, Action::MoveMode, Action::CloneMode, Action::RenameMap,

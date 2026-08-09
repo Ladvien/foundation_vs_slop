@@ -96,7 +96,12 @@ pub struct ViewPlugin;
 impl Plugin for ViewPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Rig>()
+            .init_resource::<Pointer>()
             .add_systems(Startup, setup)
+            // **Before anything acts on it.** `Phase::Sense` is where this editor decides who owns an
+            // input for the frame — the keyboard already does — so the pointer is read once, there,
+            // and every spatial system downstream sees one answer.
+            .add_systems(Update, sense_pointer.in_set(keys::Phase::Sense))
             .add_systems(Update, drive.in_set(keys::Phase::Act));
     }
 }
@@ -210,18 +215,56 @@ fn drive(
     });
 }
 
-/// Where the cursor meets the ground plane, in world metres.
+/// **Where the editor's pointer is**, in logical window pixels — the one answer every spatial system
+/// reads.
+///
+/// Filled once a frame by [`sense_pointer`]. It exists so that "where is the cursor" has a single
+/// definition in this crate: a system that asks the `Window` directly is invisible to an agent, and a
+/// system that asks this one behaves identically for a person at the machine.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
+pub struct Pointer(pub Option<Vec2>);
+
+/// Read the pointer once, before anything acts on it.
+///
+/// With the `debugger` feature on, an injected position takes precedence over the real mouse —
+/// through `bevy_debugger_bevy::cursor_position`, which is the plugin's own rule rather than a second
+/// copy of it here. **The window's own cursor is never written**: Bevy's windowing backend turns a
+/// change to it into a request to move the *physical* pointer, which would drag the mouse out from
+/// under whoever is at the machine. `DebugCursor`'s own docs carry the measurement and the line.
+pub fn sense_pointer(
+    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    #[cfg(feature = "debugger")] injected: Res<bevy_debugger_bevy::DebugCursor>,
+    mut pointer: ResMut<Pointer>,
+) {
+    let next = match &window {
+        #[cfg(feature = "debugger")]
+        Some(w) => bevy_debugger_bevy::cursor_position(w, &injected),
+        #[cfg(not(feature = "debugger"))]
+        Some(w) => w.cursor_position(),
+        // No window at all is a headless run. An injected pointer still has nowhere to be read
+        // against — `viewport_to_world` needs a camera with a viewport — so this is honestly `None`.
+        None => None,
+    };
+    if pointer.0 != next {
+        pointer.0 = next;
+    }
+}
+
+/// Where the pointer meets the ground plane, in world metres.
 ///
 /// The editor's whole spatial input is this one function, so it is worth being exact about: a ray
 /// through the cursor, intersected with `y = 0`. `None` when the cursor is off-window or the ray runs
 /// parallel to the ground — both are "there is no honest answer", and the callers treat them as such
 /// rather than falling back to the origin.
+///
+/// Takes the position rather than the `Window` so that there is exactly one place deciding *which*
+/// position that is — see [`Pointer`].
 pub fn cursor_ground(
-    window: &Window,
+    cursor: Option<Vec2>,
     camera: &Camera,
     cam_tf: &GlobalTransform,
 ) -> Option<Vec3> {
-    let cursor = window.cursor_position()?;
+    let cursor = cursor?;
     let ray = camera.viewport_to_world(cam_tf, cursor).ok()?;
     let denom = ray.direction.y;
     if denom.abs() < 1e-6 {

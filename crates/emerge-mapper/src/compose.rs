@@ -34,12 +34,34 @@ use crate::keys::{self, Action};
 use crate::project::Project;
 use crate::tiles::{ComposeRoot, Mode};
 
+/// **Where the Compose tab stands the group it is editing.**
+///
+/// Far from the map, like [`crate::tiles::STAGE`] and for the same reason: a group drawn over the map
+/// is indistinguishable from what is already placed there, and seating a member means watching *that*
+/// member move.
+pub const COMPOSE_STAGE: Vec3 = Vec3::new(4096.0, 0.0, 4096.0);
+
 /// Which group the tab is looking at, and which one the map will stamp.
 #[derive(Resource, Default)]
 pub struct ComposeState {
     /// Index into `project.compositions.compositions`. Clamped on rebuild rather than stored as an
     /// `Option`, because the list is never empty while a selection exists.
     pub selected: usize,
+    /// Index into the selected group's members — the second cursor, under the one above. Clamped the
+    /// same way and for the same reason.
+    pub member: usize,
+    /// **Previous member lists, most recent last.** Compose's own undo, because Map, Tiles and Anim
+    /// each keep one and an editing surface without one would be the odd tab out.
+    ///
+    /// Whole values rather than an operation enum. The Map's stack argues the shape it needs —
+    /// *"Every variant's inverse is another variant of this same enum"* — and for a file this size
+    /// the simplest thing with that property is the value itself, which cannot disagree with what it
+    /// is the inverse of.
+    /// Written only by [`commit`] and [`step_history`]; public because this is a `Resource` whose
+    /// other fields are, and because a functional-update literal outside the crate needs every field
+    /// visible — `tests/headless.rs` builds one.
+    pub undo: Vec<Vec<Composition>>,
+    pub redo: Vec<Vec<Composition>>,
     /// **The armed group** — by id, never by index.
     ///
     /// An index would silently re-point the moment `compositions.ron` gained a row above it, which is
@@ -239,6 +261,269 @@ pub fn record_selected(state: &mut ComposeState, project: &mut Project) {
     );
 }
 
+// ------------------------------------------------------------------------------------------------
+// Seating — the door, and the verbs that go through it
+// ------------------------------------------------------------------------------------------------
+
+/// How deep the undo stack goes. Deep enough for a seating session, bounded so a long one cannot
+/// grow without limit.
+const HISTORY: usize = 64;
+
+/// **Edit the composition set, and keep the result only if it is a valid set.**
+///
+/// The same door [`crate::editor::keep_as_group`] and [`record_selected`] go through, and the reason
+/// there is one: a group that fails validation must leave both the file and the in-memory set exactly
+/// as they were, or the editor is showing something the game will refuse to load.
+///
+/// Writes immediately rather than staging, because **that is the model `compositions.ron` already
+/// has** — both existing writers `save_atomic` on the keypress. A staging buffer would be a second
+/// write model for one file. It is safe here for a reason specific to this file: it carries no `//`
+/// comments on purpose, recorded in its own `note`, precisely because `to_ron` reserializes. There is
+/// nothing for a rewrite to lose.
+fn commit(
+    state: &mut ComposeState,
+    project: &mut Project,
+    edit: impl FnOnce(&mut Vec<Composition>) -> Result<String, String>,
+) {
+    let was = project.compositions.compositions.clone();
+    let mut proposed = project.compositions.clone();
+    let receipt = match edit(&mut proposed.compositions) {
+        Ok(r) => r,
+        Err(e) => return state.status.problem(e),
+    };
+    if let Err(e) = composition::validate(&proposed.compositions, &project.library) {
+        return state.status.problem(e);
+    }
+    let path = project
+        .emerge_dir
+        .join(emerge_core::composition::Compositions::FILE);
+    let text = match proposed.to_ron() {
+        Ok(t) => t,
+        Err(e) => return state.status.problem(format!("NOT WRITTEN: {e}")),
+    };
+    if let Err(e) = emerge_core::ron_surgery::save_atomic(&path, &text) {
+        return state.status.problem(format!("NOT WRITTEN: {e}"));
+    }
+    project.compositions = proposed;
+    state.undo.push(was);
+    if state.undo.len() > HISTORY {
+        state.undo.remove(0);
+    }
+    // A new edit forks the history. Keeping the redo stack would let a later redo reinstate a set
+    // that never followed from what is now on disk.
+    state.redo.clear();
+    state.status.note(receipt);
+}
+
+/// The selected member of the selected group, or a note saying there is none.
+fn selected_member<'a>(
+    state: &ComposeState,
+    comps: &'a [Composition],
+) -> Option<(&'a Composition, usize)> {
+    let c = comps.get(state.selected)?;
+    let i = state.member.min(c.members.len().checked_sub(1)?);
+    Some((c, i))
+}
+
+/// Walk the members of the selected group. Wraps, like every other list in this editor.
+fn walk_members(
+    mut state: ResMut<ComposeState>,
+    project: Res<Project>,
+    keys: Res<keys::Live>,
+    input: Res<ButtonInput<KeyCode>>,
+) {
+    let Some(c) = project.compositions.compositions.get(state.selected) else {
+        return;
+    };
+    let n = c.members.len();
+    if n == 0 {
+        return;
+    }
+    let mut at = state.member as i64;
+    if keys::just_pressed(&input, keys.0, Action::ComposeMemberPrev) {
+        at -= 1;
+    } else if keys::just_pressed(&input, keys.0, Action::ComposeMemberNext) {
+        at += 1;
+    } else {
+        return;
+    }
+    state.member = at.rem_euclid(n as i64) as usize;
+}
+
+/// **Seat the selected member** — one lattice step per press, written through the door.
+fn seat_member(
+    mut state: ResMut<ComposeState>,
+    mut project: ResMut<Project>,
+    keys: Res<keys::Live>,
+    input: Res<ButtonInput<KeyCode>>,
+) {
+    let nudge = [
+        (Action::SeatForward, Nudge::Forward),
+        (Action::SeatBack, Nudge::Back),
+        (Action::SeatLeft, Nudge::Left),
+        (Action::SeatRight, Nudge::Right),
+        (Action::SeatUp, Nudge::Up),
+        (Action::SeatDown, Nudge::Down),
+    ]
+    .into_iter()
+    .find(|(a, _)| keys::just_pressed(&input, keys.0, *a));
+    let Some((_, nudge)) = nudge else { return };
+
+    let comps = &project.compositions.compositions;
+    let Some((c, i)) = selected_member(&state, comps) else {
+        state.status.note("no member to seat");
+        return;
+    };
+    let (envelope, member_id) = (c.envelope, c.members[i].id.clone());
+    // Measured against the set as it stands, before the edit — a member's footprint does not depend
+    // on where it is being moved to.
+    let footprint = match member_footprint(&c.members[i], comps, &project.library) {
+        Ok(f) => f,
+        Err(e) => return state.status.problem(e),
+    };
+    let step = emerge_core::grid::SNAP / project.policy.divisions.max(1) as f32;
+    let (at, lift) = (c.members[i].at, c.members[i].lift);
+    let (next_at, next_lift) = match seated(envelope, at, lift, footprint, nudge, step) {
+        Ok(v) => v,
+        Err(e) => return state.status.problem(format!("`{member_id}`: {e}")),
+    };
+    if (next_at, next_lift) == (at, lift) {
+        return;
+    }
+    let selected = state.selected;
+    commit(&mut state, &mut project, |set| {
+        let m = set
+            .get_mut(selected)
+            .and_then(|c| c.members.get_mut(i))
+            .ok_or_else(|| format!("`{member_id}` is no longer there to seat"))?;
+        m.at = next_at;
+        m.lift = next_lift;
+        // `of_fingerprint` is deliberately untouched: it records what this member's *body* was built
+        // against, and moving one changes no body. Writing it here would make every seat look like a
+        // re-record and would silence a real STALE badge.
+        Ok(format!(
+            "`{member_id}` seated at ({:.2}, {:.2}) lift {:.2}",
+            next_at.0, next_at.1, next_lift
+        ))
+    });
+}
+
+/// Turn the selected member — a quarter bare, 15° on Shift.
+fn turn_member(
+    mut state: ResMut<ComposeState>,
+    mut project: ResMut<Project>,
+    keys: Res<keys::Live>,
+    input: Res<ButtonInput<KeyCode>>,
+) {
+    let turn = [
+        (Action::TurnMemberLeft, -1.0, 90.0),
+        (Action::TurnMemberRight, 1.0, 90.0),
+        (Action::TurnMemberLeftFine, -1.0, 15.0),
+        (Action::TurnMemberRightFine, 1.0, 15.0),
+    ]
+    .into_iter()
+    .find(|(a, _, _)| keys::just_pressed(&input, keys.0, *a));
+    let Some((_, dir, step)) = turn else { return };
+
+    let comps = &project.compositions.compositions;
+    let Some((c, i)) = selected_member(&state, comps) else {
+        state.status.note("no member to turn");
+        return;
+    };
+    let member_id = c.members[i].id.clone();
+    let next = turned(c.members[i].yaw, step, dir);
+    let selected = state.selected;
+    commit(&mut state, &mut project, |set| {
+        let m = set
+            .get_mut(selected)
+            .and_then(|c| c.members.get_mut(i))
+            .ok_or_else(|| format!("`{member_id}` is no longer there to turn"))?;
+        m.yaw = next;
+        Ok(format!("`{member_id}` turned to {next:.0}"))
+    });
+}
+
+/// Take the selected member out of the group.
+///
+/// The pair to the Map's capture verb: a box drag takes whatever was inside it, and this is how the
+/// one piece that should not have come along leaves again.
+fn drop_member(
+    mut state: ResMut<ComposeState>,
+    mut project: ResMut<Project>,
+    keys: Res<keys::Live>,
+    input: Res<ButtonInput<KeyCode>>,
+) {
+    if !keys::just_pressed(&input, keys.0, Action::DropMember) {
+        return;
+    }
+    let comps = &project.compositions.compositions;
+    let Some((c, i)) = selected_member(&state, comps) else {
+        state.status.note("no member to drop");
+        return;
+    };
+    let member_id = c.members[i].id.clone();
+    let selected = state.selected;
+    commit(&mut state, &mut project, |set| {
+        let c = set
+            .get_mut(selected)
+            .ok_or_else(|| format!("`{member_id}`'s group is no longer there"))?;
+        if i >= c.members.len() {
+            return Err(format!("`{member_id}` is no longer there to drop"));
+        }
+        c.members.remove(i);
+        // A `Location` names member ids in `props`; leaving one pointing at a member that is gone is
+        // exactly the dangling reference `validate` refuses, so the refusal below would fire and the
+        // write would be abandoned. Dropping the prop with the member keeps the group loadable, and
+        // an affordance left with no props at all is reported rather than silently kept.
+        for l in &mut c.locations {
+            l.props.retain(|p| *p != member_id);
+        }
+        Ok(format!("dropped `{member_id}`"))
+    });
+    state.member = 0;
+}
+
+/// Undo and redo, over whole member lists.
+fn step_history(
+    mut state: ResMut<ComposeState>,
+    mut project: ResMut<Project>,
+    keys: Res<keys::Live>,
+    input: Res<ButtonInput<KeyCode>>,
+) {
+    let back = keys::just_pressed(&input, keys.0, Action::UndoCompose);
+    let forward = keys::just_pressed(&input, keys.0, Action::RedoCompose);
+    if !(back || forward) {
+        return;
+    }
+    let taken = if back { state.undo.pop() } else { state.redo.pop() };
+    let Some(want) = taken else {
+        state.status.note(if back { "nothing to undo" } else { "nothing to redo" });
+        return;
+    };
+    let was = project.compositions.compositions.clone();
+    let mut proposed = project.compositions.clone();
+    proposed.compositions = want;
+    let path = project
+        .emerge_dir
+        .join(emerge_core::composition::Compositions::FILE);
+    let text = match proposed.to_ron() {
+        Ok(t) => t,
+        Err(e) => return state.status.problem(format!("NOT WRITTEN: {e}")),
+    };
+    if let Err(e) = emerge_core::ron_surgery::save_atomic(&path, &text) {
+        return state.status.problem(format!("NOT WRITTEN: {e}"));
+    }
+    project.compositions = proposed;
+    // The inverse goes on the other stack, so undo and redo are the same walk in opposite
+    // directions — the shape the Map's own stack argues for.
+    if back {
+        state.redo.push(was);
+    } else {
+        state.undo.push(was);
+    }
+    state.status.note(if back { "undone" } else { "redone" });
+}
+
 /// **Everything the panel says, derived on the spot.**
 ///
 /// No count and no badge is stored: staleness and the interface are recomputed from the library and
@@ -317,6 +602,166 @@ fn rebuild(
             ));
         }
     });
+}
+
+// ------------------------------------------------------------------------------------------------
+// Seating — the pure half
+// ------------------------------------------------------------------------------------------------
+
+/// One lattice step, in the frame [`composition::Member::at`] is written in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Nudge {
+    /// −Z, matching [`emerge_core::wfc`]'s `N`.
+    Forward,
+    Back,
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// **The axis-aligned box that contains a `w × d` footprint turned `yaw` degrees.**
+///
+/// Exact at every angle rather than only at the quarters, so a chair drawn up to a table at 15° is
+/// bounded by the box it actually occupies. At yaw 0 this is `(w, d)`; at 90 it is `(d, w)`.
+pub fn turned_footprint((w, d): (f32, f32), yaw_deg: f32) -> (f32, f32) {
+    let (s, c) = yaw_deg.to_radians().sin_cos();
+    (w * c.abs() + d * s.abs(), w * s.abs() + d * c.abs())
+}
+
+/// **How much floor a member takes**, or why that cannot be answered.
+///
+/// A nested group's footprint is its own envelope, which is the whole point of `Bounded`: it declares
+/// the tile it claims. An `Anchored` child declares none, so a parent cannot bound it — that is a
+/// refusal naming the child rather than a made-up box, the same rule
+/// [`crate::editor::composition_from_set`] applies to an unmeasured piece.
+pub fn member_footprint(
+    m: &composition::Member,
+    comps: &[Composition],
+    library: &emerge_core::library::Library,
+) -> Result<(f32, f32), String> {
+    match &m.body {
+        composition::Body::Descriptor { id, tip, patch, .. } => {
+            let base = library.get(id).ok_or_else(|| {
+                format!("`{}` places descriptor `{id}`, which the library does not define", m.id)
+            })?;
+            let d = match patch {
+                Some(p) => base.patched_with(p),
+                None => base.clone(),
+            };
+            let (w, _, dep) = emerge_core::descriptor::tipped_extents(&d, *tip)
+                .ok_or_else(|| format!("`{}` is unmeasured, so it cannot be seated", m.id))?;
+            Ok(turned_footprint((w, dep), m.yaw))
+        }
+        composition::Body::Composition { id } => {
+            let child = comps
+                .iter()
+                .find(|c| c.id == *id)
+                .ok_or_else(|| format!("`{}` nests `{id}`, which is not a group here", m.id))?;
+            match child.envelope {
+                Envelope::Bounded { size } => Ok(turned_footprint((size.0, size.2), m.yaw)),
+                Envelope::Anchored => Err(format!(
+                    "`{}` nests `{id}`, which is anchored and so claims no tile — there is no box to \
+                     seat it inside. Give `{id}` a bounded envelope first.",
+                    m.id
+                )),
+            }
+        }
+    }
+}
+
+/// **Seat a member one step, or refuse and say why.** Returns the new `(at, lift)`.
+///
+/// # The lattice is not defined here
+///
+/// Horizontal steps are [`emerge_core::grid::SNAP`] and vertical ones are `SNAP / divisions` — the
+/// exact quanta [`crate::editor`]'s `snap` and `lift_step` already apply to every `Placed`. A second
+/// quantum for the same act is the mistake `GridSpacing`'s note records: the drawn grid said 1.0 m
+/// while the snap was 0.5 m, and an author cannot see which one a piece obeyed.
+///
+/// # It refuses rather than clamping
+///
+/// A step that would put any part of the member outside the envelope is an error, not a silently
+/// shortened move. Clamping would answer a key with a smaller version of what was asked, which is the
+/// one thing pcgbook ch.11 says a mixed-initiative tool must not do — the computer acting on a model
+/// other than the one in the author's head. The bound is the member's **footprint**, not its centre:
+/// a 1 m wall centred on the edge of a 1 m envelope is half outside it.
+///
+/// `lift` is deliberately unbounded. It is a nudge on top of whatever the mount resolves to, not an
+/// absolute height, so there is no honest bound to give it — a ceiling-mounted member's useful lifts
+/// are negative. A lift that carries a member out of its envelope shows up where it should, as a face
+/// that presents nothing.
+pub fn seated(
+    envelope: Envelope,
+    at: (f32, f32),
+    lift: f32,
+    footprint: (f32, f32),
+    nudge: Nudge,
+    lift_step: f32,
+) -> Result<((f32, f32), f32), String> {
+    use emerge_core::grid::SNAP;
+    let (dx, dz, dy) = match nudge {
+        Nudge::Forward => (0.0, -SNAP, 0.0),
+        Nudge::Back => (0.0, SNAP, 0.0),
+        Nudge::Left => (-SNAP, 0.0, 0.0),
+        Nudge::Right => (SNAP, 0.0, 0.0),
+        Nudge::Up => (0.0, 0.0, lift_step),
+        Nudge::Down => (0.0, 0.0, -lift_step),
+    };
+    let next = (snap_to(at.0 + dx), snap_to(at.1 + dz));
+    if dy != 0.0 {
+        return Ok((at, lift + dy));
+    }
+    let Envelope::Bounded { size } = envelope else {
+        return Err(
+            "this group is anchored, so it claims no tile and has no lattice to seat inside. \
+             Anchored groups are furniture standing somewhere; a bounded one is a module that has to \
+             meet a wall."
+                .to_owned(),
+        );
+    };
+    let (half_x, half_z) = (size.0 * 0.5, size.2 * 0.5);
+    let (fw, fd) = (footprint.0 * 0.5, footprint.1 * 0.5);
+    // A hair of tolerance, for the same reason `adjacency::EDGE_EPSILON` has one: a piece measured
+    // 1.0000001 m flush against a 1 m envelope is flush, and refusing it would be arithmetic showing
+    // through as a rule the author cannot see the cause of.
+    const SLOP: f32 = 1e-3;
+    if next.0 - fw < -half_x - SLOP || next.0 + fw > half_x + SLOP {
+        return Err(format!(
+            "that would put it {:.2} m outside the group's {:.1} m width — a member has to stay \
+             inside the tile the group claims",
+            ((next.0.abs() + fw) - half_x).max(0.0),
+            size.0
+        ));
+    }
+    if next.1 - fd < -half_z - SLOP || next.1 + fd > half_z + SLOP {
+        return Err(format!(
+            "that would put it {:.2} m outside the group's {:.1} m depth — a member has to stay \
+             inside the tile the group claims",
+            ((next.1.abs() + fd) - half_z).max(0.0),
+            size.2
+        ));
+    }
+    Ok((next, lift))
+}
+
+/// The authoring grid, rounded the way [`crate::editor`] rounds it. One rule, two callers.
+fn snap_to(v: f32) -> f32 {
+    (v / emerge_core::grid::SNAP).round() * emerge_core::grid::SNAP
+}
+
+/// **Turn a member, landing on a multiple of `step`.**
+///
+/// Rounds the *result* rather than adding to whatever was there, so a member that arrived at 47°
+/// from somewhere else comes back onto the lattice with one press instead of staying 2° off forever.
+/// That matters because [`emerge_core::adjacency::quarter_turns`] refuses a yaw off the quarters and
+/// names the piece — a tokened member stuck at 47° makes the whole group's interface underivable.
+pub fn turned(yaw: f32, step: f32, dir: f32) -> f32 {
+    if !(step.is_finite() && step > 0.0) {
+        return yaw;
+    }
+    let next = (yaw / step).round() * step + dir * step;
+    next.rem_euclid(360.0)
 }
 
 /// One member as a line: what it is, where it sits, and what it rests on.

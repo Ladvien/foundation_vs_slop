@@ -2024,7 +2024,7 @@ fn drive_clone(
     assets: Res<AssetServer>,
     mouse: Res<ButtonInput<MouseButton>>,
     hovered_ui: Query<&Hovered>,
-    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    pointer: Res<crate::view::Pointer>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     mut marker: Query<(&mut Transform, &mut Visibility), With<CloneTile>>,
     mut drag: ResMut<CloneDrag>,
@@ -2045,11 +2045,11 @@ fn drive_clone(
         return;
     }
 
-    let (Some(window), Some(camera)) = (window, camera) else {
+    let Some(camera) = camera else {
         return;
     };
     let (cam, cam_tf) = *camera;
-    let hit = cursor_ground(&window, cam, cam_tf).filter(|_| !hovered_ui.iter().any(|h| h.0));
+    let hit = cursor_ground(pointer.0, cam, cam_tf).filter(|_| !hovered_ui.iter().any(|h| h.0));
     let Some(hit) = hit else {
         // A release off the world ends the drag — the defect `drive_removal` records.
         if mouse.just_released(MouseButton::Left) {
@@ -2311,7 +2311,7 @@ pub struct FineAnchor {
 fn sense_fine_anchor(
     keyboard: Res<ButtonInput<KeyCode>>,
     project: Res<Project>,
-    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    pointer: Res<crate::view::Pointer>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     hovered_ui: Query<&Hovered>,
     mut anchor: ResMut<FineAnchor>,
@@ -2337,11 +2337,11 @@ fn sense_fine_anchor(
     if hovered_ui.iter().any(|h| h.0) {
         return;
     }
-    let (Some(window), Some(camera)) = (window, camera) else {
+    let Some(camera) = camera else {
         return;
     };
     let (cam, cam_tf) = *camera;
-    let Some(hit) = cursor_ground(&window, cam, cam_tf) else {
+    let Some(hit) = cursor_ground(pointer.0, cam, cam_tf) else {
         return;
     };
     let (x, z) = project.map.to_map_space((hit.x, hit.z));
@@ -2456,7 +2456,7 @@ fn drive_removal(
     mut commands: Commands,
     mouse: Res<ButtonInput<MouseButton>>,
     hovered_ui: Query<&Hovered>,
-    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    pointer: Res<crate::view::Pointer>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     placed: Query<(Entity, &Placement)>,
     mut marker: Query<(&mut Transform, &mut Visibility), With<RemovalTile>>,
@@ -2478,13 +2478,13 @@ fn drive_removal(
         return;
     }
 
-    let (Some(window), Some(camera)) = (window, camera) else {
+    let Some(camera) = camera else {
         return;
     };
     let (cam, cam_tf) = *camera;
     // A cursor over the panel is not a cursor over the map, and a marker under the palette is a
     // promise about a click that will never reach the world — the same rule the ghost follows.
-    let hit = cursor_ground(&window, cam, cam_tf).filter(|_| !hovered_ui.iter().any(|h| h.0));
+    let hit = cursor_ground(pointer.0, cam, cam_tf).filter(|_| !hovered_ui.iter().any(|h| h.0));
     let Some(hit) = hit else {
         // **A release ends the drag wherever it happens.** This used to return before the
         // `just_released` branch, so letting go over a panel or off the map left `drag.from` set —
@@ -2677,7 +2677,7 @@ fn drive_place(
     keyboard: Res<ButtonInput<KeyCode>>,
     assets: Res<AssetServer>,
     hovered_ui: Query<&Hovered>,
-    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    pointer: Res<crate::view::Pointer>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     mut project: ResMut<Project>,
     mut state: ResMut<EditorState>,
@@ -2698,14 +2698,14 @@ fn drive_place(
         }
         return;
     }
-    let (Some(window), Some(camera)) = (window, camera) else {
+    let Some(camera) = camera else {
         return;
     };
     let (cam, cam_tf) = *camera;
     // A click on a control is not a click on the world. Without this, arming a piece from the palette
     // also dropped one wherever the panel happened to be over.
     let over_ui = hovered_ui.iter().any(|h| h.0);
-    let Some(hit) = cursor_ground(&window, cam, cam_tf).filter(|_| !over_ui) else {
+    let Some(hit) = cursor_ground(pointer.0, cam, cam_tf).filter(|_| !over_ui) else {
         // **A release ends the drag wherever it happens** — the defect `drive_removal` records: a
         // release over a panel used to leave `from` set, and the box then followed the cursor with no
         // button held, claiming an edit nobody was making.
@@ -3093,7 +3093,7 @@ fn keys(
     live: Res<keys::Live>,
     assets: Res<AssetServer>,
     hovered_ui: Query<&Hovered>,
-    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    pointer: Res<crate::view::Pointer>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     placed: Query<(Entity, &Placement)>,
     mut project: ResMut<Project>,
@@ -3128,7 +3128,7 @@ fn keys(
     // **Map to Tiles, carrying the piece.** Before the branches below, because they consume the
     // window and camera singles.
     if keys::just_pressed(&keyboard, live.0, Action::EditTile) {
-        send_to_tiles(window, camera, &project, &mut state, &mut mode, &mut import);
+        send_to_tiles(*pointer, camera, &project, &mut state, &mut mode, &mut import);
         return;
     }
 
@@ -3299,7 +3299,7 @@ fn keys(
             turn_under_cursor(
                 &mut commands,
                 &assets,
-                window,
+                *pointer,
                 camera,
                 &mut project,
                 &mut state,
@@ -3315,7 +3315,7 @@ fn keys(
     if keys::just_pressed(&keyboard, live.0, Action::CycleTarget)
         && !hovered_ui.iter().any(|h| h.0)
     {
-        cycle_target(window, camera, &project, &mut state, target.as_mut());
+        cycle_target(*pointer, camera, &project, &mut state, target.as_mut());
         return;
     }
 
@@ -3327,7 +3327,7 @@ fn keys(
             tip_under_cursor(
                 &mut commands,
                 &assets,
-                window,
+                *pointer,
                 camera,
                 &mut project,
                 &mut state,
@@ -3348,7 +3348,7 @@ fn keys(
             lift_under_cursor(
                 &mut commands,
                 &assets,
-                window,
+                *pointer,
                 camera,
                 &mut project,
                 &mut state,
@@ -3362,7 +3362,7 @@ fn keys(
 
     // **O pins or unpins the piece under the cursor.** A pin is what the solver routes around.
     if keys::just_pressed(&keyboard, live.0, Action::OwnToggle) && !hovered_ui.iter().any(|h| h.0) {
-        toggle_pin(window, camera, &mut project, &mut state, target.as_mut());
+        toggle_pin(*pointer, camera, &mut project, &mut state, target.as_mut());
         return;
     }
 
@@ -3389,7 +3389,7 @@ fn keys(
         flood_from_cursor(
             &mut commands,
             &assets,
-            window,
+            *pointer,
             camera,
             &mut project,
             &mut state,
@@ -3827,13 +3827,13 @@ fn apply(
 ///
 /// Unpinning is immediate; pinning asks for a reason first, because that is what the field is for.
 fn toggle_pin(
-    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    pointer: crate::view::Pointer,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     project: &mut Project,
     state: &mut EditorState,
     lock: &mut TargetLock,
 ) {
-    let Some(index) = under_cursor_target(lock, window, camera, project) else {
+    let Some(index) = under_cursor_target(lock, pointer, camera, project) else {
         state.status.note("nothing here to pin".to_owned());
         return;
     };
@@ -3867,7 +3867,7 @@ fn toggle_pin(
 fn turn_under_cursor(
     commands: &mut Commands,
     assets: &AssetServer,
-    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    pointer: crate::view::Pointer,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     project: &mut Project,
     state: &mut EditorState,
@@ -3875,7 +3875,7 @@ fn turn_under_cursor(
     lock: &mut TargetLock,
     step: f32,
 ) {
-    let Some(index) = under_cursor_target(lock, window, camera, project) else {
+    let Some(index) = under_cursor_target(lock, pointer, camera, project) else {
         state.status.note("nothing here to turn".to_owned());
         return;
     };
@@ -4388,7 +4388,7 @@ fn lift_step(project: &Project) -> f32 {
 fn lift_under_cursor(
     commands: &mut Commands,
     assets: &AssetServer,
-    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    pointer: crate::view::Pointer,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     project: &mut Project,
     state: &mut EditorState,
@@ -4396,7 +4396,7 @@ fn lift_under_cursor(
     lock: &mut TargetLock,
     sign: f32,
 ) {
-    let Some(index) = under_cursor_target(lock, window, camera, project) else {
+    let Some(index) = under_cursor_target(lock, pointer, camera, project) else {
         state.status.note("nothing here to lift".to_owned());
         return;
     };
@@ -4442,7 +4442,7 @@ fn lift_under_cursor(
 fn tip_under_cursor(
     commands: &mut Commands,
     assets: &AssetServer,
-    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    pointer: crate::view::Pointer,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     project: &mut Project,
     state: &mut EditorState,
@@ -4450,7 +4450,7 @@ fn tip_under_cursor(
     lock: &mut TargetLock,
     about_x: bool,
 ) {
-    let Some(index) = under_cursor_target(lock, window, camera, project) else {
+    let Some(index) = under_cursor_target(lock, pointer, camera, project) else {
         state.status.note("nothing here to tip".to_owned());
         return;
     };
@@ -4560,14 +4560,14 @@ fn hide_carried(
 /// every copy on the map moves with the edit. That is the point of editing it there rather than
 /// patching one placement.
 fn send_to_tiles(
-    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    pointer: crate::view::Pointer,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     project: &Project,
     state: &mut EditorState,
     mode: &mut crate::tiles::Mode,
     import: &mut crate::tiles::ImportState,
 ) {
-    let Some(index) = nearest_placement(window, camera, project) else {
+    let Some(index) = nearest_placement(pointer, camera, project) else {
         state.status.note("nothing here to edit".to_owned());
         return;
     };
@@ -4602,7 +4602,7 @@ fn drive_move(
     keyboard: Res<ButtonInput<KeyCode>>,
     assets: Res<AssetServer>,
     hovered_ui: Query<&Hovered>,
-    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    pointer: Res<crate::view::Pointer>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     placed: Query<(Entity, &Placement)>,
     mut project: ResMut<Project>,
@@ -4625,11 +4625,11 @@ fn drive_move(
     if hovered_ui.iter().any(|h| h.0) {
         return;
     }
-    let (Some(window), Some(camera)) = (window, camera) else {
+    let Some(camera) = camera else {
         return;
     };
     let (cam, cam_tf) = *camera;
-    let Some(hit) = cursor_ground(&window, cam, cam_tf) else {
+    let Some(hit) = cursor_ground(pointer.0, cam, cam_tf) else {
         return;
     };
 
@@ -4807,13 +4807,13 @@ pub fn pick_at(project: &Project, probe: (f32, f32)) -> Option<usize> {
 /// [`pick_at`], with the probe taken from the cursor — shared by pin, delete and turn, so "the thing
 /// I am pointing at" means one thing.
 fn nearest_placement(
-    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    pointer: crate::view::Pointer,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     project: &Project,
 ) -> Option<usize> {
-    let (window, camera) = (window?, camera?);
+    let camera = camera?;
     let (cam, cam_tf) = *camera;
-    let hit = cursor_ground(&window, cam, cam_tf)?;
+    let hit = cursor_ground(pointer.0, cam, cam_tf)?;
     // Both sides in map space: `at` is authored there and the cursor answers in world metres.
     pick_at(project, project.map.to_map_space((hit.x, hit.z)))
 }
@@ -4833,13 +4833,13 @@ pub struct UnderCursor(String);
 /// turned would be worse than no readout, because it would be believed. That is the whole argument
 /// its own doc comment makes for being one resolver, extended to the line that reports it.
 fn sense_under_cursor(
-    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    pointer: Res<crate::view::Pointer>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     project: Res<Project>,
     mut lock: ResMut<TargetLock>,
     mut under: ResMut<UnderCursor>,
 ) {
-    let want = match under_cursor_target(&mut lock, window, camera, &project) {
+    let want = match under_cursor_target(&mut lock, *pointer, camera, &project) {
         // The chord comes from the census, never retyped — `keys.rs`'s one rule, and the reason
         // this line cannot come to name a key the build does not read.
         Some(i) => project.map.placements.get(i).map_or_else(String::new, |p| {
@@ -4866,13 +4866,13 @@ fn sense_under_cursor(
 /// around the map would turn every later nudge into a surprise.
 fn under_cursor_target(
     lock: &mut TargetLock,
-    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    pointer: crate::view::Pointer,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     project: &Project,
 ) -> Option<usize> {
-    let (window, camera) = (window?, camera?);
+    let camera = camera?;
     let (cam, cam_tf) = *camera;
-    let hit = cursor_ground(&window, cam, cam_tf)?;
+    let hit = cursor_ground(pointer.0, cam, cam_tf)?;
     let at = project.map.to_map_space((hit.x, hit.z));
     if let Some((id, cell)) = &lock.0 {
         if (snap(at.0), snap(at.1)) == *cell {
@@ -4891,17 +4891,17 @@ fn under_cursor_target(
 /// (ids break ties, so the cycle is stable across presses). The status names the pick and the
 /// count, because a lock nobody can see is a surprise wearing a feature's clothes.
 fn cycle_target(
-    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    pointer: crate::view::Pointer,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     project: &Project,
     state: &mut EditorState,
     lock: &mut TargetLock,
 ) {
-    let (Some(window), Some(camera)) = (window, camera) else {
+    let Some(camera) = camera else {
         return;
     };
     let (cam, cam_tf) = *camera;
-    let Some(hit) = cursor_ground(&window, cam, cam_tf) else {
+    let Some(hit) = cursor_ground(pointer.0, cam, cam_tf) else {
         state.status.note("nothing under the cursor to target".to_owned());
         return;
     };
@@ -5315,16 +5315,16 @@ fn generate_from(
 fn flood_from_cursor(
     commands: &mut Commands,
     assets: &AssetServer,
-    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    pointer: crate::view::Pointer,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     project: &mut Project,
     state: &mut EditorState,
 ) {
-    let (Some(window), Some(camera)) = (window, camera) else {
+    let Some(camera) = camera else {
         return;
     };
     let (cam, cam_tf) = *camera;
-    let Some(hit) = cursor_ground(&window, cam, cam_tf) else {
+    let Some(hit) = cursor_ground(pointer.0, cam, cam_tf) else {
         return;
     };
     // Said rather than silent: `F` with nothing armed used to be indistinguishable from `F` not being
@@ -5398,7 +5398,7 @@ fn drive_ghost(
     // moment the author needs it is while the cursor is over the spot, not after the click.
     mut state: ResMut<EditorState>,
     hovered_ui: Query<&Hovered>,
-    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    pointer: Res<crate::view::Pointer>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     ghosts: Query<(Entity, &GhostOf), With<Ghost>>,
     mut transforms: Query<&mut Transform, With<Ghost>>,
@@ -5414,7 +5414,7 @@ fn drive_ghost(
         }
     };
 
-    let (Some(window), Some(camera)) = (window, camera) else {
+    let Some(camera) = camera else {
         clear(&mut commands);
         return;
     };
@@ -5427,7 +5427,7 @@ fn drive_ghost(
         return;
     }
     let (cam, cam_tf) = *camera;
-    let Some(hit) = cursor_ground(&window, cam, cam_tf) else {
+    let Some(hit) = cursor_ground(pointer.0, cam, cam_tf) else {
         clear(&mut commands);
         return;
     };

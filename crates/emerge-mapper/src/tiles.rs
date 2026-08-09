@@ -1555,7 +1555,7 @@ fn stage_box(state: &ImportState, project: &Project) -> Option<(Vec3, Vec3, (u32
 
 fn pick_lattice(
     mode: Res<Mode>,
-    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    pointer: Res<crate::view::Pointer>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<crate::view::MainCamera>>>,
     hovered_ui: Query<&Hovered>,
     state: Res<ImportState>,
@@ -1571,12 +1571,12 @@ fn pick_lattice(
         clear(&mut pick);
         return;
     }
-    let (Some(window), Some(camera)) = (window, camera) else {
+    let Some(camera) = camera else {
         clear(&mut pick);
         return;
     };
     let (cam, cam_tf) = *camera;
-    let Some(cursor) = window.cursor_position() else {
+    let Some(cursor) = pointer.0 else {
         clear(&mut pick);
         return;
     };
