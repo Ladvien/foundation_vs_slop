@@ -186,6 +186,153 @@ so a test comparing two densities authors both.
 
 ## Step 3 — lattice seating on Compose
 
+**Written to be executed from a cold start**, like step 1. Everything below was read out of the source
+or the shipped RON on 2026-08-09.
+
+### 3.0 The finding that shapes it: the lattice already exists
+
+I expected to design a seating lattice. There is one, and it is the grid the editor has always used:
+
+| | Quantum | Where it is already applied |
+|---|---|---|
+| Horizontal | `grid::SNAP` = **0.5 m** | `editor::snap(v) = (v / SNAP).round() * SNAP`, on every `Placed::at` |
+| Vertical | `SNAP / policy.divisions` = **0.25 m** default | `editor::lift_step`, on every `Placed::lift` |
+| Origin | envelope centred on zero | `interface` builds its scratch map at the origin, `Map::floor_rect` centres there |
+
+`Member::at` is already written in that frame — step 2's doorway fixture put its jambs at `±1.0` in a
+3 m envelope, which is on the lattice, and I had not noticed I was choosing lattice positions.
+
+**So step 3 makes the lattice visible and navigable; it does not define one.** Anything that invented a
+second quantum here would be a second grid for the same act, and the note under `GridSpacing` already
+records what that cost the first time — the drawn grid said 1.0 m while the snap was 0.5 m.
+
+### 3.1 What the corpus says about the surface
+
+Re-checked against home-still on 2026-08-09; distill is up (8,249 embedded documents), so the standing
+note that it was down is stale.
+
+**Merrell et al., *Interactive Furniture Layout Using Interior Design Guidelines*** (in the library as
+`furnitureLayout2`) is the nearest prior art and names its own lineage: *"Our interface is inspired by
+Igarashi and Hughes' [2001] work on suggestive interfaces."* The mechanism worth taking is not the MCMC
+sampler — it is the interaction: *"The user can constrain the suggestions by fixing some of the items
+in place… This approach allows the user to **progressively pin down** the desired layout."* Seating is
+incremental and per-member, never an all-or-nothing solve.
+
+**Infinigen Indoors** (`10.48550/arxiv.2406.11824`) states the relation this project's `Mount::OnSurface`
+is a weaker form of. `StableAgainst` *"checks that the child's surface is parallel to the parent's, **the
+child is not overhanging**, and the child's surface is exactly at the specified margin"*; `SupportedBy`
+adds *"the centroid of the child object is contained within the convex hull of the intersection between
+the child and the parent"* — *"to ensure zero torque by gravity"*, the coffee cup teetering on the
+table's edge. **`stack::resolve_y` checks neither.** A member can be seated half off its host and
+nothing says so. That is real evidence for step 5's occupancy test and is written down here rather than
+built now, because the non-goals below still hold.
+
+**Bukowski & Séquin, *Object associations*, SIGGRAPH 1995** (`10.1145/199404.199427`) is the classic on
+objects that know what they attach to. **Not read** — CrossRef has it, there is no OA PDF, and
+`paper_download` finds nothing. Cited here from Merrell's reference list, not from the text.
+
+Already applied and unchanged: Tutenel's *"snapping to the nearest valid location"*, and pcgbook ch.11's
+three constraints, of which the third governs this step — *"only when specifically requested"*, so every
+verb below is a keypress and nothing seats itself.
+
+### 3.2 Scope: the Map captures, Compose seats
+
+Step 1 gave the Map a capture verb, so **creation is answered**. Step 3 gives Compose the verbs to
+refine what capture produced: walk the members, move one on the lattice, raise it, turn it, remove it.
+
+**Adding a member from the library is deliberately not in this step.** It would be a second library
+browser beside the Tiles tab, and step 4 — authoring real site tiles — is the step that says whether
+seating-only is enough. This is a stated scope decision, not a stub: every verb that ships is complete.
+
+### 3.3 What the author sees
+
+**The group, staged in 3D, through `composition::expand` — never a second interpretation.**
+`redraw_stamps` already does exactly this for the Map: build a scratch map, `expand` the stamps against
+it, `stack::resolve_y` over a map carrying both, then `spawn_piece` → `emerge_bevy::spawn_descriptor`.
+Compose builds a scratch map whose bounds are the envelope and whose single `Stamped` is this group at
+the origin, and runs the same three calls. So what Compose shows *is* what a stamp produces, which is
+the crate's "borrowed, not copied" rule and the reason `spawn_piece` exists at all.
+
+Drawn over it with gizmos: the envelope box, the `SNAP` lattice on its floor, and a highlight on the
+selected member. An `Anchored` group has no envelope; it stages, and the box and lattice are absent
+rather than invented.
+
+### 3.4 Files
+
+| File | Change |
+|---|---|
+| `crates/emerge-mapper/src/compose.rs` | `ComposeState::member` cursor; the staging system, the gizmo pass, and the five verbs; `ComposeUndo`. |
+| `crates/emerge-mapper/src/compose.rs` | The pure core: `seat`, `staged_rows`, `apply_seat`. Unit-testable with no `App`. |
+| `crates/emerge-mapper/src/keys.rs` | Five new rows — see the census budget below. |
+
+### 3.5 The verbs, and the census budget
+
+Compose shows **3 rows** today (`up`/`down` collapse to one, `Enter`, `R`), so there are nine spare
+under the twelve-row ceiling `no_context_carries_more_than_a_learnable_vocabulary` enforces. Five are
+taken:
+
+| Chord | `does` | Note |
+|---|---|---|
+| `left` / `right` | walk this group's members | Symmetric with `up`/`down` walking the groups. Needs no new letter. |
+| `T` `F` `G` `H` | seat the member / raise | **The same cluster the Tiles lattice cursor uses.** Contexts are separate, so this is one gesture meaning one thing on two surfaces, not a collision. |
+| `[` / `]` | seat the member / raise | Same `does` as the row above, so `rows()` collapses them — the Tiles pairing again. |
+| turn chord + `Shift` | turn a quarter / Shift: 15° | Two chords, one row, the `Generate`/`GenerateDeclared` idiom. **Reuse the Map's own turn chord** rather than inventing one. |
+| `REMOVE_KEY` | remove this member | The constant the Tiles tab already binds. |
+| `Z` / `Shift+Z` | undo / redo | Map, Tiles and Anim each have this pair; an editing surface without it would be the odd one out. |
+
+**Quarter turns on the bare key, 15° on Shift, and that ordering is the argument.** A group is a tile:
+`adjacency::quarter_turns` refuses a yaw that is not a multiple of 90° and names the piece, so a
+tokened member turned 45° makes the whole group's interface underivable. It only bites a member whose
+subgrid carries edge tokens — `interface` skips the rest — so 15° stays reachable for a chair drawn up
+to a table, on the modifier, where it cannot be hit by accident.
+
+### 3.6 The write model — immediate, because that is the one `compositions.ron` already has
+
+The Map edits in memory, sets `project.dirty`, and saves explicitly. **`compositions.ron` does not work
+that way and must not start:** `record_selected` and step 1's `keep_as_group` both `save_atomic` on the
+keypress. A staging buffer for this file would be a second write model for one file.
+
+So each seat writes through the same door step 1 built: mutate a clone, `Composition::validate_shape`
+**and** `composition::validate` against the whole set, `to_ron`, `save_atomic`, adopt only on success.
+A refusal leaves the file and the in-memory set exactly as they were and goes to `status.problem`.
+
+That is safe here for a reason specific to this file: `compositions.ron` **carries no `//` comments on
+purpose**, recorded in its own `note`, precisely because `to_ron` reserializes. There is nothing for a
+rewrite to lose.
+
+**`of_fingerprint` is not touched by a seat.** It records what a member's *body* was built against;
+moving one changes no body. Writing it here would make every seat look like a re-record.
+
+**Undo holds whole `Compositions` values**, most recent last, bounded. The Map's own note argues the
+shape — *"Every variant's inverse is another variant of this same enum"* — and for a file this small
+the simplest thing with that property is the value itself. The Tiles tab already keeps its own stack
+(`ImportState::undo`), so a third is the established pattern rather than a new one.
+
+### 3.7 Acceptance
+
+- `cargo test -p emerge-mapper` green; `cargo test --workspace` green; **no golden may move**.
+- **Unit, synthetic** (`crates/emerge-mapper/CLAUDE.md`: no shipped assets):
+  - `seat` snaps to `SNAP` horizontally and `SNAP / divisions` vertically, and **refuses to leave the
+    envelope** rather than clamping — a member outside the bounds it is being seated in is a refusal
+    the author has to see;
+  - an `Anchored` group has no envelope, so seating it is refused by name rather than bounded by a
+    made-up box;
+  - a quarter turn lands on a multiple of 90 from any start, so `quarter_turns` cannot refuse a member
+    that was only ever turned by this verb;
+  - `of_fingerprint` survives a seat unchanged.
+- **The commit door, through a fixture:** a seat writes and reads back; a seat that would produce an
+  invalid composition writes nothing and leaves the in-memory set untouched; undo restores the previous
+  value and redo re-applies it.
+- **Headless:** the new systems are registered and the app survives frames in `Mode::Compose` — the
+  thing no unit test can see, and the reason `tests/headless.rs` exists.
+
+**An agent can drive this one end to end**, unlike step 1: every verb is a keypress, so
+`bevy_debugger/input` reaches all of them. The missing cursor position only blocked the box drag.
+
+---
+
+## Step 3 — original sketch (superseded by §3.0–3.7 above)
+
 The authoring surface: show the selected group's envelope subdivided, seat members into it, write
 through the same door. Reuses the Tiles tab's subgrid editor idiom (cell cursor, layer picker,
 verbs). **No schema change**: seating writes `Member::at` / `lift`, which already exist.
