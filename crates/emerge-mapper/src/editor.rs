@@ -3023,6 +3023,9 @@ fn redraw_stamps(
             y,
         ) {
             commands.entity(e).insert(StampedPiece);
+            if p.paint != 0 {
+                commands.entity(e).insert(emerge_bevy::Paint(p.paint));
+            }
             drawn += 1;
         }
     }

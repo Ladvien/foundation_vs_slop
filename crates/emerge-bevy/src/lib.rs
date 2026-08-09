@@ -32,6 +32,10 @@
 //! than from a hand-maintained map. Both gotchas those pairs document apply here and are restated on
 //! the types.
 
+use std::collections::HashMap;
+
+use bevy::asset::AssetId;
+use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 use bevy::prelude::*;
 use emerge_core::descriptor::Descriptor;
 use emerge_core::library::Library;
@@ -190,14 +194,83 @@ pub struct MountedOn(pub Entity);
 pub struct Supporting(Vec<Entity>);
 
 /// Spawns an [`EmergeWorld`] when one is inserted.
+/// **Paint order, carried onto a spawned piece** — see [`emerge_core::map::Placed::paint`].
+///
+/// Put on the root a piece spawns as; [`apply_paint`] finds it by walking up from each material the
+/// glTF scene brings in, because those arrive frames later than the entity does.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Paint(pub i8);
+
+/// **One material per `(base, paint)` pair, never per piece.**
+///
+/// A clone per instance would make material count scale with how many things are in the level, which
+/// defeats batching — and `docs/bevy_plugins.md` is explicit that a kit is instance-heavy and must
+/// batch by mesh and material. Keyed this way it scales with kinds x layers instead, and `paint`
+/// being an `i8` is what bounds the second factor.
+#[derive(Resource, Default)]
+pub struct PaintedMaterials(HashMap<(AssetId<StandardMaterial>, i8), Handle<StandardMaterial>>);
+
+/// How much depth bias one paint step is worth.
+///
+/// Small on purpose. `depth_bias` biases the **depth comparison**, so this reorders surfaces that are
+/// already close — two decals on one floor, which is what the field is for. It is deliberately not
+/// enough to hoist something in front of unrelated geometry it sits well behind; that would be a
+/// different feature and a worse one, because it would let a tile's dressing punch through its walls.
+const PAINT_STEP: f32 = 1.0;
+
+/// **Give every material under a painted piece its biased twin.**
+///
+/// Runs on materials as they *arrive*: `spawn_descriptor` hands Bevy a glTF scene handle, so the
+/// meshes and their materials are inserted some frames after the entity exists. There is no
+/// spawn-time hook to do this in, which is why it is a system watching `Added` rather than a line in
+/// the spawner.
+fn apply_paint(
+    mut commands: Commands,
+    mut cache: ResMut<PaintedMaterials>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    arrived: Query<(Entity, &MeshMaterial3d<StandardMaterial>), Added<MeshMaterial3d<StandardMaterial>>>,
+    parents: Query<&ChildOf>,
+    painted: Query<&Paint>,
+) {
+    for (entity, material) in &arrived {
+        // Walk up to the piece root. A glTF scene nests arbitrarily deep, so the paint is never on
+        // the entity holding the material.
+        let Some(paint) = std::iter::successors(Some(entity), |e| parents.get(*e).ok().map(|p| p.0))
+            .find_map(|e| painted.get(e).ok())
+            .map(|p| p.0)
+            .filter(|p| *p != 0)
+        else {
+            continue;
+        };
+        let base = material.0.id();
+        let biased = match cache.0.get(&(base, paint)) {
+            Some(h) => h.clone(),
+            None => {
+                let Some(source) = materials.get(base) else { continue };
+                let mut copy = source.clone();
+                copy.depth_bias += paint as f32 * PAINT_STEP;
+                let handle = materials.add(copy);
+                cache.0.insert((base, paint), handle.clone());
+                handle
+            }
+        };
+        commands.entity(entity).insert(MeshMaterial3d(biased));
+    }
+}
+
 pub struct EmergePlugin;
 
 impl Plugin for EmergePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SmartObjects>().add_systems(
-            Update,
-            spawn_world.run_if(resource_added::<EmergeWorld>),
-        );
+        app.init_resource::<SmartObjects>()
+            .init_resource::<PaintedMaterials>()
+            .add_systems(
+                Update,
+                spawn_world.run_if(resource_added::<EmergeWorld>),
+            )
+            // Not gated on the world resource: a scene's materials land frames after the spawn, and
+            // the editor spawns pieces without an `EmergeWorld` at all.
+            .add_systems(Update, apply_paint);
     }
 }
 
@@ -366,6 +439,9 @@ fn spawn_world(mut commands: Commands, assets: Res<AssetServer>, world: Res<Emer
             spawn_descriptor(&mut commands, &assets, d, masks, p.at, p.yaw, p.tip, origin, y)
         {
             commands.entity(e).insert(Placement(p.id.clone()));
+            if p.paint != 0 {
+                commands.entity(e).insert(Paint(p.paint));
+            }
             by_id.push((p.id.as_str(), e));
             spawned += 1;
         }

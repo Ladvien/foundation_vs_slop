@@ -158,6 +158,7 @@ impl Plugin for ComposePlugin {
                     flush_member,
                     turn_member,
                     drop_member,
+                    paint_member,
                     step_history,
                 )
                     .in_set(keys::Phase::Act)
@@ -798,6 +799,43 @@ fn turn_member(
     });
 }
 
+/// `,` / `.` — move the selected member back or forward in paint order.
+fn paint_member(
+    mut state: ResMut<ComposeState>,
+    mut project: ResMut<Project>,
+    keys: Res<keys::Live>,
+    input: Res<ButtonInput<KeyCode>>,
+) {
+    let by: i8 = if keys::just_pressed(&input, keys.0, Action::PaintUp) {
+        1
+    } else if keys::just_pressed(&input, keys.0, Action::PaintDown) {
+        -1
+    } else {
+        return;
+    };
+    let comps = &project.compositions.compositions;
+    let Some((c, i)) = selected_member(&state, comps) else {
+        return state.status.note("no member to reorder");
+    };
+    let member_id = c.members[i].id.clone();
+    // Saturating: `i8` is deliberately narrow, and a wrap would send the front-most member behind
+    // everything — the one outcome nobody presses this key for.
+    let next = c.members[i].paint.saturating_add(by);
+    if next == c.members[i].paint {
+        return state.status.note(format!("`{member_id}` is already as far {} as it goes",
+            if by > 0 { "front" } else { "back" }));
+    }
+    let selected = state.selected;
+    commit(&mut state, &mut project, move |set| {
+        let m = set
+            .get_mut(selected)
+            .and_then(|c| c.members.get_mut(i))
+            .ok_or_else(|| format!("`{member_id}` is no longer there"))?;
+        m.paint = next;
+        Ok(format!("`{member_id}` paint {next}"))
+    });
+}
+
 /// Take the selected member out of the group.
 ///
 /// The pair to the Map's capture verb: a box drag takes whatever was inside it, and this is how the
@@ -975,6 +1013,11 @@ fn restage_group(
             y,
         ) {
             commands.entity(e).insert(StagedMember);
+            // The stage must show what the map will: paint decides what is seen where two members
+            // coincide, and a preview that ignores it is a preview that lies.
+            if p.paint != 0 {
+                commands.entity(e).insert(emerge_bevy::Paint(p.paint));
+            }
         }
     }
 }
@@ -1445,10 +1488,11 @@ fn describe_member(m: &composition::Member) -> String {
     };
     let where_ = format!("({:.1}, {:.1})", m.at.0, m.at.1);
     let yaw = if m.yaw == 0.0 { String::new() } else { format!(" yaw {:.0}", m.yaw) };
+    let paint = if m.paint == 0 { String::new() } else { format!(" paint {}", m.paint) };
     if extra.is_empty() {
-        format!("{}: {what} {where_}{yaw}", m.id)
+        format!("{}: {what} {where_}{yaw}{paint}", m.id)
     } else {
-        format!("{}: {what} {where_}{yaw} — {extra}", m.id)
+        format!("{}: {what} {where_}{yaw}{paint} — {extra}", m.id)
     }
 }
 
@@ -1890,5 +1934,94 @@ mod flush_tests {
         let err = flushed(Envelope::Anchored, (0.0, 0.0), (0.1, 1.0), Nudge::Left)
             .expect_err("refuses");
         assert!(err.contains("claims no tile"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod paint_tests {
+    use emerge_core::composition::{Body, Composition, Compositions, Envelope, Member, Stamped};
+
+    fn member(id: &str, paint: i8) -> Member {
+        Member {
+            id: id.to_owned(),
+            body: Body::Descriptor { id: "wall".to_owned(), tip: (0, 0), on: None, patch: None },
+            at: (0.0, 0.0),
+            yaw: 0.0,
+            lift: 0.0,
+            paint,
+            of_fingerprint: None,
+            note: None,
+        }
+    }
+
+    /// **Zero is not written.** `#[serde(default)]` alone would put `paint: 0` on every member of
+    /// every group on the next save, which is a whole-file churn across content diffs that have to
+    /// stay readable.
+    #[test]
+    fn an_unpainted_member_writes_nothing() {
+        let set = Compositions {
+            version: emerge_core::composition::COMPOSITIONS_VERSION,
+            note: None,
+            compositions: vec![Composition {
+                id: "bay".to_owned(),
+                envelope: Envelope::Bounded { size: (1.0, 2.4, 1.0) },
+                members: vec![member("a", 0), member("b", 3)],
+                locations: Vec::new(),
+                note: None,
+            }],
+        };
+        let text = set.to_ron().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(text.matches("paint:").count(), 1, "only the painted member writes it:\n{text}");
+        assert!(text.contains("paint: 3"), "{text}");
+        let back = Compositions::parse(&text).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(back.compositions[0].members[0].paint, 0);
+        assert_eq!(back.compositions[0].members[1].paint, 3);
+    }
+
+    /// Paint reaches the rows the game spawns, or the field decides nothing.
+    #[test]
+    fn paint_survives_expand_onto_the_placed_row() {
+        let lib = emerge_core::library::Library {
+            version: emerge_core::library::LIBRARY_VERSION,
+            note: None,
+            descriptors: vec![super::tests_support::wall()],
+        };
+        let comp = Composition {
+            id: "bay".to_owned(),
+            envelope: Envelope::Bounded { size: (1.0, 2.4, 1.0) },
+            members: vec![member("decal", 2)],
+            locations: Vec::new(),
+            note: None,
+        };
+        let map = emerge_core::map::Map {
+            version: emerge_core::map::MAP_VERSION,
+            name: "m".to_owned(),
+            origin: (0.0, 0.0, 0.0),
+            bounds: (8.0, 2.4, 8.0),
+            placements: Vec::new(),
+            stamps: Vec::new(),
+            locations: Vec::new(),
+            note: None,
+        };
+        let stamps = vec![Stamped { id: "s".to_owned(), of: "bay".to_owned(), ..Default::default() }];
+        let out = emerge_core::composition::expand(&map, &stamps, &[comp], &lib)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(out.placements.len(), 1);
+        assert_eq!(out.placements[0].paint, 2, "paint has to reach the row the game spawns");
+    }
+}
+
+#[cfg(test)]
+mod tests_support {
+    use emerge_core::descriptor::{Align, Descriptor, Extent};
+
+    /// A minimal measured piece, so the paint tests need no fixture on disk.
+    pub fn wall() -> Descriptor {
+        Descriptor {
+            id: "wall".to_owned(),
+            extent: Extent { footprint: Some((1.0, 1.0)), height: Some(1.0) },
+            align: Align { y_offset: Some(0.0), ..Default::default() },
+            ..Default::default()
+        }
     }
 }

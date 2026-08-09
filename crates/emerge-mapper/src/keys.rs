@@ -108,6 +108,10 @@ pub enum Action {
     TurnMemberRightFine,
     /// Take the selected member out of the group.
     DropMember,
+    /// Move the selected member forward or back in paint order — what draws on top where two things
+    /// share a spot.
+    PaintUp,
+    PaintDown,
     /// **Start a new group** on the Compose tab — an empty bounded tile, named as it is made.
     NewGroup,
     /// Compose's own undo pair. Map, Tiles and Anim each keep one; an editing surface without one
@@ -578,6 +582,14 @@ pub const BINDINGS: &[Binding] = &[
     bs(Action::TurnMemberLeftFine, KeyCode::KeyY, false, true, Context::Compose, "Y", "turn a quarter / Shift: 15"),
     bs(Action::TurnMemberRightFine, KeyCode::KeyU, false, true, Context::Compose, "U", "turn a quarter / Shift: 15"),
     b(Action::DropMember, REMOVE_KEY, false, Context::Compose, REMOVE_NAME, "drop this member"),
+    // **Not `,` and `.`, for the second time, and the test caught it both times.**
+    //
+    // `rows()` joins a collapsed row's chords with `", "`, so a comma chord is unreadable the moment
+    // it shares a row with anything — including its own pair. `,`/`.` were tried for turn and printed
+    // `, , .`; tried again here and did it again. A comma cannot be a chord in this editor while the
+    // separator is a comma, and that is a property of the census, not of this row.
+    b(Action::PaintDown, KeyCode::Minus, false, Context::Compose, "-", "paint order: back / front"),
+    b(Action::PaintUp, KeyCode::Equal, false, Context::Compose, "=", "paint order: back / front"),
     // **The two verbs this tab was missing.** It could refine a group and not make one, so every
     // group had to be captured on the Map first — which is a fine way to work and a bad only way.
     b(Action::NewGroup, KeyCode::KeyN, false, Context::Compose, "N", "new group"),
@@ -943,7 +955,7 @@ mod tests {
             Action::TurnMemberLeft, Action::TurnMemberRight,
             Action::TurnMemberLeftFine, Action::TurnMemberRightFine,
             Action::DropMember, Action::UndoCompose, Action::RedoCompose,
-            Action::NewGroup,
+            Action::NewGroup, Action::PaintUp, Action::PaintDown,
             Action::Save, Action::Undo, Action::Redo, Action::Shortcuts, Action::EditTile,
             Action::AimLeft, Action::AimRight, Action::AimReset, Action::Cancel,
             Action::Fill, Action::Remove, Action::MoveMode, Action::CloneMode, Action::RenameMap,
