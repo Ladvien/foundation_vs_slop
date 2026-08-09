@@ -23,6 +23,9 @@
 use bevy::prelude::*;
 use emerge_mapper::harness;
 
+mod fixtures;
+use fixtures::Fixture;
+
 /// An app with nothing that needs a screen.
 fn headless() -> App {
     let mut app = App::new();
@@ -99,6 +102,11 @@ fn the_editor_plugin_registers_the_tool_resources_its_systems_take() {
         ("FineAnchor", app.world().get_resource::<emerge_mapper::editor::FineAnchor>().is_some()),
         // The box being dragged out to fill.
         ("PlaceDrag", app.world().get_resource::<emerge_mapper::editor::PlaceDrag>().is_some()),
+        // What the piece-verbs would act on, written for the UNDER readout. `refresh_status` takes
+        // it as a bare `Res<_>`, which panics its system in 0.19 if nobody registered it.
+        ("UnderCursor", app.world().get_resource::<emerge_mapper::editor::UnderCursor>().is_some()),
+        // The drawn grid's spacing. `draw_map_grid` takes it as a bare `Res<_>`.
+        ("GridSpacing", app.world().get_resource::<emerge_mapper::editor::GridSpacing>().is_some()),
     ] {
         assert!(present, "EditorPlugin does not register {name}, so its readers panic on frame one");
     }
@@ -284,13 +292,26 @@ mod stepped {
     /// later frame (`rebuild_detail` on a changed resource, `thumbs` after its booth is torn down).
     #[test]
     fn the_editor_boots_and_steps_without_panicking() {
-        let mut app = harness::build_headless(&root(), "untitled_map", None)
+        // A project written for this test. What is being asked is "does the schedule hold together",
+        // which has nothing to do with which meshes happen to be in `assets/`.
+        let root = Fixture::new("boots")
+            .descriptor("wall", "alpha")
+            .pack("beta", &["candidate"])
+            .place("wall", (0.0, 0.0))
+            .build("m");
+        let mut app = harness::build_headless(&root, "m", None)
             .unwrap_or_else(|e| panic!("{e}"));
         for _ in 0..10 {
             app.update();
         }
     }
 
+    /// **An ASSET-CONTRACT test — it reads the shipped corpus on purpose.**
+    ///
+    /// The rule is that a test about the *editor* uses `Fixture` and never the real `assets/`, so
+    /// importing a kit cannot break the suite. This one is the exception the rule needs: what it
+    /// asserts IS a fact about what ships, and checking it against a fixture would be checking that
+    /// the fixture is what the fixture is.
     /// **The anim bench's measurement pipeline runs headless**: entering the tab loads the
     /// manifest, the selected rig enters the queue, and one stepped frame later its report exists —
     /// the same three systems the watcher and check-all feed.
@@ -321,6 +342,18 @@ mod stepped {
         );
     }
 
+    /// **An ASSET-CONTRACT test — it reads the shipped corpus on purpose.**
+    ///
+    /// Staging needs a rigged, animated GLB, and there is no honest way to synthesise one: a made-up
+    /// skeleton with made-up clips would be asserting that the fixture is what the fixture is. What
+    /// this checks is that a REAL rig streams in, gets its blender, and retires — which is a fact
+    /// about the shipped asset and the code together.
+    /// **An ASSET-CONTRACT test — it reads the shipped corpus on purpose.**
+    ///
+    /// The rule is that a test about the *editor* uses `Fixture` and never the real `assets/`, so
+    /// importing a kit cannot break the suite. This one is the exception the rule needs: what it
+    /// asserts IS a fact about what ships, and checking it against a fixture would be checking that
+    /// the fixture is what the fixture is.
     /// **The staged figure spawns configured and retires with the tab, without a panic.**
     ///
     /// What this deliberately does NOT assert: the streamed-in `AnimationPlayer` reaching the
@@ -404,6 +437,12 @@ mod stepped {
         assert_eq!(remaining, 0, "the staged figure must not outlive the tab");
     }
 
+    /// **An ASSET-CONTRACT test — it reads the shipped corpus on purpose.**
+    ///
+    /// The rule is that a test about the *editor* uses `Fixture` and never the real `assets/`, so
+    /// importing a kit cannot break the suite. This one is the exception the rule needs: what it
+    /// asserts IS a fact about what ships, and checking it against a fixture would be checking that
+    /// the fixture is what the fixture is.
     /// **The plots paint pixels for a gait rig.** Select the valkyrie (the one rig with gaits),
     /// step, and the height plot's image must be non-uniform — a curve landed.
     #[test]
@@ -447,6 +486,12 @@ mod stepped {
         );
     }
 
+    /// **An ASSET-CONTRACT test — it reads the shipped corpus on purpose.**
+    ///
+    /// The rule is that a test about the *editor* uses `Fixture` and never the real `assets/`, so
+    /// importing a kit cannot break the suite. This one is the exception the rule needs: what it
+    /// asserts IS a fact about what ships, and checking it against a fixture would be checking that
+    /// the fixture is what the fixture is.
     /// And on a kit, which is a different library, a different policy and 45 more pieces.
     #[test]
     fn the_editor_boots_on_the_site_kit() {
@@ -468,6 +513,12 @@ mod stepped {
         assert_eq!(project.policy.divisions, 1);
     }
 
+    /// **An ASSET-CONTRACT test — it reads the shipped corpus on purpose.**
+    ///
+    /// The rule is that a test about the *editor* uses `Fixture` and never the real `assets/`, so
+    /// importing a kit cannot break the suite. This one is the exception the rule needs: what it
+    /// asserts IS a fact about what ships, and checking it against a fixture would be checking that
+    /// the fixture is what the fixture is.
     /// **The authored tokens survive the real load path**, and the layered library the editor reads
     /// carries them. This is the end of the chain the whole branch built: measurements on disk →
     /// policy layered → lattice validated → in front of an author.
@@ -527,11 +578,19 @@ mod stepped {
         );
     }
 
-    /// And the seed really lands in the booted editor: the site map's placements are on file, so
-    /// the state's next mint must clear every `@n` among them.
+    /// And the seed really lands in the booted editor: a map with `@n` ids on file means the
+    /// state's next mint must clear every one of them.
+    ///
+    /// The ids are written by this test rather than read out of a shipped map, so what it pins is
+    /// the rule and not whatever the corpus happens to be numbered up to.
     #[test]
     fn the_booted_editor_seeds_its_id_counter_from_the_file() {
-        let mut app = harness::build_headless(&root(), "untitled_map", Some("site"))
+        let root = Fixture::new("mint")
+            .descriptor("wall", "alpha")
+            .place_as("wall@7", "wall", (0.0, 0.0))
+            .place_as("wall@41", "wall", (2.0, 0.0))
+            .build("m");
+        let mut app = harness::build_headless(&root, "m", None)
             .unwrap_or_else(|e| panic!("{e}"));
         app.update();
         let project = app
@@ -539,6 +598,10 @@ mod stepped {
             .get_resource::<emerge_mapper::project::Project>()
             .unwrap_or_else(|| panic!("no project"));
         let want = emerge_mapper::editor::next_id_after(&project.map);
+        // The HIGH-WATER MARK, not the next id: `next_id_after` returns the largest `@n` on file
+        // and every mint site increments before it formats. Worth pinning, because the name reads
+        // like the other thing.
+        assert_eq!(want, 41, "the fixture's highest authored id is `wall@41`");
         let state = app
             .world()
             .get_resource::<emerge_mapper::editor::EditorState>()
@@ -551,7 +614,15 @@ mod stepped {
     /// scan found must appear as a text node in the candidate list, folded or not.
     #[test]
     fn untouched_packs_start_folded_and_keep_their_headers() {
-        let mut app = harness::build_headless(&root(), "untitled_map", Some("site"))
+        // Two packs of candidates and a map that places from neither, so both fold — the state a
+        // fresh map opens into, stated by the fixture rather than inferred from whatever is in
+        // `assets/` on the day the test runs.
+        let root = Fixture::new("folds")
+            .descriptor("wall", "alpha")
+            .pack("beta", &["one", "two"])
+            .pack("gamma", &["three"])
+            .build("m");
+        let mut app = harness::build_headless(&root, "m", None)
             .unwrap_or_else(|e| panic!("{e}"));
         app.update();
 
@@ -581,7 +652,7 @@ mod stepped {
             .get_resource::<emerge_mapper::tiles::ImportState>()
             .unwrap_or_else(|| panic!("no import state"));
         assert!(state.scanned, "entering the tab must have scanned");
-        assert!(!state.candidates.is_empty(), "this repo has unimported meshes");
+        assert!(!state.candidates.is_empty(), "the fixture wrote three unimported meshes");
         // Recompute the pack directories the way the list groups them.
         let mut dirs: Vec<String> = Vec::new();
         for c in &state.candidates {
@@ -592,7 +663,7 @@ mod stepped {
         }
         assert!(
             !state.folded_packs.is_empty(),
-            "a site-kit project imports nothing from the candidate packs, so they start folded"
+            "this map places from no candidate pack, so they start folded"
         );
         let folded = state.folded_packs.clone();
 
@@ -639,57 +710,11 @@ mod stepped {
         );
     }
 
-    /// The other direction of the fold default: on the furniture kit — whose library IS imported
-    /// from the candidate packs — a pack with even one import stays open.
-    #[test]
-    fn packs_the_library_draws_from_stay_open() {
-        let mut app = harness::build_headless(&root(), "untitled_map", None)
-            .unwrap_or_else(|e| panic!("{e}"));
-        app.update();
-        let tap = |app: &mut App, state: bevy::input::ButtonState| {
-            app.world_mut().write_message(bevy::input::keyboard::KeyboardInput {
-                key_code: KeyCode::Tab,
-                logical_key: bevy::input::keyboard::Key::Tab,
-                state,
-                text: None,
-                repeat: false,
-                window: Entity::PLACEHOLDER,
-            });
-            app.update();
-        };
-        tap(&mut app, bevy::input::ButtonState::Pressed);
-        tap(&mut app, bevy::input::ButtonState::Released);
-        app.update();
-
-        let project = app
-            .world()
-            .get_resource::<emerge_mapper::project::Project>()
-            .unwrap_or_else(|| panic!("no project"));
-        let imported: std::collections::HashSet<String> = project
-            .library
-            .descriptors
-            .iter()
-            .filter_map(|d| d.mesh.as_deref())
-            .map(|m| m.rsplit_once('/').map_or(".", |(dir, _)| dir).to_owned())
-            .collect();
-        let state = app
-            .world()
-            .get_resource::<emerge_mapper::tiles::ImportState>()
-            .unwrap_or_else(|| panic!("no import state"));
-        assert!(state.scanned, "entering the tab must have scanned");
-        assert!(
-            !state.candidates.is_empty(),
-            "the furniture kit has unimported meshes; summary says: {}",
-            state.summary
-        );
-        for dir in &imported {
-            assert!(
-                !state.folded_packs.contains(dir),
-                "`{dir}` has imports and must start open; folded: {:?}",
-                state.folded_packs
-            );
-        }
-    }
+    // **The fold rule is unit-tested beside the code now** (`tiles::pack_fold_tests`), over a
+    // synthetic project. It used to be here, asserting that a pack the *library* imports from stays
+    // open — the rule until the question moved one step — and it could only check that by reading
+    // the shipped corpus. A test bound to the real assets fails the day somebody imports a kit,
+    // which is the thing this editor exists to do.
 
     /// **The first candidate an author clicks stages, like every later one.** Reported live:
     /// "the first mesh I click on doesn't load — I have to click another, then back." The click
@@ -697,7 +722,15 @@ mod stepped {
     /// for first-click, second-click and back-again, and asserts the staged preview follows.
     #[test]
     fn the_first_clicked_candidate_stages_like_any_other() {
-        let mut app = harness::build_headless(&root(), "untitled_map", None)
+        // One candidate, written here. What is being asked is whether the FIRST click stages the
+        // same way a later one does — a fact about the editor, not about the art.
+        let root = Fixture::new("stage")
+            .descriptor("wall", "alpha")
+            // TWO candidates: the test's whole subject is that the FIRST click behaves like the
+            // second, so it needs a second one to compare against.
+            .pack("beta", &["candidate_a", "candidate_b"])
+            .build("m");
+        let mut app = harness::build_headless(&root, "m", None)
             .unwrap_or_else(|e| panic!("{e}"));
         app.update();
         let tap = |app: &mut App, state: bevy::input::ButtonState| {
@@ -785,6 +818,7 @@ mod stepped {
 /// something its systems take is a crash on launch, not a feature that quietly does nothing.
 #[cfg(test)]
 mod compose {
+    use super::Fixture;
     use emerge_mapper::compose::ComposeState;
     use emerge_mapper::project::Project;
     use emerge_mapper::tiles::Mode;
@@ -796,6 +830,12 @@ mod compose {
             .unwrap_or_else(|e| panic!("workspace root: {e}"))
     }
 
+    /// **An ASSET-CONTRACT test — it reads the shipped corpus on purpose.**
+    ///
+    /// The rule is that a test about the *editor* uses `Fixture` and never the real `assets/`, so
+    /// importing a kit cannot break the suite. This one is the exception the rule needs: what it
+    /// asserts IS a fact about what ships, and checking it against a fixture would be checking that
+    /// the fixture is what the fixture is.
     #[test]
     fn the_compose_tab_boots_and_sees_the_shipped_groups() {
         let mut app = emerge_mapper::harness::build_headless(&root(), "compose_probe", None)
@@ -822,7 +862,17 @@ mod compose {
     /// other test while getting wrong.
     #[test]
     fn stamping_writes_a_reference_and_undo_takes_it_back() {
-        let mut app = emerge_mapper::harness::build_headless(&root(), "compose_probe", None)
+        // A group written for this test. What is asserted is that a stamp is a REFERENCE and that
+        // undo takes it back — neither of which is a fact about which groups happen to ship.
+        let root = Fixture::new("stamp")
+            .descriptor("table", "alpha")
+            .descriptor("chair", "alpha")
+            .composition(
+                "break_table",
+                &[("table", "table", (0.0, 0.0)), ("chair_north", "chair", (0.0, -1.0))],
+            )
+            .build("m");
+        let mut app = emerge_mapper::harness::build_headless(&root, "m", None)
             .unwrap_or_else(|e| panic!("{e}"));
         for _ in 0..3 {
             app.update();
@@ -874,4 +924,90 @@ mod compose {
         assert_eq!(project.map.stamps.len(), 1, "redo did not put the stamp back");
         assert_eq!(project.map.stamps[0].of, "break_table");
     }
+}
+
+/// **The backdrop goes under the floor, and the floor is not where you would guess.**
+///
+/// `BOUNDS_FILL` is drawn below the datum so a placed floor occludes it. That was a flat 5 mm, and
+/// the site kit's `site/floor` is authored at `y_offset: -0.06` — six centimetres *into* its own
+/// floor, which `stack::datum` documents as the ordinary case for a grate. So the backdrop drew over
+/// every floor tile in the map and the grid lines sliced them.
+///
+/// The recessed piece is written by this test rather than borrowed from a kit: what is being pinned
+/// is that the depth is **derived from the library**, which a fixture can state exactly and a corpus
+/// can only illustrate.
+#[test]
+fn the_backdrop_sits_under_the_deepest_floor_in_the_library() {
+    let root = Fixture::new("backdrop")
+        .descriptor("flat", "alpha")
+        .sunk_descriptor("grate", "alpha", -0.06)
+        .sunk_descriptor("deep_drain", "alpha", -0.21)
+        .build("m");
+    let app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    let project = app
+        .world()
+        .get_resource::<emerge_mapper::project::Project>()
+        .unwrap_or_else(|| panic!("no project"));
+    let drop = emerge_mapper::editor::ground_drop(project);
+    for d in &project.library.descriptors {
+        let sunk = d.align.y_offset.unwrap_or(0.0);
+        assert!(
+            -drop < sunk,
+            "the backdrop sits at {:.4} m and `{}` is authored at {sunk:.4} m — it would be drawn over",
+            -drop,
+            d.id
+        );
+    }
+    assert!(
+        -drop < -0.21,
+        "the depth must follow the DEEPEST piece, not the first one it finds: {:.4}",
+        -drop
+    );
+}
+
+/// **The grid defaults to the kit's module, not to the snap.**
+///
+/// `grid::SNAP` is 0.5 — where a piece can land — and the site kit builds on a 1 m module, so a
+/// grid fixed to the snap draws two squares per floor tile and reads as though the tiles were
+/// straddling it. The author owns the setting (`J`); this pins where it starts.
+#[test]
+fn the_drawn_grid_starts_at_the_kits_module() {
+    let mut app = headless();
+    app.add_plugins(emerge_mapper::editor::EditorPlugin);
+    let spacing = app
+        .world()
+        .get_resource::<emerge_mapper::editor::GridSpacing>()
+        .unwrap_or_else(|| panic!("EditorPlugin does not register GridSpacing"));
+    assert!(
+        (spacing.0 - 1.0).abs() < 1e-6,
+        "the grid starts at {} m; a square is meant to be one kit tile",
+        spacing.0
+    );
+    assert!(
+        spacing.0 > emerge_core::grid::SNAP,
+        "a default finer than the snap would draw lines no piece can land on"
+    );
+}
+
+
+/// **The fixture boots** — a project written from nothing, with no shipped asset in it but the font.
+#[test]
+fn a_synthetic_project_opens_and_steps() {
+    let root = Fixture::new("smoke")
+        .descriptor("wall", "alpha")
+        .descriptor("crate", "beta")
+        .pack("gamma", &["unimported_a", "unimported_b"])
+        .place("crate", (0.0, 0.0))
+        .build("test_map");
+    let mut app = harness::build_headless(&root, "test_map", None)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    for _ in 0..3 {
+        app.update();
+    }
+    let project = app
+        .world()
+        .get_resource::<emerge_mapper::project::Project>()
+        .unwrap_or_else(|| panic!("no project"));
+    assert_eq!(project.library.descriptors.len(), 2, "two descriptors were written");
+    assert_eq!(project.map.placements.len(), 1, "one placement was written");
 }
