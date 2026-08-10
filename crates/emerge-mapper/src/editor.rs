@@ -3344,7 +3344,13 @@ fn keys(
     // that answer depend on the *window's* cursor — unreachable by an injected one, so an agent
     // driving this editor gets `false` always and a person who moved the mouse off a row gets it
     // too. One definition, read off the rects: `crate::view::over_ui`.
-    ui_nodes: Query<(&bevy::ui::ComputedNode, &GlobalTransform)>,
+    //
+    // **Filtered to the nodes that carry `Hovered`**, which is the same SET the old check consulted
+    // — only the question changed, from "did picking mark you" to "are you under the pointer". It
+    // also keeps the one deliberate hole: the name box's full-screen backdrop carries no `Hovered`
+    // because it is a prompt rather than a modal, and counting it would make the whole window read
+    // as interface whenever the prompt was open.
+    ui_nodes: Query<(&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform), With<Hovered>>,
     pointer: Res<crate::view::Pointer>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     placed: Query<(Entity, &Placement)>,
@@ -3369,6 +3375,18 @@ fn keys(
     // One clock for every key that repeats while held — see `keys::repeating`.
     let dt = time.delta_secs();
 
+    // **Asked once, used by every verb below that acts on the piece under the cursor.** The factor
+    // is the render target's, taken where `bevy_ui`'s picking backend takes it — see
+    // `crate::view::over_ui`, which carries why this is geometry rather than `Hovered`.
+    let on_ui = crate::view::over_ui(
+        pointer.0,
+        camera
+            .as_ref()
+            .and_then(|c| c.0.target_scaling_factor())
+            .unwrap_or(1.0),
+        ui_nodes.iter(),
+    );
+
     if keys::just_pressed(&keyboard, live.0, Action::Undo) {
         undo(&mut commands, &assets, &mut project, &mut state, &placed);
         return;
@@ -3386,7 +3404,7 @@ fn keys(
         // of the layout rather than of `Hovered` — see `view::over_ui`, which carries why. Without
         // it "the piece under the cursor" would answer with whatever happens to stand behind the
         // PLACE list, which is the one place an author is certainly not aiming at.
-        let under = (!crate::view::over_ui(pointer.0, ui_nodes.iter()))
+        let under = (!on_ui)
             .then(|| nearest_placement(*pointer, camera, &project))
             .flatten();
         let subject = edit_subject(&project, &state, under);
@@ -3556,7 +3574,7 @@ fn keys(
         (Action::TurnPieceRight, YAW_STEP),
     ] {
         if keys::repeating(&keyboard, live.0, action, &mut repeat, dt)
-            && !crate::view::over_ui(pointer.0, ui_nodes.iter())
+            && !on_ui
         {
             turn_under_cursor(
                 &mut commands,
@@ -3575,7 +3593,7 @@ fn keys(
 
     // **`H` targets the stack** — see `cycle_target`; the verbs below act on its pick.
     if keys::just_pressed(&keyboard, live.0, Action::CycleTarget)
-        && !crate::view::over_ui(pointer.0, ui_nodes.iter())
+        && !on_ui
     {
         cycle_target(*pointer, camera, &project, &mut state, target.as_mut());
         return;
@@ -3585,7 +3603,7 @@ fn keys(
     // Deliberately `just_pressed` where the yaw keys repeat: each axis has four states, and a held
     // key cycling them at repeat pace reads as flicker, not control.
     for (action, about_x) in [(Action::TipX, true), (Action::TipZ, false)] {
-        if keys::just_pressed(&keyboard, live.0, action) && !crate::view::over_ui(pointer.0, ui_nodes.iter()) {
+        if keys::just_pressed(&keyboard, live.0, action) && !on_ui {
             tip_under_cursor(
                 &mut commands,
                 &assets,
@@ -3605,7 +3623,7 @@ fn keys(
     // three metres up is a long tap-tap-tap otherwise.
     for (action, sign) in [(Action::LiftUp, 1.0), (Action::LiftDown, -1.0)] {
         if keys::repeating(&keyboard, live.0, action, &mut repeat, dt)
-            && !crate::view::over_ui(pointer.0, ui_nodes.iter())
+            && !on_ui
         {
             lift_under_cursor(
                 &mut commands,
@@ -3623,7 +3641,7 @@ fn keys(
     }
 
     // **O pins or unpins the piece under the cursor.** A pin is what the solver routes around.
-    if keys::just_pressed(&keyboard, live.0, Action::OwnToggle) && !crate::view::over_ui(pointer.0, ui_nodes.iter()) {
+    if keys::just_pressed(&keyboard, live.0, Action::OwnToggle) && !on_ui {
         toggle_pin(*pointer, camera, &mut project, &mut state, target.as_mut());
         return;
     }
@@ -3647,7 +3665,7 @@ fn keys(
 
     // **F floods.** From the cell under the cursor outward, stopping at anything already placed and
     // at the map's edge — see `crate::fill`.
-    if keys::just_pressed(&keyboard, live.0, Action::Fill) && !crate::view::over_ui(pointer.0, ui_nodes.iter()) {
+    if keys::just_pressed(&keyboard, live.0, Action::Fill) && !on_ui {
         flood_from_cursor(
             &mut commands,
             &assets,

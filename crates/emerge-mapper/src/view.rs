@@ -261,29 +261,34 @@ pub fn sense_pointer(
 /// answer is unreachable over BRP and untestable headless. That is the same trap `Pointer` exists to
 /// close, entered from the other side.
 ///
-/// So this reads the rects. `ComputedNode::size` is in physical pixels and the pointer is logical,
-/// which is what `inverse_scale_factor` converts — the distinction `crate::tiles`'s list arithmetic
-/// already had to make once.
+/// So this reads the rects — through **`ComputedNode::contains_point`**, which is the same function
+/// `bevy_ui`'s picking backend and focus system call (`picking_backend.rs:206`, `focus.rs:259`).
+/// Hand-rolling the rectangle test got two things wrong that the borrowed one cannot: the transform
+/// is [`bevy::ui::UiGlobalTransform`] and **not** `GlobalTransform` — a separate component in 0.19 —
+/// and the point has to be **physical**, the pointer being logical.
 ///
-/// A node with `Pickable::IGNORE` is deliberately still counted: this asks *"is a panel drawn here"*,
-/// which is a question about the layout, and click-through is a question about clicks.
+/// The conversion is `camera.target_scaling_factor()`, taken from the same place the backend takes
+/// it, and it is the render target's factor rather than `UiScale`: `UiScale` is already baked into
+/// the node sizes by layout, so applying it here would count it twice.
+///
+/// **Viewport offset is deliberately not subtracted.** The backend does it for cameras rendering to
+/// part of a target; the caller here is the window camera, and the editor's other camera renders to
+/// an offscreen image the pointer never enters.
 pub fn over_ui<'a>(
     cursor: Option<Vec2>,
-    nodes: impl IntoIterator<Item = (&'a bevy::ui::ComputedNode, &'a GlobalTransform)>,
+    scale_factor: f32,
+    nodes: impl IntoIterator<Item = (&'a bevy::ui::ComputedNode, &'a bevy::ui::UiGlobalTransform)>,
 ) -> bool {
     let Some(cursor) = cursor else {
         // No cursor is not "over the world" — there is no honest answer, and the callers treat a
         // missing pointer as no answer everywhere else in this file.
         return false;
     };
+    let point = cursor * scale_factor;
     nodes.into_iter().any(|(node, tf)| {
-        let size = node.size() * node.inverse_scale_factor();
-        if size.x <= 0.0 || size.y <= 0.0 {
-            return false;
-        }
-        let centre = tf.translation().truncate() * node.inverse_scale_factor();
-        let half = size * 0.5;
-        (cursor.x - centre.x).abs() <= half.x && (cursor.y - centre.y).abs() <= half.y
+        // A `Display::None` node has a zero rect and is not somewhere the pointer can be — the
+        // backend's own first check, for the same reason.
+        node.size() != Vec2::ZERO && node.contains_point(*tf, point)
     })
 }
 
