@@ -1743,6 +1743,7 @@ fn a_captured_group_is_written_and_reads_back() {
         ],
         centre_off: (0.25, 0.0),
         half: (0.75, 0.5),
+        yaw: 0.0,
     };
     let kept = emerge_mapper::editor::keep_as_group(&mut project, &set, "Mess Table", false)
         .unwrap_or_else(|e| panic!("the composition must be kept: {e}"));

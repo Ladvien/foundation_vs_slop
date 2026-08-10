@@ -355,13 +355,18 @@ impl Interface {
 /// The exact inverse of the rotation [`crate::stack::covers`] uses to go the other way, and written
 /// against it rather than re-derived: Bevy's yaw turns +X toward −Z, so getting the sign wrong here
 /// mirrors every composition without failing anything.
-fn rotate_xz(local: (f32, f32), yaw_deg: f32) -> (f32, f32) {
+///
+/// **Public because a turned *loose set* has to agree with a turned stamp.** `emerge-mapper`'s clone
+/// tool rotates a captured group about its anchor, and a second copy of this sign convention is how
+/// a set stamped at 90° would come out mirrored against a composition stamped at 90° — the failure
+/// this comment already warns about, one caller further out.
+pub fn rotate_xz(local: (f32, f32), yaw_deg: f32) -> (f32, f32) {
     let (s, c) = yaw_deg.to_radians().sin_cos();
     (local.0 * c + local.1 * s, -local.0 * s + local.1 * c)
 }
 
-/// Yaws add, and the sum is brought back into `[0, 360)`.
-fn add_yaw(a: f32, b: f32) -> f32 {
+/// Yaws add, and the sum is brought back into `[0, 360)`. Public for [`rotate_xz`]'s reason.
+pub fn add_yaw(a: f32, b: f32) -> f32 {
     (a + b).rem_euclid(360.0)
 }
 

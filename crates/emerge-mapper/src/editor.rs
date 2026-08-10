@@ -317,6 +317,50 @@ pub struct CloneSet {
     pub pieces: Vec<ClonePiece>,
     pub centre_off: (f32, f32),
     pub half: (f32, f32),
+    /// **How far the whole set has been turned**, degrees about +Y, applied about the anchor the
+    /// pieces are offset from.
+    ///
+    /// Its own field rather than folded into each piece's yaw at the moment of turning: an offset
+    /// rotated repeatedly accumulates float error, and a set turned four times by 90° has to come
+    /// back to exactly where it started or "turn it round and put it back" quietly moves the group.
+    /// Kept as one angle and applied once, at stamp and at preview.
+    pub yaw: f32,
+}
+
+impl CloneSet {
+    /// **Where a piece lands and which way it faces**, with the set's own turn folded in.
+    ///
+    /// Through `emerge_core::composition::rotate_xz` — the function a *stamp* rotates by — rather
+    /// than a local copy of the sign convention. Bevy's yaw turns +X toward −Z, and a second copy of
+    /// that is how a set turned 90° would come out mirrored against a composition turned 90°.
+    pub fn placed(&self, piece: &ClonePiece, target: (f32, f32)) -> ((f32, f32), f32) {
+        let off = emerge_core::composition::rotate_xz(piece.offset, self.yaw);
+        (
+            (target.0 + off.0, target.1 + off.1),
+            emerge_core::composition::add_yaw(piece.yaw, self.yaw),
+        )
+    }
+
+    /// The turned set's axis-aligned footprint, for the marker that outlines it. A rotated rectangle
+    /// is not a rectangle, so the box the author sees is the rotated one's **bounds** — which is what
+    /// a box drawn on the ground can honestly show.
+    pub fn bounds(&self, target: (f32, f32)) -> (f32, f32, f32, f32) {
+        let c = emerge_core::composition::rotate_xz(self.centre_off, self.yaw);
+        let (cx, cz) = (target.0 + c.0, target.1 + c.1);
+        let corners = [
+            (-self.half.0, -self.half.1),
+            (self.half.0, -self.half.1),
+            (self.half.0, self.half.1),
+            (-self.half.0, self.half.1),
+        ];
+        let (mut hx, mut hz) = (0.0f32, 0.0f32);
+        for corner in corners {
+            let r = emerge_core::composition::rotate_xz(corner, self.yaw);
+            hx = hx.max(r.0.abs());
+            hz = hz.max(r.1.abs());
+        }
+        (cx - hx, cz - hz, cx + hx, cz + hz)
+    }
 }
 
 /// The clone tool's state: the box being dragged, or the set in hand. Its own resource for the
@@ -2090,9 +2134,7 @@ fn drive_clone(
     // What the marker shows: the held set's bounds riding the (snapped) cursor, else the box being
     // dragged out.
     let rect = if let Some(set) = &drag.held {
-        let target = (snap(at.0), snap(at.1));
-        let c = (target.0 + set.centre_off.0, target.1 + set.centre_off.1);
-        Some((c.0 - set.half.0, c.1 - set.half.1, c.0 + set.half.0, c.1 + set.half.1))
+        Some(set.bounds((snap(at.0), snap(at.1))))
     } else {
         drag.from.map(|from| {
             (from.0.min(at.0), from.1.min(at.1), from.0.max(at.0), from.1.max(at.1))
@@ -2202,9 +2244,19 @@ fn drive_clone(
         pieces,
         centre_off: ((bx0 + bx1) * 0.5, (bz0 + bz1) * 0.5),
         half: ((bx1 - bx0) * 0.5, (bz1 - bz0) * 0.5),
+        yaw: 0.0,
     });
-    state.status
-        .note(format!("{count} piece(s) in hand — click stamps the set, Esc puts it away"));
+    // **Every verb the set has, said at the moment it exists.** The census carries them — `B,
+    // Shift+B, M` collapsed onto one row to stay under the Map context's twelve-row ceiling — but
+    // that row lives behind `K`, and "how do I keep this as a composition" was asked twice by an
+    // author holding a set. A just-in-time line costs nothing and is read where the census is not.
+    state.status.note(format!(
+        "{count} piece(s) in hand — click stamps the set, {}/{} turn it, {} keeps it as a \
+         composition, Esc puts it away",
+        keys::binding(Action::AimLeft).chord,
+        keys::binding(Action::AimRight).chord,
+        keys::chord_text(keys::binding(Action::GroupFromSet)),
+    ));
 }
 
 /// **Stamp the held set at `target`** — all of it, or none of it, the rule `move_placement` states.
@@ -2240,7 +2292,8 @@ fn stamp_set(
 
     let mut rows: Vec<Placed> = Vec::with_capacity(set.pieces.len());
     for (i, piece) in set.pieces.iter().enumerate() {
-        let at = (target.0 + piece.offset.0, target.1 + piece.offset.1);
+        // The set's own turn, folded in once — see `CloneSet::placed`.
+        let (at, yaw) = set.placed(piece, target);
         let Some(d) = project.library.get(&piece.descriptor) else {
             state.status.problem(format!(
                 "stamp refused: `{}` is not in the library any more",
@@ -2270,7 +2323,7 @@ fn stamp_set(
             &project.library,
             d,
             at,
-            piece.yaw,
+            yaw,
             piece.tip,
             on.as_deref(),
         ) {
@@ -2285,7 +2338,7 @@ fn stamp_set(
             id: new_ids[i].clone(),
             descriptor: piece.descriptor.clone(),
             at,
-            yaw: piece.yaw,
+            yaw,
             lift: piece.lift,
             tip: piece.tip,
             on,
@@ -3481,6 +3534,13 @@ fn keys(
         state.status.note(said);
         move_drag.held = None;
         clone_drag.held = None;
+        // **Arming the box puts the brush down.** A piece stayed armed through the tool change, so
+        // the palette went on showing a highlighted row and `drive_ghost` went on previewing a
+        // placement while the author was dragging a capture box — two subjects under one cursor,
+        // which is the state every other arm in this block exists to avoid.
+        if state.tool == Tool::Clone {
+            state.brush = None;
+        }
         return;
     }
 
@@ -3701,9 +3761,21 @@ fn keys(
     } else {
         0.0
     };
-    if step != 0.0 {
-        state.brush_yaw = (state.brush_yaw + step).rem_euclid(360.0);
+    if step == 0.0 {
+        return;
     }
+    // **The aim keys turn whatever the next click will put down.** That is the brush, unless a
+    // captured set is in hand — in which case the click stamps the set, and turning the brush would
+    // be aiming something that is not going anywhere. Same rule `drive_ghost` follows to decide what
+    // to preview, and the reason it is a rule rather than a second binding: an author reaching for
+    // `Z` is asking to turn *this*, and which thing that is is already decided by what they picked
+    // up.
+    if let Some(set) = clone_drag.held.as_mut() {
+        set.yaw = (set.yaw + step).rem_euclid(360.0);
+        state.status.note(format!("set turned to {:.0} deg", set.yaw));
+        return;
+    }
+    state.brush_yaw = (state.brush_yaw + step).rem_euclid(360.0);
 }
 
 /// Remove the placement nearest the cursor, within a piece's own reach.
@@ -4536,7 +4608,62 @@ mod capture_tests {
     }
 
     fn held(pieces: Vec<ClonePiece>, centre_off: (f32, f32), half: (f32, f32)) -> CloneSet {
-        CloneSet { pieces, centre_off, half }
+        CloneSet { pieces, centre_off, half, yaw: 0.0 }
+    }
+
+    /// **A turned set lands where a turned stamp would**, and comes back exactly.
+    ///
+    /// The clone tool now takes `Z`/`C` when a set is in hand, which means it owns a sign
+    /// convention — and `composition::rotate_xz`'s own doc names the failure of having two: Bevy's
+    /// yaw turns +X toward −Z, so a mirrored copy stamps a mirrored group without failing anything.
+    /// This asserts the shared function is the one being used, by checking the quarter turn against
+    /// hand-worked values rather than against itself.
+    #[test]
+    fn a_turned_set_lands_where_a_turned_stamp_would() {
+        let piece = ClonePiece {
+            descriptor: "chair".to_owned(),
+            offset: (2.0, 0.0),
+            yaw: 0.0,
+            tip: (0, 0),
+            lift: 0.0,
+            note: None,
+            owned: false,
+            owned_because: None,
+            on: CloneHost::Layer,
+        };
+        let mut set = held(vec![piece.clone()], (0.0, 0.0), (1.0, 0.5));
+
+        // Unturned: the offset is the offset.
+        let (at, yaw) = set.placed(&piece, (10.0, 10.0));
+        assert_eq!((at, yaw), ((12.0, 10.0), 0.0));
+
+        // A quarter turn: +X goes to −Z, which is the whole convention.
+        set.yaw = 90.0;
+        let (at, yaw) = set.placed(&piece, (10.0, 10.0));
+        assert!(
+            (at.0 - 10.0).abs() < 1e-4 && (at.1 - 8.0).abs() < 1e-4,
+            "a piece 2 m along +X must sit 2 m along −Z after a quarter turn, got {at:?}"
+        );
+        assert_eq!(yaw, 90.0, "the piece's own facing turns with the set");
+
+        // **Four quarter turns return exactly.** The reason `yaw` is one field applied once rather
+        // than folded into each offset as the author presses the key: rotating an offset repeatedly
+        // accumulates error, and "turn it round and put it back" would quietly move the group.
+        set.yaw = 0.0;
+        for _ in 0..4 {
+            set.yaw = (set.yaw + 90.0).rem_euclid(360.0);
+        }
+        let (at, yaw) = set.placed(&piece, (10.0, 10.0));
+        assert_eq!((at, yaw), ((12.0, 10.0), 0.0), "four quarter turns must be identity");
+
+        // The outline is the turned set's BOUNDS: a 2x1 box turned 90 degrees is 1x2.
+        set.yaw = 90.0;
+        let (x0, z0, x1, z1) = set.bounds((0.0, 0.0));
+        assert!(
+            (x1 - x0 - 1.0).abs() < 1e-4 && (z1 - z0 - 2.0).abs() < 1e-4,
+            "a 2.0 x 1.0 set turned 90 deg outlines 1.0 x 2.0, got {:?}",
+            (x1 - x0, z1 - z0)
+        );
     }
 
     fn at(descriptor: &str, offset: (f32, f32), on: CloneHost) -> ClonePiece {
@@ -6199,8 +6326,13 @@ fn drive_clone_ghost(
 
     if let Some((e, _)) = ghosts.iter().next() {
         if let Ok(mut tf) = transforms.get_mut(e) {
+            let want = Quat::from_rotation_y(set.yaw.to_radians());
+            // Written only on a change: this runs every frame the set is in hand.
             if tf.translation != root {
                 tf.translation = root;
+            }
+            if tf.rotation != want {
+                tf.rotation = want;
             }
         }
         return;
@@ -6210,8 +6342,16 @@ fn drive_clone_ghost(
     // through `stack::placement_at` against the map it is landing in; resolving that per frame for
     // a whole set is the expensive half, and the preview's job is *where in plan* the set lands.
     // The pieces ride at their captured lift, which is what a flat stamp onto floor produces.
+    // **The turn rides on the parent.** Rotating it about +Y rotates where each child sits *and*
+    // which way it faces, in one write — the same composition of transforms `CloneSet::placed`
+    // computes arithmetically for the stamp, so the preview cannot drift from the landing.
     let parent = commands
-        .spawn((CloneGhost, Transform::from_translation(root), Visibility::default()))
+        .spawn((
+            CloneGhost,
+            Transform::from_translation(root)
+                .with_rotation(Quat::from_rotation_y(set.yaw.to_radians())),
+            Visibility::default(),
+        ))
         .id();
     let mut drawn = 0usize;
     for piece in &set.pieces {
