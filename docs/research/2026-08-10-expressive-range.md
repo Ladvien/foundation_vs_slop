@@ -131,3 +131,56 @@ alphabet whose generator produces no rooms at all would be optimising the weight
 
 Nothing here is enforced. The rows are read once by a human; `range`'s metrics carry the tests, the
 verdict carries none, and nothing stops the next run from ignoring it.
+
+---
+
+## 7. Addendum — the weight hypothesis is falsified (`empty_weight`, same day)
+
+§2 named `Empty`'s weight as the mechanism: it asks for 20% and takes 37.58%, so scaling it down
+should let authored tiles win cells and let boundaries close. **That is wrong, and the sweep is
+unambiguous.** `cargo run -p emerge-core --example empty_weight`, 128 solves per row, read against the
+same pre-registered rows:
+
+| w(empty) | empty % of cells | median enclosure | solves with any enclosed region |
+|---|---|---|---|
+| 1.00 (shipped) | 37.6% | 0.000 | **0** / 128 |
+| 0.75 | 33.1% | 0.000 | 0 |
+| 0.50 | 27.6% | 0.000 | 0 |
+| 0.25 | 18.7% | 0.000 | 0 |
+| 0.10 | 9.7% | 0.000 | 1 |
+| 0.05 | 5.6% | 0.000 | 1 |
+| **0.00** | **0.0%** | **0.000** | **2** |
+
+**Deleting `Empty` from the output entirely buys two enclosed regions in 128 solves.** The lever works
+— its cell share tracks the weight exactly, 37.6% → 0.0% — and the thing it was supposed to cause does
+not happen. Median enclosure never leaves 0.000 at any setting.
+
+Two further readings, both from the same table:
+
+- **The alphabet is not over-constrained.** Row 3 never fires; every solve converges even at `w = 0`,
+  where every cell must be an authored tile. So this is not the *"add tiles before judging the
+  approach"* case either.
+- **§2's diagnosis was a correlation.** `Empty` really is over-represented, and that really is
+  explained by being compatible with everything — but over-representation was not what stopped rooms
+  forming. Removing the correlate leaves the effect.
+
+### What this leaves standing
+
+The mechanism is **the adjacency relation, not the sampling distribution.** A closed boundary is a
+property *over distance*: a wall run has to know it must eventually meet a corner that meets a wall
+that returns. Local pairwise support cannot express that, and no reweighting of local choices creates
+it — which is exactly what the sweep measures.
+
+That is the term Sandhu, Chen & McCoy name and §3 already quoted, now with evidence behind it rather
+than analogy:
+
+> we extend the local constraint reasoning by incorporating **constraints that can work over any
+> distance** and non-spatial constraints.
+
+Their second term — *"weight recalculation"* — is the one this addendum rules out for this failure.
+Both were listed in §3 as candidates; the sweep separates them.
+
+**This also settles the FVS-R-5 question in the other direction.** §3 argued the nine missing tile
+kinds were not the blocker because the room is *legal* under the learned support. The sweep
+strengthens it: the blocker is not vocabulary and not weight, so it is not something an authoring pass
+can fix. It is the solver's expressiveness.
