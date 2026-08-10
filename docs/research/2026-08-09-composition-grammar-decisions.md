@@ -297,3 +297,67 @@ re-fetched and re-converted.
 `scripts/mirror_crates.sh` refuses while `crates/bevy_autogib/` is untracked; recent commits are
 unmirrored. Correct behaviour — refusing beats forcing past a dirty tree — but it is an *unowned*
 blocker: it clears only when the other agent commits. Worth a check rather than an assumption.
+
+---
+
+## 10. Decision — a lit wall is a **tag**, shaped as Cooper's second layer (FVS-R-6)
+
+**Decided by the author, 2026-08-10.** This is the thing that gated the schema work, so it is written
+down rather than left as the four unprompted arguments Step 4 kept making for it.
+
+### The question was framed as a binary and the corpus does not answer it as one
+
+`10.1609/aiide.v18i1.21944` — Cooper's *Sturgeon*, already cited in §4.3 for expressive-range coverage
+— is the one system in the corpus that built this, and it separates the two things instead of choosing
+between them:
+
+> "a *tile* is simply an entity that can have **functional (i.e. gameplay) and/or image information**
+> associated with it… Each level can consist of both a *functional grid* that defines gameplay for the
+> level … and an *image grid* that defines what the level looks like."
+
+> "It is possible to generate functional and image grids *simultaneously* by associating tiles with
+> both … or *sequentially* by first generating a functional grid and then using that to limit image
+> tile placement. **We found the sequential approach can be more efficient**, as reachability does not
+> have to consider what a tile looks like."
+
+And the link between the layers is exactly the mechanism this decision is about:
+
+> "This work also uses *tags*, which are labels associated with one or more tiles and can be used to
+> limit what tiles can be placed at a location. … **Sometimes the tile/tag distinction is intentionally
+> blurred: functional tiles can be used as tags to constrain image tile placement.**"
+
+A lit wall is *appearance over a functional wall*. Under Sturgeon's reading it is not a second tile and
+not an inert label — it is the second layer, keyed to the first.
+
+### What is committed
+
+**Tags, not authored variants.** The argument that decided it is the one already on the record in §5,
+and it is about what remains possible when a piece is missing rather than about the cross-product:
+**under tags an absent mesh is a missing renderer and the functional layer still solves; under variants
+the axis cannot be expressed at all.** The Site kit has no wall-mounted piece, so under variants the
+sconce is not merely unauthored — it is unauthorable, and the decision would be blocked on an art task.
+
+**And the tag field is shaped as Sturgeon's image grid**, not as a renderer hint: a layer keyed to the
+functional tile, so *"a lit wall must face a room"* and *"never two adjacent"* are expressible as
+constraints later. Plain tags — a label the solver never sees — make that a schema change rather than
+an addition, and it is the same field either way, so the shape is free now and is not free later.
+
+**Only the field ships. The second solve does not.** Writing a solver for a layer nothing yet
+constrains would be building against a guess; `Composition` carries no tag axis at all today
+(`crates/emerge-core/src/composition.rs:87` — `id`, `envelope`, `members`, `locations`, `note`), so
+FVS-R-8 adds one field, and the sequential solve arrives when something asks for it. That is one path,
+not a stub: a field with no reader is data the author writes and the renderer reads, which is what the
+Descriptor's `kind`/`look` already are.
+
+### What this settles for FVS-R-8
+
+The occupancy test and the typed split values keep the size they had. The tag axis adds **one field on
+`Composition`**, not a second prototype family — which is what the variant answer would have cost, and
+what made this item gate the schema work in the first place.
+
+### The falsifier, so this can be wrong later
+
+If the appearance layer ever needs an adjacency relation the *functional* layer cannot supply — a rule
+between two lit walls that does not reduce to a rule between the walls under them — then the layers are
+not nested and Sturgeon's sequential form is the wrong shape. Nothing in the Site kit does this today.
+That is the thing to check before writing the second solve, not after.
