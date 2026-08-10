@@ -2132,7 +2132,7 @@ pub fn snap_level(keyboard: &ButtonInput<KeyCode>) -> SnapLevel {
 /// free position is clamped to it: anywhere inside that half-metre, nowhere outside it. Release and
 /// press again over a different cell to nudge a different one. An assist, not a restriction — every
 /// position that was reachable is still reachable, in two gestures instead of one.
-fn map_at(
+pub fn map_at(
     project: &Project,
     hit: Vec3,
     free: bool,
@@ -7279,7 +7279,51 @@ mod snap_tests {
         );
     }
 
-/// **A solver-visible composition may not leave the tile, whatever the modifiers say.**
+    /// **Three wall tiles placed at three careless aims abut into one wall.**
+    ///
+    /// The point of the whole change, driven through the real chain a click uses — `stamp_snap`
+    /// decides the rung and the span, `map_at` does the snapping — rather than calling
+    /// `grid::snap_corner` directly, which would be re-implementing the wiring inside its own test.
+    ///
+    /// The aims are deliberately careless: a fifth of a cell in, two thirds in, a hair under the next
+    /// boundary. Under the old centre-snap those landed on 0.0, 1.5 and 3.0 — a tile straddling two
+    /// solver cells, then a one-cell hole.
+    #[test]
+    fn three_tiles_aimed_carelessly_still_abut() {
+        use emerge_core::composition::{Composition, Envelope};
+        let mut p = tests::project(Vec::new(), Vec::new());
+        p.compositions.compositions = vec![Composition {
+            id: "site/tile_wall_n".into(),
+            envelope: Envelope::Bounded { size: (1.0, 2.4, 1.0) },
+            ..Default::default()
+        }];
+        let compose = crate::compose::ComposeState {
+            armed: Some("site/tile_wall_n".into()),
+            ..Default::default()
+        };
+        // Every rung held at once — a stamp must ignore all of them.
+        let mut held = ButtonInput::<KeyCode>::default();
+        held.press(keys::SHIFT_KEYS[0]);
+        held.press(keys::MOD_KEYS[0]);
+
+        let (level, span) = stamp_snap(&p, &compose, &held);
+        let place = |aim: f32| {
+            map_at(&p, Vec3::new(aim, 0.0, 0.4), false, &FineAnchor::default(), level, span).0
+        };
+        let got: Vec<f32> = [0.2f32, 1.7, 2.95].iter().map(|a| place(*a)).collect();
+
+        assert_eq!(got, vec![0.5, 1.5, 2.5], "three careless aims must land in three adjacent cells");
+        for w in got.windows(2) {
+            assert!(
+                (w[1] - w[0] - grid::TILE).abs() < 1e-5,
+                "{:?} are {} m apart — a gap or an overlap, not a wall",
+                w,
+                w[1] - w[0]
+            );
+        }
+    }
+
+    /// **A solver-visible composition may not leave the tile, whatever the modifiers say.**
     ///
     /// This is the rule the whole ladder is built around, and the one with real consequences if it
     /// rots. `pcgbook-ch11`: *"All content that a human can produce using a mixed-initiative PCG
