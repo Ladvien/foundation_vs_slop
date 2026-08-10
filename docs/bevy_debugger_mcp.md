@@ -116,21 +116,39 @@ Two things to know:
 
 ### Input goes to the game, never through the OS
 
-`bevy_debugger/input` writes into `ButtonInput<KeyCode>` and `ButtonInput<MouseButton>` — resources inside the game process. It cannot leak into whatever window you are actually using, and this is structural rather than careful: the crate depends only on `bevy`, `bevy_remote`, `serde`, `serde_json` and `image`, none of which can synthesise an OS event, and its sources contain no `enigo`, `CGEvent`, `core-graphics`, `xdotool`, `SendInput`, `winit` or `unsafe`. Keys injected while another application held focus produced nothing in that application.
+`bevy_debugger/input` writes into Bevy's own input **message stream** — `Messages<KeyboardInput>` and `Messages<MouseButtonInput>`, the same buffers `bevy_winit` appends to, inside the game process. It cannot leak into whatever window you are actually using, and this is structural rather than careful: the crate depends only on `bevy`, `bevy_remote`, `serde`, `serde_json` and `image`, none of which can synthesise an OS event, and its sources contain no `enigo`, `CGEvent`, `core-graphics`, `xdotool`, `SendInput`, `winit` or `unsafe`. Keys injected while another application held focus produced nothing in that application.
 
 `key` and `button` deserialize straight into Bevy's `KeyCode`/`MouseButton`, so every key Bevy knows is accepted under Bevy's own variant spelling — `KeyW`, `ArrowLeft`, `F11`, `Numpad7`, `ShiftLeft`. (An earlier note here described a hand-written twelve-key table and a scroll stub that wrote nothing; both are gone.)
 
-### Injected input is queued, and lands in `PreUpdate` — this was a real bug
+### Typing — `key` or `text`, and never both
 
-**BRP handlers registered with `with_method_main` run in the `Last` schedule.** Bevy's `keyboard_input_system` runs at the top of `PreUpdate` and clears the just-pressed and just-released sets.
+```jsonc
+{"kind": "Keyboard", "text": "porch_a"}     // one call, one frame, one message per character
+{"kind": "Keyboard", "key": "Enter"}        // commits it
+{"kind": "Keyboard", "key": "Escape"}       // leaves a tool AND closes a field, from one request
+```
+
+**`key` names a key on the keyboard; `text` is what should arrive.** Neither expresses the other — `text` cannot say which key produced a character, `key` cannot produce `é` — so sending both is refused rather than silently ordered.
+
+A `key` carries its logical half whenever Bevy spells the same name in `Key`, which **93 names do**, including every one a text field matches: `Enter`, `Escape`, `Backspace`, `Space`, `Tab`, `Delete`, the arrows, `F1`–`F35`. For a physical-only name like `KeyW` the logical half is `Unidentified`, because `KeyW` is `w` on QWERTY and `,` on Dvorak and there is no layout-independent answer.
+
+Two refusals worth knowing: a control character in `text` names the alternative (`use key: "Enter"`), and `action` with `text` is refused because a held character is meaningless. A space becomes `Key::Space`, not `Key::Character(" ")` — that is what a space bar produces, and handlers match the former.
+
+**A separate `kind: "Text"` was designed and rejected.** `Escape` is spelled identically in both enums, so a split would have made an agent choose a kind based on which of the *host's* systems was listening — which it cannot query — and each kind would deliver only half of what a real key produces.
+
+### Injected input is queued, and lands in `PreUpdate` — this was a real bug, twice
+
+**BRP handlers registered with `with_method_main` run in the `Last` schedule.** Bevy's `keyboard_input_system` runs at the top of `PreUpdate`, clears the just-pressed and just-released sets, and *then* folds the `KeyboardInput` stream into `ButtonInput`.
 
 So a handler that wrote straight into `ButtonInput` had its `just_pressed` flag wiped by the very next `PreUpdate`, *before* any `Update` system could read it. **Every `just_pressed`-based action was unreachable by injected input**, while the method cheerfully answered `success: true`. Held `pressed` state survived the clear, which is what made it look intermittent — some actions responded and some silently did not.
 
 Measured against this game: `bevy_debugger/input` reported success for `KeyQ` (`Action::CameraRotateLeft`) and the camera's rotation quaternion was bit-identical before and after, across `Press`, hold, and `Tap`.
 
-The handler now validates and **queues**; `input::apply_pending_input` runs in `PreUpdate` `.after(bevy::input::InputSystems)` and does the write on the far side of the clear. A `Tap` presses on one frame and releases on the next, because pressing and releasing within a single frame produces a state no physical key can — `pressed` false all frame while both edges are true — which silently skips every `pressed`-based reader. Verified after the fix: the same `Tap` of `KeyQ` rotated the camera 90°.
+That was first fixed by queueing and writing `ButtonInput` **after** the clear. **It is now fixed one level down:** `input::apply_pending_input` runs `.before(bevy::input::InputSystems)` and writes the *messages* Bevy folds, so the edge is produced by the engine from the same stream a real key travels on. The first fix reached everything reading `ButtonInput` and nothing reading the stream — which is every text field there is, and why an agent could press keys but not type. A `Tap` still presses on one frame and releases on the next, because pressing and releasing within a single frame produces a state no physical key can.
 
-If you change that ordering, re-verify against a running game. A unit test on `ButtonInput` cannot see this class of bug, because the bug is entirely in *when* the write happens.
+**`InputPlugin` is now required**, since it owns the fold. `DebuggerPlugin::finish` asserts its presence rather than letting the injection be silently inert.
+
+If you change that ordering, re-verify against a running game. Note the failure mode is now gentler and therefore quieter: misordered, an injected key arrives **a frame late** rather than never — `ordering_after_input_systems_costs_a_frame` pins exactly that.
 
 ## Hacking on the debugger
 
