@@ -520,6 +520,31 @@ mod tests {
             g.support[N][wall]
         );
 
+        // **One tile, one unit of weight.** A symmetric tile dedupes to one prototype and an
+        // asymmetric one keeps four, so a flat weight per prototype makes the symmetric tile a
+        // quarter as likely — which is an artifact of the solver's expansion, not anything the
+        // author said. Measured before this: `tile_floor` came out at 7.4% of 864 cells against
+        // ~23% for each of the other three.
+        let weight_of = |id: &str| -> f64 {
+            g.prototypes
+                .iter()
+                .zip(g.weights.iter())
+                .filter(|(p, _)| matches!(p, Prototype::Piece { descriptor, .. } if descriptor == id))
+                .map(|(_, w)| *w)
+                .sum()
+        };
+        let floor = weight_of("site/tile_floor");
+        let wall = weight_of("site/tile_wall_n");
+        assert!(
+            (floor - wall).abs() < 1e-9,
+            "a symmetric tile and an asymmetric one must carry the same total weight — floor \
+             {floor}, wall {wall}"
+        );
+        assert!(
+            (floor - 1.0).abs() < 1e-9,
+            "and that total is one tile's worth, not one prototype's: {floor}"
+        );
+
         // And a grid actually collapses.
         let map = crate::map::Map {
             name: "probe".into(),
@@ -906,6 +931,10 @@ pub fn from_compositions(
     // that cannot say "nothing goes here" cannot leave a doorway.
     let mut prototypes = vec![Prototype::Empty];
     let mut interfaces: Vec<Option<Interface>> = vec![None];
+    // `Empty` is one tile like any other: it is the grammar's way of saying "nothing goes here", and
+    // weighting it above or below the authored tiles would be a claim about how holey a room should
+    // be that nobody has made.
+    let mut weights: Vec<f64> = vec![1.0];
     let mut skipped: Vec<String> = Vec::new();
 
     for c in compositions {
@@ -941,6 +970,7 @@ pub fn from_compositions(
         // means there is no second rotation convention to get backwards. `rotate_xz`'s own doc names
         // that failure: a mirrored copy "mirrors every composition without failing anything".
         let mut seen_faces: Vec<[Vec<crate::composition::Band>; 4]> = Vec::new();
+        let first_proto = prototypes.len();
         for quarter in 0..4u8 {
             let yaw = quarter as f32 * 90.0;
             let turned = turn_composition(c, yaw);
@@ -973,6 +1003,25 @@ pub fn from_compositions(
             prototypes.push(Prototype::Piece { descriptor: c.id.clone(), yaw });
             interfaces.push(Some(iface));
         }
+        // **One tile, one unit of weight — split across the turns it survived as.**
+        //
+        // Uniform per PROTOTYPE is not uniform per tile, and the difference is not a design choice:
+        // a symmetric tile dedupes to one prototype while an asymmetric one keeps four, so a flat
+        // 1.0 each makes the symmetric tile a quarter as likely as its neighbours. Measured on the
+        // shipped kit before this: `tile_floor` is the only symmetric tile and came out at **7.4%**
+        // of 864 cells against ~23% for each of the other three — open floor, the material a room is
+        // mostly made of, was the rarest thing in the building.
+        //
+        // The dedup is right and stays; it is what keeps four tiles inside the solver's
+        // thirty-two. This makes "uniform" mean uniform over the vocabulary the author wrote rather
+        // than over the solver's expansion of it, which is the only reading anybody intended.
+        let turns = prototypes.len() - first_proto;
+        if turns > 0 {
+            let share = 1.0 / turns as f64;
+            for _ in 0..turns {
+                weights.push(share);
+            }
+        }
     }
 
     let n = prototypes.len();
@@ -996,8 +1045,9 @@ pub fn from_compositions(
     Ok((
         Grammar {
             prototypes,
-            // Uniform: see the note above. `learn` counts placements; a vocabulary has no count.
-            weights: vec![1.0; n],
+            // Uniform per authored TILE — see the split above. `learn` counts placements; a
+            // vocabulary has no count, so every tile the author wrote is equally likely.
+            weights,
             support,
         },
         skipped,
