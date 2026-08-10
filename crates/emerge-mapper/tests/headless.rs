@@ -1545,6 +1545,69 @@ fn cmd_remove_falls_to_the_place_selection() {
     );
 }
 
+/// **"Is the pointer on a panel" answered against the real layout.**
+///
+/// Reported live, twice: with the cursor on a PLACE row, `Cmd`+remove picked up the tile *underneath
+/// the list*. So `view::over_ui` was answering false over the panel and the ordered rule correctly
+/// took its first arm.
+///
+/// This is the assertion that was missing both times. The first version of the check read `Hovered`,
+/// which no headless test can set — `bevy_picking` writes it from the window's cursor — so there was
+/// nothing to write. Reading the rects makes it ordinary: boot the editor, take a real palette row's
+/// `ComputedNode` and `UiGlobalTransform`, and ask about its own centre.
+///
+/// The **scale factor is the thing that was wrong** and so it is the thing pinned: the node rect is
+/// physical, `view::Pointer` is logical, and a test that passed only at scale 1.0 would say nothing
+/// about the Retina window the report came from.
+#[test]
+fn the_pointer_is_over_the_panel_when_it_is_over_a_row() {
+    use bevy::ui::{ComputedNode, UiGlobalTransform};
+
+    let root = Fixture::new("overui").descriptor("floor", "alpha").build("m");
+    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..6 {
+        app.update();
+    }
+
+    // Any laid-out interactive node will do — what is asserted is the arithmetic, not which row.
+    let (size, centre) = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(&ComputedNode, &UiGlobalTransform), bevy::prelude::With<bevy::picking::hover::Hovered>>();
+        q.iter(app.world())
+            .map(|(n, tf)| (n.size(), tf.translation))
+            .find(|(size, _)| size.x > 1.0 && size.y > 1.0)
+            .unwrap_or_else(|| panic!("no laid-out interactive UI node — this test would prove nothing"))
+    };
+
+    for scale in [1.0_f32, 2.0] {
+        // The pointer is logical, the rect is physical: the centre in logical pixels is the physical
+        // centre divided by the factor. Getting this backwards is the bug being pinned.
+        let logical_centre = centre / scale;
+        let nodes: Vec<(ComputedNode, UiGlobalTransform)> = {
+            let mut q = app
+                .world_mut()
+                .query_filtered::<(&ComputedNode, &UiGlobalTransform), bevy::prelude::With<bevy::picking::hover::Hovered>>();
+            q.iter(app.world()).map(|(n, tf)| (n.clone(), *tf)).collect()
+        };
+        let borrowed: Vec<(&ComputedNode, &UiGlobalTransform)> =
+            nodes.iter().map(|(n, tf)| (n, tf)).collect();
+
+        assert!(
+            emerge_mapper::view::over_ui(Some(logical_centre), scale, borrowed.iter().copied()),
+            "a pointer on a row's own centre must read as over the interface (scale {scale}, \
+             node {size:?} at {centre:?})"
+        );
+        // Far outside every panel: the map, where the piece under the cursor IS the answer.
+        assert!(
+            !emerge_mapper::view::over_ui(Some(Vec2::new(-5000.0, -5000.0)), scale, borrowed.iter().copied()),
+            "a pointer nowhere near a panel must read as the world (scale {scale})"
+        );
+    }
+    // No cursor is not "over the world" — it is no answer, and every other reader treats it so.
+    assert!(!emerge_mapper::view::over_ui(None, 1.0, [].into_iter()));
+}
+
 /// **The backdrop goes under the floor, and the floor is not where you would guess.**
 ///
 /// `BOUNDS_FILL` is drawn below the datum so a placed floor occludes it. That was a flat 5 mm, and

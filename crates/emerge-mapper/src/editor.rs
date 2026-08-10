@@ -691,7 +691,11 @@ impl Plugin for EditorPlugin {
                     // guard. Both touch `TargetLock`, so they are named together.
                     (drive_target_marker, sense_under_cursor).run_if(in_map_mode),
                     hide_carried.run_if(in_map_mode),
-                    drive_ghost.run_if(in_map_mode),
+                    // **Nested, because this tuple is at Bevy 0.19's cap of 20.** The pair is the
+                    // two previews: one piece keyed by library index, and a whole set. Not folded
+                    // into one system — that would be one system with two subjects and two
+                    // lifetimes.
+                    (drive_ghost, drive_clone_ghost).run_if(in_map_mode),
                     // **Not gated on the mode.** The stamped rows are part of the map, so they stay
                     // drawn while an author is on Tiles or Compose looking at the group that made
                     // them — a world that empties out when you change tabs would read as the stamp
@@ -6104,6 +6108,129 @@ fn drive_ghost(
         }
     }
 }
+
+/// **The held clone set, previewed as the pieces themselves.**
+///
+/// Reported live: *"Shift+B still isn't showing a ghosted version of the composition so I can see
+/// where to place it."* The clone tool drew only [`CloneTile`] — the set's **bounds** riding the
+/// cursor — which says how big the thing is and nothing about what it is or which way round it
+/// faces. Butting one section against another needs both.
+///
+/// The bounds rectangle stays, on the author's call: the pieces imply an extent, but a set with a
+/// gap at its edge reads as smaller than the region it claims, and flush-against-the-last-one is
+/// exactly the judgement this preview exists to support.
+///
+/// **A parent with the pieces as children**, the shape [`StampInstance`] uses and for the same
+/// reason: `Children` is `linked_spawn`, so despawning the parent takes the ghosts with it, and
+/// riding the cursor is then one transform write instead of N. Rebuilt only when the set in hand
+/// changes — a clone set is fixed once taken, so a per-frame rebuild would be tearing down and
+/// respawning a dozen GLB scenes at frame rate for a preview that only moves.
+///
+/// The pieces carry [`Ghost`] so [`fade_ghost`] fades them through the one path that already exists,
+/// and **not** [`GhostOf`], which keys the brush ghost by library index — two pieces of one
+/// descriptor in a set would collide on it, and `drive_ghost`'s own clear would take them.
+#[allow(clippy::too_many_arguments)]
+fn drive_clone_ghost(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    project: Res<Project>,
+    state: Res<EditorState>,
+    drag: Res<CloneDrag>,
+    pointer: Res<crate::view::Pointer>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    ui_nodes: Query<(&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform), With<Hovered>>,
+    ghosts: Query<(Entity, &CloneGhost)>,
+    mut transforms: Query<&mut Transform, With<CloneGhost>>,
+) {
+    let clear = |commands: &mut Commands| {
+        for (e, _) in &ghosts {
+            commands.entity(e).despawn();
+        }
+    };
+
+    let Some(camera) = camera else {
+        clear(&mut commands);
+        return;
+    };
+    let (cam, cam_tf) = *camera;
+    // No preview while the cursor is on a panel: the set is not going there, and the click will not
+    // reach the world — `drive_clone` filters the same way, so the two agree about when a drop is
+    // possible. Geometry rather than `Hovered`, for `view::over_ui`'s reason.
+    let on_ui = crate::view::over_ui(
+        pointer.0,
+        cam.target_scaling_factor().unwrap_or(1.0),
+        ui_nodes.iter(),
+    );
+    let (Some(set), false) = (drag.held.as_ref(), state.tool != Tool::Clone) else {
+        clear(&mut commands);
+        return;
+    };
+    let Some(hit) = cursor_ground(pointer.0, cam, cam_tf).filter(|_| !on_ui) else {
+        clear(&mut commands);
+        return;
+    };
+
+    // **Exactly the arithmetic the drop uses.** `drive_clone` stamps at `(snap(at.0), snap(at.1))`
+    // and `stamp_set` puts each piece at `target + piece.offset`; a preview computing either
+    // differently is a promise about a landing that will not happen, which is the one thing this
+    // editor's previews are held to.
+    let at = project.map.to_map_space((hit.x, hit.z));
+    let target = (snap(at.0), snap(at.1));
+    let root = emerge_bevy::origin_of(target, project.map.origin, 0.0);
+
+    if let Some((e, _)) = ghosts.iter().next() {
+        if let Ok(mut tf) = transforms.get_mut(e) {
+            if tf.translation != root {
+                tf.translation = root;
+            }
+        }
+        return;
+    }
+
+    // **Y is left at the drop's own answer being unknown here.** `stamp_set` seats each piece
+    // through `stack::placement_at` against the map it is landing in; resolving that per frame for
+    // a whole set is the expensive half, and the preview's job is *where in plan* the set lands.
+    // The pieces ride at their captured lift, which is what a flat stamp onto floor produces.
+    let parent = commands
+        .spawn((CloneGhost, Transform::from_translation(root), Visibility::default()))
+        .id();
+    let mut drawn = 0usize;
+    for piece in &set.pieces {
+        let Some(d) = project.library.get(&piece.descriptor) else {
+            continue;
+        };
+        // Local to the parent, so moving the set is one write: the parent sits at `target` and each
+        // piece sits at its own offset from it.
+        let local = emerge_bevy::origin_of(piece.offset, (0.0, 0.0, 0.0), piece.lift);
+        if let Some(e) = spawn_piece(
+            &mut commands,
+            &assets,
+            d,
+            piece.offset,
+            piece.yaw,
+            piece.tip,
+            (0.0, 0.0, 0.0),
+            piece.lift,
+        ) {
+            commands
+                .entity(e)
+                .insert((Ghost, ChildOf(parent)))
+                .insert(Transform::from_translation(local).with_rotation(Quat::from_rotation_y(
+                    emerge_bevy::draw_yaw(d, piece.yaw).to_radians(),
+                )));
+            drawn += 1;
+        }
+    }
+    if drawn == 0 {
+        // Nothing drew, so the parent is an empty promise — and an empty parent would satisfy the
+        // "already built" check above and never try again.
+        commands.entity(parent).despawn();
+    }
+}
+
+/// The parent of a held clone set's ghost pieces. See [`drive_clone_ghost`].
+#[derive(Component)]
+struct CloneGhost;
 
 /// Fade the ghost once its GLB has instantiated materials.
 ///
