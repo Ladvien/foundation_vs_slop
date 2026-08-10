@@ -331,8 +331,34 @@ pub enum CloneHost {
 
 /// The set in hand, plus the bounds the marker shows: centre offset from the anchor and
 /// half-extents, both from the pieces' own footprints at capture.
+/// **A stamp caught in the capture box**, carried whole.
+///
+/// FVS-R-14: *tools act on the instance, never through it.* A box that catches a nurse station
+/// takes the station, not its rows — copying expanded geometry would flatten the reference the
+/// schema exists to protect, which `stamping_writes_a_reference_and_undo_takes_it_back` pins.
+///
+/// Its own list beside [`CloneSet::pieces`] rather than an enum sharing one, and that is forced
+/// rather than chosen: [`CloneHost::InSet`] is an **index into `pieces`**, so interleaving a second
+/// kind would silently repoint every host a captured set carries.
+#[derive(Clone)]
+pub struct CloneStamp {
+    /// The [`emerge_core::composition::Composition`] id this instances.
+    pub of: String,
+    /// From the set's anchor, in map metres — the same frame [`ClonePiece::offset`] uses.
+    pub offset: (f32, f32),
+    pub yaw: f32,
+    /// Carried verbatim: an override is a statement about *this* instance, and a copy that dropped
+    /// them would be a different nurse station wearing the same name.
+    pub overrides: Vec<emerge_core::composition::Override>,
+    pub owned: bool,
+    pub owned_because: Option<String>,
+    pub note: Option<String>,
+}
+
 pub struct CloneSet {
     pub pieces: Vec<ClonePiece>,
+    /// Stamps the box caught. See [`CloneStamp`].
+    pub stamps: Vec<CloneStamp>,
     pub centre_off: (f32, f32),
     pub half: (f32, f32),
     /// **How far the whole set has been turned**, degrees about +Y, applied about the anchor the
@@ -356,6 +382,15 @@ impl CloneSet {
         (
             (target.0 + off.0, target.1 + off.1),
             emerge_core::composition::add_yaw(piece.yaw, self.yaw),
+        )
+    }
+
+    /// [`Self::placed`] for a carried stamp — the same turn, applied to a whole instance.
+    pub fn placed_stamp(&self, st: &CloneStamp, target: (f32, f32)) -> ((f32, f32), f32) {
+        let off = emerge_core::composition::rotate_xz(st.offset, self.yaw);
+        (
+            (target.0 + off.0, target.1 + off.1),
+            emerge_core::composition::add_yaw(st.yaw, self.yaw),
         )
     }
 
@@ -2119,6 +2154,7 @@ fn drive_clone(
     mut drag: ResMut<CloneDrag>,
     mut project: ResMut<Project>,
     mut state: ResMut<EditorState>,
+    picture: Res<StampPicture>,
 ) {
     // Read, never write, unless something happened — `rebuild_palette` watches `state`.
     if state.tool != Tool::Clone {
@@ -2216,17 +2252,44 @@ fn drive_clone(
         .filter(|(_, p)| p.at.0 >= x0 && p.at.0 <= x1 && p.at.1 >= z0 && p.at.1 <= z1)
         .map(|(i, _)| i)
         .collect();
-    if caught.is_empty() {
+    // **Stamps the box catches come whole**, on the rule the removal box already follows and for the
+    // stronger reason: a box clipping the corner of a nurse station cannot take a corner of it, so
+    // the choice is the instance or nothing. Caught by any drawn row's centre, which is the same
+    // test the placements above use.
+    let caught_stamps: Vec<usize> = {
+        let mut v: Vec<usize> = picture
+            .rows
+            .iter()
+            .filter(|r| r.at.0 >= x0 && r.at.0 <= x1 && r.at.1 >= z0 && r.at.1 <= z1)
+            .filter_map(|r| project.map.stamps.iter().position(|s| s.id == r.stamp))
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    if caught.is_empty() && caught_stamps.is_empty() {
         state.status.note("nothing in that box to clone".to_owned());
         return;
     }
 
     // The anchor is the snapped centroid, so the set rides centred under the hand and stamps land
     // on the grid while every internal offset stays exact.
-    let n = caught.len() as f32;
-    let cx: f32 = caught.iter().map(|&i| project.map.placements[i].at.0).sum::<f32>() / n;
-    let cz: f32 = caught.iter().map(|&i| project.map.placements[i].at.1).sum::<f32>() / n;
-    let anchor = (snap(cx), snap(cz));
+    //
+    // **Over both lists**, or a box holding only stamps divides by zero — and a set anchored on the
+    // placements alone would ride off-centre the moment the two kinds are mixed.
+    let mut sum = (0.0f32, 0.0f32);
+    let mut n = 0.0f32;
+    for &i in &caught {
+        sum.0 += project.map.placements[i].at.0;
+        sum.1 += project.map.placements[i].at.1;
+        n += 1.0;
+    }
+    for &i in &caught_stamps {
+        sum.0 += project.map.stamps[i].at.0;
+        sum.1 += project.map.stamps[i].at.1;
+        n += 1.0;
+    }
+    let anchor = (snap(sum.0 / n), snap(sum.1 / n));
 
     let mut pieces = Vec::with_capacity(caught.len());
     let (mut bx0, mut bz0, mut bx1, mut bz1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
@@ -2263,9 +2326,39 @@ fn drive_clone(
             on,
         });
     }
-    let count = pieces.len();
+    // The stamps, carried whole. Their bounds come from the rows the picture already knows about,
+    // so the marker claims what the stamp actually covers rather than a point at its anchor.
+    let mut stamps = Vec::with_capacity(caught_stamps.len());
+    for &i in &caught_stamps {
+        let st = &project.map.stamps[i];
+        let offset = (st.at.0 - anchor.0, st.at.1 - anchor.1);
+        for row in picture.rows.iter().filter(|r| r.stamp == st.id) {
+            let (w, depth) = project
+                .library
+                .get(&row.descriptor)
+                .map(|d| crate::fill::cell_extents(d, row.yaw))
+                .unwrap_or((crate::fill::MIN_CELL, crate::fill::MIN_CELL));
+            let ro = (row.at.0 - anchor.0, row.at.1 - anchor.1);
+            bx0 = bx0.min(ro.0 - w * 0.5);
+            bz0 = bz0.min(ro.1 - depth * 0.5);
+            bx1 = bx1.max(ro.0 + w * 0.5);
+            bz1 = bz1.max(ro.1 + depth * 0.5);
+        }
+        stamps.push(CloneStamp {
+            of: st.of.clone(),
+            offset,
+            yaw: st.yaw,
+            overrides: st.overrides.clone(),
+            owned: st.owned,
+            owned_because: st.owned_because.clone(),
+            note: st.note.clone(),
+        });
+    }
+
+    let count = pieces.len() + stamps.len();
     drag.held = Some(CloneSet {
         pieces,
+        stamps,
         centre_off: ((bx0 + bx1) * 0.5, (bz0 + bz1) * 0.5),
         half: ((bx1 - bx0) * 0.5, (bz1 - bz0) * 0.5),
         yaw: 0.0,
@@ -2383,14 +2476,57 @@ fn stamp_set(
     }
 
     let count = rows.len();
+    // **A carried stamp lands as a stamp**, not as the rows it expands to. Copying expanded
+    // geometry would flatten the reference `stamping_writes_a_reference_and_undo_takes_it_back`
+    // exists to protect — the instance is the thing that was picked up, so the instance is the
+    // thing put down.
+    let mut fresh: Vec<emerge_core::composition::Stamped> = Vec::with_capacity(set.stamps.len());
+    for cs in &set.stamps {
+        if !project.compositions.compositions.iter().any(|c| c.id == cs.of) {
+            state.status.problem(format!(
+                "stamp refused: `{}` is not a composition any more",
+                cs.of
+            ));
+            return;
+        }
+        n += 1;
+        let (at, yaw) = set.placed_stamp(cs, target);
+        fresh.push(emerge_core::composition::Stamped {
+            id: format!("{}@{}", short_id(&cs.of), n),
+            of: cs.of.clone(),
+            at,
+            yaw,
+            overrides: cs.overrides.clone(),
+            of_fingerprint: None,
+            owned: cs.owned,
+            owned_because: cs.owned_because.clone(),
+            note: cs.note.clone(),
+        });
+    }
+
     let first = project.map.placements.len();
     state.next_id = n;
     project.map.placements.extend(rows);
+    let stamped = fresh.len();
+    project.map.stamps.extend(fresh);
     spawn_range(commands, assets, project, state, first);
     project.dirty = true;
-    // One entry for the whole set: one act the author performed is one act to take back.
-    state.record(Undo::Added { count });
-    state.status.note(format!("stamped {count} piece(s) — click again stamps another"));
+    // One entry for the whole set: one act the author performed is one act to take back. Two lists
+    // means a `Group`, whose inverses run in reverse order — the property that keeps `Undo` closed.
+    let op = match (count == 0, stamped == 0) {
+        (false, true) => Undo::Added { count },
+        (true, false) => Undo::Stamped { count: stamped },
+        _ => Undo::Group {
+            ops: vec![Undo::Added { count }, Undo::Stamped { count: stamped }],
+        },
+    };
+    state.record(op);
+    let what = match (count, stamped) {
+        (c, 0) => format!("{c} piece(s)"),
+        (0, t) => format!("{t} stamp(s)"),
+        (c, t) => format!("{c} piece(s) and {t} stamp(s)"),
+    };
+    state.status.note(format!("stamped {what} — click again stamps another"));
 }
 
 /// **The cell fine placement is confined to** — captured when the platform modifier goes down.
@@ -4474,6 +4610,11 @@ pub fn composition_from_set(
     set: &CloneSet,
     id: &str,
     library: &emerge_core::library::Library,
+    // **The composition set, because a captured stamp names one.** Refused at the door rather than
+    // trusted: `policy::layered_library` hard-refuses a composition whose member is missing, so
+    // writing a group that names a composition nobody defines produces a project that will not open
+    // at all — the failure `take_out_of_library` already guards from the other side.
+    compositions: &emerge_core::composition::Compositions,
 ) -> Result<emerge_core::composition::Composition, String> {
     use emerge_core::composition::{Body, Composition, Envelope, Member};
 
@@ -4485,7 +4626,7 @@ pub fn composition_from_set(
                     underscores, starting with a letter."
             .to_owned());
     }
-    if set.pieces.is_empty() {
+    if set.pieces.is_empty() && set.stamps.is_empty() {
         return Err("that box held nothing, so there is no composition to make".to_owned());
     }
 
@@ -4565,12 +4706,47 @@ pub fn composition_from_set(
         });
     }
 
+    // **A captured stamp nests by REFERENCE.** `Body::Composition { id }` is the schema's own way to
+    // say "another composition, in full — its internals are immutable from here", which is the
+    // encapsulation rule this item exists to honour: a group that copied the stamp's expanded rows
+    // would be a snapshot, and editing the inner composition would stop reaching it.
+    //
+    // Member ids are minted in the same shape as the pieces', off the composition's short name, so
+    // capturing the same box twice names the same members and an override survives a recapture.
+    for cs in &set.stamps {
+        if !compositions.compositions.iter().any(|c| c.id == cs.of) {
+            return Err(format!(
+                "`{}` is not a composition any more, so it cannot go in a group",
+                cs.of
+            ));
+        }
+        let short = short_id(&cs.of);
+        let n = seen.entry(short).or_insert(0);
+        *n += 1;
+        let id = if *n == 1 { short.to_owned() } else { format!("{short}_{n}") };
+        members.push(Member {
+            paint: 0,
+            id,
+            body: Body::Composition { id: cs.of.clone() },
+            at: (
+                cs.offset.0 - set.centre_off.0,
+                cs.offset.1 - set.centre_off.1,
+            ),
+            yaw: cs.yaw,
+            // A nested composition sits on the floor of the group that holds it: `Envelope::Bounded`
+            // rises from its anchor, so a lift here would be a second claim about the same datum.
+            lift: 0.0,
+            of_fingerprint: None,
+            note: cs.note.clone(),
+        });
+    }
+
     // **Sorted by id, because the schema requires it rather than prefers it.** One group has one
     // encoding, or two authors building the same thing produce diffs that differ without meaning to.
     // `Composition::validate_shape` refuses otherwise and names the order it wants.
     members.sort_by(|a, b| a.id.cmp(&b.id));
 
-    let size = envelope_size(set, &members, library)?;
+    let size = envelope_size(set, &members, library, compositions)?;
     let comp = Composition {
         id,
         envelope: Envelope::Bounded { size },
@@ -4607,6 +4783,7 @@ fn envelope_size(
     set: &CloneSet,
     members: &[emerge_core::composition::Member],
     library: &emerge_core::library::Library,
+    compositions: &emerge_core::composition::Compositions,
 ) -> Result<(f32, f32, f32), String> {
     use emerge_core::composition::Body;
     use emerge_core::map::{Map, Placed};
@@ -4634,6 +4811,34 @@ fn envelope_size(
     let ys = emerge_core::stack::resolve_y(&scratch, library)
         .map_err(|e| format!("the group's members do not stand up: {e}"))?;
     let mut top = 0.0f32;
+    // **A nested composition is measured through its own envelope**, not skipped. This loop used to
+    // `continue` past `Body::Composition` — correct while nothing could produce one, and wrong the
+    // moment a captured stamp can: a group holding only a nested one derived a height of zero and
+    // was refused by `validate_shape` for enclosing nothing, which is a true statement about a
+    // measurement that never looked.
+    for m in members {
+        let Body::Composition { id } = &m.body else {
+            continue;
+        };
+        let nested = compositions
+            .compositions
+            .iter()
+            .find(|c| &c.id == id)
+            .ok_or_else(|| format!("`{id}` is not a composition, so the group has no height"))?;
+        match nested.envelope {
+            emerge_core::composition::Envelope::Bounded { size } => {
+                top = top.max(m.lift + size.1);
+            }
+            // Refused by name rather than measured at zero: an `Anchored` group claims no tile, so
+            // there is no honest number to fold into a `Bounded` one that contains it.
+            emerge_core::composition::Envelope::Anchored => {
+                return Err(format!(
+                    "`{id}` is anchored, so it claims no space and a group cannot take its size \
+                     from it. Give it a bounded envelope first."
+                ))
+            }
+        }
+    }
     for (i, p) in scratch.placements.iter().enumerate() {
         let (Some(desc), Some(&y)) = (library.get(&p.descriptor), ys.get(i)) else {
             continue;
@@ -4667,7 +4872,17 @@ mod capture_tests {
     }
 
     fn held(pieces: Vec<ClonePiece>, centre_off: (f32, f32), half: (f32, f32)) -> CloneSet {
-        CloneSet { pieces, centre_off, half, yaw: 0.0 }
+        CloneSet { pieces, stamps: Vec::new(), centre_off, half, yaw: 0.0 }
+    }
+
+    /// No compositions — the capture tests are about loose pieces, and a nested member is covered
+    /// by its own test where the set actually holds a stamp.
+    fn no_compositions() -> emerge_core::composition::Compositions {
+        emerge_core::composition::Compositions {
+            version: emerge_core::composition::COMPOSITIONS_VERSION,
+            note: None,
+            compositions: Vec::new(),
+        }
     }
 
     /// **A turned set lands where a turned stamp would**, and comes back exactly.
@@ -4752,7 +4967,7 @@ mod capture_tests {
             (1.0, 0.0),
             (0.5, 0.5),
         );
-        let c = composition_from_set(&set, "Break Table", &library).expect("captures");
+        let c = composition_from_set(&set, "Break Table", &library, &no_compositions()).expect("captures");
 
         assert_eq!(c.id, "break_table", "the name is FORCED into snake_case, not checked");
         assert!(matches!(c.envelope, Envelope::Bounded { .. }), "capture is always bounded");
@@ -4788,7 +5003,7 @@ mod capture_tests {
             (0.0, 0.0),
             (1.0, 1.5),
         );
-        let c = composition_from_set(&set, "desk", &library).expect("captures");
+        let c = composition_from_set(&set, "desk", &library, &no_compositions()).expect("captures");
         let Envelope::Bounded { size } = c.envelope else { panic!("not bounded") };
         assert!((size.0 - 2.0).abs() < 1e-5, "width is the drag's, doubled: {}", size.0);
         assert!((size.2 - 3.0).abs() < 1e-5, "depth is the drag's, doubled: {}", size.2);
@@ -4808,22 +5023,22 @@ mod capture_tests {
         let library = lib(vec![measured, unmeasured, ceiling]);
 
         let outside = held(vec![at("crate", (0.0, 0.0), CloneHost::Outside)], (0.0, 0.0), (0.5, 0.5));
-        let e = composition_from_set(&outside, "g", &library).expect_err("must refuse");
+        let e = composition_from_set(&outside, "g", &library, &no_compositions()).expect_err("must refuse");
         assert!(e.contains("crate") && e.contains("outside"), "{e}");
 
         let unmeasured = held(vec![at("mystery", (0.0, 0.0), CloneHost::Layer)], (0.0, 0.0), (0.5, 0.5));
-        let e = composition_from_set(&unmeasured, "g", &library).expect_err("must refuse");
+        let e = composition_from_set(&unmeasured, "g", &library, &no_compositions()).expect_err("must refuse");
         assert!(e.contains("mystery") && e.contains("unmeasured"), "{e}");
 
         let hanging = held(vec![at("lamp", (0.0, 0.0), CloneHost::Layer)], (0.0, 0.0), (0.5, 0.5));
-        let e = composition_from_set(&hanging, "g", &library).expect_err("must refuse");
+        let e = composition_from_set(&hanging, "g", &library, &no_compositions()).expect_err("must refuse");
         assert!(e.contains("lamp") && e.contains("ceiling"), "{e}");
 
         let empty = held(Vec::new(), (0.0, 0.0), (0.5, 0.5));
-        assert!(composition_from_set(&empty, "g", &library).is_err(), "an empty box is nothing to keep");
+        assert!(composition_from_set(&empty, "g", &library, &no_compositions()).is_err(), "an empty box is nothing to keep");
 
         let named = held(vec![at("crate", (0.0, 0.0), CloneHost::Layer)], (0.0, 0.0), (0.5, 0.5));
-        let e = composition_from_set(&named, "!!!", &library).expect_err("must refuse");
+        let e = composition_from_set(&named, "!!!", &library, &no_compositions()).expect_err("must refuse");
         assert!(e.contains("snake_case"), "{e}");
     }
 
@@ -4840,7 +5055,7 @@ mod capture_tests {
             (0.0, 0.0),
             (1.0, 1.0),
         );
-        let c = composition_from_set(&set, "chairs", &library).expect("captures");
+        let c = composition_from_set(&set, "chairs", &library, &no_compositions()).expect("captures");
         let ids: Vec<&str> = c.members.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["chair", "chair_2", "chair_3"]);
     }
@@ -5894,7 +6109,7 @@ pub fn keep_as_group(
     raw: &str,
     confirmed: bool,
 ) -> Result<Kept, String> {
-    let comp = composition_from_set(set, raw, &project.library)?;
+    let comp = composition_from_set(set, raw, &project.library, &project.compositions)?;
     let id = comp.id.clone();
     let at = project.compositions.compositions.iter().position(|c| c.id == id);
 

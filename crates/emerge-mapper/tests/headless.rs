@@ -1324,6 +1324,113 @@ mod compose {
         assert_eq!(app.world().resource::<Project>().map.stamps[0].at, (7.0, 5.0));
     }
 
+    /// **A captured stamp nests by reference, and the nesting round-trips.**
+    ///
+    /// FVS-R-14's last two clauses: `CloneSet` carries either a piece or a stamp, and capturing a
+    /// box that holds one emits `Body::Composition { id }` rather than the rows it expands to.
+    ///
+    /// The distinction is the whole item. A group that copied the expanded rows would be a
+    /// snapshot: editing the inner composition afterwards would stop reaching it, which is exactly
+    /// the flattening `stamping_writes_a_reference_and_undo_takes_it_back` pins against for a map.
+    /// So this asserts the **body kind**, and then that stamping the outer group puts the inner
+    /// one's pieces on the map through the reference.
+    #[test]
+    fn a_captured_stamp_nests_by_reference_and_round_trips() {
+        use emerge_core::composition::Body;
+
+        let root = Fixture::new("nest")
+            .descriptor("table", "alpha")
+            .descriptor("chair", "alpha")
+            // **Bounded, because only a bounded group can size the one that nests it.** An
+            // anchored composition claims no tile, so there is no honest height to fold in — the
+            // capture refuses it by name, which is its own small proof that the guard works.
+            .bounded_composition(
+                "break_table",
+                (2.0, 1.2, 2.0),
+                &[("table", "table", (0.0, 0.0)), ("chair_north", "chair", (0.0, -1.0))],
+            )
+            .build("m");
+        let mut app = emerge_mapper::harness::build_headless(&root, "m", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        for _ in 0..3 {
+            app.update();
+        }
+
+        // A set holding one stamp and nothing else — the case that would divide by zero if the
+        // anchor were averaged over placements alone.
+        let set = emerge_mapper::editor::CloneSet {
+            pieces: Vec::new(),
+            stamps: vec![emerge_mapper::editor::CloneStamp {
+                of: "break_table".to_owned(),
+                offset: (0.0, 0.0),
+                yaw: 0.0,
+                overrides: Vec::new(),
+                owned: false,
+                owned_because: None,
+                note: None,
+            }],
+            centre_off: (0.0, 0.0),
+            half: (1.0, 1.0),
+            yaw: 0.0,
+        };
+
+        let comp = {
+            let project = app.world().resource::<Project>();
+            emerge_mapper::editor::composition_from_set(
+                &set,
+                "mess_corner",
+                &project.library,
+                &project.compositions,
+            )
+            .unwrap_or_else(|e| panic!("capture refused: {e}"))
+        };
+        assert_eq!(comp.members.len(), 1, "one stamp in, one member out");
+        assert!(
+            matches!(&comp.members[0].body, Body::Composition { id } if id == "break_table"),
+            "a captured stamp must nest by REFERENCE — copying its rows would flatten it, and \
+             editing `break_table` afterwards would stop reaching this group. Got {:?}",
+            comp.members[0].body
+        );
+
+        // And the reference resolves: stamping the outer group puts the inner one's pieces down.
+        {
+            let world = app.world_mut();
+            world.resource_scope(|world, mut project: bevy::prelude::Mut<Project>| {
+                project.compositions.compositions.push(comp.clone());
+                let mut state = world.resource_mut::<emerge_mapper::editor::EditorState>();
+                let mut compose = ComposeState {
+                    armed: Some("mess_corner".to_owned()),
+                    ..Default::default()
+                };
+                emerge_mapper::editor::stamp_here_for_test(
+                    &mut project,
+                    &mut state,
+                    &mut compose,
+                    (4.0, 4.0),
+                );
+            });
+        }
+        for _ in 0..3 {
+            app.update();
+        }
+
+        let project = app.world().resource::<Project>();
+        assert_eq!(project.map.stamps.len(), 1, "the outer group stamped");
+        assert_eq!(project.map.stamps[0].of, "mess_corner");
+        assert!(
+            project.map.placements.is_empty(),
+            "nesting must not write expanded rows into the map — the map holds the reference"
+        );
+        // Two rows drawn THROUGH the nested reference is what proves it resolved rather than
+        // merely parsed.
+        let picture = app.world().resource::<emerge_mapper::editor::StampPicture>();
+        assert_eq!(
+            picture.rows.len(),
+            2,
+            "the nested composition's two members must reach the map through the reference"
+        );
+    }
+
     /// **The focal group stands up with its neighbours either side** — the carousel, asked of a
     /// running app rather than of the layout function.
     ///
@@ -1945,6 +2052,7 @@ fn a_captured_group_is_written_and_reads_back() {
         ],
         centre_off: (0.25, 0.0),
         half: (0.75, 0.5),
+        stamps: Vec::new(),
         yaw: 0.0,
     };
     let kept = emerge_mapper::editor::keep_as_group(&mut project, &set, "Mess Table", false)
