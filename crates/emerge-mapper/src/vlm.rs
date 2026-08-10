@@ -335,20 +335,7 @@ fn front_measured_line(measured: Option<Option<Face>>) -> String {
 pub fn build_prompt(vocab: &Vocabularies, ctx: &PromptCtx) -> (String, String) {
     let surface_names: Vec<String> =
         vocab.surfaces.tokens.iter().map(|t| t.name.clone()).collect();
-    // The schema example. `what` FIRST — reasoning-first ordering is measured, not style
-    // (Tam et al. 2024); a future edit must not move it below the axis fields.
-    let schema = r#"{
-  "what": "one sentence: what real-world thing this is",
-  "kind": [], "effects": [], "look": [],
-  "offers_surfaces": [],
-  "mount": {"on": "floor"},
-  "front": "south",
-  "needs_turn": null,
-  "note": "one or two sentences a human author would keep",
-  "rooms": [], "group": null,
-  "confidence": "high",
-  "token_proposals": []
-}"#;
+    let schema = SCHEMA_EXAMPLE;
     let system = format!(
         "You label ONE 3D game asset for a level-placement library. You are given two renders of \
          the same asset: image 1 is a three-quarter front view, image 2 is a three-quarter rear \
@@ -427,8 +414,36 @@ pub fn build_prompt(vocab: &Vocabularies, ctx: &PromptCtx) -> (String, String) {
     (system, user)
 }
 
+/// **The key order the model is told to keep**, and the only place it is written.
+///
+/// `what` FIRST — reasoning-first ordering is measured, not style (Tam et al. 2024); a future edit
+/// must not move it below the axis fields.
+///
+/// Hoisted out of `build_prompt` so a test can hold it against [`RawSuggestion`]'s own fields. It
+/// was a local literal, which is the third way a prompt drifts from the code: add a field to the
+/// parser and the example does not mention it, the model is never asked for it, and nothing fails —
+/// the field simply arrives absent forever. `the_schema_example_names_every_field_the_parser_reads`
+/// closes that.
+pub const SCHEMA_EXAMPLE: &str = r#"{
+  "what": "one sentence: what real-world thing this is",
+  "kind": [], "effects": [], "look": [],
+  "offers_surfaces": [],
+  "mount": {"on": "floor"},
+  "front": "south",
+  "needs_turn": null,
+  "note": "one or two sentences a human author would keep",
+  "rooms": [], "group": null,
+  "confidence": "high",
+  "token_proposals": []
+}"#;
+
 /// The shape the model answers in, before the gate. Field order mirrors the schema example.
-#[derive(Debug, serde::Deserialize)]
+///
+/// `Serialize` is derived for one reason: it makes the field list **readable by a test**, so
+/// [`SCHEMA_EXAMPLE`] cannot quietly stop naming a field the parser reads. Every field carries
+/// `#[serde(default)]`, so `{}` parses — which is what lets that test build a complete value
+/// without a hand-written one to drift alongside.
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct RawSuggestion {
     #[serde(default)]
     pub what: String,
@@ -458,7 +473,7 @@ pub struct RawSuggestion {
     pub token_proposals: Vec<RawProposal>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct RawMount {
     pub on: String,
     #[serde(default)]
@@ -467,7 +482,7 @@ pub struct RawMount {
     pub class: Option<String>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct RawTurn {
     #[serde(default)]
     pub axis: String,
@@ -475,7 +490,7 @@ pub struct RawTurn {
     pub why: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct RawProposal {
     #[serde(default)]
     pub axis: String,
@@ -913,6 +928,31 @@ mod tests {
             .err()
             .unwrap_or_else(|| panic!("accepted"));
         assert!(e.contains("did you mean `light`"), "{e}");
+    }
+
+    /// **The schema example names every field the parser reads.**
+    ///
+    /// The example is what the model is told to answer in. Add a field to [`RawSuggestion`] and,
+    /// before this, nothing connected the two: the example would not mention it, the model would
+    /// never send it, and the field would arrive absent forever with no test going red.
+    ///
+    /// Derived from the type rather than from a list beside it — every field carries
+    /// `#[serde(default)]`, so `{}` parses into a complete value whose serialization *is* the field
+    /// set. A list written here would be the same drift one level up.
+    #[test]
+    fn the_schema_example_names_every_field_the_parser_reads() {
+        let complete: RawSuggestion =
+            serde_json::from_str("{}").expect("every field defaults, so an empty object parses");
+        let as_json = serde_json::to_value(&complete).expect("serializes");
+        let fields = as_json.as_object().expect("an object");
+        assert!(fields.len() >= 12, "sanity: the parser reads more than a couple of fields");
+        for key in fields.keys() {
+            assert!(
+                SCHEMA_EXAMPLE.contains(&format!("\"{key}\"")),
+                "the prompt's schema example never mentions `{key}`, so the model is not asked for \
+                 it and it will arrive absent forever. Example:\n{SCHEMA_EXAMPLE}"
+            );
+        }
     }
 
     /// **A measured front reaches the prompt, and a measured-symmetric mesh forbids one.**
