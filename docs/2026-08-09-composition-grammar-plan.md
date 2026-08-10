@@ -95,20 +95,49 @@ not reach are enclosed. Range 0–1.
 **Opening density** — doorway tiles per enclosed region, as a mean over regions. Zero means sealed
 boxes; unbounded means walls with no rooms.
 
-**Committed thresholds. The approach fails if, over 200 solves:**
+**Committed thresholds, 2026-08-10. The approach fails if, over a run sized by the calibration rule
+below:**
 
 | Signature | Reading |
 |---|---|
 | median enclosure **< 0.15** | the solver makes wall confetti, not rooms |
 | median enclosure **> 0.95** with opening density **< 0.5** | it makes sealed boxes nobody can enter |
-| the 2-D histogram occupies **< 5%** of its populated bounding box | one hot spot — uniform tiling or checkerboard, the two degenerate outcomes a small alphabet actually produces |
-| **> 20%** of solves return the `no arrangement satisfies what you have pinned` error | the alphabet is over-constrained; add tiles before judging the approach |
+| normalised entropy **`H / ln 36 < 0.25`** | one hot spot — uniform tiling or checkerboard, the two degenerate outcomes a small alphabet actually produces |
+| **any single bin holds more than 50% of solves** | the same failure seen the other way; entropy alone passes a 70% hot spot with a broad tail |
+| **> 20%** of solves return the `no arrangement satisfies what you have pinned` error | the alphabet is over-constrained; add tiles before judging the approach. **This row is a gate:** if it fires, the others are not interpretable |
 
 The last row is the one the closed §6 buys us: a failed solve is *named and loud*, so it is countable
 rather than being mistaken for a mediocre success.
 
-**These numbers are arguable and should be argued with now, before they cost anything.** What is not
-negotiable is that they are written down before the first solve is looked at.
+**The third row was rewritten, and the original is worth keeping visible because the fault is easy to
+repeat.** It read *"the 2-D histogram occupies < 5% of its populated bounding box"* — but a bounding
+box computed from the populated cells is defined by them, so with every solve in one bin the box **is**
+that bin and occupancy is 100%, the statistic's maximum. It is insensitive by construction to the case
+it exists to catch. A second draft — *"fewer than 5% of bins occupied"* — fails differently and worse:
+occupancy is blind to concentration, so 180 solves in one bin plus 20 scattered singly occupies 21 bins
+and passes with 90% of the mass in the hot spot. **A hot spot is a concentration, so the statistic has
+to be one.** Full argument, and why Cooper's constrained-coverage form is unavailable to this solver,
+in `research/2026-08-09-composition-grammar-decisions.md` §4.3.
+
+**The calibration rule, committed in place of X.** The achievable region of this plane is a function of
+the tile alphabet, and #25's census finds nine kinds missing — so a floor picked today would fire on
+alphabet poverty rather than generator bias, and nothing would distinguish them. From `pcgbook-ch12`:
+*"generate **increasingly large amounts of content and visualize the expressive range, stopping when
+the graphs begin to look the same**."* Fix the grid first (enclosure `[0,1]` × opening density `[0,4]`,
+**6 ranges per dimension, 36 bins** — the granularity the corpus's own worked example used, and not
+noise-dominated the way 400 bins would be at these sample sizes); run at doubling sizes until the
+histogram stabilises; then set X from the max-bin share of a uniform distribution over the
+*reachable* bins, times a stated multiple. Both halves get written down at calibration time.
+
+**What is not negotiable is that the rule is written down before the first solve is looked at, and that
+the number is derived from it rather than chosen after.** An uncalibrated number is not falsifiable; it
+is only unchangeable.
+
+**One metric is at risk on ch12's own test.** *"Strive to choose metrics that are as far as possible
+from the input parameters… a metric highly correlated to an input parameter can only ever provide
+confirmatory results."* Under a four-tile alphabet, **enclosure** is very nearly a restatement of how
+many wall and corner tiles the solver was permitted to place; **opening density** is the safer of the
+two. Not settleable before the alphabet is fixed — flagged, and revisited when it is.
 
 ---
 

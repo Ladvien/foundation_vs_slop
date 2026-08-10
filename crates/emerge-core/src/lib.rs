@@ -47,6 +47,7 @@ pub mod naming;
 pub mod placement;
 pub mod plot;
 pub mod policy;
+pub mod range;
 pub mod rig_check;
 pub mod rigs;
 pub mod rigs_edit;

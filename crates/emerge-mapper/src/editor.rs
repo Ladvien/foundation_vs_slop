@@ -155,7 +155,14 @@ pub struct EditorState {
     /// `pinning`'s shape and for the same reason: a group's name is the author's, and a canned one
     /// supplied by the editor would be a field nobody reads wearing a name nobody chose. The set it
     /// names is `CloneDrag::held`, which stays in hand until the name is committed or abandoned.
-    grouping: Option<String>,
+    pub grouping: Option<String>,
+    /// **Which existing composition the open name field has armed for replacement.**
+    ///
+    /// Capturing over a name that exists redefines it, which every stamp of it in every map follows.
+    /// That is destructive enough to ask twice, and the arm is what makes the second `Enter` mean
+    /// "yes, redefine it" rather than "I pressed Enter again". Cleared the moment the name is edited,
+    /// because the confirmation was for THAT name — the rule `tiles::DemoteArm` already follows.
+    pub replacing: Option<String>,
     /// The raw text being typed into the name, or `None` when not renaming.
     ///
     /// Raw, with the snake_case spelling applied for display and on commit — so a backspace undoes a
@@ -262,7 +269,25 @@ pub struct RemovalDrag {
 /// exactly what the first one did.
 #[derive(Resource, Default)]
 pub struct MoveDrag {
-    pub held: Option<String>,
+    pub held: Option<Held>,
+}
+
+/// **What the move tool has picked up.**
+///
+/// Ids, never indices, for [`MoveDrag`]'s own reason: an undo or a fill between the grab and the
+/// drop can move a row, and an index would then name a different piece. The two arms are the two
+/// things a click can land on — see [`Subject`], which answers *which* and is resolved to this.
+///
+/// FVS-R-14: a stamp moves as **one thing**. Grabbing a member and dragging it would be reaching
+/// *through* the instance, which is what `composition.rs`'s encapsulation rule forbids and what the
+/// missing `Placement` on stamped rows used to prevent by making it unreachable.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Held {
+    /// A loose placement, by [`emerge_core::map::Placed::id`]. Its riders come with it.
+    Piece(String),
+    /// A stamp, by [`emerge_core::composition::Stamped::id`]. Moving it writes `Stamped::at`; the
+    /// rows follow because `redraw_stamps` rebuilds them from the list.
+    Stamp(String),
 }
 
 /// The translucent red marker: the hovered piece's footprint, or the dragged rectangle.
@@ -306,10 +331,89 @@ pub enum CloneHost {
 
 /// The set in hand, plus the bounds the marker shows: centre offset from the anchor and
 /// half-extents, both from the pieces' own footprints at capture.
+/// **A stamp caught in the capture box**, carried whole.
+///
+/// FVS-R-14: *tools act on the instance, never through it.* A box that catches a nurse station
+/// takes the station, not its rows — copying expanded geometry would flatten the reference the
+/// schema exists to protect, which `stamping_writes_a_reference_and_undo_takes_it_back` pins.
+///
+/// Its own list beside [`CloneSet::pieces`] rather than an enum sharing one, and that is forced
+/// rather than chosen: [`CloneHost::InSet`] is an **index into `pieces`**, so interleaving a second
+/// kind would silently repoint every host a captured set carries.
+#[derive(Clone)]
+pub struct CloneStamp {
+    /// The [`emerge_core::composition::Composition`] id this instances.
+    pub of: String,
+    /// From the set's anchor, in map metres — the same frame [`ClonePiece::offset`] uses.
+    pub offset: (f32, f32),
+    pub yaw: f32,
+    /// Carried verbatim: an override is a statement about *this* instance, and a copy that dropped
+    /// them would be a different nurse station wearing the same name.
+    pub overrides: Vec<emerge_core::composition::Override>,
+    pub owned: bool,
+    pub owned_because: Option<String>,
+    pub note: Option<String>,
+}
+
 pub struct CloneSet {
     pub pieces: Vec<ClonePiece>,
+    /// Stamps the box caught. See [`CloneStamp`].
+    pub stamps: Vec<CloneStamp>,
     pub centre_off: (f32, f32),
     pub half: (f32, f32),
+    /// **How far the whole set has been turned**, degrees about +Y, applied about the anchor the
+    /// pieces are offset from.
+    ///
+    /// Its own field rather than folded into each piece's yaw at the moment of turning: an offset
+    /// rotated repeatedly accumulates float error, and a set turned four times by 90° has to come
+    /// back to exactly where it started or "turn it round and put it back" quietly moves the group.
+    /// Kept as one angle and applied once, at stamp and at preview.
+    pub yaw: f32,
+}
+
+impl CloneSet {
+    /// **Where a piece lands and which way it faces**, with the set's own turn folded in.
+    ///
+    /// Through `emerge_core::composition::rotate_xz` — the function a *stamp* rotates by — rather
+    /// than a local copy of the sign convention. Bevy's yaw turns +X toward −Z, and a second copy of
+    /// that is how a set turned 90° would come out mirrored against a composition turned 90°.
+    pub fn placed(&self, piece: &ClonePiece, target: (f32, f32)) -> ((f32, f32), f32) {
+        let off = emerge_core::composition::rotate_xz(piece.offset, self.yaw);
+        (
+            (target.0 + off.0, target.1 + off.1),
+            emerge_core::composition::add_yaw(piece.yaw, self.yaw),
+        )
+    }
+
+    /// [`Self::placed`] for a carried stamp — the same turn, applied to a whole instance.
+    pub fn placed_stamp(&self, st: &CloneStamp, target: (f32, f32)) -> ((f32, f32), f32) {
+        let off = emerge_core::composition::rotate_xz(st.offset, self.yaw);
+        (
+            (target.0 + off.0, target.1 + off.1),
+            emerge_core::composition::add_yaw(st.yaw, self.yaw),
+        )
+    }
+
+    /// The turned set's axis-aligned footprint, for the marker that outlines it. A rotated rectangle
+    /// is not a rectangle, so the box the author sees is the rotated one's **bounds** — which is what
+    /// a box drawn on the ground can honestly show.
+    pub fn bounds(&self, target: (f32, f32)) -> (f32, f32, f32, f32) {
+        let c = emerge_core::composition::rotate_xz(self.centre_off, self.yaw);
+        let (cx, cz) = (target.0 + c.0, target.1 + c.1);
+        let corners = [
+            (-self.half.0, -self.half.1),
+            (self.half.0, -self.half.1),
+            (self.half.0, self.half.1),
+            (-self.half.0, self.half.1),
+        ];
+        let (mut hx, mut hz) = (0.0f32, 0.0f32);
+        for corner in corners {
+            let r = emerge_core::composition::rotate_xz(corner, self.yaw);
+            hx = hx.max(r.0.abs());
+            hz = hz.max(r.1.abs());
+        }
+        (cx - hx, cz - hz, cx + hx, cz + hz)
+    }
 }
 
 /// The clone tool's state: the box being dragged, or the set in hand. Its own resource for the
@@ -401,6 +505,21 @@ enum Undo {
     UnstampedMany {
         items: Vec<(usize, Box<emerge_core::composition::Stamped>)>,
     },
+    /// **Take these exact stamps off the list** — the inverse of [`Undo::UnstampedMany`], and the
+    /// stamp-side twin of [`Undo::RemoveAt`].
+    ///
+    /// `UnstampedMany` used to invert to [`Undo::Stamped`], which drains the **tail**. That is
+    /// correct for the only thing that recorded it — `stamp_here` appends, so the stamps it put down
+    /// *are* the tail — and wrong the moment a stamp is removed from the middle, which is what
+    /// FVS-R-14's delete does: undo would put it back at index 3 and redo would then take the last
+    /// one off instead. Indices, like every other paired removal in this file.
+    UnstampAt { indices: Vec<usize> },
+    /// **Put a stamp back where it was.** Its own inverse — a move is a move either way, so unlike
+    /// the placement pair there is no second variant.
+    ///
+    /// By id rather than index, because [`Undo::UnstampAt`] can reorder the list between the move
+    /// and the undo, and an index would then move somebody else.
+    MovedStamp { id: String, from: (f32, f32) },
     /// Put a placement's pin back, reason included. Its own inverse.
     Pinned {
         index: usize,
@@ -423,6 +542,7 @@ impl Default for EditorState {
             collapsed: std::collections::HashSet::new(),
             pinning: None,
             grouping: None,
+            replacing: None,
             renaming: None,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -546,8 +666,6 @@ enum Field {
     /// could be read. Two different questions — "what did I just do" and "why can't I place this" —
     /// so two lines.
     Hint,
-    /// The name being typed for a group being captured. Silent otherwise.
-    Group,
     /// **What the piece-verbs would act on**, and the chord that opens it for editing.
     ///
     /// The readout the panel was missing. `BRUSH` says what a click would *place*; nothing said what
@@ -572,7 +690,6 @@ impl Field {
             Field::Yaw => "YAW",
             Field::Map => "MAP",
             Field::Under => "UNDER",
-            Field::Group => "GROUP",
             Field::Last => "",
             Field::Hint => "",
         }
@@ -590,6 +707,9 @@ impl Plugin for EditorPlugin {
             .init_resource::<MoveDrag>()
             .init_resource::<CloneDrag>()
             .init_resource::<TargetLock>()
+            // Written by `redraw_stamps` and read by `pick_subject`'s callers, so this plugin owns
+            // it — a missing `ResMut` panics its system in Bevy 0.19 rather than skipping it.
+            .init_resource::<StampPicture>()
             // Read by `refresh_status`, so this plugin owns it — a missing `Res<T>` panics its
             // system in Bevy 0.19 rather than skipping it (`CLAUDE.md`).
             .init_resource::<UnderCursor>()
@@ -651,6 +771,9 @@ impl Plugin for EditorPlugin {
                     (
                         pin_reason_keys.in_set(keys::Phase::Text),
                         group_name_keys.in_set(keys::Phase::Text),
+                        // Before the fields, so the frame a tab changes on is the frame the prompt
+                        // goes down, rather than one where it is invisible and still eating keys.
+                        leaving_a_tab_puts_the_name_prompt_down.in_set(keys::Phase::Sense),
                     ),
                     size_edit_keys.in_set(keys::Phase::Text),
                     // No `not_typing`, no `in_map_mode`: `keys::just_pressed` now refuses on both
@@ -671,7 +794,11 @@ impl Plugin for EditorPlugin {
                     // guard. Both touch `TargetLock`, so they are named together.
                     (drive_target_marker, sense_under_cursor).run_if(in_map_mode),
                     hide_carried.run_if(in_map_mode),
-                    drive_ghost.run_if(in_map_mode),
+                    // **Nested, because this tuple is at Bevy 0.19's cap of 20.** The pair is the
+                    // two previews: one piece keyed by library index, and a whole set. Not folded
+                    // into one system — that would be one system with two subjects and two
+                    // lifetimes.
+                    (drive_ghost, drive_clone_ghost).run_if(in_map_mode),
                     // **Not gated on the mode.** The stamped rows are part of the map, so they stay
                     // drawn while an author is on Tiles or Compose looking at the group that made
                     // them — a world that empties out when you change tabs would read as the stamp
@@ -786,7 +913,6 @@ fn spawn_panel(mut commands: Commands) {
                 Field::Yaw,
                 Field::Map,
                 Field::Under,
-                Field::Group,
                 Field::Last,
                 Field::Hint,
                 Field::Edges,
@@ -1580,13 +1706,6 @@ fn refresh_status(
             // A caret while typing, so an empty field reads as "waiting for you" rather than as
             // nothing happening — the rename field's rule. Forced to snake_case as it is typed, so
             // the naming rule teaches itself.
-            Field::Group => match &state.grouping {
-                Some(raw) => (
-                    format!("{}_", emerge_core::naming::to_snake_case(raw)),
-                    ACCENT,
-                ),
-                None => (String::new(), DIM),
-            },
             Field::Yaw => (format!("{} deg", state.brush_yaw), TEXT),
             Field::Map => (
                 // Counted by `emerge_core::census`, never here — see
@@ -1685,16 +1804,15 @@ pub fn sense_context(
     note: Res<crate::tiles::NoteEdit>,
     width: Res<crate::tiles::ScaleEdit>,
     height: Res<crate::tiles::HeightEdit>,
-    compose: Res<crate::compose::ComposeState>,
     mut live: ResMut<keys::Live>,
 ) {
     let typing = state.renaming.is_some()
         || state.pinning.is_some()
-        // **`grouping` was missing here**, so naming a captured group on the Map also dispatched Map
-        // actions for every letter typed — `corner` fired aim, turn, rename-map and turn-view. Added
-        // with `compose.naming`, which is the same field on the other tab.
+        // **`grouping` was missing here**, so naming a captured composition also dispatched Map
+        // actions for every letter typed — `corner` fired aim, turn, rename-map and turn-view. It was
+        // added alongside Compose's own name field; that tab no longer has one, and this is now the
+        // only text field that can be open while the Map holds the keyboard.
         || state.grouping.is_some()
-        || compose.naming.is_some()
         || edit.active.is_some()
         || import.renaming.is_some()
         || filters.typing()
@@ -2036,6 +2154,7 @@ fn drive_clone(
     mut drag: ResMut<CloneDrag>,
     mut project: ResMut<Project>,
     mut state: ResMut<EditorState>,
+    picture: Res<StampPicture>,
 ) {
     // Read, never write, unless something happened — `rebuild_palette` watches `state`.
     if state.tool != Tool::Clone {
@@ -2075,9 +2194,7 @@ fn drive_clone(
     // What the marker shows: the held set's bounds riding the (snapped) cursor, else the box being
     // dragged out.
     let rect = if let Some(set) = &drag.held {
-        let target = (snap(at.0), snap(at.1));
-        let c = (target.0 + set.centre_off.0, target.1 + set.centre_off.1);
-        Some((c.0 - set.half.0, c.1 - set.half.1, c.0 + set.half.0, c.1 + set.half.1))
+        Some(set.bounds((snap(at.0), snap(at.1))))
     } else {
         drag.from.map(|from| {
             (from.0.min(at.0), from.1.min(at.1), from.0.max(at.0), from.1.max(at.1))
@@ -2135,17 +2252,44 @@ fn drive_clone(
         .filter(|(_, p)| p.at.0 >= x0 && p.at.0 <= x1 && p.at.1 >= z0 && p.at.1 <= z1)
         .map(|(i, _)| i)
         .collect();
-    if caught.is_empty() {
+    // **Stamps the box catches come whole**, on the rule the removal box already follows and for the
+    // stronger reason: a box clipping the corner of a nurse station cannot take a corner of it, so
+    // the choice is the instance or nothing. Caught by any drawn row's centre, which is the same
+    // test the placements above use.
+    let caught_stamps: Vec<usize> = {
+        let mut v: Vec<usize> = picture
+            .rows
+            .iter()
+            .filter(|r| r.at.0 >= x0 && r.at.0 <= x1 && r.at.1 >= z0 && r.at.1 <= z1)
+            .filter_map(|r| project.map.stamps.iter().position(|s| s.id == r.stamp))
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    if caught.is_empty() && caught_stamps.is_empty() {
         state.status.note("nothing in that box to clone".to_owned());
         return;
     }
 
     // The anchor is the snapped centroid, so the set rides centred under the hand and stamps land
     // on the grid while every internal offset stays exact.
-    let n = caught.len() as f32;
-    let cx: f32 = caught.iter().map(|&i| project.map.placements[i].at.0).sum::<f32>() / n;
-    let cz: f32 = caught.iter().map(|&i| project.map.placements[i].at.1).sum::<f32>() / n;
-    let anchor = (snap(cx), snap(cz));
+    //
+    // **Over both lists**, or a box holding only stamps divides by zero — and a set anchored on the
+    // placements alone would ride off-centre the moment the two kinds are mixed.
+    let mut sum = (0.0f32, 0.0f32);
+    let mut n = 0.0f32;
+    for &i in &caught {
+        sum.0 += project.map.placements[i].at.0;
+        sum.1 += project.map.placements[i].at.1;
+        n += 1.0;
+    }
+    for &i in &caught_stamps {
+        sum.0 += project.map.stamps[i].at.0;
+        sum.1 += project.map.stamps[i].at.1;
+        n += 1.0;
+    }
+    let anchor = (snap(sum.0 / n), snap(sum.1 / n));
 
     let mut pieces = Vec::with_capacity(caught.len());
     let (mut bx0, mut bz0, mut bx1, mut bz1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
@@ -2182,14 +2326,54 @@ fn drive_clone(
             on,
         });
     }
-    let count = pieces.len();
+    // The stamps, carried whole. Their bounds come from the rows the picture already knows about,
+    // so the marker claims what the stamp actually covers rather than a point at its anchor.
+    let mut stamps = Vec::with_capacity(caught_stamps.len());
+    for &i in &caught_stamps {
+        let st = &project.map.stamps[i];
+        let offset = (st.at.0 - anchor.0, st.at.1 - anchor.1);
+        for row in picture.rows.iter().filter(|r| r.stamp == st.id) {
+            let (w, depth) = project
+                .library
+                .get(&row.descriptor)
+                .map(|d| crate::fill::cell_extents(d, row.yaw))
+                .unwrap_or((crate::fill::MIN_CELL, crate::fill::MIN_CELL));
+            let ro = (row.at.0 - anchor.0, row.at.1 - anchor.1);
+            bx0 = bx0.min(ro.0 - w * 0.5);
+            bz0 = bz0.min(ro.1 - depth * 0.5);
+            bx1 = bx1.max(ro.0 + w * 0.5);
+            bz1 = bz1.max(ro.1 + depth * 0.5);
+        }
+        stamps.push(CloneStamp {
+            of: st.of.clone(),
+            offset,
+            yaw: st.yaw,
+            overrides: st.overrides.clone(),
+            owned: st.owned,
+            owned_because: st.owned_because.clone(),
+            note: st.note.clone(),
+        });
+    }
+
+    let count = pieces.len() + stamps.len();
     drag.held = Some(CloneSet {
         pieces,
+        stamps,
         centre_off: ((bx0 + bx1) * 0.5, (bz0 + bz1) * 0.5),
         half: ((bx1 - bx0) * 0.5, (bz1 - bz0) * 0.5),
+        yaw: 0.0,
     });
-    state.status
-        .note(format!("{count} piece(s) in hand — click stamps the set, Esc puts it away"));
+    // **Every verb the set has, said at the moment it exists.** The census carries them — `B,
+    // Shift+B, M` collapsed onto one row to stay under the Map context's twelve-row ceiling — but
+    // that row lives behind `K`, and "how do I keep this as a composition" was asked twice by an
+    // author holding a set. A just-in-time line costs nothing and is read where the census is not.
+    state.status.note(format!(
+        "{count} piece(s) in hand — click stamps the set, {}/{} turn it, {} keeps it as a \
+         composition, Esc puts it away",
+        keys::binding(Action::AimLeft).chord,
+        keys::binding(Action::AimRight).chord,
+        keys::chord_text(keys::binding(Action::GroupFromSet)),
+    ));
 }
 
 /// **Stamp the held set at `target`** — all of it, or none of it, the rule `move_placement` states.
@@ -2225,7 +2409,8 @@ fn stamp_set(
 
     let mut rows: Vec<Placed> = Vec::with_capacity(set.pieces.len());
     for (i, piece) in set.pieces.iter().enumerate() {
-        let at = (target.0 + piece.offset.0, target.1 + piece.offset.1);
+        // The set's own turn, folded in once — see `CloneSet::placed`.
+        let (at, yaw) = set.placed(piece, target);
         let Some(d) = project.library.get(&piece.descriptor) else {
             state.status.problem(format!(
                 "stamp refused: `{}` is not in the library any more",
@@ -2255,7 +2440,7 @@ fn stamp_set(
             &project.library,
             d,
             at,
-            piece.yaw,
+            yaw,
             piece.tip,
             on.as_deref(),
         ) {
@@ -2270,7 +2455,7 @@ fn stamp_set(
             id: new_ids[i].clone(),
             descriptor: piece.descriptor.clone(),
             at,
-            yaw: piece.yaw,
+            yaw,
             lift: piece.lift,
             tip: piece.tip,
             on,
@@ -2291,14 +2476,57 @@ fn stamp_set(
     }
 
     let count = rows.len();
+    // **A carried stamp lands as a stamp**, not as the rows it expands to. Copying expanded
+    // geometry would flatten the reference `stamping_writes_a_reference_and_undo_takes_it_back`
+    // exists to protect — the instance is the thing that was picked up, so the instance is the
+    // thing put down.
+    let mut fresh: Vec<emerge_core::composition::Stamped> = Vec::with_capacity(set.stamps.len());
+    for cs in &set.stamps {
+        if !project.compositions.compositions.iter().any(|c| c.id == cs.of) {
+            state.status.problem(format!(
+                "stamp refused: `{}` is not a composition any more",
+                cs.of
+            ));
+            return;
+        }
+        n += 1;
+        let (at, yaw) = set.placed_stamp(cs, target);
+        fresh.push(emerge_core::composition::Stamped {
+            id: format!("{}@{}", short_id(&cs.of), n),
+            of: cs.of.clone(),
+            at,
+            yaw,
+            overrides: cs.overrides.clone(),
+            of_fingerprint: None,
+            owned: cs.owned,
+            owned_because: cs.owned_because.clone(),
+            note: cs.note.clone(),
+        });
+    }
+
     let first = project.map.placements.len();
     state.next_id = n;
     project.map.placements.extend(rows);
+    let stamped = fresh.len();
+    project.map.stamps.extend(fresh);
     spawn_range(commands, assets, project, state, first);
     project.dirty = true;
-    // One entry for the whole set: one act the author performed is one act to take back.
-    state.record(Undo::Added { count });
-    state.status.note(format!("stamped {count} piece(s) — click again stamps another"));
+    // One entry for the whole set: one act the author performed is one act to take back. Two lists
+    // means a `Group`, whose inverses run in reverse order — the property that keeps `Undo` closed.
+    let op = match (count == 0, stamped == 0) {
+        (false, true) => Undo::Added { count },
+        (true, false) => Undo::Stamped { count: stamped },
+        _ => Undo::Group {
+            ops: vec![Undo::Added { count }, Undo::Stamped { count: stamped }],
+        },
+    };
+    state.record(op);
+    let what = match (count, stamped) {
+        (c, 0) => format!("{c} piece(s)"),
+        (0, t) => format!("{t} stamp(s)"),
+        (c, t) => format!("{c} piece(s) and {t} stamp(s)"),
+    };
+    state.status.note(format!("stamped {what} — click again stamps another"));
 }
 
 /// **The cell fine placement is confined to** — captured when the platform modifier goes down.
@@ -2470,6 +2698,7 @@ fn drive_removal(
     mut drag: ResMut<RemovalDrag>,
     mut project: ResMut<Project>,
     mut state: ResMut<EditorState>,
+    picture: Res<StampPicture>,
 ) {
     // Read, never write, unless something actually happened: `state` is watched by
     // `rebuild_palette`, so an unconditional deref here rebuilds the palette every frame.
@@ -2559,8 +2788,14 @@ fn drive_removal(
     };
 
     if (from.0 - at.0).abs() <= CLICK_EPS && (from.1 - at.1).abs() <= CLICK_EPS {
-        match pick_at(&project, at) {
-            Some(i) => delete_index(&mut commands, i, &mut project, &mut state, &placed),
+        match pick_subject(&project, &picture, at) {
+            Some(Subject::Placement(i)) => {
+                delete_index(&mut commands, i, &mut project, &mut state, &placed)
+            }
+            // **The instance, whole.** A click landed on one member of it; removing that member is
+            // reaching *through* the stamp, which is the thing `composition.rs`'s encapsulation rule
+            // forbids and which the missing `Placement` used to prevent by making it unreachable.
+            Some(Subject::Stamp(id)) => delete_stamp(&id, &mut project, &mut state),
             None => state.status.note("nothing here to remove"),
         }
         return;
@@ -2583,7 +2818,21 @@ fn drive_removal(
         .collect();
     doomed.sort_unstable();
     doomed.dedup();
-    if doomed.is_empty() {
+
+    // **A stamp the box touches goes whole**, on the same rule as a group of placements and for a
+    // stronger reason: a box clipping the corner of a nurse station cannot take a corner of it, so
+    // the choice is the instance or nothing. Caught by any drawn row's centre, which is the test the
+    // rows above use, so a stamp and a loose piece are caught by one rule rather than two.
+    let mut stamps: Vec<usize> = picture
+        .rows
+        .iter()
+        .filter(|r| r.at.0 >= x0 && r.at.0 <= x1 && r.at.1 >= z0 && r.at.1 <= z1)
+        .filter_map(|r| project.map.stamps.iter().position(|s| s.id == r.stamp))
+        .collect();
+    stamps.sort_unstable();
+    stamps.dedup();
+
+    if doomed.is_empty() && stamps.is_empty() {
         state.status.note("nothing inside that box");
         return;
     }
@@ -2603,13 +2852,71 @@ fn drive_removal(
     // Ascending again, which is the order `Undo::RemovedMany` puts them back in.
     items.reverse();
 
+    // Descending here too, and after the placements: taking a stamp off `map.stamps` does not shift
+    // `map.placements`, so the two lists are independent — but within the stamp list the same rule
+    // applies, and getting it wrong is silent.
+    let mut taken: Vec<(usize, Box<emerge_core::composition::Stamped>)> =
+        Vec::with_capacity(stamps.len());
+    for i in stamps.iter().rev() {
+        taken.push((*i, Box::new(project.map.stamps.remove(*i))));
+    }
+    taken.reverse();
+
     let n = items.len();
-    state.record(Undo::RemovedMany { items });
+    let m = taken.len();
+    // **One keypress, one undo.** A box that caught both leaves two edits behind, and `Undo::Group`
+    // exists so they come back together — its own doc: "two separate entries would make one keypress
+    // two undos". Inverses run in reverse order, which is what keeps the enum closed under
+    // inversion, so the stamps go on last and come back first.
+    let op = match (items.is_empty(), taken.is_empty()) {
+        (false, true) => Undo::RemovedMany { items },
+        (true, false) => Undo::UnstampedMany { items: taken },
+        _ => Undo::Group {
+            ops: vec![
+                Undo::RemovedMany { items },
+                Undo::UnstampedMany { items: taken },
+            ],
+        },
+    };
+    state.record(op);
     project.dirty = true;
     // The whole chord, rendered by the census — naming just the modifier told the author to press
     // `Cmd`, which is not a thing anyone can do.
+    let what = match (n, m) {
+        (n, 0) => format!("{n} placement(s)"),
+        (0, m) => format!("{m} stamp(s)"),
+        (n, m) => format!("{n} placement(s) and {m} stamp(s)"),
+    };
     state.status.note(format!(
-        "removed {n} placement(s) — {} puts them back",
+        "removed {what} — {} puts them back",
+        keys::chord_text(keys::binding(Action::Undo))
+    ));
+}
+
+/// **Take a stamp off the map, whole.**
+///
+/// FVS-R-14's Delete arm: *"Delete removes the **instance**."* Named by [`Stamped::id`] and never by
+/// an index, because the caller picked it a frame ago and the list can have moved since — the rule
+/// [`MoveDrag`] states for placements and which applies here for the same reason.
+///
+/// The entities are not despawned here. `redraw_stamps` rebuilds the whole stamped set from
+/// `map.stamps`, so there is one place that turns a stamp list into pictures rather than two that
+/// could disagree about what is on screen — the same argument the undo arms make.
+fn delete_stamp(id: &str, project: &mut Project, state: &mut EditorState) {
+    let Some(index) = project.map.stamps.iter().position(|s| s.id == id) else {
+        // Not an error worth a banner: the author clicked something that has since gone, which undo
+        // and a second click can both produce.
+        state.status.note(format!("`{id}` is not on this map any more"));
+        return;
+    };
+    let removed = project.map.stamps.remove(index);
+    let of = removed.of.clone();
+    state.record(Undo::UnstampedMany {
+        items: vec![(index, Box::new(removed))],
+    });
+    project.dirty = true;
+    state.status.note(format!(
+        "removed `{id}` — the whole `{of}`, not a piece of it. {} puts it back",
         keys::chord_text(keys::binding(Action::Undo))
     ));
 }
@@ -2960,14 +3267,22 @@ fn redraw_stamps(
     assets: Res<AssetServer>,
     project: Res<Project>,
     mut state: ResMut<EditorState>,
-    drawn: Query<Entity, With<StampedPiece>>,
+    mut picture: ResMut<StampPicture>,
+    drawn: Query<Entity, With<StampInstance>>,
 ) {
     if !project.is_changed() {
         return;
     }
+    // **The instance, not the rows.** `Children` is `linked_spawn`, so this takes the pieces with
+    // it; despawning the rows instead would leave a childless parent behind on every redraw, and
+    // those are what the tools pick against.
     for e in &drawn {
         commands.entity(e).despawn();
     }
+    // Cleared here and not on each `return` below: the index describes the entities that exist, and
+    // they are gone as of the line above. A path that rebuilds neither leaves both empty, which is
+    // the truth — a map whose stamps do not resolve is drawing nothing.
+    picture.rows.clear();
     if project.map.stamps.is_empty() {
         return;
     }
@@ -3002,6 +3317,11 @@ fn redraw_stamps(
     };
     let first = project.map.placements.len();
     let mut drawn = 0usize;
+    // **One parent per stamp, minted on first sight of a row belonging to it.** Identity, not a
+    // transform node: the rows already carry world positions from `spawn_piece`, and a parent with a
+    // translation would apply it twice. What the parent buys is a lifetime — `Children` is
+    // `linked_spawn`, so despawning it takes the rows — and something for a tool to name.
+    let mut instances: std::collections::HashMap<&str, Entity> = std::collections::HashMap::new();
     for (k, p) in expanded.placements.iter().enumerate() {
         let Some(base) = project.library.get(&p.descriptor) else {
             error!("emerge-mapper: stamped row `{}` names descriptor `{}`, which the library does not define", p.id, p.descriptor);
@@ -3012,6 +3332,16 @@ fn redraw_stamps(
             None => base.clone(),
         };
         let Some(&y) = ys.get(first + k) else { continue };
+        // **Provenance as structure.** `Expansion::from` is returned for exactly this, so that no
+        // consumer splits `<stamp>/<member>` back apart — its own doc says so.
+        let Some((stamp_id, _member)) = expanded.from.get(&p.id) else {
+            error!(
+                "emerge-mapper: expanded row `{}` has no provenance — it belongs to no stamp, which \
+                 `expand` is not supposed to be able to produce",
+                p.id
+            );
+            continue;
+        };
         if let Some(e) = spawn_piece(
             &mut commands,
             &assets,
@@ -3022,10 +3352,41 @@ fn redraw_stamps(
             project.map.origin,
             y,
         ) {
-            commands.entity(e).insert(StampedPiece);
+            let parent = match instances.get(stamp_id.as_str()) {
+                Some(&parent) => parent,
+                None => {
+                    let of = project
+                        .map
+                        .stamps
+                        .iter()
+                        .find(|s| &s.id == stamp_id)
+                        .map(|s| s.of.clone())
+                        .unwrap_or_default();
+                    let parent = commands
+                        .spawn((
+                            StampInstance { id: stamp_id.clone(), of },
+                            // A spatial node with nothing of its own to place: the children are
+                            // already where they belong, and `Visibility` is required for them to
+                            // inherit one.
+                            Transform::IDENTITY,
+                            Visibility::default(),
+                        ))
+                        .id();
+                    instances.insert(stamp_id.as_str(), parent);
+                    parent
+                }
+            };
+            commands.entity(e).insert((StampedPiece, ChildOf(parent)));
             if p.paint != 0 {
                 commands.entity(e).insert(emerge_bevy::Paint(p.paint));
             }
+            picture.rows.push(StampRow {
+                stamp: stamp_id.clone(),
+                row: p.id.clone(),
+                at: p.at,
+                yaw: p.yaw,
+                descriptor: p.descriptor.clone(),
+            });
             drawn += 1;
         }
     }
@@ -3040,6 +3401,77 @@ fn redraw_stamps(
 /// picture of it, rebuilt whole.
 #[derive(Component)]
 struct StampedPiece;
+
+/// **The stamp as one thing** — a parent entity per [`Stamped`] row, with the pieces it expands to
+/// as children.
+///
+/// FVS-R-14. Stamped rows deliberately carry no [`Placement`], *"so the remove, move and clone tools
+/// cannot see them at all"* — right while stamps were output-only, and wrong the moment authoring
+/// moved to the Map. **The fix is not to give them one.** A `Placement` on an expanded row makes
+/// every tool edit *rows*, which is the failure the omission prevented: delete would take one member
+/// out of an instance, clone would copy expanded geometry and flatten the reference
+/// `stamping_writes_a_reference_and_undo_takes_it_back` exists to protect.
+///
+/// What was missing is a **selectable identity for the instance**, which is this. `Children` in Bevy
+/// 0.19 is `#[relationship_target(relationship = ChildOf, linked_spawn)]`
+/// (`bevy_ecs-0.19.0/src/hierarchy.rs:148`), so despawning this despawns the rows — the lifetime is
+/// the engine's, not a bookkeeping list to keep in step. And `Query<&Placement>` still correctly
+/// matches nothing here, so every existing tool is unchanged by construction.
+///
+/// **One rule: tools act on the instance, never through it** — the USD-style encapsulation
+/// `composition.rs`'s header already states, *"a stamp may override values, never delete/re-parent/
+/// reach into a nested composition"*.
+#[derive(Component)]
+pub struct StampInstance {
+    /// The [`Stamped::id`] this stands for.
+    pub id: String,
+    /// The [`Composition::id`] it is an instance of — carried so a status line can name what an
+    /// author is about to remove without going back to the map to look it up.
+    pub of: String,
+}
+
+/// **Where the drawn stamped rows are**, so a tool can answer "which stamp is under the cursor".
+///
+/// The picture layer's own index, written by [`redraw_stamps`] alongside the entities and rebuilt
+/// with them — not a second source of truth, and exactly as derived as the entities are. It exists
+/// because the alternative is calling `composition::expand` over every stamp inside the hover
+/// marker's per-frame path; `site_67` alone is 144 of them.
+///
+/// **Provenance comes from `Expansion::from`, never from splitting an id.** That map's own doc says
+/// it exists so *"no consumer parses an id back apart"*.
+#[derive(Resource, Default)]
+pub struct StampPicture {
+    pub rows: Vec<StampRow>,
+}
+
+/// One drawn row, and the stamp it belongs to.
+pub struct StampRow {
+    /// [`Stamped::id`] — an id and never an index, the rule [`MoveDrag`] states: the stamp list can
+    /// shift under a held subject, and an index would then name a different stamp.
+    pub stamp: String,
+    /// The expanded row's own id. Unique across placements *and* stamped rows — `expand` refuses a
+    /// stamp id used twice for exactly this reason — which is what lets [`pick_subject`] rank both
+    /// lists in one competition with a total key.
+    pub row: String,
+    pub at: (f32, f32),
+    pub yaw: f32,
+    pub descriptor: String,
+}
+
+/// **What a click on the map is about** — one competition over both lists.
+///
+/// A loose piece and a stamped row can legally overlap, so "which did I mean" cannot be answered by
+/// asking one list and then the other: whichever is asked first wins regardless of what the author
+/// can see. [`pick_subject`] runs `pick_at`'s rule — smallest footprint covering the probe — across
+/// both, and a stamped row resolves to its **stamp**, which is the whole of "tools act on the
+/// instance, never through it".
+#[derive(Clone, Debug, PartialEq)]
+pub enum Subject {
+    /// An index into `map.placements`.
+    Placement(usize),
+    /// A [`Stamped::id`]. Not an index, for [`StampRow::stamp`]'s reason.
+    Stamp(String),
+}
 
 /// Undo and redo, reachable from `tests/headless.rs`.
 ///
@@ -3090,6 +3522,75 @@ pub fn stamp_here_for_test(
     stamp_here(project, state, compose, at);
 }
 
+/// FVS-R-14's Delete arm, reachable from `tests/headless.rs` — the same split, and for the same
+/// reason: the mouse path is not drivable headless, and a test that re-implemented the body would
+/// pass while the real one was broken.
+pub fn delete_stamp_for_test(id: &str, project: &mut Project, state: &mut EditorState) {
+    delete_stamp(id, project, state);
+}
+
+/// **Turn the set in hand, if there is one** — and report the angle it came to rest at.
+///
+/// `pub` so a test can prove the aim keys REACH it: `CloneDrag::held` is private, so the arithmetic
+/// was pinned while the binding was not. The key handler calls this rather than repeating its two
+/// lines, on the rule `undo_for_test` states — a test driving a copy would pass while the real one
+/// was broken.
+pub fn turn_held_set(step: f32, clone_drag: &mut CloneDrag) -> Option<f32> {
+    let set = clone_drag.held.as_mut()?;
+    set.yaw = (set.yaw + step).rem_euclid(360.0);
+    Some(set.yaw)
+}
+
+/// Put a set in hand, so the function above has something to turn.
+pub fn hold_set_for_test(set: CloneSet, clone_drag: &mut CloneDrag) {
+    clone_drag.held = Some(set);
+}
+
+impl CloneDrag {
+    /// The held set's turn, for a test that has to read what a key wrote. Not the set itself: the
+    /// field stays private so nothing outside can put one down by writing to it.
+    pub fn held_for_test(&self) -> Option<f32> {
+        self.held.as_ref().map(|s| s.yaw)
+    }
+}
+
+/// FVS-R-14's move arm, reachable from `tests/headless.rs`/// FVS-R-14's move arm, reachable from `tests/headless.rs` — the mouse path is not drivable
+/// headless (`cursor_ground` needs a viewport), and a test re-implementing the body would pass
+/// while the real one was broken.
+pub fn move_stamp_for_test(
+    id: &str,
+    to: (f32, f32),
+    project: &mut Project,
+    state: &mut EditorState,
+) {
+    let Some(st) = project.map.stamps.iter_mut().find(|s| s.id == id) else {
+        state.status.problem(format!("`{id}` is gone — nothing was moved"));
+        return;
+    };
+    let from = st.at;
+    if from == to {
+        return;
+    }
+    st.at = to;
+    project.dirty = true;
+    state.record(Undo::MovedStamp { id: id.to_owned(), from });
+}
+
+/// The other half of `Cmd`+remove, reachable from `tests/headless.rs`.
+///
+/// [`edit_subject`] answers *which* piece and is tested on its own; this is what happens to the
+/// answer, and the two failed separately — a subject resolved correctly and then handed to a door
+/// that did not open is indistinguishable, from the author's chair, from the subject being wrong.
+pub fn send_to_tiles_for_test(
+    subject: Result<String, String>,
+    project: &Project,
+    state: &mut EditorState,
+    mode: &mut crate::tiles::Mode,
+    import: &mut crate::tiles::ImportState,
+) {
+    send_to_tiles(subject, project, state, mode, import);
+}
+
 /// The tail of a descriptor id, so a generated placement id reads as `crate@7` rather than
 /// `kenney_prototype-kit/crate@7`.
 fn short_id(descriptor_id: &str) -> &str {
@@ -3102,7 +3603,18 @@ fn keys(
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<keys::Live>,
     assets: Res<AssetServer>,
-    hovered_ui: Query<&Hovered>,
+    // **The layout, not `Hovered`.** Every verb in this system that acts on "the piece under the
+    // cursor" has to know whether the cursor is on a panel, and asking the picking backend makes
+    // that answer depend on the *window's* cursor — unreachable by an injected one, so an agent
+    // driving this editor gets `false` always and a person who moved the mouse off a row gets it
+    // too. One definition, read off the rects: `crate::view::over_ui`.
+    //
+    // **Filtered to the nodes that carry `Hovered`**, which is the same SET the old check consulted
+    // — only the question changed, from "did picking mark you" to "are you under the pointer". It
+    // also keeps the one deliberate hole: the name box's full-screen backdrop carries no `Hovered`
+    // because it is a prompt rather than a modal, and counting it would make the whole window read
+    // as interface whenever the prompt was open.
+    ui_nodes: Query<(&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform), With<Hovered>>,
     pointer: Res<crate::view::Pointer>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     placed: Query<(Entity, &Placement)>,
@@ -3116,14 +3628,28 @@ fn keys(
     // One tuple param, three tools: a Bevy system takes at most sixteen parameters, and this
     // one is full — a tuple of params counts as one.
     mut tools: (ResMut<MoveDrag>, ResMut<CloneDrag>, ResMut<TargetLock>),
-    // The Tiles tab's state, written by exactly one action here — `EditTile`. See `send_to_tiles`.
-    mut mode: ResMut<crate::tiles::Mode>,
-    mut import: ResMut<crate::tiles::ImportState>,
+    // **The Tiles tab's state, as one param.** `EditTile` sends a piece over to be defined. A Bevy
+    // system takes at most sixteen parameters and this one is full, so they travel as a tuple, which
+    // counts as one.
+    mut tiles: (ResMut<crate::tiles::Mode>, ResMut<crate::tiles::ImportState>),
 ) {
 
+    let (mode, import) = &mut tiles;
     let (move_drag, clone_drag, target) = &mut tools;
     // One clock for every key that repeats while held — see `keys::repeating`.
     let dt = time.delta_secs();
+
+    // **Asked once, used by every verb below that acts on the piece under the cursor.** The factor
+    // is the render target's, taken where `bevy_ui`'s picking backend takes it — see
+    // `crate::view::over_ui`, which carries why this is geometry rather than `Hovered`.
+    let on_ui = crate::view::over_ui(
+        pointer.0,
+        camera
+            .as_ref()
+            .and_then(|c| c.0.target_scaling_factor())
+            .unwrap_or(1.0),
+        ui_nodes.iter(),
+    );
 
     if keys::just_pressed(&keyboard, live.0, Action::Undo) {
         undo(&mut commands, &assets, &mut project, &mut state, &placed);
@@ -3138,7 +3664,15 @@ fn keys(
     // **Map to Tiles, carrying the piece.** Before the branches below, because they consume the
     // window and camera singles.
     if keys::just_pressed(&keyboard, live.0, Action::EditTile) {
-        send_to_tiles(*pointer, camera, &project, &mut state, &mut mode, &mut import);
+        // **A panel is drawn over the map, so a cursor on one is not pointing at the world.** Asked
+        // of the layout rather than of `Hovered` — see `view::over_ui`, which carries why. Without
+        // it "the piece under the cursor" would answer with whatever happens to stand behind the
+        // PLACE list, which is the one place an author is certainly not aiming at.
+        let under = (!on_ui)
+            .then(|| nearest_placement(*pointer, camera, &project))
+            .flatten();
+        let subject = edit_subject(&project, &state, under);
+        send_to_tiles(subject, &project, &mut state, mode, import);
         return;
     }
 
@@ -3207,6 +3741,13 @@ fn keys(
         state.status.note(said);
         move_drag.held = None;
         clone_drag.held = None;
+        // **Arming the box puts the brush down.** A piece stayed armed through the tool change, so
+        // the palette went on showing a highlighted row and `drive_ghost` went on previewing a
+        // placement while the author was dragging a capture box — two subjects under one cursor,
+        // which is the state every other arm in this block exists to avoid.
+        if state.tool == Tool::Clone {
+            state.brush = None;
+        }
         return;
     }
 
@@ -3222,7 +3763,7 @@ fn keys(
     // of them needs a key that means "I have read that". The *peel* below is still map-only, so this
     // one branch does need to know which tab is live — and `crate::notice::dismiss` handles the
     // other three so no tab is without it.
-    if *mode == crate::tiles::Mode::Map && keys::just_pressed(&keyboard, live.0, Action::Cancel) {
+    if **mode == crate::tiles::Mode::Map && keys::just_pressed(&keyboard, live.0, Action::Cancel) {
         // The outermost layer. Cleared here rather than in `notice::dismiss` so a single press
         // cannot both take the block down and peel a tool — the promise this comment makes.
         if state.status.has_problem() {
@@ -3265,10 +3806,10 @@ fn keys(
     if keys::just_pressed(&keyboard, live.0, Action::GroupFromSet) {
         if clone_drag.holding() {
             state.grouping = Some(String::new());
-            state.status.note("name the group — Enter to keep it, Esc to leave it alone");
+            state.status.note("name the composition — Enter to keep it, Esc to leave it alone");
         } else {
             state.status.note(format!(
-                "nothing in hand to keep. {} drags a box round what should go in the group first.",
+                "nothing in hand to keep. {} drags a box round what should go in the composition first.",
                 keys::chord_text(keys::binding(Action::CloneMode))
             ));
         }
@@ -3304,7 +3845,7 @@ fn keys(
         (Action::TurnPieceRight, YAW_STEP),
     ] {
         if keys::repeating(&keyboard, live.0, action, &mut repeat, dt)
-            && !hovered_ui.iter().any(|h| h.0)
+            && !on_ui
         {
             turn_under_cursor(
                 &mut commands,
@@ -3323,7 +3864,7 @@ fn keys(
 
     // **`H` targets the stack** — see `cycle_target`; the verbs below act on its pick.
     if keys::just_pressed(&keyboard, live.0, Action::CycleTarget)
-        && !hovered_ui.iter().any(|h| h.0)
+        && !on_ui
     {
         cycle_target(*pointer, camera, &project, &mut state, target.as_mut());
         return;
@@ -3333,7 +3874,7 @@ fn keys(
     // Deliberately `just_pressed` where the yaw keys repeat: each axis has four states, and a held
     // key cycling them at repeat pace reads as flicker, not control.
     for (action, about_x) in [(Action::TipX, true), (Action::TipZ, false)] {
-        if keys::just_pressed(&keyboard, live.0, action) && !hovered_ui.iter().any(|h| h.0) {
+        if keys::just_pressed(&keyboard, live.0, action) && !on_ui {
             tip_under_cursor(
                 &mut commands,
                 &assets,
@@ -3353,7 +3894,7 @@ fn keys(
     // three metres up is a long tap-tap-tap otherwise.
     for (action, sign) in [(Action::LiftUp, 1.0), (Action::LiftDown, -1.0)] {
         if keys::repeating(&keyboard, live.0, action, &mut repeat, dt)
-            && !hovered_ui.iter().any(|h| h.0)
+            && !on_ui
         {
             lift_under_cursor(
                 &mut commands,
@@ -3371,7 +3912,7 @@ fn keys(
     }
 
     // **O pins or unpins the piece under the cursor.** A pin is what the solver routes around.
-    if keys::just_pressed(&keyboard, live.0, Action::OwnToggle) && !hovered_ui.iter().any(|h| h.0) {
+    if keys::just_pressed(&keyboard, live.0, Action::OwnToggle) && !on_ui {
         toggle_pin(*pointer, camera, &mut project, &mut state, target.as_mut());
         return;
     }
@@ -3388,6 +3929,20 @@ fn keys(
             Source::Declared,
         );
     }
+    // The three arms need no `return` between them and no ordering: `just_pressed` refuses a binding
+    // whose modifier state does not match exactly (`keys.rs`, `b.needs_mod != mod_held || !shift_ok`),
+    // so bare, Shift and the platform modifier are mutually exclusive by construction. `keys`'
+    // `the_three_generate_sources_do_not_shadow_each_other` is what keeps that true.
+    if keys::just_pressed(&keyboard, live.0, Action::GenerateComposed) {
+        generate_from(
+            &mut commands,
+            &assets,
+            &mut project,
+            &mut state,
+            &placed,
+            Source::Composed,
+        );
+    }
     if keys::just_pressed(&keyboard, live.0, Action::Generate) {
         generate(&mut commands, &assets, &mut project, &mut state, &placed);
         return;
@@ -3395,7 +3950,7 @@ fn keys(
 
     // **F floods.** From the cell under the cursor outward, stopping at anything already placed and
     // at the map's edge — see `crate::fill`.
-    if keys::just_pressed(&keyboard, live.0, Action::Fill) && !hovered_ui.iter().any(|h| h.0) {
+    if keys::just_pressed(&keyboard, live.0, Action::Fill) && !on_ui {
         flood_from_cursor(
             &mut commands,
             &assets,
@@ -3407,7 +3962,7 @@ fn keys(
         return;
     }
 
-    // **X puts the brush back where it started.** Turning is relative, so a piece three quarters round
+    // **V puts the brush back where it started.** Turning is relative, so a piece three quarters round
     // is one press from straight in one direction and three in the other — and an author who has been
     // tapping `Z` has no reason to be keeping count. This is the only absolute among the aim keys.
     if keys::just_pressed(&keyboard, live.0, Action::AimReset) {
@@ -3427,9 +3982,20 @@ fn keys(
     } else {
         0.0
     };
-    if step != 0.0 {
-        state.brush_yaw = (state.brush_yaw + step).rem_euclid(360.0);
+    if step == 0.0 {
+        return;
     }
+    // **The aim keys turn whatever the next click will put down.** That is the brush, unless a
+    // captured set is in hand — in which case the click stamps the set, and turning the brush would
+    // be aiming something that is not going anywhere. Same rule `drive_ghost` follows to decide what
+    // to preview, and the reason it is a rule rather than a second binding: an author reaching for
+    // `Z` is asking to turn *this*, and which thing that is is already decided by what they picked
+    // up.
+    if let Some(now) = turn_held_set(step, clone_drag) {
+        state.status.note(format!("set turned to {now:.0} deg"));
+        return;
+    }
+    state.brush_yaw = (state.brush_yaw + step).rem_euclid(360.0);
 }
 
 /// Remove the placement nearest the cursor, within a piece's own reach.
@@ -3800,12 +4366,53 @@ fn apply(
         Undo::UnstampedMany { items } => {
             // Ascending by index, so each lands where it came from — `RemovedMany`'s rule.
             let count = items.len();
+            let mut at_indices: Vec<usize> = Vec::with_capacity(count);
             for (at, st) in items {
                 let at = at.min(project.map.stamps.len());
                 project.map.stamps.insert(at, *st);
+                at_indices.push(at);
             }
             state.status.note(format!("put {count} stamp(s) back"));
-            Undo::Stamped { count }
+            // Where they actually landed, not where they were asked to — the clamp above can move
+            // one, and an inverse naming the unclamped index would take a different stamp off.
+            Undo::UnstampAt {
+                indices: at_indices,
+            }
+        }
+        Undo::UnstampAt { indices } => {
+            // Descending, so removing an earlier stamp cannot shift a later one out from under us —
+            // the rule every removal in this file follows. The entities are not despawned here:
+            // `redraw_stamps` rebuilds the whole stamped set from `map.stamps`, so there is one
+            // place that turns a stamp list into pictures rather than two that could disagree.
+            let mut ordered = indices.clone();
+            ordered.sort_unstable();
+            let mut items: Vec<(usize, Box<emerge_core::composition::Stamped>)> =
+                Vec::with_capacity(ordered.len());
+            for i in ordered.iter().rev() {
+                if *i >= project.map.stamps.len() {
+                    continue;
+                }
+                items.push((*i, Box::new(project.map.stamps.remove(*i))));
+            }
+            if items.is_empty() {
+                return None;
+            }
+            items.reverse();
+            state.status.note(format!("took back {} stamp(s)", items.len()));
+            Undo::UnstampedMany { items }
+        }
+        Undo::MovedStamp { id, from } => {
+            let Some(st) = project.map.stamps.iter_mut().find(|s| s.id == id) else {
+                state.status.problem(format!("`{id}` is not on this map any more"));
+                return None;
+            };
+            let now = st.at;
+            st.at = from;
+            state.status.note(format!("`{id}` back at ({:.1}, {:.1})", from.0, from.1));
+            // The entities are not touched: `redraw_stamps` rebuilds the whole stamped set from the
+            // list, so there is one place that turns stamps into pictures — the same argument every
+            // other stamp arm here makes.
+            Undo::MovedStamp { id, from: now }
         }
         Undo::Pinned {
             index,
@@ -4041,6 +4648,11 @@ pub fn composition_from_set(
     set: &CloneSet,
     id: &str,
     library: &emerge_core::library::Library,
+    // **The composition set, because a captured stamp names one.** Refused at the door rather than
+    // trusted: `policy::layered_library` hard-refuses a composition whose member is missing, so
+    // writing a group that names a composition nobody defines produces a project that will not open
+    // at all — the failure `take_out_of_library` already guards from the other side.
+    compositions: &emerge_core::composition::Compositions,
 ) -> Result<emerge_core::composition::Composition, String> {
     use emerge_core::composition::{Body, Composition, Envelope, Member};
 
@@ -4052,8 +4664,8 @@ pub fn composition_from_set(
                     underscores, starting with a letter."
             .to_owned());
     }
-    if set.pieces.is_empty() {
-        return Err("that box held nothing, so there is no group to make".to_owned());
+    if set.pieces.is_empty() && set.stamps.is_empty() {
+        return Err("that box held nothing, so there is no composition to make".to_owned());
     }
 
     // **Member ids, stable and unique.** The first of a kind keeps the bare short name; later ones
@@ -4075,7 +4687,7 @@ pub fn composition_from_set(
     for (i, piece) in set.pieces.iter().enumerate() {
         let d = library.get(&piece.descriptor).ok_or_else(|| {
             format!(
-                "`{}` is not in this library any more, so it cannot go in a group",
+                "`{}` is not in this library any more, so it cannot go in a composition",
                 piece.descriptor
             )
         })?;
@@ -4132,12 +4744,47 @@ pub fn composition_from_set(
         });
     }
 
+    // **A captured stamp nests by REFERENCE.** `Body::Composition { id }` is the schema's own way to
+    // say "another composition, in full — its internals are immutable from here", which is the
+    // encapsulation rule this item exists to honour: a group that copied the stamp's expanded rows
+    // would be a snapshot, and editing the inner composition would stop reaching it.
+    //
+    // Member ids are minted in the same shape as the pieces', off the composition's short name, so
+    // capturing the same box twice names the same members and an override survives a recapture.
+    for cs in &set.stamps {
+        if !compositions.compositions.iter().any(|c| c.id == cs.of) {
+            return Err(format!(
+                "`{}` is not a composition any more, so it cannot go in a group",
+                cs.of
+            ));
+        }
+        let short = short_id(&cs.of);
+        let n = seen.entry(short).or_insert(0);
+        *n += 1;
+        let id = if *n == 1 { short.to_owned() } else { format!("{short}_{n}") };
+        members.push(Member {
+            paint: 0,
+            id,
+            body: Body::Composition { id: cs.of.clone() },
+            at: (
+                cs.offset.0 - set.centre_off.0,
+                cs.offset.1 - set.centre_off.1,
+            ),
+            yaw: cs.yaw,
+            // A nested composition sits on the floor of the group that holds it: `Envelope::Bounded`
+            // rises from its anchor, so a lift here would be a second claim about the same datum.
+            lift: 0.0,
+            of_fingerprint: None,
+            note: cs.note.clone(),
+        });
+    }
+
     // **Sorted by id, because the schema requires it rather than prefers it.** One group has one
     // encoding, or two authors building the same thing produce diffs that differ without meaning to.
     // `Composition::validate_shape` refuses otherwise and names the order it wants.
     members.sort_by(|a, b| a.id.cmp(&b.id));
 
-    let size = envelope_size(set, &members, library)?;
+    let size = envelope_size(set, &members, library, compositions)?;
     let comp = Composition {
         id,
         envelope: Envelope::Bounded { size },
@@ -4155,10 +4802,10 @@ pub fn composition_from_set(
 
 /// Does this piece's height depend on the ceiling — i.e. on the very bounds being derived?
 fn mounts_against_the_ceiling(d: &emerge_core::descriptor::Descriptor) -> bool {
-    use emerge_core::descriptor::{Mount, OverlayHost};
+    use emerge_core::descriptor::{Mount, DecalHost};
     matches!(
         d.mount,
-        Some(Mount::OnCeiling) | Some(Mount::Overlay { on: OverlayHost::Ceiling })
+        Some(Mount::OnCeiling) | Some(Mount::Decal { on: DecalHost::Ceiling })
     )
 }
 
@@ -4174,6 +4821,7 @@ fn envelope_size(
     set: &CloneSet,
     members: &[emerge_core::composition::Member],
     library: &emerge_core::library::Library,
+    compositions: &emerge_core::composition::Compositions,
 ) -> Result<(f32, f32, f32), String> {
     use emerge_core::composition::Body;
     use emerge_core::map::{Map, Placed};
@@ -4201,6 +4849,34 @@ fn envelope_size(
     let ys = emerge_core::stack::resolve_y(&scratch, library)
         .map_err(|e| format!("the group's members do not stand up: {e}"))?;
     let mut top = 0.0f32;
+    // **A nested composition is measured through its own envelope**, not skipped. This loop used to
+    // `continue` past `Body::Composition` — correct while nothing could produce one, and wrong the
+    // moment a captured stamp can: a group holding only a nested one derived a height of zero and
+    // was refused by `validate_shape` for enclosing nothing, which is a true statement about a
+    // measurement that never looked.
+    for m in members {
+        let Body::Composition { id } = &m.body else {
+            continue;
+        };
+        let nested = compositions
+            .compositions
+            .iter()
+            .find(|c| &c.id == id)
+            .ok_or_else(|| format!("`{id}` is not a composition, so the group has no height"))?;
+        match nested.envelope {
+            emerge_core::composition::Envelope::Bounded { size } => {
+                top = top.max(m.lift + size.1);
+            }
+            // Refused by name rather than measured at zero: an `Anchored` group claims no tile, so
+            // there is no honest number to fold into a `Bounded` one that contains it.
+            emerge_core::composition::Envelope::Anchored => {
+                return Err(format!(
+                    "`{id}` is anchored, so it claims no space and a group cannot take its size \
+                     from it. Give it a bounded envelope first."
+                ))
+            }
+        }
+    }
     for (i, p) in scratch.placements.iter().enumerate() {
         let (Some(desc), Some(&y)) = (library.get(&p.descriptor), ys.get(i)) else {
             continue;
@@ -4234,7 +4910,116 @@ mod capture_tests {
     }
 
     fn held(pieces: Vec<ClonePiece>, centre_off: (f32, f32), half: (f32, f32)) -> CloneSet {
-        CloneSet { pieces, centre_off, half }
+        CloneSet { pieces, stamps: Vec::new(), centre_off, half, yaw: 0.0 }
+    }
+
+    /// No compositions — the capture tests are about loose pieces, and a nested member is covered
+    /// by its own test where the set actually holds a stamp.
+    fn no_compositions() -> emerge_core::composition::Compositions {
+        emerge_core::composition::Compositions {
+            version: emerge_core::composition::COMPOSITIONS_VERSION,
+            note: None,
+            compositions: Vec::new(),
+        }
+    }
+
+    /// **The ghost stands where the drop lands** — the preview's one real claim.
+    ///
+    /// `drive_clone_ghost` cannot be driven headless: it needs `cursor_ground`, which needs a
+    /// viewport. So this asks the extracted half instead, and asks it the question that matters
+    /// rather than the one that is easy — the parent transform composed with a child's own local
+    /// offset must reproduce, piece for piece, what `stamp_set` computes through `CloneSet::placed`.
+    ///
+    /// Checked at a NON-ZERO set yaw, because at zero the parent rotation is identity and a ghost
+    /// that ignored the turn entirely would still pass.
+    #[test]
+    fn the_ghost_stands_where_the_drop_lands() {
+        let piece = ClonePiece {
+            descriptor: "chair".to_owned(),
+            offset: (2.0, 0.5),
+            yaw: 0.0,
+            tip: (0, 0),
+            lift: 0.0,
+            note: None,
+            owned: false,
+            owned_because: None,
+            on: CloneHost::Layer,
+        };
+        let mut set = held(vec![piece.clone()], (0.0, 0.0), (1.0, 0.5));
+        set.yaw = 90.0;
+
+        let origin = (10.0, 0.0, -4.0);
+        let target = (3.0, 7.0);
+
+        // The preview: parent transform, then the child at its own untouched local offset.
+        let (root, spin) = ghost_anchor(&set, target, origin);
+        let local = emerge_bevy::origin_of(piece.offset, (0.0, 0.0, 0.0), piece.lift);
+        let previewed = root + spin * local;
+
+        // The drop: the same piece, positioned by the arithmetic `stamp_set` uses.
+        let (at, _) = set.placed(&piece, target);
+        let landed = emerge_bevy::origin_of(at, origin, piece.lift);
+
+        assert!(
+            (previewed - landed).length() < 1e-4,
+            "the ghost promises {previewed:?} and the drop puts it at {landed:?} — a preview that \
+             computes either differently is a promise about a landing that will not happen"
+        );
+    }
+
+    /// **A turned set lands where a turned stamp would**, and comes back exactly.
+    ///
+    /// The clone tool now takes `Z`/`C` when a set is in hand, which means it owns a sign
+    /// convention — and `composition::rotate_xz`'s own doc names the failure of having two: Bevy's
+    /// yaw turns +X toward −Z, so a mirrored copy stamps a mirrored group without failing anything.
+    /// This asserts the shared function is the one being used, by checking the quarter turn against
+    /// hand-worked values rather than against itself.
+    #[test]
+    fn a_turned_set_lands_where_a_turned_stamp_would() {
+        let piece = ClonePiece {
+            descriptor: "chair".to_owned(),
+            offset: (2.0, 0.0),
+            yaw: 0.0,
+            tip: (0, 0),
+            lift: 0.0,
+            note: None,
+            owned: false,
+            owned_because: None,
+            on: CloneHost::Layer,
+        };
+        let mut set = held(vec![piece.clone()], (0.0, 0.0), (1.0, 0.5));
+
+        // Unturned: the offset is the offset.
+        let (at, yaw) = set.placed(&piece, (10.0, 10.0));
+        assert_eq!((at, yaw), ((12.0, 10.0), 0.0));
+
+        // A quarter turn: +X goes to −Z, which is the whole convention.
+        set.yaw = 90.0;
+        let (at, yaw) = set.placed(&piece, (10.0, 10.0));
+        assert!(
+            (at.0 - 10.0).abs() < 1e-4 && (at.1 - 8.0).abs() < 1e-4,
+            "a piece 2 m along +X must sit 2 m along −Z after a quarter turn, got {at:?}"
+        );
+        assert_eq!(yaw, 90.0, "the piece's own facing turns with the set");
+
+        // **Four quarter turns return exactly.** The reason `yaw` is one field applied once rather
+        // than folded into each offset as the author presses the key: rotating an offset repeatedly
+        // accumulates error, and "turn it round and put it back" would quietly move the group.
+        set.yaw = 0.0;
+        for _ in 0..4 {
+            set.yaw = (set.yaw + 90.0).rem_euclid(360.0);
+        }
+        let (at, yaw) = set.placed(&piece, (10.0, 10.0));
+        assert_eq!((at, yaw), ((12.0, 10.0), 0.0), "four quarter turns must be identity");
+
+        // The outline is the turned set's BOUNDS: a 2x1 box turned 90 degrees is 1x2.
+        set.yaw = 90.0;
+        let (x0, z0, x1, z1) = set.bounds((0.0, 0.0));
+        assert!(
+            (x1 - x0 - 1.0).abs() < 1e-4 && (z1 - z0 - 2.0).abs() < 1e-4,
+            "a 2.0 x 1.0 set turned 90 deg outlines 1.0 x 2.0, got {:?}",
+            (x1 - x0, z1 - z0)
+        );
     }
 
     fn at(descriptor: &str, offset: (f32, f32), on: CloneHost) -> ClonePiece {
@@ -4264,7 +5049,7 @@ mod capture_tests {
             (1.0, 0.0),
             (0.5, 0.5),
         );
-        let c = composition_from_set(&set, "Break Table", &library).expect("captures");
+        let c = composition_from_set(&set, "Break Table", &library, &no_compositions()).expect("captures");
 
         assert_eq!(c.id, "break_table", "the name is FORCED into snake_case, not checked");
         assert!(matches!(c.envelope, Envelope::Bounded { .. }), "capture is always bounded");
@@ -4300,7 +5085,7 @@ mod capture_tests {
             (0.0, 0.0),
             (1.0, 1.5),
         );
-        let c = composition_from_set(&set, "desk", &library).expect("captures");
+        let c = composition_from_set(&set, "desk", &library, &no_compositions()).expect("captures");
         let Envelope::Bounded { size } = c.envelope else { panic!("not bounded") };
         assert!((size.0 - 2.0).abs() < 1e-5, "width is the drag's, doubled: {}", size.0);
         assert!((size.2 - 3.0).abs() < 1e-5, "depth is the drag's, doubled: {}", size.2);
@@ -4320,22 +5105,22 @@ mod capture_tests {
         let library = lib(vec![measured, unmeasured, ceiling]);
 
         let outside = held(vec![at("crate", (0.0, 0.0), CloneHost::Outside)], (0.0, 0.0), (0.5, 0.5));
-        let e = composition_from_set(&outside, "g", &library).expect_err("must refuse");
+        let e = composition_from_set(&outside, "g", &library, &no_compositions()).expect_err("must refuse");
         assert!(e.contains("crate") && e.contains("outside"), "{e}");
 
         let unmeasured = held(vec![at("mystery", (0.0, 0.0), CloneHost::Layer)], (0.0, 0.0), (0.5, 0.5));
-        let e = composition_from_set(&unmeasured, "g", &library).expect_err("must refuse");
+        let e = composition_from_set(&unmeasured, "g", &library, &no_compositions()).expect_err("must refuse");
         assert!(e.contains("mystery") && e.contains("unmeasured"), "{e}");
 
         let hanging = held(vec![at("lamp", (0.0, 0.0), CloneHost::Layer)], (0.0, 0.0), (0.5, 0.5));
-        let e = composition_from_set(&hanging, "g", &library).expect_err("must refuse");
+        let e = composition_from_set(&hanging, "g", &library, &no_compositions()).expect_err("must refuse");
         assert!(e.contains("lamp") && e.contains("ceiling"), "{e}");
 
         let empty = held(Vec::new(), (0.0, 0.0), (0.5, 0.5));
-        assert!(composition_from_set(&empty, "g", &library).is_err(), "an empty box is nothing to keep");
+        assert!(composition_from_set(&empty, "g", &library, &no_compositions()).is_err(), "an empty box is nothing to keep");
 
         let named = held(vec![at("crate", (0.0, 0.0), CloneHost::Layer)], (0.0, 0.0), (0.5, 0.5));
-        let e = composition_from_set(&named, "!!!", &library).expect_err("must refuse");
+        let e = composition_from_set(&named, "!!!", &library, &no_compositions()).expect_err("must refuse");
         assert!(e.contains("snake_case"), "{e}");
     }
 
@@ -4352,7 +5137,7 @@ mod capture_tests {
             (0.0, 0.0),
             (1.0, 1.0),
         );
-        let c = composition_from_set(&set, "chairs", &library).expect("captures");
+        let c = composition_from_set(&set, "chairs", &library, &no_compositions()).expect("captures");
         let ids: Vec<&str> = c.members.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["chair", "chair_2", "chair_3"]);
     }
@@ -4539,16 +5324,41 @@ fn hide_carried(
     drag: Res<MoveDrag>,
     project: Res<Project>,
     mut placed: Query<(&Placement, &mut Visibility)>,
+    mut instances: Query<(&StampInstance, &mut Visibility), Without<Placement>>,
 ) {
-    let carried: Vec<String> = drag
-        .held
-        .as_ref()
-        .and_then(|id| project.map.placements.iter().position(|p| &p.id == id))
-        .map(|ix| emerge_core::stack::group_of(&project.map, ix))
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|i| project.map.placements.get(i).map(|p| p.id.clone()))
-        .collect();
+    // **The instance, one write, every row.** A carried stamp's pieces carry no `Placement`, so the
+    // query below cannot see them; the parent's visibility is inherited by all of them, which is
+    // the same property that makes moving a stamp one field rather than N.
+    let carried_stamp = match drag.held.as_ref() {
+        Some(Held::Stamp(id)) => Some(id.clone()),
+        _ => None,
+    };
+    for (inst, mut vis) in &mut instances {
+        let want = if carried_stamp.as_deref() == Some(inst.id.as_str()) {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+        if *vis != want {
+            *vis = want;
+        }
+    }
+    let carried: Vec<String> = match drag.held.as_ref() {
+        Some(Held::Piece(id)) => project
+            .map
+            .placements
+            .iter()
+            .position(|p| &p.id == id)
+            .map(|ix| emerge_core::stack::group_of(&project.map, ix))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|i| project.map.placements.get(i).map(|p| p.id.clone()))
+            .collect(),
+        // **A carried stamp hides through its instance**, not through this query: stamped rows
+        // carry no `Placement`, so none of them match here — and the parent's `Visibility` reaches
+        // every row it owns, which is the same one-write property the move itself relies on.
+        Some(Held::Stamp(_)) | None => Vec::new(),
+    };
 
     for (marker, mut vis) in &mut placed {
         let want = if carried.iter().any(|id| *id == marker.0) {
@@ -4565,7 +5375,47 @@ fn hide_carried(
     }
 }
 
-/// **Send the piece under the cursor to the Tiles tab**, and go there.
+/// **Which piece `Cmd`+remove is about** — one question with an ordered answer.
+///
+/// 1. The piece **under the cursor**, when there is one.
+/// 2. Failing that, the **PLACE selection** — the row that list draws as selected, and the subject
+///    every other verb on the tab already acts on.
+/// 3. Failing both, a refusal that names both places it looked.
+///
+/// That is the shape [`pick_at`] already has — footprint covering the probe first, then nearest
+/// within reach — and it is one rule rather than a fallback: the question is "which piece do you
+/// mean", and these are where the answer can come from, in the order an author means them.
+///
+/// **It replaced a rule keyed on whether the pointer was over the interface, which was wrong in a
+/// way worth keeping written down.** That question was asked as `Hovered`, which `bevy_picking`
+/// writes from the *window's* cursor — the one an injected pointer never moves — so the verb was
+/// unreachable over BRP, untestable headless, and answered "no" whenever the author had moved the
+/// mouse off the row they had just selected. Reported as the feature not working, twice. `under`
+/// still comes from where the cursor is, but nothing now depends on the cursor *resting* anywhere.
+///
+/// Pure, and separate from the system, for the reason `compose::pick_along` is: `nearest_placement`
+/// needs a viewport to answer and a headless test has none, so a test written against the whole
+/// system could only ever exercise one branch — and would pass while asserting nothing if the other
+/// silently stopped resolving. `under` is that answer, already taken.
+pub fn edit_subject(
+    project: &Project,
+    state: &EditorState,
+    under: Option<usize>,
+) -> Result<String, String> {
+    if let Some(id) = under
+        .and_then(|ix| project.map.placements.get(ix))
+        .map(|p| p.descriptor.clone())
+    {
+        return Ok(id);
+    }
+    state
+        .brush
+        .and_then(|ix| project.library.descriptors.get(ix))
+        .map(|d| d.id.clone())
+        .ok_or_else(|| "nothing under the cursor, and nothing selected in PLACE".to_owned())
+}
+
+/// **Send a piece to the Tiles tab to be defined**, and go there.
 ///
 /// The gap this closes: a map is where you *notice* a piece is wrong — too big, floating, facing the
 /// wrong way — and until now the only route from noticing to fixing was to read its id off the status
@@ -4574,20 +5424,25 @@ fn hide_carried(
 /// It sends the **descriptor**, not the placement: what the Tiles tab edits is the definition, so
 /// every copy on the map moves with the edit. That is the point of editing it there rather than
 /// patching one placement.
+///
+/// **Which piece is the caller's question, not this function's.** It was `nearest_placement` inlined
+/// here, which quietly made the verb mean "a piece standing on the map" — so a piece the author had
+/// selected in the PLACE list, and was looking straight at, answered *"nothing here to edit"*. The
+/// subject arrives already resolved, with the refusal the resolution earned, so the two subjects
+/// share one door and one set of checks rather than growing a second copy of them.
 fn send_to_tiles(
-    pointer: crate::view::Pointer,
-    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    subject: Result<String, String>,
     project: &Project,
     state: &mut EditorState,
     mode: &mut crate::tiles::Mode,
     import: &mut crate::tiles::ImportState,
 ) {
-    let Some(index) = nearest_placement(pointer, camera, project) else {
-        state.status.note("nothing here to edit".to_owned());
-        return;
-    };
-    let Some(id) = project.map.placements.get(index).map(|p| p.descriptor.clone()) else {
-        return;
+    let id = match subject {
+        Ok(id) => id,
+        Err(why) => {
+            state.status.note(why);
+            return;
+        }
     };
     // A placement naming a descriptor the library does not have is a map/library mismatch, and
     // switching tabs to show an empty pane would report it as nothing happening.
@@ -4599,7 +5454,10 @@ fn send_to_tiles(
     // whole of "focus this piece" — the detail pane, the preview, the lattice and the fields all read
     // through that one accessor.
     import.selected_library_id = Some(id.clone());
-    import.status.note(format!("editing `{id}`, sent from the map"));
+    // "from the map" was true of the only subject there used to be, and is a lie about the other
+    // one. The tab an author lands on says what they are editing; where it came from is the thing
+    // they just did.
+    import.status.note(format!("editing `{id}`"));
     *mode = crate::tiles::Mode::Tiles;
     state.status.note(format!("`{id}` — opened on the tiles tab"));
 }
@@ -4624,6 +5482,7 @@ fn drive_move(
     mut state: ResMut<EditorState>,
     mut drag: ResMut<MoveDrag>,
     anchor: Res<FineAnchor>,
+    picture: Res<StampPicture>,
 ) {
     // Read, never write, unless something happened: `state` is watched by `rebuild_palette`, and an
     // unconditional deref here rebuilds all forty-odd rows every frame. Same rule as `drive_removal`.
@@ -4653,20 +5512,60 @@ fn drive_move(
         // cursor actually is — snapping first would answer it about the middle of a cell.
         None => {
             let probe = project.map.to_map_space((hit.x, hit.z));
-            let Some(index) = pick_at(&project, probe) else {
-                state.status.note("nothing here to move".to_owned());
-                return;
+            // **One competition over both lists** — see `pick_subject`. A stamped row resolves to
+            // its stamp, so grabbing a member picks up the instance rather than reaching into it.
+            let held = match pick_subject(&project, &picture, probe) {
+                Some(Subject::Placement(index)) => {
+                    let Some(p) = project.map.placements.get(index) else {
+                        return;
+                    };
+                    Held::Piece(p.id.clone())
+                }
+                Some(Subject::Stamp(id)) => Held::Stamp(id),
+                None => {
+                    state.status.note("nothing here to move".to_owned());
+                    return;
+                }
             };
-            let Some(p) = project.map.placements.get(index) else {
-                return;
+            let what = match &held {
+                Held::Piece(id) => id.clone(),
+                Held::Stamp(id) => format!("`{id}`, whole"),
             };
-            let id = p.id.clone();
-            state.status.note(format!("{id} in hand — click to put it down, Esc to put it back"));
-            drag.held = Some(id);
+            state.status.note(format!("{what} in hand — click to put it down, Esc to put it back"));
+            drag.held = Some(held);
         }
         // **Drop.** Snapped like a placement, and free with the modifier held, so a move lands on the
         // same grid a place would.
-        Some(id) => {
+        // **A stamp moves as one thing**, and moving it is one field: the rows are derived, so
+        // `redraw_stamps` puts them where the new `at` says. FVS-R-14's move arm.
+        Some(Held::Stamp(id)) => {
+            let free = keys::mod_held(&keyboard);
+            let at = map_at(&project, hit, free, &anchor);
+            // Resolved now, not at grab — the list can have moved under it, exactly as for a piece.
+            let Some(st) = project.map.stamps.iter_mut().find(|s| s.id == id) else {
+                drag.held = None;
+                state.status.problem(format!("`{id}` is gone — nothing was moved"));
+                return;
+            };
+            let from = st.at;
+            if from == at {
+                // Put down where it was picked up: not an edit, and recording one would put an
+                // undo step on the stack that does nothing when taken.
+                drag.held = None;
+                state.status.note(format!("`{id}` put back where it was"));
+                return;
+            }
+            st.at = at;
+            drag.held = None;
+            project.dirty = true;
+            state.record(Undo::MovedStamp { id: id.clone(), from });
+            let how = if free { " free" } else { "" };
+            state.status.note(format!(
+                "moved `{id}` to ({:.1}, {:.1}){how}",
+                at.0, at.1
+            ));
+        }
+        Some(Held::Piece(id)) => {
             // Resolved now, not at grab: an undo or a fill between the two clicks may have moved this
             // row, and it may have removed it outright.
             let Some(index) = project.map.placements.iter().position(|p| p.id == id) else {
@@ -4819,6 +5718,63 @@ pub fn pick_at(project: &Project, probe: (f32, f32)) -> Option<usize> {
     nearest.map(|(i, _, _)| i)
 }
 
+/// **[`pick_at`]'s rule, run over the loose pieces and the stamped rows together.**
+///
+/// Asking one list and then the other cannot work: a loose piece and a stamped row may legally
+/// overlap — a lamp put down on a stamped worktop — and whichever list is consulted first would then
+/// win every time, regardless of what the author can see. So there is one competition, `pick_at`'s
+/// own: **smallest footprint covering the probe**, because the piece you can see least of is the one
+/// you must have been aiming at.
+///
+/// The total key is `(area, row id)`. That is total *across* the two lists because the two id spaces
+/// are one: `expand` refuses a stamp id that a second stamp reuses, precisely so the rows it names
+/// `<stamp>/<member>` cannot collide with anything — see [`Stamped::id`].
+///
+/// A stamped row resolves to its **stamp**, never to itself. That is the whole of the rule, and it
+/// is why this returns a [`Subject`] rather than an index.
+///
+/// The second pass of `pick_at` — nearest centre within its own reach — deliberately does **not**
+/// extend to stamps. That pass is a grab assist for a piece too small to hit; a stamp is a tile-sized
+/// region and an author pointing near one but not at it is pointing at the floor.
+pub fn pick_subject(project: &Project, picture: &StampPicture, probe: (f32, f32)) -> Option<Subject> {
+    let mut best: Option<(Subject, f32, &str)> = None;
+    for (i, p) in project.map.placements.iter().enumerate() {
+        let Some(d) = project.library.get(&p.descriptor) else {
+            continue;
+        };
+        if !emerge_core::stack::covers(d, p.at, p.yaw, probe) {
+            continue;
+        }
+        let area = emerge_core::descriptor::placed_footprint(d)
+            .map_or(f32::INFINITY, |(w, depth)| w * depth);
+        let better = match &best {
+            None => true,
+            Some((_, best_area, best_id)) => (area, p.id.as_str()) < (*best_area, *best_id),
+        };
+        if better {
+            best = Some((Subject::Placement(i), area, p.id.as_str()));
+        }
+    }
+    for row in &picture.rows {
+        let Some(d) = project.library.get(&row.descriptor) else {
+            continue;
+        };
+        if !emerge_core::stack::covers(d, row.at, row.yaw, probe) {
+            continue;
+        }
+        let area = emerge_core::descriptor::placed_footprint(d)
+            .map_or(f32::INFINITY, |(w, depth)| w * depth);
+        let better = match &best {
+            None => true,
+            Some((_, best_area, best_id)) => (area, row.row.as_str()) < (*best_area, *best_id),
+        };
+        if better {
+            best = Some((Subject::Stamp(row.stamp.clone()), area, row.row.as_str()));
+        }
+    }
+    best.map(|(s, _, _)| s)
+}
+
 /// [`pick_at`], with the probe taken from the cursor — shared by pin, delete and turn, so "the thing
 /// I am pointing at" means one thing.
 fn nearest_placement(
@@ -4842,34 +5798,75 @@ fn nearest_placement(
 #[derive(Resource, Default)]
 pub struct UnderCursor(String);
 
+impl UnderCursor {
+    /// What the block is showing. An accessor rather than a public field: the string is written by
+    /// exactly one system and read by the panel, and a test asserting the readout stays silent over
+    /// a panel should not be able to write it.
+    pub fn line(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Name what the verbs would act on, through **the same resolver the verbs use**.
 ///
 /// [`under_cursor_target`] and not a second pick: a readout that named a different piece than `R`
 /// turned would be worse than no readout, because it would be believed. That is the whole argument
 /// its own doc comment makes for being one resolver, extended to the line that reports it.
+///
+/// **And it stops at the panel, which it did not.** This had no over-the-interface gate at all,
+/// while every verb it reports on has one — so with the cursor resting on the PLACE list the block
+/// named whatever placement stood behind the panel and said *"`Cmd`+Delete edits it"*, which is a
+/// promise about a key that acts on the PLACE selection there. A readout that is believed and wrong
+/// is worse than none, by this function's own argument; the gate is the same `view::over_ui` the
+/// verbs ask, so the line and the key cannot disagree.
 fn sense_under_cursor(
     pointer: Res<crate::view::Pointer>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     project: Res<Project>,
     mut lock: ResMut<TargetLock>,
     mut under: ResMut<UnderCursor>,
+    ui_nodes: Query<(&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform), With<Hovered>>,
 ) {
-    let want = match under_cursor_target(&mut lock, *pointer, camera, &project) {
+    let on_ui = crate::view::over_ui(
+        pointer.0,
+        camera
+            .as_ref()
+            .and_then(|c| c.0.target_scaling_factor())
+            .unwrap_or(1.0),
+        ui_nodes.iter(),
+    );
+    let picked = under_cursor_target(&mut lock, *pointer, camera, &project)
+        .and_then(|i| project.map.placements.get(i));
+    let want = under_readout(on_ui, picked);
+    if under.0 != want {
+        under.0 = want;
+    }
+}
+
+/// **What the block says**, given whether the pointer is on a panel and what it is over.
+///
+/// Pure and separate from the system for the reason `edit_subject` is: `under_cursor_target` needs a
+/// viewport to answer, and a headless test has none — so a test written against the whole system is
+/// blank whatever the rule does, and **passes with the gate deleted**. That is not a hypothetical:
+/// the first version of this test was written that way, mutation-tested, and found to assert
+/// nothing. The rule lives here so it can be asked directly.
+pub fn under_readout(on_ui: bool, picked: Option<&Placed>) -> String {
+    // A panel is drawn over the map, so a pointer on one is not over the piece behind it — and this
+    // line ends "edits it" about a key that acts on the PLACE selection there.
+    if on_ui {
+        return String::new();
+    }
+    match picked {
         // The chord comes from the census, never retyped — `keys.rs`'s one rule, and the reason
         // this line cannot come to name a key the build does not read.
-        Some(i) => project.map.placements.get(i).map_or_else(String::new, |p| {
-            format!(
-                "{}  — {} edits it",
-                p.id,
-                keys::chord_text(keys::binding(Action::EditTile))
-            )
-        }),
+        Some(p) => format!(
+            "{}  — {} edits it",
+            p.id,
+            keys::chord_text(keys::binding(Action::EditTile))
+        ),
         // Empty over bare floor. A row saying "nothing" would be a row that is never blank, and the
         // eye stops reading a line that always has something in it.
         None => String::new(),
-    };
-    if under.0 != want {
-        under.0 = want;
     }
 }
 
@@ -5027,6 +6024,30 @@ fn spawn_target_tile(
 /// Type the reason a cell is pinned.
 /// **Name a composition, and keep it.** `pin_reason_keys`' shape — see `keys::Phase` for why the fields
 /// run before the dispatchers.
+/// **Leaving the Map puts the name prompt down**, so the box being open and the field being live are
+/// one condition rather than two.
+///
+/// `EditorState::grouping` is not mode-scoped, and `chrome::paint_name_box` used to be — it matched on
+/// `Mode::Map`. Clicking the tab strip mid-name therefore hid the box while `group_name_keys` kept the
+/// keyboard: every keystroke vanished, with nothing on screen to say where they were going, until
+/// `Esc`. Two conditions for one question is what made that reachable.
+///
+/// One owner, watching the mode rather than each of the three ways to change it — number keys, `Tab`,
+/// and a click on the strip — so a fourth cannot reintroduce it. The set stays in hand, exactly as
+/// `Esc` leaves it; only the question is withdrawn.
+fn leaving_a_tab_puts_the_name_prompt_down(
+    mode: Res<crate::tiles::Mode>,
+    mut state: ResMut<EditorState>,
+) {
+    if !mode.is_changed() || *mode == crate::tiles::Mode::Map || state.grouping.is_none() {
+        return;
+    }
+    state.grouping = None;
+    // An unconfirmed replace is a question about a name that is no longer being asked.
+    state.replacing = None;
+    state.status.note("not named — the set is still in hand".to_owned());
+}
+
 fn group_name_keys(
     mut events: MessageReader<bevy::input::keyboard::KeyboardInput>,
     mut project: ResMut<Project>,
@@ -5046,67 +6067,166 @@ fn group_name_keys(
         }
         match &event.logical_key {
             Key::Enter => {
-                let Some(raw) = state.grouping.take() else { return };
+                // **Peeked, not taken.** An unconfirmed replace has to leave the field open, or the
+                // second press would have nothing to confirm.
+                let Some(raw) = state.grouping.clone() else { return };
                 let Some(set) = clone_drag.held.as_ref() else {
+                    state.grouping = None;
                     state.status.problem("the set was put down before the name was finished");
                     return;
                 };
-                match keep_as_group(&mut project, set, &raw) {
-                    Ok(id) => {
+                let confirmed = state.replacing.is_some();
+                match keep_as_group(&mut project, set, &raw, confirmed) {
+                    Ok(Kept::WouldReplace { id, stamps }) => {
+                        let held = match stamps {
+                            0 => "nothing in this map stamps it".to_owned(),
+                            1 => "1 stamp in this map follows it".to_owned(),
+                            n => format!("{n} stamps in this map follow it"),
+                        };
+                        state.replacing = Some(id.clone());
+                        state.status.problem(format!(
+                            "`{id}` already exists — {held}. Enter again to redefine it from this                              selection, Esc to leave it alone."
+                        ));
+                    }
+                    Ok(kept) => {
+                        let id = match &kept {
+                            Kept::Made(id) => id.clone(),
+                            Kept::Replaced { id, .. } => id.clone(),
+                            Kept::WouldReplace { id, .. } => id.clone(),
+                        };
                         // Armed, so the next click on the map stamps what was just made. The whole
                         // point of capturing is to place it again.
                         compose.armed = Some(id.clone());
                         clone_drag.held = None;
-                        state
-                            .status
-                            .note(format!("`{id}` kept — armed, so the next click stamps it"));
+                        state.grouping = None;
+                        state.replacing = None;
+                        state.status.note(match kept {
+                            Kept::Replaced { stamps: 0, .. } => {
+                                format!("`{id}` redefined — armed, so the next click stamps it")
+                            }
+                            Kept::Replaced { stamps, .. } => format!(
+                                "`{id}` redefined — {stamps} stamp(s) here now expand to it, and                                  read as STALE until re-recorded"
+                            ),
+                            _ => format!("`{id}` kept — armed, so the next click stamps it"),
+                        });
                     }
-                    Err(e) => state.status.problem(e),
+                    Err(e) => {
+                        state.grouping = None;
+                        state.replacing = None;
+                        state.status.problem(e);
+                    }
                 }
                 return;
             }
             Key::Escape => {
                 state.grouping = None;
-                state.status.note("the group was not kept — the set is still in hand");
+                // Abandoning the name abandons the confirmation with it.
+                state.replacing = None;
+                state.status.note("not kept — the set is still in hand");
                 return;
             }
             Key::Backspace => {
                 if let Some(raw) = state.grouping.as_mut() {
                     raw.pop();
-                }
+                    state.replacing = None;
+            }
             }
             Key::Character(text) => {
                 if let Some(raw) = state.grouping.as_mut() {
                     raw.push_str(text);
-                }
+                    state.replacing = None;
+            }
             }
             Key::Space => {
                 if let Some(raw) = state.grouping.as_mut() {
                     raw.push(' ');
-                }
+                    state.replacing = None;
+            }
             }
             _ => {}
         }
     }
 }
 
-/// **The commit door for a captured group** — `pub` so a test can drive it without a cursor. — validate the whole set, then write, then adopt.
+/// **What a capture did**, or what it is waiting for.
+///
+/// A three-state answer rather than a `Result<String, _>` because capturing over an existing name is
+/// neither a success nor a refusal until the author has said which they meant.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Kept {
+    /// A composition that did not exist before is now on disk.
+    Made(String),
+    /// An existing composition was **redefined**. Every stamp of it in this map now expands to the
+    /// new body — the count is how many, so the receipt can say what just moved.
+    Replaced { id: String, stamps: usize },
+    /// The name is taken and nothing was written. Press again to replace it.
+    WouldReplace { id: String, stamps: usize },
+}
+
+/// **The commit door for a captured composition** — validate the whole set, then write, then adopt.
+///
+/// `pub` so a test can drive it without a cursor.
 ///
 /// `record_selected`'s discipline: nothing in `project` moves until the file is on disk, and a
 /// refusal leaves both exactly as they were. The validation is deliberately the FULL one
-/// (`composition::validate` over every group, not just this one), because a new composition can only break
-/// the set as a whole — a duplicate id, or a nested reference that no longer resolves.
-pub fn keep_as_group(project: &mut Project, set: &CloneSet, raw: &str) -> Result<String, String> {
-    let comp = composition_from_set(set, raw, &project.library)?;
+/// (`composition::validate` over every composition, not just this one), because a new composition can
+/// only break the set as a whole — a duplicate id, or a nested reference that no longer resolves.
+///
+/// # Capturing over a name that exists is how a composition is edited
+///
+/// It used to refuse: *"pick another name — renaming one would strand every map that stamped it."*
+/// That was right while the Compose tab could edit a composition in place, and it stopped being right
+/// when authoring moved here: nothing else modifies, replaces or deletes a composition, so refusing
+/// made them **append-only** and made the demote verb's own advice — "edit the group first" —
+/// impossible to follow.
+///
+/// Replacing keeps the **id**, so no stamp is stranded; what changes is what those stamps expand to,
+/// which is the point. The schema already expects this: `Stamped::of_fingerprint` exists precisely to
+/// notice that a composition changed under a map and say so before the map stops loading.
+///
+/// `confirmed` is the second press. The first returns [`Kept::WouldReplace`] and writes nothing.
+pub fn keep_as_group(
+    project: &mut Project,
+    set: &CloneSet,
+    raw: &str,
+    confirmed: bool,
+) -> Result<Kept, String> {
+    let comp = composition_from_set(set, raw, &project.library, &project.compositions)?;
     let id = comp.id.clone();
-    if project.compositions.compositions.iter().any(|c| c.id == id) {
-        return Err(format!(
-            "`{id}` is already a group. Pick another name — renaming one would strand every map \
-             that stamped it."
-        ));
+    let at = project.compositions.compositions.iter().position(|c| c.id == id);
+
+    let stamps = project.map.stamps.iter().filter(|s| s.of == id).count();
+    if let Some(_existing) = at {
+        // **An override names a member, so redefining can strand one.** `expand` refuses a stamp
+        // whose override names a member the composition does not have, which means the map stops
+        // loading — for the game as well as here. Checked before anything is written, on the same
+        // rule the send-back verb follows: do not perform half a destructive act.
+        let members: std::collections::BTreeSet<&str> =
+            comp.members.iter().map(|m| m.id.as_str()).collect();
+        let mut stranded: Vec<String> = Vec::new();
+        for s in project.map.stamps.iter().filter(|s| s.of == id) {
+            for o in &s.overrides {
+                if !members.contains(o.member.as_str()) {
+                    stranded.push(format!("`{}` overrides `{}`", s.id, o.member));
+                }
+            }
+        }
+        if !stranded.is_empty() {
+            return Err(format!(
+                "replacing `{id}` would strand {}: the new definition has no such member, and a map                  with a dangling override does not load. Remove the override first.",
+                stranded.join(", ")
+            ));
+        }
+        if !confirmed {
+            return Ok(Kept::WouldReplace { id, stamps });
+        }
     }
+
     let mut proposed = project.compositions.clone();
-    proposed.compositions.push(comp);
+    match at {
+        Some(i) => proposed.compositions[i] = comp,
+        None => proposed.compositions.push(comp),
+    }
     proposed.compositions.sort_by(|a, b| a.id.cmp(&b.id));
     emerge_core::composition::validate(&proposed.compositions, &project.library)?;
 
@@ -5116,7 +6236,10 @@ pub fn keep_as_group(project: &mut Project, set: &CloneSet, raw: &str) -> Result
     let text = proposed.to_ron()?;
     emerge_core::ron_surgery::save_atomic(&path, &text).map_err(|e| format!("NOT WRITTEN: {e}"))?;
     project.compositions = proposed;
-    Ok(id)
+    Ok(match at {
+        Some(_) => Kept::Replaced { id, stamps },
+        None => Kept::Made(id),
+    })
 }
 
 fn pin_reason_keys(
@@ -5200,6 +6323,12 @@ enum Source {
     Learned,
     /// Read off the kit's declared edge tokens. Works on an empty map.
     Declared,
+    /// Built from the kit's **compositions** — whole tiles rather than single pieces.
+    ///
+    /// The one source that draws in stamps rather than placements, which is what makes a kit whose
+    /// meshes are never cell-sized solvable at all. Not a fallback for the other two: each either
+    /// produces a grammar or refuses by name.
+    Composed,
 }
 
 fn generate(
@@ -5223,13 +6352,25 @@ fn generate_from(
     // One metre: the tile the kits are authored on, and coarse enough that a 32 m map is a grid the
     // solver finishes rather than 4,096 cells of half-metre noise.
 
-    let built = match source {
-        Source::Learned => emerge_core::grammar::learn(&project.map, CELL),
+    // `from_compositions` also reports what it could not make a tile of, by name. `learn` and
+    // `declared` refuse whole or succeed whole, so they carry an empty report rather than a different
+    // shape — one type here, and the refusals reach the status line either way.
+    let built: Result<(emerge_core::grammar::Grammar, Vec<String>), String> = match source {
+        Source::Learned => emerge_core::grammar::learn(&project.map, CELL).map(|g| (g, Vec::new())),
         Source::Declared => {
             emerge_core::grammar::declared(&project.library, project.policy.face_bands, CELL)
+                .map(|g| (g, Vec::new()))
         }
+        Source::Composed => emerge_core::grammar::from_compositions(
+            &project.compositions.compositions,
+            &project.library,
+            project.policy.face_bands,
+            CELL,
+            emerge_core::composition::agrees,
+        )
+        .map(|c| (c.grammar, c.skipped)),
     };
-    let grammar = match built {
+    let (grammar, skipped) = match built {
         Ok(g) => g,
         Err(e) => {
             state.status.problem(e);
@@ -5284,14 +6425,36 @@ fn generate_from(
     // the solver output and stopped, with a success message), and every index-based entry already on
     // the stack — Moved, Turned, Pinned, RemoveAt — was left pointing at rows that had shifted, so a
     // second Cmd+Z rewrote whatever now sat at those indices with the dead sketch's data.
-    let removed: Vec<(usize, Box<Placed>)> = project
-        .map
-        .placements
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| !p.owned)
-        .map(|(i, p)| (i, Box::new(p.clone())))
-        .collect();
+    // **A solve replaces the sketch in the medium it draws in.** A grammar over descriptors lays
+    // placements, so it clears the unpinned placements; a grammar over compositions lays stamps, so it
+    // clears the unpinned stamps and must leave the author's placements alone. Clearing both would
+    // make `Shift+G` silently delete every group an author had stamped.
+    let composes = matches!(source, Source::Composed);
+
+    let removed: Vec<(usize, Box<Placed>)> = if composes {
+        Vec::new()
+    } else {
+        project
+            .map
+            .placements
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.owned)
+            .map(|(i, p)| (i, Box::new(p.clone())))
+            .collect()
+    };
+    let unstamped: Vec<(usize, Box<emerge_core::composition::Stamped>)> = if composes {
+        project
+            .map
+            .stamps
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.owned)
+            .map(|(i, s)| (i, Box::new(s.clone())))
+            .collect()
+    } else {
+        Vec::new()
+    };
     for (entity, marker) in placed {
         if removed.iter().any(|(_, p)| p.id == marker.0) {
             commands.entity(entity).despawn();
@@ -5301,6 +6464,9 @@ fn generate_from(
     for (i, _) in removed.iter().rev() {
         project.map.placements.remove(*i);
     }
+    for (i, _) in unstamped.iter().rev() {
+        project.map.stamps.remove(*i);
+    }
 
     // **Into the map first, drawn second.** The solver lays pieces on the floor grid; how high each
     // one ends up is a question about the finished map, so the map has to be finished before it is
@@ -5309,18 +6475,40 @@ fn generate_from(
     let first = project.map.placements.len();
     project.map.placements.extend(solved.placements);
     spawn_range(commands, assets, project, state, first);
+
+    // **Stamps need no spawn call.** `redraw_stamps` rebuilds the whole stamped picture from
+    // `map.stamps` whenever it changes, so writing the rows is the whole job — unlike the placement
+    // path above, which owns its entities.
+    let stamped = solved.stamps.len();
+    project.map.stamps.extend(solved.stamps);
     project.dirty = true;
-    // One act, one entry: undoing a generate first strips the solver rows (the `Added`), then puts
-    // the sketch back at its own indices (the `RemovedMany`) — [`Undo::Group`] applies in order and
-    // inverts by reversing.
-    state.record(Undo::Group {
-        ops: vec![
-            Undo::Added { count },
-            Undo::RemovedMany { items: removed },
-        ],
-    });
+
+    // One act, one entry: undoing a generate first strips the solver rows (the `Added`/`Stamped`),
+    // then puts the sketch back at its own indices (the `RemovedMany`/`UnstampedMany`) —
+    // [`Undo::Group`] applies in order and inverts by reversing.
+    let mut ops = Vec::new();
+    if count > 0 {
+        ops.push(Undo::Added { count });
+    }
+    if stamped > 0 {
+        ops.push(Undo::Stamped { count: stamped });
+    }
+    if !removed.is_empty() {
+        ops.push(Undo::RemovedMany { items: removed });
+    }
+    if !unstamped.is_empty() {
+        ops.push(Undo::UnstampedMany { items: unstamped });
+    }
+    if !ops.is_empty() {
+        state.record(Undo::Group { ops });
+    }
+
+    for s in &skipped {
+        state.status.problem(format!("not a tile: {s}"));
+    }
     state.status.note(format!(
-        "continued the layout: {count} placed around {} pinned cell(s), from {} prototype(s)",
+        "continued the layout: {} around {} pinned cell(s), from {} prototype(s)",
+        if composes { format!("{stamped} stamped") } else { format!("{count} placed") },
         solved.owned_cells,
         grammar.len() - 1
     ));
@@ -5461,9 +6649,15 @@ fn drive_ghost(
         // The clone tool draws its own marker — the set's bounds riding the cursor — and a brush
         // ghost beside it would be a second preview for a click that stamps, not places.
         Tool::Clone => None,
+        // A carried STAMP previews as itself — its rows stay drawn while it is in hand and the
+        // drop moves them — so the brush ghost has nothing to add and would be a second subject.
         Tool::Move => held
             .held
             .as_ref()
+            .and_then(|h| match h {
+                Held::Piece(id) => Some(id),
+                Held::Stamp(_) => None,
+            })
             .and_then(|id| project.map.placements.iter().find(|p| &p.id == id))
             .and_then(|p| {
                 project
@@ -5497,7 +6691,7 @@ fn drive_ghost(
     // removed; so must the preview, or it is a promise about something that is not going to happen —
     // the one thing this editor's previews are held to.
     let probe_map = match (state.tool, held.held.as_ref()) {
-        (Tool::Move, Some(id)) => {
+        (Tool::Move, Some(Held::Piece(id))) => {
             let mut reduced = project.map.clone();
             if let Some(ix) = reduced.placements.iter().position(|p| &p.id == id) {
                 let mut group = emerge_core::stack::group_of(&reduced, ix);
@@ -5575,6 +6769,162 @@ fn drive_ghost(
         }
     }
 }
+
+/// **The held clone set, previewed as the pieces themselves.**
+///
+/// Reported live: *"Shift+B still isn't showing a ghosted version of the composition so I can see
+/// where to place it."* The clone tool drew only [`CloneTile`] — the set's **bounds** riding the
+/// cursor — which says how big the thing is and nothing about what it is or which way round it
+/// faces. Butting one section against another needs both.
+///
+/// The bounds rectangle stays, on the author's call: the pieces imply an extent, but a set with a
+/// gap at its edge reads as smaller than the region it claims, and flush-against-the-last-one is
+/// exactly the judgement this preview exists to support.
+///
+/// **A parent with the pieces as children**, the shape [`StampInstance`] uses and for the same
+/// reason: `Children` is `linked_spawn`, so despawning the parent takes the ghosts with it, and
+/// riding the cursor is then one transform write instead of N. Rebuilt only when the set in hand
+/// changes — a clone set is fixed once taken, so a per-frame rebuild would be tearing down and
+/// respawning a dozen GLB scenes at frame rate for a preview that only moves.
+///
+/// The pieces carry [`Ghost`] so [`fade_ghost`] fades them through the one path that already exists,
+/// and **not** [`GhostOf`], which keys the brush ghost by library index — two pieces of one
+/// descriptor in a set would collide on it, and `drive_ghost`'s own clear would take them.
+#[allow(clippy::too_many_arguments)]
+fn drive_clone_ghost(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    project: Res<Project>,
+    state: Res<EditorState>,
+    drag: Res<CloneDrag>,
+    pointer: Res<crate::view::Pointer>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    ui_nodes: Query<(&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform), With<Hovered>>,
+    ghosts: Query<(Entity, &CloneGhost)>,
+    mut transforms: Query<&mut Transform, With<CloneGhost>>,
+) {
+    let clear = |commands: &mut Commands| {
+        for (e, _) in &ghosts {
+            commands.entity(e).despawn();
+        }
+    };
+
+    let Some(camera) = camera else {
+        clear(&mut commands);
+        return;
+    };
+    let (cam, cam_tf) = *camera;
+    // No preview while the cursor is on a panel: the set is not going there, and the click will not
+    // reach the world — `drive_clone` filters the same way, so the two agree about when a drop is
+    // possible. Geometry rather than `Hovered`, for `view::over_ui`'s reason.
+    let on_ui = crate::view::over_ui(
+        pointer.0,
+        cam.target_scaling_factor().unwrap_or(1.0),
+        ui_nodes.iter(),
+    );
+    let (Some(set), false) = (drag.held.as_ref(), state.tool != Tool::Clone) else {
+        clear(&mut commands);
+        return;
+    };
+    let Some(hit) = cursor_ground(pointer.0, cam, cam_tf).filter(|_| !on_ui) else {
+        clear(&mut commands);
+        return;
+    };
+
+    // **Exactly the arithmetic the drop uses.** `drive_clone` stamps at `(snap(at.0), snap(at.1))`
+    // and `stamp_set` puts each piece at `target + piece.offset`; a preview computing either
+    // differently is a promise about a landing that will not happen, which is the one thing this
+    // editor's previews are held to.
+    let at = project.map.to_map_space((hit.x, hit.z));
+    let target = (snap(at.0), snap(at.1));
+    let (root, spin) = ghost_anchor(set, target, project.map.origin);
+
+    if let Some((e, _)) = ghosts.iter().next() {
+        if let Ok(mut tf) = transforms.get_mut(e) {
+            let want = spin;
+            // Written only on a change: this runs every frame the set is in hand.
+            if tf.translation != root {
+                tf.translation = root;
+            }
+            if tf.rotation != want {
+                tf.rotation = want;
+            }
+        }
+        return;
+    }
+
+    // **Y is left at the drop's own answer being unknown here.** `stamp_set` seats each piece
+    // through `stack::placement_at` against the map it is landing in; resolving that per frame for
+    // a whole set is the expensive half, and the preview's job is *where in plan* the set lands.
+    // The pieces ride at their captured lift, which is what a flat stamp onto floor produces.
+    // **The turn rides on the parent.** Rotating it about +Y rotates where each child sits *and*
+    // which way it faces, in one write — the same composition of transforms `CloneSet::placed`
+    // computes arithmetically for the stamp, so the preview cannot drift from the landing.
+    let parent = commands
+        .spawn((
+            CloneGhost,
+            Transform::from_translation(root).with_rotation(spin),
+            Visibility::default(),
+        ))
+        .id();
+    let mut drawn = 0usize;
+    for piece in &set.pieces {
+        let Some(d) = project.library.get(&piece.descriptor) else {
+            continue;
+        };
+        // Local to the parent, so moving the set is one write: the parent sits at `target` and each
+        // piece sits at its own offset from it.
+        let local = emerge_bevy::origin_of(piece.offset, (0.0, 0.0, 0.0), piece.lift);
+        if let Some(e) = spawn_piece(
+            &mut commands,
+            &assets,
+            d,
+            piece.offset,
+            piece.yaw,
+            piece.tip,
+            (0.0, 0.0, 0.0),
+            piece.lift,
+        ) {
+            commands
+                .entity(e)
+                .insert((Ghost, ChildOf(parent)))
+                .insert(Transform::from_translation(local).with_rotation(Quat::from_rotation_y(
+                    emerge_bevy::draw_yaw(d, piece.yaw).to_radians(),
+                )));
+            drawn += 1;
+        }
+    }
+    if drawn == 0 {
+        // Nothing drew, so the parent is an empty promise — and an empty parent would satisfy the
+        // "already built" check above and never try again.
+        commands.entity(parent).despawn();
+    }
+}
+
+/// **Where the ghost stands and how it is turned** — the pure half of [`drive_clone_ghost`].
+///
+/// Extracted for the reason `edit_subject` and `under_readout` were: the system needs
+/// `cursor_ground`, which needs a viewport, so a headless test cannot reach it at all. What a test
+/// *can* reach is the property that matters — **the preview lands where the drop lands** — and this
+/// is the whole of the preview's side of that.
+///
+/// It is deliberately NOT a re-test of `CloneSet::placed`, which
+/// `a_turned_set_lands_where_a_turned_stamp_would` already pins. The claim here is that the parent
+/// transform composed with a child's own local offset reproduces exactly what the *drop* computes
+/// per piece — which is what makes the ghost a promise rather than a picture.
+///
+/// **Still uncovered, and named rather than implied:** that the system spawns one child per piece,
+/// fades them, and clears them when the cursor leaves the world. Those are frame questions.
+pub fn ghost_anchor(set: &CloneSet, target: (f32, f32), origin: (f32, f32, f32)) -> (Vec3, Quat) {
+    (
+        emerge_bevy::origin_of(target, origin, 0.0),
+        Quat::from_rotation_y(set.yaw.to_radians()),
+    )
+}
+
+/// The parent of a held clone set's ghost pieces. See [`drive_clone_ghost`]./// The parent of a held clone set's ghost pieces. See [`drive_clone_ghost`].
+#[derive(Component)]
+struct CloneGhost;
 
 /// Fade the ghost once its GLB has instantiated materials.
 ///

@@ -60,7 +60,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::descriptor::{Descriptor, Dir as ClearDir, Mount, OverlayHost, Subgrid};
+use crate::descriptor::{Descriptor, Dir as ClearDir, Mount, DecalHost, Subgrid};
 use crate::library::Library;
 use crate::map::{Location, Map, Placed};
 use crate::placement::ir::Dir;
@@ -171,7 +171,7 @@ fn paint_is_zero(v: &i8) -> bool {
 ///
 /// The three fields below live in this variant rather than on [`Member`] so that the states they would
 /// otherwise make expressible are unrepresentable instead. A composition has no mesh to tip, no
-/// `Descriptor` shape for a patch to overlay, and its own members answer their own hosts; a `tip`,
+/// `Descriptor` shape for a patch to decal, and its own members answer their own hosts; a `tip`,
 /// `patch` or `on` on a group would each be a field with no meaning that some reader would eventually
 /// act on.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -188,7 +188,7 @@ pub enum Body {
         /// which [`expand`] resolves against the map the stamp lands in.
         #[serde(default)]
         on: Option<String>,
-        /// Per-member overlay on the library entry. Sparse: [`Descriptor`] is a patch type, so absence
+        /// Per-member decal on the library entry. Sparse: [`Descriptor`] is a patch type, so absence
         /// inherits.
         #[serde(default)]
         patch: Option<Descriptor>,
@@ -254,6 +254,66 @@ pub struct Override {
     /// same argument: without it a diff cannot tell a deliberate exception from a stray keystroke.
     pub because: String,
 }
+
+/// **Do two tiles agree where they meet?** — the substitutable adjacency rule.
+///
+/// FVS-R-7's invariant, and it is about *substitutability* rather than about this particular answer.
+/// Karth & Smith, on WFC's constraint layer: *"any arbitrary adjacency validity function can be
+/// substituted here… without changing the WFC solver itself."* Everything that learns a grammar over
+/// compositions calls through a function of this shape, so the edge-versus-corner question
+/// (FVS-R-11, blocked on Lagae & Dutré) cannot gate the grammar: swapping the rule is swapping an
+/// argument.
+///
+/// # The rule this one implements
+///
+/// `a`'s `dir` face against `b`'s opposite. Where the two overlap — in height and along the seam —
+/// the tokens must be equal, and `None` is a token in its own right that matches only `None`
+/// (`crate::adjacency`'s rule, so a composition and a plain tile answer the same way).
+///
+/// **No mirroring.** [`Band::lat`] is quoted in the envelope's own coordinates, `-size/2` to
+/// `+size/2`, and its doc says why: *"it does not depend on which side you imagine standing, which is
+/// the kind of thing that reads fine and mirrors a face."* Two abutting tiles quote the same world
+/// axis, so the ranges compare directly. A version of this that flipped one side would pass every
+/// symmetric test and mirror every doorway.
+///
+/// **Bands, not one token a side**, because four shipped pieces present two at once — a doorway
+/// reads `wall` at the jambs and nothing through the opening. Comparing overlaps rather than whole
+/// faces is what lets a doorway meet a wall along the jamb and a gap along the hole.
+///
+/// A face presenting nothing at all agrees with anything: there is no seam to disagree about.
+pub fn agrees(a: &Interface, b: &Interface, dir: Dir) -> bool {
+    let opposite = match dir {
+        crate::wfc::N => crate::wfc::S,
+        crate::wfc::E => crate::wfc::W,
+        crate::wfc::S => crate::wfc::N,
+        _ => crate::wfc::E,
+    };
+    let (Some(ours), Some(theirs)) = (a.faces.get(dir), b.faces.get(opposite)) else {
+        return false;
+    };
+    for x in ours {
+        for y in theirs {
+            let over_y = (x.y.0.max(y.y.0), x.y.1.min(y.y.1));
+            let over_lat = (x.lat.0.max(y.lat.0), x.lat.1.min(y.lat.1));
+            // Touching is not overlapping: two bands that share only an edge do not meet over any
+            // area, and calling that a disagreement would fault every stacked band against its
+            // neighbour's.
+            if over_y.1 - over_y.0 <= SEAM_EPSILON || over_lat.1 - over_lat.0 <= SEAM_EPSILON {
+                continue;
+            }
+            if x.token != y.token {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// How much overlap two bands must share before they are held to agree, metres.
+///
+/// The same tenth of a millimetre [`crate::grammar::CELL_EPSILON`] uses, and for the same reason:
+/// far below anything an author expresses, far above `f32`'s error at authoring scale.
+pub const SEAM_EPSILON: f32 = 1e-4;
 
 /// What a map's stamps come out as.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -355,13 +415,18 @@ impl Interface {
 /// The exact inverse of the rotation [`crate::stack::covers`] uses to go the other way, and written
 /// against it rather than re-derived: Bevy's yaw turns +X toward −Z, so getting the sign wrong here
 /// mirrors every composition without failing anything.
-fn rotate_xz(local: (f32, f32), yaw_deg: f32) -> (f32, f32) {
+///
+/// **Public because a turned *loose set* has to agree with a turned stamp.** `emerge-mapper`'s clone
+/// tool rotates a captured group about its anchor, and a second copy of this sign convention is how
+/// a set stamped at 90° would come out mirrored against a composition stamped at 90° — the failure
+/// this comment already warns about, one caller further out.
+pub fn rotate_xz(local: (f32, f32), yaw_deg: f32) -> (f32, f32) {
     let (s, c) = yaw_deg.to_radians().sin_cos();
     (local.0 * c + local.1 * s, -local.0 * s + local.1 * c)
 }
 
-/// Yaws add, and the sum is brought back into `[0, 360)`.
-fn add_yaw(a: f32, b: f32) -> f32 {
+/// Yaws add, and the sum is brought back into `[0, 360)`. Public for [`rotate_xz`]'s reason.
+pub fn add_yaw(a: f32, b: f32) -> f32 {
     (a + b).rem_euclid(360.0)
 }
 
@@ -523,12 +588,34 @@ impl Composition {
                 self.id
             ));
         }
-        // **An empty composition is not refused here, and that is a correction.** The reason this
-        // check gave — "an empty group stamps nothing, which looks exactly like a stamp that failed"
-        // — is an argument about *stamping*, and it is now made where stamping happens, in [`expand`].
-        // Refusing at definition time made the editor's own NEW verb impossible: it creates an empty
-        // tile and then asks you to fill it, so the door refused the thing it had just been asked to
-        // make. A composition with no members yet is the ordinary first state of authoring one.
+        // **Refused here again, and the round trip is worth recording.**
+        //
+        // This check was moved out to [`expand`] earlier the same day, on the argument that its own
+        // reason — "an empty group stamps nothing, which looks exactly like a stamp that failed" —
+        // is about *stamping*. That was true, and it was the wrong conclusion, for two reasons found
+        // afterwards.
+        //
+        // **The blast radius is the map, not the stamp.** `editor::redraw_stamps` and `emerge-bevy`
+        // both expand a map's stamps in ONE call, and the editor despawns every stamped row *before*
+        // that call can fail — so a single empty composition takes every stamped row in the map off
+        // the screen, and the saved file will not load in the game either. A per-stamp refusal
+        // downstream cannot be contained to the stamp that caused it.
+        //
+        // **And the thing it was moved for is gone.** It was blocking the Compose tab's NEW verb,
+        // which created an empty tile and then asked you to fill it. Authoring moved to the Map,
+        // where a composition is captured from a box selection and an empty box is already refused
+        // — so nothing creates an empty composition any more, and refusing one at the door costs
+        // nothing and catches a hand-edited file before it reaches a map.
+        //
+        // [`expand`] keeps its own check as a precondition on a public function, for a caller that
+        // builds compositions in memory without coming through here.
+        if self.members.is_empty() {
+            return Err(format!(
+                "composition: `{}` has no members. An empty composition stamps nothing, which looks \
+                 exactly like a stamp that failed.",
+                self.id
+            ));
+        }
         if let Envelope::Bounded { size } = self.envelope {
             for (axis, v) in [("x", size.0), ("y", size.1), ("z", size.2)] {
                 if !(v.is_finite() && v > 0.0) {
@@ -777,7 +864,7 @@ pub fn descriptor_fingerprint(d: &Descriptor) -> u64 {
     }
     // **Encoded by hand, not by `Debug`.** These were `format!("{x:?}")`, which is the same mistake
     // in kind as hashing a float's text: `Debug` output is not a stability contract, so renaming a
-    // `Mount` field or reordering `OverlayHost` would re-fingerprint every descriptor carrying one
+    // `Mount` field or reordering `DecalHost` would re-fingerprint every descriptor carrying one
     // and flip every composition using it to STALE with no real drift. A discriminant plus the
     // fields that matter says what it means and only changes when the meaning does.
     match d.align.front {
@@ -809,12 +896,12 @@ pub fn descriptor_fingerprint(d: &Descriptor) -> u64 {
         Some(Mount::OnSurface { class }) => {
             f.tag(5).str(class);
         }
-        Some(Mount::Overlay { on }) => {
+        Some(Mount::Decal { on }) => {
             f.tag(6);
             match on {
-                OverlayHost::Floor => f.tag(0),
-                OverlayHost::Ceiling => f.tag(1),
-                OverlayHost::Wall { height } => f.tag(2).f32(*height),
+                DecalHost::Floor => f.tag(0),
+                DecalHost::Ceiling => f.tag(1),
+                DecalHost::Wall { height } => f.tag(2).f32(*height),
             };
         }
         Some(Mount::Tiled) => {
@@ -1110,7 +1197,7 @@ pub fn expand(
             if matches!(member.map(|m| &m.body), Some(Body::Composition { .. })) {
                 return Err(format!(
                     "map: stamp `{}` overrides member `{}` of `{}`, which is a composition. A group \
-                     has no descriptor for a patch to overlay — override one of its own members, or \
+                     has no descriptor for a patch to decal — override one of its own members, or \
                      edit the group.",
                     s.id, o.member, comp.id
                 ));
@@ -1587,15 +1674,22 @@ mod tests {
         p
     }
 
-    /// **An empty composition is a composition being authored, and stamping one is the mistake.**
+    /// **An empty composition is refused at the door, and again at the stamp.**
     ///
-    /// This refusal used to sit in `validate_shape`, which made the editor's NEW verb impossible:
-    /// it creates an empty tile and then asks you to fill it, so the commit door refused the thing
-    /// it had just been told to make. The reason the refusal gave was always about *stamping*, so
-    /// that is where it now is — and both halves are pinned here, because moving a check is only
-    /// safe if the thing it was catching is still caught.
+    /// The refusal lived in `validate_shape`, moved to `expand` to unblock a verb that created empty
+    /// tiles, and came back when that verb did not survive: authoring moved to the Map, where an
+    /// empty box selection is already refused, so nothing makes one any more.
+    ///
+    /// Both halves are pinned because they catch different things. `validate_shape` catches a
+    /// hand-edited file **at load, naming the empty composition** — including one nested inside
+    /// another, which the stamp-time check can only report against the outer id. `expand` catches a
+    /// caller that built compositions in memory and never came through the door.
+    ///
+    /// The reason the load-time check is the important one: `redraw_stamps` and `emerge-bevy` expand
+    /// a whole map in ONE call, and the editor despawns every stamped row before that call can fail.
+    /// One empty composition therefore costs every stamped row in the map, not just its own.
     #[test]
-    fn an_empty_composition_may_exist_but_may_not_be_stamped() {
+    fn an_empty_composition_is_refused_at_the_door_and_at_the_stamp() {
         let comp = Composition {
             id: "half_built".to_owned(),
             envelope: Envelope::Bounded { size: (1.0, 2.4, 1.0) },
@@ -1604,13 +1698,17 @@ mod tests {
             note: None,
         };
         let lib = library(vec![piece("floor", 1.0, 1.0, 0.1)]);
-        // It exists, it loads, it can be selected and filled.
-        comp.validate_shape().unwrap_or_else(|e| panic!("an empty composition must be authorable: {e}"));
-        validate(std::slice::from_ref(&comp), &lib)
-            .unwrap_or_else(|e| panic!("an empty composition must load: {e}"));
 
-        // Stamping it is refused, and the refusal names the stamp AND the composition — at that
-        // point the author has one of each and needs to know which.
+        // The door, naming the composition an author has to go and fix.
+        let err = comp.validate_shape().expect_err("an empty composition must not load");
+        assert!(err.contains("half_built"), "{err}");
+        assert!(err.contains("no members"), "{err}");
+        let err = validate(std::slice::from_ref(&comp), &lib)
+            .expect_err("nor pass the whole-set validation the loader runs");
+        assert!(err.contains("half_built"), "{err}");
+
+        // And the backstop, for a caller that built one in memory. It names the stamp AND the
+        // composition, because at that point there is one of each.
         let stamps = vec![Stamped {
             id: "s1".to_owned(),
             of: "half_built".to_owned(),
@@ -1620,7 +1718,45 @@ mod tests {
             .expect_err("stamping an empty composition has to refuse");
         assert!(err.contains("s1"), "the stamp is not named: {err}");
         assert!(err.contains("half_built"), "the composition is not named: {err}");
-        assert!(err.contains("no members"), "{err}");
+    }
+
+    /// **A nested empty composition is named by the one an author has to edit.**
+    ///
+    /// The stamp-time check can only see that the whole expansion came out empty, so it reports the
+    /// OUTER composition — which is not the one to go and fix. The load-time check walks every
+    /// composition in the set, so it names the inner one directly. This is why moving the check
+    /// downstream lost information, not just timing.
+    #[test]
+    fn a_nested_empty_composition_is_named_rather_than_its_parent() {
+        let alcove = Composition {
+            id: "alcove".to_owned(),
+            envelope: Envelope::Anchored,
+            members: Vec::new(),
+            locations: Vec::new(),
+            note: None,
+        };
+        let room = Composition {
+            id: "room".to_owned(),
+            envelope: Envelope::Anchored,
+            members: vec![Member {
+                id: "nook".to_owned(),
+                body: Body::Composition { id: "alcove".to_owned() },
+                at: (0.0, 0.0),
+                yaw: 0.0,
+                lift: 0.0,
+                paint: 0,
+                of_fingerprint: None,
+                note: None,
+            }],
+            locations: Vec::new(),
+            note: None,
+        };
+        let lib = library(vec![piece("floor", 1.0, 1.0, 0.1)]);
+        let err = validate(&[alcove, room], &lib).expect_err("the empty inner one must refuse");
+        assert!(
+            err.contains("alcove"),
+            "the refusal has to name the composition to go and edit, not its parent: {err}"
+        );
     }
 
     fn library(descriptors: Vec<Descriptor>) -> Library {

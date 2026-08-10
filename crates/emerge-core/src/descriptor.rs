@@ -25,7 +25,7 @@
 //! `site::layout::is_floor_marking`, which inferred "this is a decal" from a mesh being under 15 cm
 //! and had already misclassified a 10.9 cm mug. Layering is now something an author *states*.
 //!
-//! [`Mount::Overlay`] is the case that could not be expressed at all before: a decal on a wall. The
+//! [`Mount::Decal`] is the case that could not be expressed at all before: a decal on a wall. The
 //! Site's props carried no Y, no host and no normal, so the only wall-mounted object in the game was
 //! `DoorPlaque`, hardcoded in Rust and never authored.
 
@@ -480,13 +480,13 @@ pub fn mount_options(surfaces: &[String]) -> Vec<Mount> {
         Mount::OnWall { height: 1.8 },
         Mount::OnCeiling,
         Mount::Tiled,
-        Mount::Overlay { on: OverlayHost::Floor },
+        Mount::Decal { on: DecalHost::Floor },
         // The same default `OnWall` offers, because it is the same question: eye level for a sign.
-        Mount::Overlay {
-            on: OverlayHost::Wall { height: 1.8 },
+        Mount::Decal {
+            on: DecalHost::Wall { height: 1.8 },
         },
-        Mount::Overlay {
-            on: OverlayHost::Ceiling,
+        Mount::Decal {
+            on: DecalHost::Ceiling,
         },
         Mount::InOpening { clear: None },
     ];
@@ -507,7 +507,7 @@ pub fn mount_options(surfaces: &[String]) -> Vec<Mount> {
 /// **The height a mount carries**, metres, or `None` for one where the question does not arise.
 ///
 /// Two variants carry a height and they carry the same one for the same reason — a wall's height is
-/// nobody else's to state, unlike the floor and the ceiling, which the map states. [`OverlayHost`]'s
+/// nobody else's to state, unlike the floor and the ceiling, which the map states. [`DecalHost`]'s
 /// own doc says so.
 ///
 /// This exists because the editor could put a piece **on** a wall and then not say how far up: the
@@ -516,8 +516,8 @@ pub fn mount_options(surfaces: &[String]) -> Vec<Mount> {
 pub fn mount_height(m: &Mount) -> Option<f32> {
     match m {
         Mount::OnWall { height } => Some(*height),
-        Mount::Overlay {
-            on: OverlayHost::Wall { height },
+        Mount::Decal {
+            on: DecalHost::Wall { height },
         } => Some(*height),
         _ => None,
     }
@@ -530,10 +530,10 @@ pub fn mount_height(m: &Mount) -> Option<f32> {
 pub fn with_mount_height(m: &Mount, height: f32) -> Option<Mount> {
     match m {
         Mount::OnWall { .. } => Some(Mount::OnWall { height }),
-        Mount::Overlay {
-            on: OverlayHost::Wall { .. },
-        } => Some(Mount::Overlay {
-            on: OverlayHost::Wall { height },
+        Mount::Decal {
+            on: DecalHost::Wall { .. },
+        } => Some(Mount::Decal {
+            on: DecalHost::Wall { height },
         }),
         _ => None,
     }
@@ -548,10 +548,10 @@ pub fn mount_label(mount: Option<&Mount>) -> String {
         Some(Mount::OnWall { height }) => format!("on wall at {height:.1} m"),
         Some(Mount::OnCeiling) => "on ceiling".to_owned(),
         Some(Mount::Tiled) => "tiled".to_owned(),
-        Some(Mount::Overlay { on }) => match on {
-            OverlayHost::Floor => "overlay on floor".to_owned(),
-            OverlayHost::Ceiling => "overlay on ceiling".to_owned(),
-            OverlayHost::Wall { height } => format!("overlay on wall at {height:.1} m"),
+        Some(Mount::Decal { on }) => match on {
+            DecalHost::Floor => "decal on floor".to_owned(),
+            DecalHost::Ceiling => "decal on ceiling".to_owned(),
+            DecalHost::Wall { height } => format!("decal on wall at {height:.1} m"),
         },
         Some(Mount::InOpening { clear }) => match clear {
             Some((w, h)) => format!("in opening {w:.2} x {h:.2} m"),
@@ -739,6 +739,29 @@ pub struct Extent {
 
 /// Where a piece attaches — the layering axis, replacing `Role` + `rests_on` + the floor-marking
 /// height heuristic.
+///
+/// # Each variant names *where a piece sits* and decides *what it contests*
+///
+/// Those are two different things, and only the first is in the name. The second is what makes an
+/// edit refused, and it lives in [`crate::stack::same_layer`]'s match arms — invisible at the call
+/// site, so an author picking a mount is choosing collision semantics while reading a positional
+/// word. Three variants put a piece at deck level and mean three different things about collision.
+/// The table is the schema; it is restated here so choosing a mount does not require reading
+/// `stack.rs`.
+///
+/// | variant | height | contests |
+/// |---|---|---|
+/// | `OnFloor` (and an absent mount) | the deck | every other floor-standing piece |
+/// | `Tiled` | the deck | only other `Tiled` — which is what lets floor go under a dressed room |
+/// | `Decal { .. }` | its host's plane | **nothing.** Two decals may share a wall, which is the point of them |
+/// | `OnCeiling` | the ceiling | only other `OnCeiling` |
+/// | `InOpening { .. }` | the opening | only other `InOpening` — so a door and its wall cannot conflict |
+/// | `OnWall { height }` | that height | only `OnWall` **at the same height**, within 1 mm |
+/// | `OnSurface { class }` | its host's top | only `OnSurface` **on the same host** — two lamps contest one table, not two tables |
+///
+/// **A heterogeneous pair contests nothing at all** (`same_layer`'s `_ => false`), which is why the
+/// bounded claim on [`crate::stack::blocking`] matters: the rule is per-layer and in plan, so a tall
+/// floor-standing piece and a wall-mounted one behind it never meet.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Mount {
@@ -762,11 +785,11 @@ pub enum Mount {
     OnSurface { class: String },
     /// **Lies flat on a host surface** — a decal, a floor marking, a wall poster, a ceiling stain.
     ///
-    /// The case the old schemas could not express. `Overlay` claims no volume and never participates
+    /// The case the old schemas could not express. `Decal` claims no volume and never participates
     /// in the overlap rule: two decals may share a wall, which is the whole point of them.
     ///
-    /// The host carries the height where a height is a thing that exists — see [`OverlayHost`].
-    Overlay { on: OverlayHost },
+    /// The host carries the height where a height is a thing that exists — see [`DecalHost`].
+    Decal { on: DecalHost },
     /// Laid on a grid by a tiling solver.
     Tiled,
 }
@@ -779,12 +802,12 @@ pub enum Mount {
 /// nothing anywhere states how high a poster hangs.
 ///
 /// That last one shipped as a hole. `Mount::OnWall` has carried a height since it was written, and
-/// `Overlay` — the variant that exists *for* wall decals — had nowhere to put one, so a wall overlay
+/// `Decal` — the variant that exists *for* wall decals — had nowhere to put one, so a wall decal
 /// could be authored and then had no answer for where it went. Encoding it in the variant means the
 /// unanswerable state is not constructible rather than merely rejected.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub enum OverlayHost {
+pub enum DecalHost {
     /// A floor marking — a hazard stripe, a painted lane, a stain. Lies on the map's floor.
     Floor,
     /// A ceiling stain or a painted marking. Lies on the map's ceiling.
@@ -966,7 +989,7 @@ impl Descriptor {
         // on, and defaulting that to zero would sink them into the floor.
         let height = match (self.extent.height, &mount) {
             (Some(h), _) => h,
-            (None, Mount::Overlay { .. }) => 0.0,
+            (None, Mount::Decal { .. }) => 0.0,
             (None, _) => return Err(need("extent.height")),
         };
 
@@ -1010,7 +1033,7 @@ impl Descriptor {
 impl Resolved {
     /// Does this piece claim floor space that another may not share?
     ///
-    /// Replaces `site::layout::occupies_floor` and its height threshold. An `Overlay` claims nothing
+    /// Replaces `site::layout::occupies_floor` and its height threshold. An `Decal` claims nothing
     /// (that is what a decal is), and something resting on a surface is the host's problem, not the
     /// floor's — two mugs on one table still collide with each other, which the overlap rule handles
     /// on the surface rather than here.
@@ -1107,8 +1130,8 @@ mod tests {
     fn the_two_wall_mounts_are_the_ones_with_a_height() {
         assert_eq!(mount_height(&Mount::OnWall { height: 1.6 }), Some(1.6));
         assert_eq!(
-            mount_height(&Mount::Overlay {
-                on: OverlayHost::Wall { height: 2.1 }
+            mount_height(&Mount::Decal {
+                on: DecalHost::Wall { height: 2.1 }
             }),
             Some(2.1)
         );
@@ -1118,8 +1141,8 @@ mod tests {
             Mount::Tiled,
             Mount::InOpening { clear: None },
             Mount::OnSurface { class: "worktop".into() },
-            Mount::Overlay { on: OverlayHost::Floor },
-            Mount::Overlay { on: OverlayHost::Ceiling },
+            Mount::Decal { on: DecalHost::Floor },
+            Mount::Decal { on: DecalHost::Ceiling },
         ] {
             assert_eq!(mount_height(&no_height), None, "{no_height:?}");
             assert_eq!(
@@ -1134,14 +1157,14 @@ mod tests {
     /// somebody typed a number at it.
     #[test]
     fn setting_a_height_does_not_change_which_mount_it_is() {
-        let poster = Mount::Overlay {
-            on: OverlayHost::Wall { height: 1.8 },
+        let poster = Mount::Decal {
+            on: DecalHost::Wall { height: 1.8 },
         };
         let moved = with_mount_height(&poster, 1.2).unwrap_or_else(|| panic!("has a height"));
         assert!(matches!(
             moved,
-            Mount::Overlay {
-                on: OverlayHost::Wall { .. }
+            Mount::Decal {
+                on: DecalHost::Wall { .. }
             }
         ));
         assert_eq!(mount_height(&moved), Some(1.2));
@@ -1249,12 +1272,12 @@ mod tests {
         d.extent.height = None;
         assert!(d.resolve().is_err(), "a solid piece must state its height");
 
-        d.mount = Some(Mount::Overlay {
-            on: OverlayHost::Wall { height: 1.8 },
+        d.mount = Some(Mount::Decal {
+            on: DecalHost::Wall { height: 1.8 },
         });
         let r = d.resolve().expect("a decal may omit height");
         assert_eq!(r.height, 0.0);
-        assert!(!r.occupies_floor(), "an overlay claims no floor");
+        assert!(!r.occupies_floor(), "an decal claims no floor");
     }
 
     #[test]
@@ -1268,16 +1291,16 @@ mod tests {
                 footprint: Some((0.4, 0.4)),
                 height: None,
             },
-            mount: Some(Mount::Overlay {
-                on: OverlayHost::Wall { height: 1.8 },
+            mount: Some(Mount::Decal {
+                on: DecalHost::Wall { height: 1.8 },
             }),
             ..Default::default()
         };
         let r = d.resolve().expect("resolves");
         assert_eq!(
             r.mount,
-            Mount::Overlay {
-                on: OverlayHost::Wall { height: 1.8 }
+            Mount::Decal {
+                on: DecalHost::Wall { height: 1.8 }
             }
         );
         assert!(!r.occupies_floor());

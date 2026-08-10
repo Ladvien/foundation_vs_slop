@@ -202,6 +202,7 @@ fn stage_camera(
     state: Res<ImportState>,
     project: Res<Project>,
     preset: Option<Res<crate::anim_stage::BenchCamera>>,
+    carousel: Res<crate::compose::StagedCarousel>,
     mut rig: ResMut<crate::view::Rig>,
     mut saved: ResMut<MapView>,
     mut staged: ResMut<StagedLift>,
@@ -217,7 +218,11 @@ fn stage_camera(
     // A preset cycle is a discrete event on the Anim tab, exactly like a lift on the Tiles tab.
     let preset_moved =
         *mode == Mode::Anim && preset.as_ref().is_some_and(|p| p.is_changed());
-    if !mode.is_changed() && !lift_moved && !preset_moved {
+    // And a re-laid strip is one on the Compose tab. `StagedCarousel` is written only when the strip
+    // actually changes — a carousel step, a group added, an envelope resized — so this is the same
+    // discrete-event shape and not a per-frame write that would take panning away.
+    let strip_moved = *mode == Mode::Compose && carousel.is_changed();
+    if !mode.is_changed() && !lift_moved && !preset_moved && !strip_moved {
         return;
     }
     if lift_moved {
@@ -278,6 +283,10 @@ fn stage_camera(
         // than a camera jump. The worry it names is also already answered elsewhere — the Tiles tab
         // has jumped to a stage and restored on the way back for as long as it has existed, and
         // arming still switches nothing by itself.
+        //
+        // **The focal group is pinned to the stage origin**, so stepping the carousel slides the
+        // strip past a fixed centre rather than moving the thing being edited. The camera frames the
+        // whole strip, miniatures included, and re-frames only when the strip is re-laid.
         Mode::Compose => {
             if saved.0.is_none() {
                 saved.0 = Some(crate::view::Rig {
@@ -288,8 +297,13 @@ fn stage_camera(
                     elevation: rig.elevation,
                 });
             }
-            rig.focus = crate::compose::COMPOSE_STAGE;
-            rig.height = TILE_VIEW_HEIGHT;
+            // **Focused halfway up, not on the floor.** The groups rise from the ground plane, so
+            // aiming at it put a 2.4 m tile in the top half of the frame with the bottom empty —
+            // seen in a captured frame, and the same correction the Tiles arm makes with `want_lift`.
+            rig.focus =
+                crate::compose::COMPOSE_STAGE + Vec3::Y * carousel.0.tallest * 0.5;
+            rig.height = crate::compose::framing_height(carousel.0.extent, carousel.0.tallest)
+                .min(crate::view::MAX_ZOOM);
             rig.elevation = crate::view::ISO_ELEVATION;
         }
         Mode::Map => {
@@ -306,7 +320,10 @@ fn stage_camera(
 
 /// Orthographic viewport height on the stage, metres. About three grid cells, so a 1-cell piece has
 /// room around it and a 3-cell one still fits.
-const TILE_VIEW_HEIGHT: f32 = 4.0;
+///
+/// `pub(crate)` because it is also the Compose sheet's floor — see `compose::framing_height`. One
+/// tile should read the same size whichever tab is looking at it.
+pub(crate) const TILE_VIEW_HEIGHT: f32 = 4.0;
 
 /// **The divisions readout** — derived, not typed.
 ///
@@ -3298,7 +3315,7 @@ fn suggestion_keys(
     state.status.say(said);
 }
 
-/// **Accept a candidate into the library.**
+/// **Commit the focused tile** — add it if it is a candidate, update it if it is already a tile.
 ///
 /// Validated first, and refused rather than repaired: a descriptor that fails the vocabulary is one
 /// an author has not finished, and writing a broken entry would make the next `Library::parse` fail
@@ -3307,6 +3324,25 @@ fn suggestion_keys(
 /// The library is written immediately. An importer that batches its additions until some later save
 /// is one where a crash loses work an author believes they did — and the file is generated from the
 /// manifests today, so an unwritten addition would simply be regenerated away.
+///
+/// # Enter on a library entry is an update, and it used to be a refusal
+///
+/// It answered *"`{id}` is already in the library — pick a candidate below to add one"*, which is a
+/// true sentence that lands as a false one. Every field on this pane writes through [`persist`] the
+/// moment it changes, so an author who edits a tile and then reaches for save has *already* saved —
+/// and was being told, at the exact moment they asked, that their piece was not going in. The verb
+/// they pressed is "commit this tile"; the two destinations are the two states a tile can be in, not
+/// two different verbs, so this runs the same door again and reports what it did.
+///
+/// Re-running it is not a no-op dressed as one. [`commit_measured`] re-applies the policy, re-checks
+/// the lattices against the face bands and re-resolves the masks *before* it writes, so Enter is
+/// where an author finds out that the tile they have been editing still holds together — the one
+/// question the incremental writes answer piecemeal and never as a whole.
+///
+/// **A candidate whose id collides is still refused**, and that asymmetry is the point. Writing a
+/// freshly-measured candidate over a library entry is a *replace*: the entry's tags, note, mount and
+/// lattice are not in the candidate, so the write would take them out. The route to changing a tile
+/// is to edit the tile.
 fn commit_candidate(
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<crate::keys::Live>,
@@ -3317,7 +3353,20 @@ fn commit_candidate(
         return;
     }
     if let Some(id) = state.selected_library_id.clone() {
-        state.status.note(format!("`{id}` is already in the library — pick a candidate below to add one"));
+        match write_library(&mut project) {
+            Ok(path) => {
+                state.status.note(format!(
+                    "`{id}` is up to date — every edit on this tab is written as you make it"
+                ));
+                info!("re-wrote `{id}` to {}", path.display());
+            }
+            Err(e) => {
+                // The edits are in memory and the file is not, which is the one case where an
+                // author has to be told to fix something before they leave the tab.
+                state.status.problem(format!("`{id}` NOT WRITTEN: {e}"));
+                error!("{e}");
+            }
+        }
         return;
     }
     let Some(candidate) = state.current().cloned() else {
@@ -3333,7 +3382,16 @@ fn commit_candidate(
         return;
     }
     if project.library.get(&descriptor.id).is_some() {
-        state.status.note(format!("`{}` is already in the library — rename it (I)", descriptor.id));
+        // **Two routes, and they are not interchangeable.** Editing the tile above updates it;
+        // accepting this candidate over it would replace it, and a candidate is what a mesh scan
+        // can see — no tags, no note, no mount, no lattice — so the replace silently takes those
+        // out. The refusal names the one that keeps them.
+        state.status.note(format!(
+            "`{}` is already in the library — select it above to edit that tile, or rename this \
+             candidate (I). Accepting it here would replace the tile and take its tags and lattice \
+             with it.",
+            descriptor.id
+        ));
         return;
     }
 
@@ -3450,11 +3508,18 @@ fn take_out_of_library(id: &str, project: &mut Project) -> Result<std::path::Pat
         .map(|c| c.id.as_str())
         .collect();
     if !groups.is_empty() {
+        // **Name the verb that DOES work.** This used to end "edit the group first", which is true
+        // and unhelpful: an author reading it while pointing at `site/floor` — held by all four site
+        // tiles — sees a refusal with no next step and reports the feature as broken. Twice. Sending
+        // a piece back STRIPS it; editing it does not, and editing is almost always what was wanted.
         return Err(format!(
-            "`{id}` is a member of {}: {}. Removing it would leave `compositions.ron` naming a \
-             descriptor nothing defines, and the project would stop opening — edit the group first.",
-            if groups.len() == 1 { "the group" } else { "the groups" },
-            groups.join(", ")
+            "`{id}` is a member of {}: {}. It cannot be sent back while they hold it — the project \
+             would stop opening with `compositions.ron` naming a descriptor nothing defines. \
+             {} edits it in place without removing it; sending it back means redefining {} first.",
+            if groups.len() == 1 { "the composition" } else { "the compositions" },
+            groups.join(", "),
+            crate::keys::chord(crate::keys::Action::EditTile),
+            if groups.len() == 1 { "that composition" } else { "those compositions" },
         ));
     }
     let Some(at) = project.measured.descriptors.iter().position(|d| d.id == id) else {
@@ -3463,6 +3528,63 @@ fn take_out_of_library(id: &str, project: &mut Project) -> Result<std::path::Pat
     let mut trial = project.measured.clone();
     trial.descriptors.remove(at);
     commit_measured(project, trial)
+}
+
+/// **What would stop `id` being sent back to the candidates**, and the mesh it would come back as.
+///
+/// Extracted because two verbs now ask it. The Tiles tab asks before demoting; the **Map** asks
+/// before it deletes anything, and that ordering is the whole reason this is a function: a blocker
+/// discovered *after* placements were gone would be a destructive half-act with nothing to show
+/// for it.
+///
+/// It deliberately does **not** check the placement count. That is the one precondition the Map verb
+/// exists to clear, and `take_out_of_library` still enforces it at the door for every caller.
+pub(crate) fn demote_blockers(id: &str, project: &Project) -> Result<String, String> {
+    // An entry with no mesh has nothing to come back as; sending it "back" would just be Delete
+    // wearing a costume, so it refuses and names the honest key.
+    let Some(mesh) = project
+        .measured
+        .descriptors
+        .iter()
+        .find(|d| d.id == id)
+        .and_then(|d| d.mesh.clone())
+    else {
+        return Err(format!(
+            "`{id}` has no mesh — nothing to send back ({} removes it outright)",
+            crate::keys::REMOVE_NAME
+        ));
+    };
+    // **Compositions are the second referrer of a descriptor id, and they are stricter than a map.**
+    // `policy::layered_library` hard-refuses a composition whose member descriptor is missing, so a
+    // library written without the entry does not give a map with a hole — it gives a project that
+    // neither the editor nor the game can open.
+    let groups: Vec<&str> = project
+        .compositions
+        .compositions
+        .iter()
+        .filter(|c| {
+            c.members.iter().any(|m| {
+                matches!(&m.body, emerge_core::composition::Body::Descriptor { id: d, .. } if d == id)
+            })
+        })
+        .map(|c| c.id.as_str())
+        .collect();
+    if !groups.is_empty() {
+        // **Name the verb that DOES work.** This used to end "edit the group first", which is true
+        // and unhelpful: an author reading it while pointing at `site/floor` — held by all four site
+        // tiles — sees a refusal with no next step and reports the feature as broken. Twice. Sending
+        // a piece back STRIPS it; editing it does not, and editing is almost always what was wanted.
+        return Err(format!(
+            "`{id}` is a member of {}: {}. It cannot be sent back while they hold it — the project \
+             would stop opening with `compositions.ron` naming a descriptor nothing defines. \
+             {} edits it in place without removing it; sending it back means redefining {} first.",
+            if groups.len() == 1 { "the composition" } else { "the compositions" },
+            groups.join(", "),
+            crate::keys::chord(crate::keys::Action::EditTile),
+            if groups.len() == 1 { "that composition" } else { "those compositions" },
+        ));
+    }
+    Ok(mesh)
 }
 
 /// Which library entry `Shift+Delete` has armed for demotion — the first press's answer, waiting
@@ -3508,21 +3630,11 @@ fn demote_tile(
         return;
     }
     arm.0 = None;
-    // The mesh path is the reborn candidate's name — captured before the entry is gone. An entry
-    // with no mesh has nothing to come back as; sending it "back" would just be Delete wearing a
-    // costume, so it refuses and names the honest key.
-    let Some(mesh) = project
-        .measured
-        .descriptors
-        .iter()
-        .find(|d| d.id == id)
-        .and_then(|d| d.mesh.clone())
-    else {
-        state.status.problem(format!(
-            "`{id}` has no mesh — nothing to send back ({} removes it outright)",
-            crate::keys::REMOVE_NAME
-        ));
-        return;
+    // The mesh path is the reborn candidate's name — captured before the entry is gone, through the
+    // same question the Map asks before it deletes anything on this piece's behalf.
+    let mesh = match demote_blockers(&id, &project) {
+        Ok(mesh) => mesh,
+        Err(e) => return state.status.problem(e),
     };
     let before = state.snapshot(&project);
     match take_out_of_library(&id, &mut project) {
@@ -5469,7 +5581,7 @@ fn rebuild_detail(
 #[cfg(test)]
 mod mount_cycle_tests {
     use emerge_core::descriptor::{
-        mount_height, mount_options, with_mount_height, Mount, OverlayHost,
+        mount_height, mount_options, with_mount_height, Mount, DecalHost,
     };
 
     /// The lookup `cycle_mount` performs, extracted so the rule can be tested without an `App`. It
@@ -5493,8 +5605,8 @@ mod mount_cycle_tests {
         for current in [
             Mount::OnWall { height: 1.2 },
             Mount::OnWall { height: 0.0 },
-            Mount::Overlay {
-                on: OverlayHost::Wall { height: 2.35 },
+            Mount::Decal {
+                on: DecalHost::Wall { height: 2.35 },
             },
         ] {
             let at = position_of(&options, &current)

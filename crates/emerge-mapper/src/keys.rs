@@ -79,45 +79,13 @@ pub enum Action {
     ComposeNext,
     /// Arm the selected composition on the map, so a click stamps it.
     ComposeArm,
-    /// Write down what this group's members present now, so later drift is measurable.
-    ComposeRecord,
     /// Walk the selected group's members. A second cursor, under the one that walks the groups.
     ComposeMemberPrev,
     ComposeMemberNext,
-    /// **Seat the selected member** — one lattice step, in the frame `Member::at` is written in.
-    ///
-    /// Not a cursor that a verb is then applied to, which is what the Tiles lattice keys are. Here the
-    /// movement *is* the verb, so the member is seen to move; Merrell's furniture layout calls that
-    /// progressively pinning a layout down, and it is why seating is per-member rather than a solve.
-    SeatForward,
-    SeatLeft,
-    SeatBack,
-    SeatRight,
-    SeatDown,
-    SeatUp,
-    /// **Put the selected member flush against an envelope face.** The verb a wall wants: its offset
-    /// comes from its own measured thickness, not from a grid step it cannot land on.
-    FlushForward,
-    FlushLeft,
-    FlushBack,
-    FlushRight,
-    /// Turn the selected member. A quarter bare, 15° on Shift — see the binding for why that way round.
-    TurnMemberLeft,
-    TurnMemberRight,
-    TurnMemberLeftFine,
-    TurnMemberRightFine,
-    /// Take the selected member out of the group.
-    DropMember,
-    /// Move the selected member forward or back in paint order — what draws on top where two things
-    /// share a spot.
-    PaintUp,
-    PaintDown,
-    /// **Start a new group** on the Compose tab — an empty bounded tile, named as it is made.
-    NewGroup,
-    /// Compose's own undo pair. Map, Tiles and Anim each keep one; an editing surface without one
-    /// would be the odd tab out.
-    UndoCompose,
-    RedoCompose,
+    /// Step the Compose carousel — the previous or next composition becomes the focal one. Its own
+    /// keys rather than the arrows, which belong to whichever of the three lists has focus.
+    CarouselPrev,
+    CarouselNext,
     Save,
     Undo,
     Redo,
@@ -158,6 +126,8 @@ pub enum Action {
     Generate,
     /// Fill from what the kit's tiles DECLARE, rather than from what the map already shows.
     GenerateDeclared,
+    /// Fill from the kit's COMPOSITIONS — whole tiles, laid as stamps rather than as placements.
+    GenerateComposed,
     /// Step the drawn grid's spacing. A view setting, not an edit — see `editor::GridSpacing`.
     CycleGrid,
     /// Keep the set in hand as a reusable group — see `editor::composition_from_set`.
@@ -333,7 +303,19 @@ pub const BINDINGS: &[Binding] = &[
     // have to hold `K` to see — so the verb was reported missing by someone looking straight at it.
     // Every other row in this census names its subject; this one said "this" and left the reader to
     // guess whether it meant the armed brush, the selected row, or what the mouse was over.
-    b(Action::EditTile, KeyCode::Digit2, true, Context::Global, "2", "edit the piece under the cursor"),
+    // **`Cmd`+remove opens the piece under the cursor for editing.** It was `Cmd`+the tab key, on the
+    // argument that one key could carry both "the Tiles tab" and "the Tiles tab, about this piece".
+    // That was tidy and it was not what an author reached for: asked what should happen when they
+    // press a chord on a piece they got wrong, the answer was "open it for editing", and the chord
+    // they reached for was the remove key with the command modifier — "get this out of my way and
+    // let me fix it". The bare remove key is unbound on the Map, so this pairs with nothing and
+    // collides with nothing.
+    // **One question, with an ordered answer**: the piece under the cursor, and failing that the
+    // PLACE selection. It reached only pieces standing on the map, so a piece selected in PLACE —
+    // which the author is looking straight at — answered "nothing here to edit". The first fix keyed
+    // on whether the pointer was over the interface, which made the answer depend on where the mouse
+    // happened to be resting; ordering it does not.
+    b(Action::EditTile, REMOVE_KEY, true, Context::Global, REMOVE_NAME, "send the piece under the cursor, or the PLACE selection, to be defined"),
     // **Held, not toggled**, and read with `keys::pressed`. The list is a thing you glance at with a
     // thumb down, not a mode you enter and have to leave — and a modal you can forget you opened is a
     // modal that eats the next keystroke.
@@ -416,6 +398,8 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::LiftDown, KeyCode::BracketLeft, false, Context::Map, "[", "lift / lower this"),
     b(Action::LiftUp, KeyCode::BracketRight, false, Context::Map, "]", "lift / lower this"),
     b(Action::Fill, KeyCode::KeyF, false, Context::Map, "F", "flood fill"),
+    // **The delete key arms a tool; it does not delete.** Removing on the keypress meant the only
+    // preview of what was about to go was the author's memory of where the cursor was.
     b(Action::Remove, KeyCode::KeyX, false, Context::Map, "X", "removal mode"),
     // **`B` is the last free key under the left hand.** The cluster an author's hand already rests on
     // is `Q W E R T / A S D F G / Z X C V B`, and every other letter in it is spoken for — pan, turn
@@ -426,21 +410,26 @@ pub const BINDINGS: &[Binding] = &[
     // **The Map context is at its twelve-row ceiling.** There is no headroom left; the next verb
     // here has to share a `does` with a neighbour or take something else's key — which is exactly
     // what the clone tool does: the Cmd+Z shape, one key, the shifted form for the sibling verb.
-    bs(Action::MoveMode, KeyCode::KeyB, false, false, Context::Map, "B", "move / clone a set / keep as a composition"),
-    bs(Action::CloneMode, KeyCode::KeyB, false, true, Context::Map, "B", "move / clone a set / keep as a composition"),
+    bs(Action::MoveMode, KeyCode::KeyB, false, false, Context::Map, "B", "move / Shift: clone a set / M: keep as a composition"),
+    bs(Action::CloneMode, KeyCode::KeyB, false, true, Context::Map, "B", "move / Shift: clone a set / M: keep as a composition"),
     // **A third verb on a state that already exists.** `Shift+B` drags a box and leaves a set in
     // hand; this keeps that set as a reusable group instead of stamping it. Declared adjacent to the
     // pair above and sharing their `does`, so `rows()` collapses all three into one line — the Map
     // context is AT its twelve-row ceiling and `no_context_carries_more_than_a_learnable_vocabulary`
     // enforces it. `M` for module; it is one of four letters this context has left.
-    b(Action::GroupFromSet, KeyCode::KeyM, false, Context::Map, "M", "move / clone a set / keep as a composition"),
+    b(Action::GroupFromSet, KeyCode::KeyM, false, Context::Map, "M", "move / Shift: clone a set / M: keep as a composition"),
     b(Action::RenameMap, KeyCode::KeyN, false, Context::Map, "N", "rename map"),
     b(Action::OwnToggle, KeyCode::KeyO, false, Context::Map, "O", "pin / unpin"),
     // **Two sources, one row.** `rows()` collapses adjacent bindings sharing a `does` string, so the
     // Map context stays at its twelve-row ceiling while gaining a verb. The two are not a fallback
     // pair — each either produces a grammar or refuses by name.
-    bs(Action::Generate, KeyCode::KeyG, false, false, Context::Map, "G", "continue the layout / Shift: from the kit's tokens"),
-    bs(Action::GenerateDeclared, KeyCode::KeyG, false, true, Context::Map, "G", "continue the layout / Shift: from the kit's tokens"),
+    // Three sources, one displayed row. `rows` collapses consecutive bindings that share a `does`
+    // and renders each chord with its modifier, so this reads "G, Shift+G, {MOD}+G" against one
+    // description and costs the Map context nothing against its twelve-row ceiling. They must stay
+    // adjacent and keep the same string, or the third one buys a row this context has not got.
+    bs(Action::Generate, KeyCode::KeyG, false, false, Context::Map, "G", "continue the layout: from the map, the kit's tokens, or its compositions"),
+    bs(Action::GenerateDeclared, KeyCode::KeyG, false, true, Context::Map, "G", "continue the layout: from the map, the kit's tokens, or its compositions"),
+    bs(Action::GenerateComposed, KeyCode::KeyG, true, false, Context::Map, "G", "continue the layout: from the map, the kit's tokens, or its compositions"),
 
     // **The camera is Global — pan included.** This briefly moved to `Context::Map` to free
     // `W, A, S, D` for the Tiles lattice cursor, on the argument that panning off a staged tile has
@@ -470,7 +459,10 @@ pub const BINDINGS: &[Binding] = &[
     // subgrid below has its own `layer y` picker for the lattice slice. One panel said "layer" twice
     // and meant two different things.
     b(Action::CycleMount, KeyCode::KeyM, false, Context::Tiles, "M", "mount"),
-    b(Action::Accept, KeyCode::Enter, false, Context::Tiles, "Enter", "add to library"),
+    // **One verb, two states of a tile.** It read "add to library", which named half of what it
+    // does and made the other half look like a refusal: Enter on a piece already in the library
+    // answered "already in the library", to an author who had just edited it.
+    b(Action::Accept, KeyCode::Enter, false, Context::Tiles, "Enter", "add / update this tile"),
     b(Action::Rescan, KeyCode::KeyR, false, Context::Tiles, "R", "rescan"),
     // The Cmd+Z shape again: one key, the shifted form for the reversible-but-destructive sibling.
     // Shift+Delete DEMOTES — back to the candidates, stripped — where bare Delete removes outright.
@@ -534,8 +526,7 @@ pub const BINDINGS: &[Binding] = &[
     // force a worse binding here, which is the whole reason contexts exist.
     b(Action::ComposePrev, KeyCode::ArrowUp, false, Context::Compose, "up", "walk the focused list"),
     b(Action::ComposeNext, KeyCode::ArrowDown, false, Context::Compose, "down", "walk the focused list"),
-    b(Action::ComposeArm, KeyCode::Enter, false, Context::Compose, "Enter", "add the picked piece / arm this composition"),
-    b(Action::ComposeRecord, KeyCode::KeyR, false, Context::Compose, "R", "record what this composition's members present now"),
+    b(Action::ComposeArm, KeyCode::Enter, false, Context::Compose, "Enter", "arm this composition for the Map"),
     // Symmetric with the pair above: `up`/`down` walk the groups, `left`/`right` walk the members of
     // the one you are on. Costs no letter, and the two cursors read as one idea.
     b(Action::ComposeMemberPrev, KeyCode::ArrowLeft, false, Context::Compose, "left", "which list the arrows walk"),
@@ -543,12 +534,6 @@ pub const BINDINGS: &[Binding] = &[
     // **The Tiles lattice cluster, on the other lattice.** `Context` overlaps by design, so one hand
     // shape means one thing on both surfaces rather than colliding. Declared adjacent to `[` and `]`
     // and sharing their `does`, so `rows()` collapses all six into one row.
-    bs(Action::SeatForward, KeyCode::KeyT, false, false, Context::Compose, "T", "seat this member / raise"),
-    bs(Action::SeatLeft, KeyCode::KeyF, false, false, Context::Compose, "F", "seat this member / raise"),
-    bs(Action::SeatBack, KeyCode::KeyG, false, false, Context::Compose, "G", "seat this member / raise"),
-    bs(Action::SeatRight, KeyCode::KeyH, false, false, Context::Compose, "H", "seat this member / raise"),
-    b(Action::SeatDown, KeyCode::BracketLeft, false, Context::Compose, "[", "seat this member / raise"),
-    b(Action::SeatUp, KeyCode::BracketRight, false, Context::Compose, "]", "seat this member / raise"),
     // **Flush to a face, which is the verb a wall actually wants.**
     //
     // Step 4 measured why: `site/wall` is 0.1 m thick, so seating it flush inside a 1 m tile puts it
@@ -559,10 +544,6 @@ pub const BINDINGS: &[Binding] = &[
     //
     // Its own row rather than the seat row's: ten chords collapsed into one line stops being a row
     // and starts being a paragraph.
-    bs(Action::FlushForward, KeyCode::KeyT, false, true, Context::Compose, "T", "flush to that face"),
-    bs(Action::FlushLeft, KeyCode::KeyF, false, true, Context::Compose, "F", "flush to that face"),
-    bs(Action::FlushBack, KeyCode::KeyG, false, true, Context::Compose, "G", "flush to that face"),
-    bs(Action::FlushRight, KeyCode::KeyH, false, true, Context::Compose, "H", "flush to that face"),
     // **A quarter bare, 15° on Shift — and that order is the argument, not a preference.**
     //
     // A group is a tile. `adjacency::quarter_turns` refuses a yaw that is not a multiple of 90 and
@@ -577,25 +558,28 @@ pub const BINDINGS: &[Binding] = &[
     // **Not `,` and `.`, and the test is why.** `rows()` joins a collapsed row's chords with `", "`,
     // so a chord that *is* a comma comes out as `, , .` and cannot be read back —
     // `collapsing_rows_loses_nothing` failed on exactly that, naming the vanished chord.
-    bs(Action::TurnMemberLeft, KeyCode::KeyY, false, false, Context::Compose, "Y", "turn a quarter / Shift: 15"),
-    bs(Action::TurnMemberRight, KeyCode::KeyU, false, false, Context::Compose, "U", "turn a quarter / Shift: 15"),
-    bs(Action::TurnMemberLeftFine, KeyCode::KeyY, false, true, Context::Compose, "Y", "turn a quarter / Shift: 15"),
-    bs(Action::TurnMemberRightFine, KeyCode::KeyU, false, true, Context::Compose, "U", "turn a quarter / Shift: 15"),
-    b(Action::DropMember, REMOVE_KEY, false, Context::Compose, REMOVE_NAME, "drop this member"),
     // **Not `,` and `.`, for the second time, and the test caught it both times.**
     //
     // `rows()` joins a collapsed row's chords with `", "`, so a comma chord is unreadable the moment
     // it shares a row with anything — including its own pair. `,`/`.` were tried for turn and printed
     // `, , .`; tried again here and did it again. A comma cannot be a chord in this editor while the
     // separator is a comma, and that is a property of the census, not of this row.
-    b(Action::PaintDown, KeyCode::Minus, false, Context::Compose, "-", "paint order: back / front"),
-    b(Action::PaintUp, KeyCode::Equal, false, Context::Compose, "=", "paint order: back / front"),
     // **The two verbs this tab was missing.** It could refine a group and not make one, so every
     // group had to be captured on the Map first — which is a fine way to work and a bad only way.
-    b(Action::NewGroup, KeyCode::KeyN, false, Context::Compose, "N", "new composition"),
+    // **The carousel, and this tab's TWELFTH row — the last one it has.** The focal composition stands
+    // full size with its neighbours either side as miniatures; these step the strip.
+    //
+    // Its own pair rather than the arrows, because the arrows belong to whichever of the three lists
+    // has focus: stepping to the next group while editing a member would otherwise cost
+    // `left left up right right`.
+    //
+    // `O`/`P` are adjacent and free — `Context::Compose` overlaps nothing but `Global` (see
+    // `Context::overlaps`), so the Map's own `O` is no obstacle. After this row,
+    // `no_context_carries_more_than_a_learnable_vocabulary` is AT its ceiling for this context: a new
+    // Compose verb now costs a merge or a removal, not an addition.
+    b(Action::CarouselPrev, KeyCode::KeyO, false, Context::Compose, "O", "previous / next composition"),
+    b(Action::CarouselNext, KeyCode::KeyP, false, Context::Compose, "P", "previous / next composition"),
     // One row, two chords — the Map, Tiles and Anim pairs again.
-    bs(Action::UndoCompose, KeyCode::KeyZ, true, false, Context::Compose, "Z", "undo / redo"),
-    bs(Action::RedoCompose, KeyCode::KeyZ, true, true, Context::Compose, "Z", "undo / redo"),
     // One row, two chords, same as the Map and Tiles undo pairs.
     bs(Action::UndoBench, KeyCode::KeyZ, true, false, Context::Anim, "Z", "undo / redo the last write"),
     bs(Action::RedoBench, KeyCode::KeyZ, true, true, Context::Anim, "Z", "undo / redo the last write"),
@@ -674,9 +658,17 @@ pub fn binding(action: Action) -> &'static Binding {
         .unwrap_or(&BINDINGS[0])
 }
 
-/// The chord for an action, for putting next to the control that does it.
-pub fn chord(action: Action) -> &'static str {
-    binding(action).chord
+/// **The chord for an action, rendered** — for putting next to the control that does it.
+///
+/// Goes through [`chord_text`], which is the one place a chord becomes text. It used to return the
+/// bare `chord` field, which **silently drops the modifier**: every message about `Cmd+2` came out
+/// saying "2 edits it in place", and an author reading that reasonably concluded the tool was
+/// broken. Two live callers were wrong that way and neither could be spotted by reading them.
+///
+/// `rows()` has the same note for the same reason — it pushed `b.chord` and collapsed `Cmd+Z` and
+/// `Shift+Cmd+Z` into "Cmd+Z, Z", naming a key that does not do that. One renderer, no exceptions.
+pub fn chord(action: Action) -> String {
+    chord_text(binding(action))
 }
 
 /// Everything live in one context, in declaration order — never sorted, never reordered by use.
@@ -948,18 +940,13 @@ mod tests {
         let actions = [
             Action::NextTab, Action::MapTab, Action::TilesTab, Action::AnimTab,
             Action::ComposeTab, Action::ComposePrev, Action::ComposeNext, Action::ComposeArm,
-            Action::ComposeRecord, Action::ComposeMemberPrev, Action::ComposeMemberNext,
-            Action::SeatForward, Action::SeatLeft, Action::SeatBack, Action::SeatRight,
-            Action::SeatDown, Action::SeatUp,
-            Action::FlushForward, Action::FlushLeft, Action::FlushBack, Action::FlushRight,
-            Action::TurnMemberLeft, Action::TurnMemberRight,
-            Action::TurnMemberLeftFine, Action::TurnMemberRightFine,
-            Action::DropMember, Action::UndoCompose, Action::RedoCompose,
-            Action::NewGroup, Action::PaintUp, Action::PaintDown,
+            Action::ComposeMemberPrev, Action::ComposeMemberNext,
+            Action::CarouselPrev, Action::CarouselNext,
             Action::Save, Action::Undo, Action::Redo, Action::Shortcuts, Action::EditTile,
             Action::AimLeft, Action::AimRight, Action::AimReset, Action::Cancel,
             Action::Fill, Action::Remove, Action::MoveMode, Action::CloneMode, Action::RenameMap,
-            Action::OwnToggle, Action::Generate, Action::GenerateDeclared, Action::CycleGrid,
+            Action::OwnToggle, Action::Generate, Action::GenerateDeclared, Action::GenerateComposed,
+            Action::CycleGrid,
             Action::GroupFromSet,
             Action::PanForward, Action::PanBack, Action::PanLeft, Action::PanRight,
             Action::TurnViewLeft, Action::TurnViewRight,
@@ -1069,6 +1056,41 @@ mod tests {
         assert!(Context::Typing.overlaps(Context::Global));
     }
 
+    /// **The composition verb names its own key**, because it was reported missing twice while on
+    /// screen.
+    ///
+    /// `Context::Map` is at the row ceiling the test below enforces, so `B`, `Shift+B` and `M` share
+    /// one `does` and collapse into a single line. That line read `move / clone a set / keep as a
+    /// composition` — three chords and three phrases paired only by position, one of which (`M`) has
+    /// no relationship to the other two. An author with the overlay open asked twice how to keep a
+    /// selection as a composition.
+    ///
+    /// **Deliberately about this row rather than a general rule**, and that is the finding. Two
+    /// attempts at a lint over every collapsed row both flagged prose that is fine: `Cmd+Z,
+    /// Shift+Cmd+Z / undo / redo` and `[, ] / lift / lower` pair by a convention older than this
+    /// editor, and `Z, X, C, V / solid / edge / anchor / clear` is a contiguous run read as a keypad,
+    /// like `W, A, S, D`. A lint that forces `Shift:` into those makes the panel worse to satisfy
+    /// itself. What was actually wrong here is one unrelated key hiding in a family row.
+    #[test]
+    fn the_composition_verb_names_its_key_in_the_map_census() {
+        let row = rows(Context::Map)
+            .into_iter()
+            .find(|r| r.does.contains("composition"))
+            .unwrap_or_else(|| panic!("the Map census no longer offers a composition verb at all"));
+        let chord = chord_text(binding(Action::GroupFromSet));
+        assert!(
+            row.chord.split(", ").any(|c| c == chord),
+            "the row's chord column must list `{chord}`, and it reads `{}`",
+            row.chord
+        );
+        assert!(
+            row.does.contains(&format!("{chord}:")),
+            "`{chord}` is one of {} chords on this row, so the phrase has to name it — it reads `{}`",
+            row.chord.split(", ").count(),
+            row.does
+        );
+    }
+
     /// ~12 per context, counted as ROWS — what a reader actually sees. Zheng et al. 2018 found a
     /// vocabulary of about a dozen is learnable to recall in three ten-minute sessions; past that a
     /// list stops being memorised and starts being read.
@@ -1091,6 +1113,23 @@ mod tests {
                  starts being a reference card (docs/ui.md §3.5, Zheng et al. 2018)"
             );
         }
+    }
+
+    /// **A rendered chord carries its modifier**, or a message names a key that does something else.
+    ///
+    /// `chord` returned the bare field, so `Cmd+2` printed as "2" — and the refusal that told an
+    /// author to press it read as nonsense. Asserted against a binding that HAS a modifier, because
+    /// that is the only case the old version got wrong.
+    #[test]
+    fn a_rendered_chord_includes_the_modifier() {
+        let send = binding(Action::EditTile);
+        assert!(send.needs_mod, "this test is about a modified binding");
+        let text = chord(Action::EditTile);
+        assert!(
+            text.contains(MOD_NAME),
+            "a chord an author is told to press has to name the modifier: got `{text}`"
+        );
+        assert!(text.ends_with(send.chord), "and still end in the key itself: got `{text}`");
     }
 
     /// Four keys, one idea. The displayed list collapses them rather than repeating the word.
@@ -1320,6 +1359,58 @@ mod tests {
             !just_pressed(&input, Context::Map, Action::Undo),
             "bare Z must not undo"
         );
+    }
+
+    /// **Three sources on one key, and none of them shadows another.**
+    ///
+    /// `G` is bound three times — bare, Shift, and the platform modifier — and the dispatcher runs all
+    /// three checks in a row with no `return` between them. That is only safe because `just_pressed`
+    /// requires the modifier state to match *exactly*, so this is the assertion the dispatcher's lack
+    /// of ordering rests on. Written when the third arm landed; the pairwise tests above cover other
+    /// keys but say nothing about a triple.
+    #[test]
+    fn the_three_generate_sources_do_not_shadow_each_other() {
+        let cases = [
+            (vec![], Action::Generate, "bare G"),
+            (vec![SHIFT_KEYS[0]], Action::GenerateDeclared, "Shift+G"),
+            (vec![MOD_KEYS[0]], Action::GenerateComposed, "modified G"),
+        ];
+        for (mods, wanted, name) in cases {
+            // A fresh input each time: `clear()` keeps the pressed state, so a key already held never
+            // registers as just-pressed again.
+            let mut input = ButtonInput::<KeyCode>::default();
+            for m in &mods {
+                input.press(*m);
+            }
+            input.press(KeyCode::KeyG);
+            for other in [Action::Generate, Action::GenerateDeclared, Action::GenerateComposed] {
+                let fired = just_pressed(&input, Context::Map, other);
+                assert_eq!(
+                    fired,
+                    other == wanted,
+                    "{name} must fire {wanted:?} and nothing else, but {other:?} answered {fired}"
+                );
+            }
+        }
+    }
+
+    /// The three share one displayed row, which is what keeps the Map context inside the ceiling
+    /// `no_context_carries_more_than_a_learnable_vocabulary` enforces. They collapse only while they
+    /// are adjacent and carry the same `does`, so this pins both.
+    #[test]
+    fn the_three_generate_sources_collapse_into_one_row() {
+        let rows = rows(Context::Map);
+        let generate: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.chord.split(", ").any(|c| c.ends_with('G')))
+            .map(|r| r.chord.as_str())
+            .collect();
+        assert_eq!(generate.len(), 1, "three bindings, one row: {generate:?}");
+        let chords: Vec<&str> = generate[0].split(", ").collect();
+        assert_eq!(chords.len(), 3, "all three chords are on it: {:?}", generate[0]);
+        assert!(chords.iter().any(|c| *c == "G"), "{chords:?}");
+        assert!(chords.iter().any(|c| c.starts_with("Shift")), "{chords:?}");
+        assert!(chords.iter().any(|c| c.starts_with(MOD_NAME)), "{chords:?}");
     }
 
     /// Every binding can be rendered next to the thing it does, which is the whole point of carrying

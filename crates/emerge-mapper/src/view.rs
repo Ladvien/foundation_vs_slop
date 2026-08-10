@@ -48,7 +48,9 @@ const ISO_DISTANCE: f32 = 20.784_609; // |(12, 12, 12)| = 12 * sqrt 3
 const ROTATION_STEPS: u32 = 4;
 
 const MIN_ZOOM: f32 = 4.0;
-const MAX_ZOOM: f32 = 80.0;
+/// The furthest out the rig goes. `pub(crate)` because the Compose sheet has to know it: a gallery
+/// that needs more than this to be seen whole is cropped, and cropped silently reads as complete.
+pub(crate) const MAX_ZOOM: f32 = 80.0;
 const ZOOM_STEP: f32 = 2.0;
 /// Metres a second, matching the game's `src/camera.rs` so the two feel the same.
 const PAN_SPEED: f32 = 16.0;
@@ -250,6 +252,46 @@ pub fn sense_pointer(
     }
 }
 
+/// **Is the pointer over a panel** — asked of the layout, not of the picking backend.
+///
+/// `bevy_picking`'s `Hovered` answers the same question for the mouse verbs, and correctly: a click
+/// is delivered by the picking backend, so the two agree by construction. A **keyboard** verb asking
+/// it is a different matter, and got this wrong in one shipped commit: `Hovered` is written from the
+/// *window's* cursor, which is the one thing [`sense_pointer`] refuses to move for an agent — so the
+/// answer is unreachable over BRP and untestable headless. That is the same trap `Pointer` exists to
+/// close, entered from the other side.
+///
+/// So this reads the rects — through **`ComputedNode::contains_point`**, which is the same function
+/// `bevy_ui`'s picking backend and focus system call (`picking_backend.rs:206`, `focus.rs:259`).
+/// Hand-rolling the rectangle test got two things wrong that the borrowed one cannot: the transform
+/// is [`bevy::ui::UiGlobalTransform`] and **not** `GlobalTransform` — a separate component in 0.19 —
+/// and the point has to be **physical**, the pointer being logical.
+///
+/// The conversion is `camera.target_scaling_factor()`, taken from the same place the backend takes
+/// it, and it is the render target's factor rather than `UiScale`: `UiScale` is already baked into
+/// the node sizes by layout, so applying it here would count it twice.
+///
+/// **Viewport offset is deliberately not subtracted.** The backend does it for cameras rendering to
+/// part of a target; the caller here is the window camera, and the editor's other camera renders to
+/// an offscreen image the pointer never enters.
+pub fn over_ui<'a>(
+    cursor: Option<Vec2>,
+    scale_factor: f32,
+    nodes: impl IntoIterator<Item = (&'a bevy::ui::ComputedNode, &'a bevy::ui::UiGlobalTransform)>,
+) -> bool {
+    let Some(cursor) = cursor else {
+        // No cursor is not "over the world" — there is no honest answer, and the callers treat a
+        // missing pointer as no answer everywhere else in this file.
+        return false;
+    };
+    let point = cursor * scale_factor;
+    nodes.into_iter().any(|(node, tf)| {
+        // A `Display::None` node has a zero rect and is not somewhere the pointer can be — the
+        // backend's own first check, for the same reason.
+        node.size() != Vec2::ZERO && node.contains_point(*tf, point)
+    })
+}
+
 /// Where the pointer meets the ground plane, in world metres.
 ///
 /// The editor's whole spatial input is this one function, so it is worth being exact about: a ray
@@ -259,19 +301,45 @@ pub fn sense_pointer(
 ///
 /// Takes the position rather than the `Window` so that there is exactly one place deciding *which*
 /// position that is — see [`Pointer`].
+/// **The ray under the cursor**, as `(origin, unit direction)` in world metres.
+///
+/// Split out of [`cursor_ground`] because the ground point is not enough to pick a thing that stands
+/// up. Under this rig a screen point over a feature at height `h` intersects `y = 0` roughly `h`
+/// metres away from where that feature actually is, so testing a ground point against an object's
+/// FLOOR footprint misses everything but its base. Anything picking a volume wants the ray; anything
+/// picking a position on the floor wants the intersection below.
+///
+/// Returned as a pair rather than `Ray3d` so callers do the arithmetic in plain `Vec3` — the picking
+/// this feeds is a slab test, not a Bevy query.
+pub fn cursor_ray(
+    cursor: Option<Vec2>,
+    camera: &Camera,
+    cam_tf: &GlobalTransform,
+) -> Option<(Vec3, Vec3)> {
+    let cursor = cursor?;
+    let ray = camera.viewport_to_world(cam_tf, cursor).ok()?;
+    Some((ray.origin, *ray.direction))
+}
+
 pub fn cursor_ground(
     cursor: Option<Vec2>,
     camera: &Camera,
     cam_tf: &GlobalTransform,
 ) -> Option<Vec3> {
-    let cursor = cursor?;
-    let ray = camera.viewport_to_world(cam_tf, cursor).ok()?;
-    let denom = ray.direction.y;
+    let (origin, dir) = cursor_ray(cursor, camera, cam_tf)?;
+    let ray = Ray { origin, dir };
+    let denom = ray.dir.y;
     if denom.abs() < 1e-6 {
         return None;
     }
     let t = -ray.origin.y / denom;
-    (t > 0.0).then(|| ray.origin + *ray.direction * t)
+    (t > 0.0).then(|| ray.origin + ray.dir * t)
+}
+
+/// A ray in plain vectors, so the two readers above share one spelling of it.
+struct Ray {
+    origin: Vec3,
+    dir: Vec3,
 }
 
 /// **Which way the world moves for a pan key**, in world metres on the ground plane.

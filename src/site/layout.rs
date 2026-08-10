@@ -1007,7 +1007,19 @@ pub fn prop_placement_report(layout: &SiteLayout, kit: &super::kit::SiteKit) -> 
         // The nearest surface within reach, if any. Nearest rather than "every surface": a chair
         // between two tables belongs to one of them, and requiring it to face both is unsatisfiable.
         let mut nearest: Option<(f32, &PropPlacement)> = None;
-        for q in layout.props.iter().filter(|q| kit.is_surface(q.piece)) {
+        // **A seat is never pulled up to itself**, and the index is the only thing that can say so —
+        // two identical stools legitimately stand at different spots, so comparing pieces or
+        // positions would either miss the case or reject a real pair.
+        //
+        // This was unguarded, and stayed invisible only while no seat offered a surface. The moment
+        // `site/stool` was labelled `offers.surfaces: ["support"]` every stool became its own
+        // nearest surface at **0.00 m**, and the fault read "is 90° off the Stool it is pulled up to
+        // 0.00 m away" — which reads as nonsense because it is. A bench or a counter with a seat
+        // built into it would have found the same hole; the labelling only got there first.
+        for (j, q) in layout.props.iter().enumerate() {
+            if j == i || !kit.is_surface(q.piece) {
+                continue;
+            }
             let d = ((q.pos.0 - p.pos.0).powi(2) + (q.pos.1 - p.pos.1).powi(2)).sqrt();
             if d <= SEAT_ADDRESSES_SURFACE_WITHIN && nearest.is_none_or(|(bd, _)| d < bd) {
                 nearest = Some((d, q));

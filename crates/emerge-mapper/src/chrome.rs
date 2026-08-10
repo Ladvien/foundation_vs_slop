@@ -387,12 +387,17 @@ pub fn problem_banner(parent: &mut ChildSpawnerCommands, tab: crate::tiles::Mode
             display: Display::None,
             padding: UiRect::axes(Val::Px(GAP_ROW + 1.0), Val::Px(GAP_ROW)),
             margin: UiRect::top(Val::Px(GAP_ROW)).with_bottom(Val::Px(GAP_TIGHT)),
+            max_width: Val::Percent(100.0),
             ..default()
         },
         BackgroundColor(PROBLEM_BG),
         Text::new(String::new()),
         TextColor(PROBLEM_TEXT),
         TextFont::from_font_size(11.0),
+        // **Stated, not inherited.** This carries the newest refusal in full, and those name
+        // descriptors and compositions — the longest text this editor renders. `max_width` is what
+        // stops a long word pushing the node wider than the panel it sits in.
+        TextLayout::new(Justify::Left, LineBreak::WordOrCharacter),
         ProblemBanner(tab),
     ));
 }
@@ -430,16 +435,46 @@ pub fn problem_log(parent: &mut ChildSpawnerCommands, tab: crate::tiles::Mode) {
 
 /// One bullet. `•` and not `-`: the shipped face has U+2022 (checked, as U+26A0 was not), and a
 /// bullet reads as a list where a hyphen reads as a range.
+///
+/// # The bullet and the text are siblings, so it can wrap
+///
+/// This was one `Text` reading `"• {text}"` with `LineBreak::NoWrap`, on the argument that a wrapped
+/// continuation restarts at column zero and breaks the bullet column. The argument was right and the
+/// remedy was wrong: refusing to wrap does not keep a long refusal inside the panel, it runs it out
+/// through the side of the box, which is what an author reported. This tab's messages name
+/// descriptors, compositions and counts, so they are routinely longer than 380 px.
+///
+/// A row with the bullet as its own child fixes both at once: the text wraps, and its continuations
+/// align under the text rather than under the bullet, because the bullet is not in that column.
+///
+/// `min_width: 0` is load-bearing. A flex item will not shrink below its min-content width by
+/// default, and for text that is the longest word — so without it the row grows to fit and the
+/// wrapping never happens. Same trick as `min_height: 0` on the scroll areas above.
 pub fn problem_log_line(parent: &mut ChildSpawnerCommands, text: &str, colour: Color) {
-    parent.spawn((
-        Text::new(format!("• {text}")),
-        TextColor(colour),
-        TextFont::from_font_size(10.0),
-        // A wrapped continuation restarts at column zero and breaks the bullet column — the same
-        // thing that set the Compose panel's width. The full text is on the banner and in `Cmd+C`.
-        TextLayout::new(Justify::Left, LineBreak::NoWrap),
-        ProblemLogLine,
-    ));
+    parent
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(4.0),
+                width: Val::Percent(100.0),
+                ..default()
+            },
+            ProblemLogLine,
+        ))
+        .with_children(|row| {
+            row.spawn((
+                Text::new("•"),
+                TextColor(colour),
+                TextFont::from_font_size(10.0),
+                TextLayout::new(Justify::Left, LineBreak::NoWrap),
+            ));
+            row.spawn((
+                Node { min_width: Val::Px(0.0), ..default() },
+                Text::new(text.to_owned()),
+                TextColor(colour),
+                TextFont::from_font_size(10.0),
+            ));
+        });
 }
 
 /// **The key list, read from the census and never retyped.**
@@ -520,6 +555,161 @@ pub fn scroll_list(parent: &mut ChildSpawnerCommands, marker: impl Bundle) {
 // tabs, differing only in the label column's width. It is not written yet because nothing has been
 // moved onto it, and a builder with no caller is a stub.
 
+/// **The name box** — the centred prompt for naming a new composition.
+///
+/// `M` on the Map keeps the set in hand as one composition, and this is where it is named. It used to
+/// be a field in the Map's status readout, which put the question in the corner of the screen while
+/// the whole screen waited for it.
+///
+/// Two tabs asked it when Compose could also make a composition. That is why this is a shared widget
+/// painted by [`paint_name_box`] rather than a Map-local one: authoring collapsed onto the Map, and a
+/// widget that survives losing one of its two callers is cheaper than one that has to be rebuilt if a
+/// second ever returns.
+#[derive(Component)]
+pub struct NameBox;
+
+#[derive(Component)]
+struct NameBoxTitle;
+
+#[derive(Component)]
+struct NameBoxValue;
+
+#[derive(Component)]
+struct NameBoxHint;
+
+fn spawn_name_box(mut commands: Commands) {
+    commands
+        .spawn((
+            NameBox,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                top: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                display: Display::None,
+                ..default()
+            },
+            // **Per `docs/ui.md` §5 trap 7.** A full-screen container without this eats every world
+            // click. It also means a click while naming falls through to the stage, which is right:
+            // the box is a prompt, not a modal that has to be dismissed before anything else works.
+            bevy::picking::Pickable::IGNORE,
+            // Above the panels and the tab strip (101), below nothing else — the same tier the
+            // shortcuts overlay uses, because both are "the screen is asking you something".
+            GlobalZIndex(400),
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.72)),
+        ))
+        .with_children(|p| {
+            p.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    padding: UiRect::all(Val::Px(PAD * 1.5)),
+                    row_gap: Val::Px(GAP_ROW * 2.0),
+                    min_width: Val::Px(360.0),
+                    ..default()
+                },
+                BackgroundColor(PANEL_BG),
+                // **The dialog itself is UI; the dimmed backdrop behind it is not.**
+                //
+                // "Is the pointer over UI" is asked everywhere as "is any `Hovered` true"
+                // (`view::drive`, `place_on_click`, `compose::pick_slot`), and this panel carried no
+                // `Hovered` — so scrolling over a visible, open dialog zoomed the world behind it.
+                //
+                // This narrows the root's deliberate `Pickable::IGNORE` rather than undoing it. The
+                // root stays click-through, because a prompt is not a modal that has to be dismissed
+                // before anything else works; the 360 px box stops being, because a click landing *on*
+                // the dialog and placing a piece behind it is the same bug as the scroll.
+                //
+                // Not `Pickable::IGNORE` here — that would make it unhoverable and reopen the hole.
+                // `Hovered` is true for an entity or any descendant, so one on this panel answers for
+                // the title, the value and the hint.
+                Hovered::default(),
+            ))
+            .with_children(|b| {
+                b.spawn((
+                    Text::new(String::new()),
+                    TextFont::from_font_size(11.0),
+                    TextColor(LABEL),
+                    NameBoxTitle,
+                ));
+                b.spawn((
+                    Text::new(String::new()),
+                    TextFont::from_font_size(18.0),
+                    TextColor(ACCENT),
+                    NameBoxValue,
+                ));
+                b.spawn((
+                    Text::new(String::new()),
+                    TextFont::from_font_size(11.0),
+                    TextColor(DIM),
+                    NameBoxHint,
+                ));
+            });
+        });
+}
+
+/// **Show the live tab's name field, or nothing.**
+///
+/// Reads the Map's own state rather than a shared projection, and formats the value the way the Map
+/// commits it — snake_case as you type. Relocating the prompt must not quietly change what is saved.
+fn paint_name_box(
+    editor: Res<crate::editor::EditorState>,
+    mut roots: Query<&mut Node, With<NameBox>>,
+    mut titles: Query<&mut Text, (With<NameBoxTitle>, Without<NameBoxValue>, Without<NameBoxHint>)>,
+    mut values: Query<&mut Text, (With<NameBoxValue>, Without<NameBoxTitle>, Without<NameBoxHint>)>,
+    mut hints: Query<&mut Text, (With<NameBoxHint>, Without<NameBoxTitle>, Without<NameBoxValue>)>,
+) {
+    // **`grouping.is_some()` and the box being visible are the same condition**, and that is the
+    // invariant rather than a description of the code.
+    //
+    // This used to also match on `Mode::Map`, which looked like a harmless guard and was not:
+    // `EditorState::grouping` has no mode scope, so clicking the tab strip mid-name hid the box while
+    // `group_name_keys` kept consuming the keyboard — every keystroke vanished until `Esc`, with
+    // nothing on screen to say where they were going. Two conditions for one question is what made
+    // that state reachable.
+    //
+    // The tab switch now clears `grouping` (see `tiles::leaving_a_tab_puts_the_name_prompt_down`), so
+    // there is one owner and this reads it. The prompt is the Map's, and if a second tab ever asks
+    // again the answer is another field, not another condition on this one.
+    let asking: Option<(&str, String, String)> = editor.grouping.as_ref().map(|raw| {
+        (
+            "NAME THIS COMPOSITION",
+            // Forced to snake_case as it is typed, so the naming rule teaches itself.
+            format!("{}_", emerge_core::naming::to_snake_case(raw)),
+            "Enter keeps it.   Esc leaves the set in hand.".to_owned(),
+        )
+    });
+    let display = if asking.is_some() { Display::Flex } else { Display::None };
+    for mut node in &mut roots {
+        if node.display != display {
+            node.display = display;
+        }
+    }
+    let Some((title, value, hint)) = asking else {
+        return;
+    };
+    // Guarded against the no-op write, like `editor::refresh_status`: this runs every frame and
+    // `Text` is change-detected, so writing an unchanged string would re-lay the box continuously.
+    // Three separate loops rather than one over a tuple: the queries have different filters, so they
+    // are different types and cannot share an array.
+    fn set(text: &mut Text, want: &str) {
+        if text.0 != want {
+            text.0 = want.to_owned();
+        }
+    }
+    for mut t in titles.iter_mut() {
+        set(&mut t, title);
+    }
+    for mut t in values.iter_mut() {
+        set(&mut t, &value);
+    }
+    for mut t in hints.iter_mut() {
+        set(&mut t, &hint);
+    }
+}
+
 /// The held-key overlay's root. `Display::None` when it is not being asked for.
 #[derive(Component)]
 pub struct ShortcutsOverlay;
@@ -550,8 +740,11 @@ pub struct ChromePlugin;
 impl Plugin for ChromePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShowingFor>()
-            .add_systems(Startup, spawn_shortcuts_overlay)
-            .add_systems(Update, drive_shortcuts_overlay.in_set(keys::Phase::Act));
+            .add_systems(Startup, (spawn_shortcuts_overlay, spawn_name_box))
+            .add_systems(Update, drive_shortcuts_overlay.in_set(keys::Phase::Act))
+            // **After `Phase::Text`, not in it.** The field consumes the keystroke there; painting
+            // before it would show the box one character behind what has been typed.
+            .add_systems(Update, paint_name_box.after(keys::Phase::Text));
     }
 }
 
