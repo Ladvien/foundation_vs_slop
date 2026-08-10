@@ -255,6 +255,66 @@ pub struct Override {
     pub because: String,
 }
 
+/// **Do two tiles agree where they meet?** — the substitutable adjacency rule.
+///
+/// FVS-R-7's invariant, and it is about *substitutability* rather than about this particular answer.
+/// Karth & Smith, on WFC's constraint layer: *"any arbitrary adjacency validity function can be
+/// substituted here… without changing the WFC solver itself."* Everything that learns a grammar over
+/// compositions calls through a function of this shape, so the edge-versus-corner question
+/// (FVS-R-11, blocked on Lagae & Dutré) cannot gate the grammar: swapping the rule is swapping an
+/// argument.
+///
+/// # The rule this one implements
+///
+/// `a`'s `dir` face against `b`'s opposite. Where the two overlap — in height and along the seam —
+/// the tokens must be equal, and `None` is a token in its own right that matches only `None`
+/// (`crate::adjacency`'s rule, so a composition and a plain tile answer the same way).
+///
+/// **No mirroring.** [`Band::lat`] is quoted in the envelope's own coordinates, `-size/2` to
+/// `+size/2`, and its doc says why: *"it does not depend on which side you imagine standing, which is
+/// the kind of thing that reads fine and mirrors a face."* Two abutting tiles quote the same world
+/// axis, so the ranges compare directly. A version of this that flipped one side would pass every
+/// symmetric test and mirror every doorway.
+///
+/// **Bands, not one token a side**, because four shipped pieces present two at once — a doorway
+/// reads `wall` at the jambs and nothing through the opening. Comparing overlaps rather than whole
+/// faces is what lets a doorway meet a wall along the jamb and a gap along the hole.
+///
+/// A face presenting nothing at all agrees with anything: there is no seam to disagree about.
+pub fn agrees(a: &Interface, b: &Interface, dir: Dir) -> bool {
+    let opposite = match dir {
+        crate::wfc::N => crate::wfc::S,
+        crate::wfc::E => crate::wfc::W,
+        crate::wfc::S => crate::wfc::N,
+        _ => crate::wfc::E,
+    };
+    let (Some(ours), Some(theirs)) = (a.faces.get(dir), b.faces.get(opposite)) else {
+        return false;
+    };
+    for x in ours {
+        for y in theirs {
+            let over_y = (x.y.0.max(y.y.0), x.y.1.min(y.y.1));
+            let over_lat = (x.lat.0.max(y.lat.0), x.lat.1.min(y.lat.1));
+            // Touching is not overlapping: two bands that share only an edge do not meet over any
+            // area, and calling that a disagreement would fault every stacked band against its
+            // neighbour's.
+            if over_y.1 - over_y.0 <= SEAM_EPSILON || over_lat.1 - over_lat.0 <= SEAM_EPSILON {
+                continue;
+            }
+            if x.token != y.token {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// How much overlap two bands must share before they are held to agree, metres.
+///
+/// The same tenth of a millimetre [`crate::grammar::CELL_EPSILON`] uses, and for the same reason:
+/// far below anything an author expresses, far above `f32`'s error at authoring scale.
+pub const SEAM_EPSILON: f32 = 1e-4;
+
 /// What a map's stamps come out as.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Expansion {

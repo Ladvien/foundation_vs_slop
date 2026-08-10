@@ -36,7 +36,9 @@
 
 use std::collections::HashMap;
 
+use crate::composition::{Composition, Envelope, Interface};
 use crate::library::Library;
+use crate::placement::ir::Dir;
 use crate::map::{Map, Placed};
 use crate::wfc;
 use crate::wfc::{E, N, S, W};
@@ -444,6 +446,106 @@ mod declared_tests {
 mod tests {
     use super::*;
 
+    /// An interface presenting one token across the whole of every face.
+    fn iface(token: Option<&str>) -> crate::composition::Interface {
+        use crate::composition::Band;
+        let band = Band {
+            y: (0.0, 1.0),
+            lat: (-0.5, 0.5),
+            token: token.map(str::to_owned),
+        };
+        crate::composition::Interface {
+            faces: [
+                vec![band.clone()],
+                vec![band.clone()],
+                vec![band.clone()],
+                vec![band],
+            ],
+            faults: Vec::new(),
+        }
+    }
+
+    /// A bounded one-cell composition with nothing in it — enough to carry an interface slot.
+    fn empty_tile(id: &str) -> Composition {
+        Composition {
+            id: id.to_owned(),
+            envelope: Envelope::Bounded { size: (1.0, 1.0, 1.0) },
+            members: Vec::new(),
+            locations: Vec::new(),
+            note: None,
+        }
+    }
+
+    /// **Swapping the rule changes the grammar** — driven through the learner, not just asserted of
+    /// the default rule.
+    ///
+    /// If the face comparison were inline, as it is in `declared`, both calls below would produce
+    /// the same `support` and this would fail. That is the invariant FVS-R-7 states, and it is what
+    /// keeps the edge-versus-corner question (FVS-R-11) from gating anything: answering it later is
+    /// passing a different argument.
+    #[test]
+    fn swapping_the_rule_changes_the_learned_grammar() {
+        let comps = vec![empty_tile("tile_a"), empty_tile("tile_b")];
+        let library = Library {
+            version: crate::library::LIBRARY_VERSION,
+            note: None,
+            descriptors: Vec::new(),
+        };
+
+        let (permissive, skipped) =
+            from_compositions(&comps, &library, 1, 1.0, |_, _, _| true).expect("learns");
+        assert!(skipped.is_empty(), "both tiles are one cell and bounded: {skipped:?}");
+        assert_eq!(permissive.len(), 3, "Empty plus the two tiles");
+
+        let (refusing, _) =
+            from_compositions(&comps, &library, 1, 1.0, |_, _, _| false).expect("learns");
+
+        // `Empty` keeps its unconstrained role under BOTH rules — it is not routed through `agrees`,
+        // because a grammar that cannot say "nothing goes here" cannot leave a doorway.
+        assert_eq!(
+            permissive.support[N][0], refusing.support[N][0],
+            "Empty's row must not depend on the adjacency rule"
+        );
+        // The tiles' rows must, or the rule is not reaching the grammar at all.
+        assert_ne!(
+            permissive.support[N][1], refusing.support[N][1],
+            "the rule is a parameter and this proves it: an inline comparison would give one answer"
+        );
+        assert_eq!(
+            refusing.support[N][1] & 0b110,
+            0,
+            "a rule that refuses everything must leave no tile-to-tile support"
+        );
+    }
+
+    /// **The adjacency rule is substitutable, which is the whole invariant.**
+    ///
+    /// FVS-R-7's stated non-negotiable: adjacency goes through `agrees`, never an inline face
+    /// comparison, so the edge-versus-corner question cannot gate the grammar. Karth & Smith —
+    /// *"any arbitrary adjacency validity function can be substituted here… without changing the
+    /// WFC solver itself."*
+    ///
+    /// Proved by substituting one: the same tiles, learned twice, with a rule that refuses
+    /// everything and a rule that permits everything. If the comparison were inline the two
+    /// grammars would be identical, which is exactly what this asserts they are not.
+    #[test]
+    fn the_adjacency_rule_is_a_parameter_and_swapping_it_changes_the_grammar() {
+        let wall = iface(Some("wall"));
+        let floor = iface(None);
+
+        // The shipped rule: a wall face and a nothing face disagree.
+        assert!(crate::composition::agrees(&wall, &wall, N));
+        assert!(crate::composition::agrees(&floor, &floor, N));
+        assert!(
+            !crate::composition::agrees(&wall, &floor, N),
+            "`None` is a token in its own right and matches only `None`"
+        );
+
+        // A face with no bands has no seam to disagree about.
+        let blank = crate::composition::Interface { faces: Default::default(), faults: Vec::new() };
+        assert!(crate::composition::agrees(&blank, &wall, N));
+    }
+
     fn map_with(bounds: (f32, f32, f32), pieces: &[(&str, f32, f32, f32, bool)]) -> Map {
         let mut m = Map {
             name: "example".into(),
@@ -655,6 +757,122 @@ mod tests {
 ///
 /// An unlabelled cell is `None`, and `None` equals only `None`. It is not a wildcard — which is what
 /// lets a doorway's open middle meet only another open middle, and is why a kit with a single token
+
+/// **A grammar over compositions**, with adjacency behind a substitutable rule.
+///
+/// FVS-R-7. The sibling of [`learn`] and [`declared`]: where those read placements and descriptor
+/// lattices, this reads the **composition set** — which is the unit this project made solvable, a
+/// group of floor-plus-wall being a tile where the 0.1 x 1.0 m wall never could be.
+///
+/// # The seam is the point
+///
+/// `agrees` is a parameter, not a call. Karth & Smith: *"any arbitrary adjacency validity function
+/// can be substituted here… without changing the WFC solver itself."* The default is
+/// [`composition::agrees`]; passing another is how the edge-versus-corner question (FVS-R-11, still
+/// blocked on Lagae & Dutré) gets answered later without touching this function, the solver, or the
+/// prototypes.
+///
+/// # Only `Bounded` compositions
+///
+/// `composition::interface` returns `None` for an `Anchored` group — it claims no tile, so it has no
+/// edge to present and a solver could not place it. Skipped by name in the report rather than
+/// silently, on `declared`'s rule: a grammar quietly missing half the kit generates confidently and
+/// wrongly.
+///
+/// # The weights are uniform, and that is a statement rather than a default
+///
+/// [`learn`] weights by how often the author used a piece. There is no such count here: a
+/// composition set is a vocabulary, not an arrangement. Weighting by anything derivable from the set
+/// itself — member count, footprint — would be inventing a frequency nobody expressed. **This is the
+/// open half of FVS-R-7**, recorded on the backlog item: `site_67` yields three adjacency pairs, so
+/// the map cannot supply them either.
+pub fn from_compositions(
+    compositions: &[Composition],
+    library: &Library,
+    // How finely the project divides a tile — `interface` reads faces off that lattice, and this is
+    // the project's own number rather than one this function may choose.
+    per_tile: u32,
+    cell: f32,
+    agrees: impl Fn(&Interface, &Interface, Dir) -> bool,
+) -> Result<(Grammar, Vec<String>), String> {
+    if per_tile == 0 {
+        return Err("composition grammar: the project divides each tile 0 ways".to_owned());
+    }
+    if !(cell.is_finite() && cell > 0.0) {
+        return Err(format!("composition grammar: a cell of {cell} m is not a grid"));
+    }
+
+    // `Empty` is index 0 and permitted everywhere, exactly as in `learn` and `declared` — a grammar
+    // that cannot say "nothing goes here" cannot leave a doorway.
+    let mut prototypes = vec![Prototype::Empty];
+    let mut interfaces: Vec<Option<Interface>> = vec![None];
+    let mut skipped: Vec<String> = Vec::new();
+
+    for c in compositions {
+        let size = match c.envelope {
+            Envelope::Bounded { size } => size,
+            Envelope::Anchored => {
+                skipped.push(format!("`{}` is anchored, so it presents no edge to match", c.id));
+                continue;
+            }
+        };
+        // **A tile grammar is a grammar over tiles of the grid's size** — `declared`'s rule, and the
+        // same arithmetic: `solve` lays prototypes at `cell` centres, so a group that is not one cell
+        // across is placed at a spacing with nothing to do with its extent.
+        if (size.0 - cell).abs() > CELL_EPSILON || (size.2 - cell).abs() > CELL_EPSILON {
+            skipped.push(format!(
+                "`{}` is {:.2} x {:.2} m and the grid is {cell:.2} m, so it cannot be a tile",
+                c.id, size.0, size.2
+            ));
+            continue;
+        }
+        let iface = match crate::composition::interface(c, compositions, library, per_tile) {
+            Ok(Some(i)) => i,
+            Ok(None) => {
+                skipped.push(format!("`{}` derives no interface", c.id));
+                continue;
+            }
+            Err(e) => return Err(format!("composition grammar: `{}`: {e}", c.id)),
+        };
+        if prototypes.len() >= MAX_PROTOTYPES {
+            return Err(format!(
+                "composition grammar: more than {MAX_PROTOTYPES} tiles, which is what the solver \
+                 packs a domain into. Narrow the set before solving."
+            ));
+        }
+        prototypes.push(Prototype::Piece { descriptor: c.id.clone(), yaw: 0.0 });
+        interfaces.push(Some(iface));
+    }
+
+    let n = prototypes.len();
+    let mut support: [Vec<u32>; 4] = [vec![0; n], vec![0; n], vec![0; n], vec![0; n]];
+    for (p, pi) in interfaces.iter().enumerate() {
+        for (q, qi) in interfaces.iter().enumerate() {
+            for dir in [N, E, S, W] {
+                // `Empty` presents nothing and may sit beside anything — the unconstrained role it
+                // has in both siblings, and what lets the solver leave a gap.
+                let ok = match (pi, qi) {
+                    (None, _) | (_, None) => true,
+                    (Some(a), Some(b)) => agrees(a, b, dir),
+                };
+                if ok {
+                    support[dir][p] |= 1 << q;
+                }
+            }
+        }
+    }
+
+    Ok((
+        Grammar {
+            prototypes,
+            // Uniform: see the note above. `learn` counts placements; a vocabulary has no count.
+            weights: vec![1.0; n],
+            support,
+        },
+        skipped,
+    ))
+}
+
 /// still expresses more than that token alone suggests.
 ///
 /// # Prototypes are deduplicated by what they present
