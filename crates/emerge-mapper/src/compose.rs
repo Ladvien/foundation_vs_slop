@@ -748,13 +748,6 @@ fn restage_group(
             locations: Vec::new(),
             note: None,
         };
-        // **Nothing to expand is not an error here.** A composition with no members yet is the
-        // ordinary state right after `N`; `expand` refuses to *stamp* one, which is right for a map
-        // and wrong for the stage that is showing you the one you are filling. Its envelope still
-        // draws — `draw_stage` reads that off the schema, not off the members.
-        if c.members.is_empty() {
-            continue;
-        }
         let stamp = emerge_core::composition::Stamped {
             id: "staged".to_owned(),
             of: c.id.clone(),
