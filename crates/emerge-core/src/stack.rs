@@ -543,6 +543,75 @@ pub fn restore_moved(map: &mut Map, moved: &Moved) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Every `Mount` variant contests itself, unless it is exempt on purpose.**
+    ///
+    /// [`same_layer`] ends in `_ => false`, so a variant added tomorrow contests **nothing —
+    /// including another of itself** until somebody remembers to add an arm. It fails open, in the
+    /// direction of "the edit is allowed", and silently.
+    ///
+    /// The hole is invisible without this test because the one variant that *should* fall through
+    /// does: `Overlay` claims no volume by design, so the fall-through looks deliberate for every
+    /// variant. Naming the exemption is what separates "decided" from "not yet written".
+    ///
+    /// Exhaustive by construction — the `match` below has no wildcard, so a new variant does not
+    /// compile until its author has answered the question.
+    #[test]
+    fn every_mount_variant_contests_itself_or_says_why_not() {
+        use crate::descriptor::{Extent, Mount, OverlayHost};
+
+        let every = [
+            Mount::OnFloor,
+            Mount::OnWall { height: 1.8 },
+            Mount::OnCeiling,
+            Mount::InOpening { clear: None },
+            Mount::OnSurface { class: "worktop".to_owned() },
+            Mount::Overlay { on: OverlayHost::Floor },
+            Mount::Tiled,
+        ];
+
+        for mount in every {
+            // Answered per variant, with no wildcard: adding a `Mount` breaks this line first.
+            let (exempt, why) = match &mount {
+                Mount::Overlay { .. } => (
+                    true,
+                    "claims no volume — two decals may share a wall, which is the point of them",
+                ),
+                Mount::OnFloor
+                | Mount::OnWall { .. }
+                | Mount::OnCeiling
+                | Mount::InOpening { .. }
+                | Mount::OnSurface { .. }
+                | Mount::Tiled => (false, ""),
+            };
+
+            let d = Descriptor {
+                id: "probe".to_owned(),
+                extent: Extent { footprint: Some((1.0, 1.0)), height: Some(1.0) },
+                mount: Some(mount.clone()),
+                ..Descriptor::default()
+            };
+            // `OnSurface` contests only pieces on the SAME host, so the probe names one.
+            let host = matches!(mount, Mount::OnSurface { .. }).then_some("table@1");
+            let contests = same_layer(&d, host, &d, host);
+
+            if exempt {
+                assert!(
+                    !contests,
+                    "`{mount:?}` is exempt because it {why}, but it contests itself"
+                );
+            } else {
+                assert!(
+                    contests,
+                    "`{mount:?}` does not contest another of itself, so two of them may occupy one \
+                     space and nothing will refuse it. Add an arm to `same_layer`, or exempt it here \
+                     with a reason."
+                );
+            }
+        }
+    }
+
+    use super::*;
     use crate::descriptor::{Align, Extent, Offers};
     use crate::library::LIBRARY_VERSION;
     use crate::map::Placed;
