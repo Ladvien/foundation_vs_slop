@@ -487,10 +487,16 @@ mod tests {
             ron::from_str(&std::fs::read_to_string(root.join("compositions.ron")).expect("groups"))
                 .expect("the site compositions parse");
 
-        let (g, skipped) =
+        let composed =
             from_compositions(&comps.compositions, &library, 1, 1.0, crate::composition::agrees)
                 .expect("the shipped kit learns");
+        let Composed { grammar: g, skipped, faces } = composed;
         assert!(skipped.is_empty(), "every authored tile is one cell and bounded: {skipped:?}");
+        // The interfaces come back alongside the prototypes, and `Empty` has none — which is what
+        // `crate::range` reads to tell a wall face from an open one without learning the kit's tokens.
+        assert_eq!(faces.len(), g.len(), "one interface slot per prototype");
+        assert!(faces[0].is_none(), "Empty presents nothing");
+        assert!(faces[1..].iter().all(|f| f.is_some()), "every tile prototype presents something");
 
         // Four authored tiles; three are asymmetric and contribute four turns each, and the floor is
         // symmetric so its four collapse to one. That count is the dedup rule working, not a
@@ -592,13 +598,14 @@ mod tests {
             descriptors: Vec::new(),
         };
 
-        let (permissive, skipped) =
+        let Composed { grammar: permissive, skipped, .. } =
             from_compositions(&comps, &library, 1, 1.0, |_, _, _| true).expect("learns");
         assert!(skipped.is_empty(), "both tiles are one cell and bounded: {skipped:?}");
         assert_eq!(permissive.len(), 3, "Empty plus the two tiles");
 
-        let (refusing, _) =
-            from_compositions(&comps, &library, 1, 1.0, |_, _, _| false).expect("learns");
+        let refusing = from_compositions(&comps, &library, 1, 1.0, |_, _, _| false)
+            .expect("learns")
+            .grammar;
 
         // `Empty` keeps its unconstrained role under BOTH rules — it is not routed through `agrees`,
         // because a grammar that cannot say "nothing goes here" cannot leave a doorway.
@@ -911,6 +918,29 @@ fn turn_composition(c: &Composition, yaw: f32) -> Composition {
 /// itself — member count, footprint — would be inventing a frequency nobody expressed. **This is the
 /// open half of FVS-R-7**, recorded on the backlog item: `site_67` yields three adjacency pairs, so
 /// the map cannot supply them either.
+/// A grammar over compositions, with what it refused and what each prototype presents.
+///
+/// # Why the interfaces come back out
+///
+/// A caller that wants to read a *solved grid* — [`crate::range`] measuring enclosure, an editor
+/// reporting a seam fault — needs to know which faces of each prototype are walls. `Grammar` does not
+/// carry that, and it cannot be re-derived from outside: the turned interface is produced by a private
+/// `turn_composition`, so a second derivation would be a second rotation convention, which is exactly
+/// the failure [`crate::composition::rotate_xz`]'s doc warns costs you a mirrored kit with nothing
+/// going red. Returning what was already computed is one path; re-deriving it would be two.
+#[derive(Debug)]
+pub struct Composed {
+    pub grammar: Grammar,
+    /// Compositions that could not become tiles, each with the reason, by name. A grammar quietly
+    /// missing half the kit generates confidently and wrongly — `declared`'s rule.
+    pub skipped: Vec<String>,
+    /// What each prototype presents, indexed alongside `grammar.prototypes`.
+    ///
+    /// Index 0 is [`Prototype::Empty`]'s, and it is `None`: empty presents nothing and may sit beside
+    /// anything, which is the unconstrained role that lets the solver leave a gap.
+    pub faces: Vec<Option<Interface>>,
+}
+
 pub fn from_compositions(
     compositions: &[Composition],
     library: &Library,
@@ -919,7 +949,7 @@ pub fn from_compositions(
     per_tile: u32,
     cell: f32,
     agrees: impl Fn(&Interface, &Interface, Dir) -> bool,
-) -> Result<(Grammar, Vec<String>), String> {
+) -> Result<Composed, String> {
     if per_tile == 0 {
         return Err("composition grammar: the project divides each tile 0 ways".to_owned());
     }
@@ -1042,8 +1072,8 @@ pub fn from_compositions(
         }
     }
 
-    Ok((
-        Grammar {
+    Ok(Composed {
+        grammar: Grammar {
             prototypes,
             // Uniform per authored TILE — see the split above. `learn` counts placements; a
             // vocabulary has no count, so every tile the author wrote is equally likely.
@@ -1051,7 +1081,8 @@ pub fn from_compositions(
             support,
         },
         skipped,
-    ))
+        faces: interfaces,
+    })
 }
 
 /// still expresses more than that token alone suggests.

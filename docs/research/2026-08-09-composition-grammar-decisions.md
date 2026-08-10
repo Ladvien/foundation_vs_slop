@@ -303,6 +303,14 @@ Each of these otherwise gets decided by whatever the code happens to do, after t
   — Smith & Whitehead run **10,000 levels** for every graph in the paper this method comes from, and a
   WFC solve over a 12 × 12 grid is far more expensive than a Launchpad level, so the cap is a budget and
   is reported as one if it is hit.
+- **A region is a connected run of enclosed *floor* cells**, joined across seams no wall blocks — the
+  interiors. Grouping every unreached cell instead would merge two sealed rooms into one through the
+  wall ring they share, and *"doorway tiles per enclosed region"* would then count a corridor of rooms
+  as one room. A doorway is counted against a region when it is orthogonally adjacent to it, whether or
+  not that seam is open: it is the puncture in the wall, and the wall is what makes it a boundary.
+- **Outside is not necessarily one place.** The fill seeds **every** border cell, not one corner — a
+  wall running border to border splits the outdoors in two, and a single seed would report the far half
+  as a room.
 - **Zero enclosed regions** makes opening density undefined, and wall-confetti is the *expected* output
   given `Empty` at 36%. Such solves are **excluded from the opening-density median and from the
   histogram, and counted and reported as `no_enclosed_region`** — not mapped to 0, because 0 already
