@@ -387,12 +387,17 @@ pub fn problem_banner(parent: &mut ChildSpawnerCommands, tab: crate::tiles::Mode
             display: Display::None,
             padding: UiRect::axes(Val::Px(GAP_ROW + 1.0), Val::Px(GAP_ROW)),
             margin: UiRect::top(Val::Px(GAP_ROW)).with_bottom(Val::Px(GAP_TIGHT)),
+            max_width: Val::Percent(100.0),
             ..default()
         },
         BackgroundColor(PROBLEM_BG),
         Text::new(String::new()),
         TextColor(PROBLEM_TEXT),
         TextFont::from_font_size(11.0),
+        // **Stated, not inherited.** This carries the newest refusal in full, and those name
+        // descriptors and compositions — the longest text this editor renders. `max_width` is what
+        // stops a long word pushing the node wider than the panel it sits in.
+        TextLayout::new(Justify::Left, LineBreak::WordOrCharacter),
         ProblemBanner(tab),
     ));
 }
@@ -430,16 +435,46 @@ pub fn problem_log(parent: &mut ChildSpawnerCommands, tab: crate::tiles::Mode) {
 
 /// One bullet. `•` and not `-`: the shipped face has U+2022 (checked, as U+26A0 was not), and a
 /// bullet reads as a list where a hyphen reads as a range.
+///
+/// # The bullet and the text are siblings, so it can wrap
+///
+/// This was one `Text` reading `"• {text}"` with `LineBreak::NoWrap`, on the argument that a wrapped
+/// continuation restarts at column zero and breaks the bullet column. The argument was right and the
+/// remedy was wrong: refusing to wrap does not keep a long refusal inside the panel, it runs it out
+/// through the side of the box, which is what an author reported. This tab's messages name
+/// descriptors, compositions and counts, so they are routinely longer than 380 px.
+///
+/// A row with the bullet as its own child fixes both at once: the text wraps, and its continuations
+/// align under the text rather than under the bullet, because the bullet is not in that column.
+///
+/// `min_width: 0` is load-bearing. A flex item will not shrink below its min-content width by
+/// default, and for text that is the longest word — so without it the row grows to fit and the
+/// wrapping never happens. Same trick as `min_height: 0` on the scroll areas above.
 pub fn problem_log_line(parent: &mut ChildSpawnerCommands, text: &str, colour: Color) {
-    parent.spawn((
-        Text::new(format!("• {text}")),
-        TextColor(colour),
-        TextFont::from_font_size(10.0),
-        // A wrapped continuation restarts at column zero and breaks the bullet column — the same
-        // thing that set the Compose panel's width. The full text is on the banner and in `Cmd+C`.
-        TextLayout::new(Justify::Left, LineBreak::NoWrap),
-        ProblemLogLine,
-    ));
+    parent
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(4.0),
+                width: Val::Percent(100.0),
+                ..default()
+            },
+            ProblemLogLine,
+        ))
+        .with_children(|row| {
+            row.spawn((
+                Text::new("•"),
+                TextColor(colour),
+                TextFont::from_font_size(10.0),
+                TextLayout::new(Justify::Left, LineBreak::NoWrap),
+            ));
+            row.spawn((
+                Node { min_width: Val::Px(0.0), ..default() },
+                Text::new(text.to_owned()),
+                TextColor(colour),
+                TextFont::from_font_size(10.0),
+            ));
+        });
 }
 
 /// **The key list, read from the census and never retyped.**

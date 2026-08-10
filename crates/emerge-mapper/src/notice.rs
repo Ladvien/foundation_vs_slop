@@ -145,6 +145,21 @@ fn paint_notices(
         }
         commands.entity(entity).with_children(|p| {
             crate::chrome::section(p, "PROBLEMS ON THIS TAB");
+            // **Say how to take them down.** These are sticky by design — a refusal that vanished
+            // before it was read is the failure `Status` exists to prevent — but sticky with no
+            // stated way out reads as an editor filling up with complaints. An author watching the
+            // same refusal collect an `(x14)` has no reason to know `Esc` is the answer, which is
+            // Cockburn et al.'s intermodal-transition point that the shortcuts overlay already cites:
+            // a fast path offered beside no slow one is not offered.
+            p.spawn((
+                bevy::prelude::Text::new(format!(
+                    "{} clears them",
+                    crate::keys::chord(crate::keys::Action::Cancel)
+                )),
+                bevy::prelude::TextColor(crate::chrome::DIM),
+                bevy::prelude::TextFont::from_font_size(10.0),
+                crate::chrome::ProblemLogLine,
+            ));
             for (i, line) in want.iter().enumerate() {
                 // Newest first, and it is the one the banner is also showing — so the top of the
                 // log and the block above it agree, and the older ones recede.
