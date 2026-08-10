@@ -36,7 +36,7 @@ use crate::view::{cursor_ground, MainCamera};
 /// module note says why that is not allowed: *"Nothing here is clever. It is here so there is
 /// exactly one of it."* It had already drifted from a third statement of the same fact — the drawn
 /// grid, which `view.rs` set to 1.0 m under a comment insisting it was the snap.
-use emerge_core::grid::SNAP;
+use emerge_core::grid::{self, SnapLevel};
 /// Yaw snap, degrees.
 const YAW_STEP: f32 = 15.0;
 
@@ -627,7 +627,7 @@ pub struct Placement(pub String);
 /// Shared by `generate` and `check_edges` on purpose: the learned grammar and the edge check must
 /// agree about which two placements are neighbours, or the tool would report a fault between pieces
 /// the solver does not think touch.
-const CELL: f32 = 1.0;
+const CELL: f32 = grid::TILE;
 
 /// The see-through preview of the armed brush.
 #[derive(Component)]
@@ -1522,6 +1522,7 @@ const GRID_STEPS: [f32; 4] = [0.5, 1.0, 2.0, 4.0];
 fn cycle_grid(
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<keys::Live>,
+    project: Res<Project>,
     mut spacing: ResMut<GridSpacing>,
     mut state: ResMut<EditorState>,
 ) {
@@ -1535,7 +1536,13 @@ fn cycle_grid(
     spacing.0 = GRID_STEPS[(at + 1) % GRID_STEPS.len()];
     state
         .status
-        .note(format!("grid {:.2} m — the snap is still {SNAP:.2} m", spacing.0));
+        .note(format!(
+            "grid {:.2} m — snap is the tile, Shift {:.3} m, {}+Shift {:.3} m",
+            spacing.0,
+            SnapLevel::Fine.pitch(project.policy.snap_divisor),
+            keys::MOD_NAME,
+            SnapLevel::Finer.pitch(project.policy.snap_divisor),
+        ));
 }
 
 /// The slab that shows how far the map goes. See [`BOUNDS_FILL`].
@@ -1592,12 +1599,32 @@ fn fit_bounds_floor(project: Res<Project>, mut slab: Query<&mut Transform, With<
 ///
 /// `Gizmos::grid` is bounded by construction — a cell count, not a plane — so "stop at the edge"
 /// costs nothing and cannot drift from `draw_bounds`, which reads the same rectangle.
-fn draw_map_grid(project: Res<Project>, spacing: Res<GridSpacing>, mut gizmos: Gizmos) {
+fn draw_map_grid(
+    project: Res<Project>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    spacing: Res<GridSpacing>,
+    mut gizmos: Gizmos,
+) {
     let (min_x, min_z, max_x, max_z) = project.map.floor_rect();
     let (w, _h, d) = project.map.bounds;
     // Guarded rather than trusted: a zero would divide to infinity and ask the gizmo for every cell
     // there is. `GRID_STEPS` cannot produce one, and this is what keeps that true of a future step.
-    let step = if spacing.0 > 0.0 { spacing.0 } else { 1.0 };
+    // **While a rung modifier is held, the grid IS the lattice you will land on.**
+    //
+    // `pcgbook-ch11`: *"a human designer may become frustrated or confused if the computer
+    // consistently acts as though it is not following the model that the human designer has in her
+    // head."* Drawing one static grid over a three-rung ladder is that, three times over — and this
+    // file already records the drawn grid and the snap drifting apart once before, with `view.rs` set
+    // to 1.0 m "under a comment insisting it was the snap".
+    //
+    // Bare, there is nothing to disambiguate — the tile IS the bare rung — so the author's own cycled
+    // spacing stands.
+    let level = snap_level(&keyboard);
+    let step = if level == SnapLevel::Tile {
+        if spacing.0 > 0.0 { spacing.0 } else { grid::TILE }
+    } else {
+        level.pitch(project.policy.snap_divisor)
+    };
     // At least one cell each way: a map smaller than a cell still has a floor to draw.
     let cells = UVec2::new(
         ((w / step).round() as u32).max(1),
@@ -2004,8 +2031,75 @@ fn cost_tint(triangles: usize) -> Color {
 
 // ── placing ──────────────────────────────────────────────────────────────────────────────────────
 
-fn snap(v: f32) -> f32 {
-    (v / SNAP).round() * SNAP
+/// **Snap a bare point** — an anchor, not a piece, so there is no footprint and no phase.
+///
+/// `snap_corner` with a zero span is exactly rounding to the pitch, which is what the clone tools
+/// want: a captured set carries its own layout and only its anchor lands on the lattice.
+fn snap_point(project: &Project, v: f32, level: SnapLevel) -> f32 {
+    grid::snap_corner(v, 0.0, level.pitch(project.policy.snap_divisor))
+}
+
+/// **The footprint a brush will occupy, turned by its own yaw.**
+///
+/// Unmeasured pieces answer `(0, 0)`, which makes [`grid::snap_corner`] fall back to snapping the
+/// centre — the honest answer when nothing knows how big the thing is, and the same "refuse to invent
+/// a box" rule `compose::member_footprint` applies.
+pub fn brush_span(d: &emerge_core::descriptor::Descriptor, yaw: f32) -> (f32, f32) {
+    match d.extent.footprint {
+        Some(fp) => crate::compose::turned_footprint(fp, yaw),
+        None => (0.0, 0.0),
+    }
+}
+
+/// **Which rung a stamp may use, and how big it is.**
+///
+/// A `Bounded` composition is the solver's own unit, so it is pinned to [`SnapLevel::Tile`] whatever
+/// the modifiers say — see the call site for the mixed-initiative argument. An `Anchored` group claims
+/// no tile and is furniture by `from_compositions`'s own rule, so it rides the ladder like any prop.
+pub fn stamp_snap(
+    project: &Project,
+    compose: &crate::compose::ComposeState,
+    keyboard: &ButtonInput<KeyCode>,
+) -> (SnapLevel, (f32, f32)) {
+    let armed = compose
+        .armed
+        .as_ref()
+        .and_then(|id| project.compositions.compositions.iter().find(|c| &c.id == id));
+    match armed.map(|c| &c.envelope) {
+        Some(emerge_core::composition::Envelope::Bounded { size }) => {
+            (SnapLevel::Tile, (size.0, size.2))
+        }
+        _ => (snap_level(keyboard), (0.0, 0.0)),
+    }
+}
+
+/// The footprint of whatever the move tool is carrying, so a dragged piece snaps by its own corner.
+///
+/// `(0, 0)` when nothing is held or the piece is unmeasured — centre-snapping, as above.
+pub fn held_span(project: &Project, drag: &MoveDrag) -> (f32, f32) {
+    let Some(Held::Piece(id)) = drag.held.as_ref() else {
+        return (0.0, 0.0);
+    };
+    let Some(p) = project.map.placements.iter().find(|p| &p.id == id) else {
+        return (0.0, 0.0);
+    };
+    match project.library.get(&p.descriptor) {
+        Some(d) => brush_span(d, p.yaw),
+        None => (0.0, 0.0),
+    }
+}
+
+/// **Which rung of the placement ladder the modifiers are asking for.**
+///
+/// Extracted as a pure decision so a test can ask it directly — the projection needs a viewport and
+/// this does not. Shift always means *one rung finer*; free placement is [`keys::alt_held`] and is
+/// not on this ladder at all.
+pub fn snap_level(keyboard: &ButtonInput<KeyCode>) -> SnapLevel {
+    match (keys::mod_held(keyboard), keys::shift_held(keyboard)) {
+        (true, true) => SnapLevel::Finer,
+        (_, true) => SnapLevel::Fine,
+        _ => SnapLevel::Tile,
+    }
 }
 
 /// A world ground point as a **map-space** `at`, snapped to the authoring grid unless `free`.
@@ -2038,13 +2132,20 @@ fn snap(v: f32) -> f32 {
 /// free position is clamped to it: anywhere inside that half-metre, nowhere outside it. Release and
 /// press again over a different cell to nudge a different one. An assist, not a restriction — every
 /// position that was reachable is still reachable, in two gestures instead of one.
-fn map_at(project: &Project, hit: Vec3, free: bool, anchor: &FineAnchor) -> (f32, f32) {
+fn map_at(
+    project: &Project,
+    hit: Vec3,
+    free: bool,
+    anchor: &FineAnchor,
+    level: SnapLevel,
+    span: (f32, f32),
+) -> (f32, f32) {
     let (x, z) = project.map.to_map_space((hit.x, hit.z));
     match (free, anchor.cell) {
         // `snap` rounds to the nearest multiple of `SNAP`, so the cell around a snapped point reaches
         // half a step either side of it.
         (true, Some((cx, cz))) => {
-            let half = SNAP * 0.5;
+            let half = level.pitch(project.policy.snap_divisor) * 0.5;
             (
                 x.clamp(cx - half, cx + half),
                 z.clamp(cz - half, cz + half),
@@ -2053,7 +2154,17 @@ fn map_at(project: &Project, hit: Vec3, free: bool, anchor: &FineAnchor) -> (f32
         // The modifier went down off the ground plane, so there is no cell to hold to. Free, as it
         // was — refusing to place at all would be a worse answer than the one the author asked for.
         (true, None) => (x, z),
-        (false, _) => (snap(x), snap(z)),
+        // **The piece's minimum corner lands on the lattice, not its centre.** `cell_centre` is
+        // `min + (c + 0.5) * TILE`, so the phase differs per footprint; snapping the centre put a 1 m
+        // tile on whole metres, spanning two solver cells, and `to_cell` then floored it into one it
+        // half covered. See `grid::SnapLevel`.
+        (false, _) => {
+            let pitch = level.pitch(project.policy.snap_divisor);
+            (
+                grid::snap_corner(x, span.0, pitch),
+                grid::snap_corner(z, span.1, pitch),
+            )
+        }
     }
 }
 
@@ -2147,6 +2258,7 @@ fn drive_clone(
     mut commands: Commands,
     assets: Res<AssetServer>,
     mouse: Res<ButtonInput<MouseButton>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
     hovered_ui: Query<&Hovered>,
     pointer: Res<crate::view::Pointer>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
@@ -2194,7 +2306,10 @@ fn drive_clone(
     // What the marker shows: the held set's bounds riding the (snapped) cursor, else the box being
     // dragged out.
     let rect = if let Some(set) = &drag.held {
-        Some(set.bounds((snap(at.0), snap(at.1))))
+        Some(set.bounds((
+            snap_point(&project, at.0, snap_level(&keyboard)),
+            snap_point(&project, at.1, snap_level(&keyboard)),
+        )))
     } else {
         drag.from.map(|from| {
             (from.0.min(at.0), from.1.min(at.1), from.0.max(at.0), from.1.max(at.1))
@@ -2226,7 +2341,11 @@ fn drive_clone(
         let Some(set) = drag.held.take() else {
             return;
         };
-        stamp_set(&mut commands, &assets, &mut project, &mut state, &set, (snap(at.0), snap(at.1)));
+        let anchor_at = (
+            snap_point(&project, at.0, snap_level(&keyboard)),
+            snap_point(&project, at.1, snap_level(&keyboard)),
+        );
+        stamp_set(&mut commands, &assets, &mut project, &mut state, &set, anchor_at);
         // Back in hand whatever happened: a refusal's fix is usually "two cells to the left".
         drag.held = Some(set);
         return;
@@ -2289,7 +2408,11 @@ fn drive_clone(
         sum.1 += project.map.stamps[i].at.1;
         n += 1.0;
     }
-    let anchor = (snap(sum.0 / n), snap(sum.1 / n));
+    // The captured set's own anchor sits on the tile lattice: a group is placed as a group.
+    let anchor = (
+        snap_point(&project, sum.0 / n, SnapLevel::Tile),
+        snap_point(&project, sum.1 / n, SnapLevel::Tile),
+    );
 
     let mut pieces = Vec::with_capacity(caught.len());
     let (mut bx0, mut bz0, mut bx1, mut bz1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
@@ -2551,7 +2674,8 @@ fn sense_fine_anchor(
     hovered_ui: Query<&Hovered>,
     mut anchor: ResMut<FineAnchor>,
 ) {
-    let held = keys::mod_held(&keyboard);
+    // Alt, not the platform modifier: free placement moved so that Shift means exactly one thing.
+    let held = keys::alt_held(&keyboard);
     if !held {
         // Only when it changes — `ResMut` marks the resource changed on every mutable deref.
         if anchor.cell.is_some() {
@@ -2580,7 +2704,11 @@ fn sense_fine_anchor(
         return;
     };
     let (x, z) = project.map.to_map_space((hit.x, hit.z));
-    anchor.cell = Some((snap(x), snap(z)));
+    // The tile is the region a fine nudge is held inside — a cell, as the doc above says.
+    anchor.cell = Some((
+        snap_point(&project, x, SnapLevel::Tile),
+        snap_point(&project, z, SnapLevel::Tile),
+    ));
 }
 
 /// Put a piece in the world — **through `emerge-bevy`**, which is also what the game uses.
@@ -3042,8 +3170,14 @@ fn drive_place(
             drag.from = None;
         }
         if mouse.just_released(MouseButton::Left) {
-            let free = keys::mod_held(&keyboard);
-            let at = map_at(&project, hit, free, &anchor);
+            // **A composition the solver can see is pinned to the tile.** `pcgbook-ch11`: *"All
+            // content that a human can produce using a mixed-initiative PCG system must be possible
+            // for the computer to generate on its own."* A `Bounded` group IS the solver's unit, so
+            // placing one off the cell lattice would author a state no solve could reproduce — and
+            // `to_cell` would floor it into a cell it half covers. `Anchored` groups claim no tile
+            // (`from_compositions` skips them by name as furniture), so they get the ladder.
+            let (level, span) = stamp_snap(&project, &compose, &keyboard);
+            let at = map_at(&project, hit, keys::alt_held(&keyboard), &anchor, level, span);
             stamp_here(&mut project, &mut state, &mut compose, at);
         }
         return;
@@ -3059,8 +3193,15 @@ fn drive_place(
         }
         return;
     };
-    let free = keys::mod_held(&keyboard);
-    let at = map_at(&project, hit, free, &anchor);
+    let free = keys::alt_held(&keyboard);
+    let at = map_at(
+        &project,
+        hit,
+        free,
+        &anchor,
+        snap_level(&keyboard),
+        brush_span(&d, state.brush_yaw),
+    );
 
     if mouse.just_pressed(MouseButton::Left) {
         drag.from = Some(at);
@@ -5539,8 +5680,8 @@ fn drive_move(
         // **A stamp moves as one thing**, and moving it is one field: the rows are derived, so
         // `redraw_stamps` puts them where the new `at` says. FVS-R-14's move arm.
         Some(Held::Stamp(id)) => {
-            let free = keys::mod_held(&keyboard);
-            let at = map_at(&project, hit, free, &anchor);
+            let free = keys::alt_held(&keyboard);
+            let at = map_at(&project, hit, free, &anchor, snap_level(&keyboard), held_span(&project, &drag));
             // Resolved now, not at grab — the list can have moved under it, exactly as for a piece.
             let Some(st) = project.map.stamps.iter_mut().find(|s| s.id == id) else {
                 drag.held = None;
@@ -5573,8 +5714,8 @@ fn drive_move(
                 state.status.problem(format!("`{id}` is gone — nothing was moved"));
                 return;
             };
-            let free = keys::mod_held(&keyboard);
-            let at = map_at(&project, hit, free, &anchor);
+            let free = keys::alt_held(&keyboard);
+            let at = map_at(&project, hit, free, &anchor, snap_level(&keyboard), held_span(&project, &drag));
             // One `deref_mut`, then two disjoint field borrows. `ResMut`'s `Deref` cannot split them
             // for us, so `(&mut project.map, &project.library)` is a double borrow of the resource.
             let p = &mut *project;
@@ -5887,7 +6028,7 @@ fn under_cursor_target(
     let hit = cursor_ground(pointer.0, cam, cam_tf)?;
     let at = project.map.to_map_space((hit.x, hit.z));
     if let Some((id, cell)) = &lock.0 {
-        if (snap(at.0), snap(at.1)) == *cell {
+        if (snap_point(project, at.0, SnapLevel::Tile), snap_point(project, at.1, SnapLevel::Tile)) == *cell {
             if let Some(i) = project.map.placements.iter().position(|p| &p.id == id) {
                 return Some(i);
             }
@@ -5918,7 +6059,10 @@ fn cycle_target(
         return;
     };
     let at = project.map.to_map_space((hit.x, hit.z));
-    let cell = (snap(at.0), snap(at.1));
+    let cell = (
+        snap_point(project, at.0, SnapLevel::Tile),
+        snap_point(project, at.1, SnapLevel::Tile),
+    );
     let ys = heights(project).unwrap_or_default();
     let mut stack: Vec<(usize, f32)> = project
         .map
@@ -6679,7 +6823,14 @@ fn drive_ghost(
         return;
     };
 
-    let at = map_at(&project, hit, keys::mod_held(&keyboard), &anchor);
+    let at = map_at(
+        &project,
+        hit,
+        keys::alt_held(&keyboard),
+        &anchor,
+        snap_level(&keyboard),
+        (0.0, 0.0),
+    );
     let yaw = emerge_bevy::draw_yaw(d, want_yaw);
 
     // **The ghost asks the question the drop will ask** — against a map the carried group is NOT in.
@@ -6794,6 +6945,7 @@ fn drive_ghost(
 fn drive_clone_ghost(
     mut commands: Commands,
     assets: Res<AssetServer>,
+    keyboard: Res<ButtonInput<KeyCode>>,
     project: Res<Project>,
     state: Res<EditorState>,
     drag: Res<CloneDrag>,
@@ -6831,12 +6983,17 @@ fn drive_clone_ghost(
         return;
     };
 
-    // **Exactly the arithmetic the drop uses.** `drive_clone` stamps at `(snap(at.0), snap(at.1))`
-    // and `stamp_set` puts each piece at `target + piece.offset`; a preview computing either
-    // differently is a promise about a landing that will not happen, which is the one thing this
-    // editor's previews are held to.
+    // **Exactly the arithmetic the drop uses.** `drive_clone` stamps at `snap_point` on the rung the
+    // modifiers are asking for, and `stamp_set` puts each piece at `target + piece.offset`; a preview
+    // computing either differently is a promise about a landing that will not happen, which is the
+    // one thing this editor's previews are held to. That now includes the RUNG — a ghost snapping to
+    // the tile while the drop snaps to a third would be the same broken promise at a new scale.
     let at = project.map.to_map_space((hit.x, hit.z));
-    let target = (snap(at.0), snap(at.1));
+    let level = snap_level(&keyboard);
+    let target = (
+        snap_point(&project, at.0, level),
+        snap_point(&project, at.1, level),
+    );
     let (root, spin) = ghost_anchor(set, target, project.map.origin);
 
     if let Some((e, _)) = ghosts.iter().next() {
@@ -7102,12 +7259,104 @@ mod snap_tests {
         p
     }
 
-    /// The default is unchanged: a click lands on the authoring grid, wherever inside a cell it fell.
+    /// **A tile-sized piece lands filling a cell, wherever inside one the click fell.**
+    ///
+    /// This used to assert centre-snapping to the half-metre grid — `(0.24, 0.76) -> (0.0, 1.0)` —
+    /// which is exactly the bug: `at` is a CENTRE, so a 1 m tile at a whole metre spans two solver
+    /// cells and `to_cell` floors it into one it half covers. The rule is now stated on the piece's
+    /// minimum corner, so the answer is a cell centre and never a boundary.
     #[test]
-    fn a_click_snaps_to_the_grid_by_default() {
+    fn a_tile_click_lands_filling_a_cell() {
         let p = project_at((0.0, 0.0, 0.0));
-        assert_eq!(map_at(&p, Vec3::new(0.24, 0.0, 0.76), false, &FineAnchor::default()), (0.0, 1.0));
-        assert_eq!(map_at(&p, Vec3::new(1.26, 0.0, -0.24), false, &FineAnchor::default()), (1.5, 0.0));
+        let tile = (grid::TILE, grid::TILE);
+        assert_eq!(
+            map_at(&p, Vec3::new(0.24, 0.0, 0.76), false, &FineAnchor::default(), SnapLevel::Tile, tile),
+            (0.5, 0.5)
+        );
+        assert_eq!(
+            map_at(&p, Vec3::new(1.26, 0.0, -0.24), false, &FineAnchor::default(), SnapLevel::Tile, tile),
+            (1.5, -0.5)
+        );
+    }
+
+/// **A solver-visible composition may not leave the tile, whatever the modifiers say.**
+    ///
+    /// This is the rule the whole ladder is built around, and the one with real consequences if it
+    /// rots. `pcgbook-ch11`: *"All content that a human can produce using a mixed-initiative PCG
+    /// system must be possible for the computer to generate on its own."* A `Bounded` composition IS
+    /// the solver's unit; placed at a third of a cell it is a state no solve could reproduce, and
+    /// `grammar::to_cell` would floor it into a cell it half covers — the original bug, at a finer
+    /// pitch. `Anchored` groups claim no tile (`from_compositions` skips them as furniture), so they
+    /// ride the ladder like any prop.
+    #[test]
+    fn a_bounded_stamp_is_pinned_to_the_tile_but_an_anchored_one_is_not() {
+        use emerge_core::composition::{Composition, Envelope};
+        let mut p = tests::project(Vec::new(), Vec::new());
+        p.compositions.compositions = vec![
+            Composition {
+                id: "tile_a".into(),
+                envelope: Envelope::Bounded { size: (1.0, 1.0, 1.0) },
+                ..Default::default()
+            },
+            Composition {
+                id: "loose_a".into(),
+                envelope: Envelope::Anchored,
+                ..Default::default()
+            },
+        ];
+
+        let mut shifted = ButtonInput::<KeyCode>::default();
+        shifted.press(keys::SHIFT_KEYS[0]);
+        shifted.press(keys::MOD_KEYS[0]);
+        assert_eq!(snap_level(&shifted), SnapLevel::Finer, "the modifiers really do ask for the finest rung");
+
+        let armed = |id: &str| crate::compose::ComposeState {
+            armed: Some(id.to_owned()),
+            ..Default::default()
+        };
+
+        let (level, span) = stamp_snap(&p, &armed("tile_a"), &shifted);
+        assert_eq!(level, SnapLevel::Tile, "a Bounded composition must ignore the ladder");
+        assert_eq!(span, (1.0, 1.0), "and snap by its own envelope, so its corner lands on a cell");
+
+        let (level, _) = stamp_snap(&p, &armed("loose_a"), &shifted);
+        assert_eq!(level, SnapLevel::Finer, "an Anchored group claims no tile, so it is dressing");
+
+        // Nothing armed, or an id the kit no longer has: the ladder, and no invented footprint.
+        let (level, span) = stamp_snap(&p, &crate::compose::ComposeState::default(), &shifted);
+        assert_eq!((level, span), (SnapLevel::Finer, (0.0, 0.0)));
+    }
+
+    /// **The rungs, and that each is finer than the one above.** Thirds by default, so the middle rung
+    /// is 333 mm — deliberately NOT the old half-metre, which is not a multiple of a third.
+    #[test]
+    fn the_ladder_offers_three_rungs() {
+        let p = project_at((0.0, 0.0, 0.0));
+        let hit = Vec3::new(0.62, 0.0, 0.41);
+        let point = (0.0, 0.0);
+        let at = |lvl| map_at(&p, hit, false, &FineAnchor::default(), lvl, point);
+        let (tile, fine, finer) = (at(SnapLevel::Tile), at(SnapLevel::Fine), at(SnapLevel::Finer));
+        let err = |v: (f32, f32)| (v.0 - 0.62).abs().max((v.1 - 0.41).abs());
+        assert!(
+            err(finer) < err(fine) && err(fine) < err(tile),
+            "each rung must land nearer the cursor: {tile:?} {fine:?} {finer:?}"
+        );
+        assert_eq!(SnapLevel::Fine.pitch(p.policy.snap_divisor), 1.0 / 3.0);
+    }
+
+    /// The modifier ladder itself, as a pure decision — Shift always means one rung finer.
+    #[test]
+    fn shift_means_one_rung_finer_whatever_else_is_held() {
+        let mut k = ButtonInput::<KeyCode>::default();
+        assert_eq!(snap_level(&k), SnapLevel::Tile);
+        k.press(keys::SHIFT_KEYS[0]);
+        assert_eq!(snap_level(&k), SnapLevel::Fine);
+        k.press(keys::MOD_KEYS[0]);
+        assert_eq!(snap_level(&k), SnapLevel::Finer);
+        // Alt is free placement and is not a rung, so it must not move the ladder.
+        let mut k = ButtonInput::<KeyCode>::default();
+        k.press(keys::ALT_KEYS[0]);
+        assert_eq!(snap_level(&k), SnapLevel::Tile);
     }
 
     /// **Held, it does not.** The point comes through exactly as the cursor gave it.
@@ -7115,9 +7364,13 @@ mod snap_tests {
     fn the_modifier_places_where_the_cursor_actually_is() {
         let p = project_at((0.0, 0.0, 0.0));
         let hit = Vec3::new(0.24, 0.0, 0.76);
-        let free = map_at(&p, hit, true, &FineAnchor::default());
+        let free = map_at(&p, hit, true, &FineAnchor::default(), SnapLevel::Tile, (0.0, 0.0));
         assert!((free.0 - 0.24).abs() < 1e-6 && (free.1 - 0.76).abs() < 1e-6, "{free:?}");
-        assert_ne!(free, map_at(&p, hit, false, &FineAnchor::default()), "free placement must differ from snapped");
+        assert_ne!(
+            free,
+            map_at(&p, hit, false, &FineAnchor::default(), SnapLevel::Tile, (0.0, 0.0)),
+            "free placement must differ from snapped"
+        );
     }
 
     /// Both paths still convert world space to map space, so a map that is not at the origin is not
@@ -7126,9 +7379,16 @@ mod snap_tests {
     fn free_placement_still_converts_into_map_space() {
         let p = project_at((10.0, 0.0, -4.0));
         let hit = Vec3::new(12.3, 0.0, -1.7);
-        assert_eq!(map_at(&p, hit, true, &FineAnchor::default()), p.map.to_map_space((hit.x, hit.z)));
+        assert_eq!(
+            map_at(&p, hit, true, &FineAnchor::default(), SnapLevel::Tile, (0.0, 0.0)),
+            p.map.to_map_space((hit.x, hit.z))
+        );
         // And the snapped path lands on the grid in MAP space, not in world space.
-        let (sx, sz) = map_at(&p, hit, false, &FineAnchor::default());
-        assert!((sx / SNAP).fract().abs() < 1e-4 && (sz / SNAP).fract().abs() < 1e-4, "{sx}, {sz}");
+        let (sx, sz) = map_at(&p, hit, false, &FineAnchor::default(), SnapLevel::Tile, (0.0, 0.0));
+        let pitch = SnapLevel::Tile.pitch(p.policy.snap_divisor);
+        assert!(
+            (sx / pitch).fract().abs() < 1e-4 && (sz / pitch).fract().abs() < 1e-4,
+            "{sx}, {sz} are not on the tile lattice in MAP space"
+        );
     }
 }

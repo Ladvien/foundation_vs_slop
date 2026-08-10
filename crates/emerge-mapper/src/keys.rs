@@ -250,6 +250,14 @@ pub const MOD_KEYS: [KeyCode; 2] = [KeyCode::ControlLeft, KeyCode::ControlRight]
 /// Shift, either side. Not platform-dependent — unlike [`MOD_KEYS`], Shift is Shift everywhere.
 pub const SHIFT_KEYS: [KeyCode; 2] = [KeyCode::ShiftLeft, KeyCode::ShiftRight];
 
+/// Alt/Option, either side — **free placement while placing**, and nothing else.
+///
+/// It has its own modifier so that [`shift_held`] can mean exactly one thing. Free placement used to
+/// live on [`MOD_KEYS`], which made Shift read as "one rung finer" from bare and "back onto a
+/// lattice" from the modifier — a modifier whose meaning inverts depending on another modifier does
+/// not get learned.
+pub const ALT_KEYS: [KeyCode; 2] = [KeyCode::AltLeft, KeyCode::AltRight];
+
 /// What [`MOD_KEYS`] is called in writing. The panel and every status line take the name from here so
 /// no string in this crate can claim a modifier the build does not read.
 #[cfg(target_os = "macos")]
@@ -701,6 +709,10 @@ pub fn chord_text(b: &Binding) -> String {
 }
 
 /// Is Shift down?
+pub fn alt_held(keys: &ButtonInput<KeyCode>) -> bool {
+    ALT_KEYS.iter().any(|k| keys.pressed(*k))
+}
+
 pub fn shift_held(keys: &ButtonInput<KeyCode>) -> bool {
     SHIFT_KEYS.iter().any(|k| keys.pressed(*k))
 }

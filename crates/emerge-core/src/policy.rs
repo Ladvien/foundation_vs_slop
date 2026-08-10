@@ -214,6 +214,22 @@ pub struct Policy {
     /// authored to look right rather than to tile.
     #[serde(default = "four")]
     pub seating_divisions: u32,
+    /// **How finely the placement ladder divides a TILE**, once per rung.
+    ///
+    /// `grid::SnapLevel::Fine` is `grid::TILE / snap_divisor` and `Finer` is `TILE / snap_divisor²`,
+    /// so at the default 3 the rungs are 1 m, 333 mm and 111 mm.
+    ///
+    /// **Its own number, not [`Policy::face_bands`].** Tying the placement lattice to an edge-token
+    /// count would re-merge two things `face_bands` and [`Policy::seating_divisions`] were split
+    /// apart to keep separate, and worse: a kit author editing an unrelated token count would
+    /// silently move every existing placement off-lattice.
+    ///
+    /// **3 by default.** Note this is NOT a superset of the old half-metre snap — 0.5 is not a
+    /// multiple of a third — so a piece an author deliberately re-snaps may shift by up to half a
+    /// rung. Nothing moves on its own; existing maps are untouched. A kit that wants the old
+    /// behaviour sets 2, which makes the middle rung exactly `grid::SNAP`.
+    #[serde(default = "three")]
+    pub snap_divisor: u32,
     #[serde(default)]
     pub patches: Vec<Patch>,
 }
@@ -226,6 +242,10 @@ fn one() -> u32 {
 /// The default for [`Policy::seating_divisions`].
 fn four() -> u32 {
     4
+}
+
+fn three() -> u32 {
+    3
 }
 
 /// The most a project may divide one tile.
@@ -242,6 +262,7 @@ impl Default for Policy {
             note: None,
             face_bands: one(),
             seating_divisions: four(),
+            snap_divisor: three(),
             patches: Vec::new(),
         }
     }
@@ -508,6 +529,7 @@ mod tests {
         let policy = Policy {
             version: POLICY_VERSION,
             seating_divisions: 4,
+            snap_divisor: 3,
             note: Some("this facility has 2.4 m ceilings".into()),
             face_bands: 2,
             patches: vec![rule(Match::Kind("door".into()), stretch(1.2))],
