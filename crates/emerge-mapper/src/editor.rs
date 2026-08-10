@@ -656,6 +656,9 @@ impl Plugin for EditorPlugin {
                     (
                         pin_reason_keys.in_set(keys::Phase::Text),
                         group_name_keys.in_set(keys::Phase::Text),
+                        // Before the fields, so the frame a tab changes on is the frame the prompt
+                        // goes down, rather than one where it is invisible and still eating keys.
+                        leaving_a_tab_puts_the_name_prompt_down.in_set(keys::Phase::Sense),
                     ),
                     size_edit_keys.in_set(keys::Phase::Text),
                     // No `not_typing`, no `in_map_mode`: `keys::just_pressed` now refuses on both
@@ -5025,6 +5028,30 @@ fn spawn_target_tile(
 /// Type the reason a cell is pinned.
 /// **Name a composition, and keep it.** `pin_reason_keys`' shape — see `keys::Phase` for why the fields
 /// run before the dispatchers.
+/// **Leaving the Map puts the name prompt down**, so the box being open and the field being live are
+/// one condition rather than two.
+///
+/// `EditorState::grouping` is not mode-scoped, and `chrome::paint_name_box` used to be — it matched on
+/// `Mode::Map`. Clicking the tab strip mid-name therefore hid the box while `group_name_keys` kept the
+/// keyboard: every keystroke vanished, with nothing on screen to say where they were going, until
+/// `Esc`. Two conditions for one question is what made that reachable.
+///
+/// One owner, watching the mode rather than each of the three ways to change it — number keys, `Tab`,
+/// and a click on the strip — so a fourth cannot reintroduce it. The set stays in hand, exactly as
+/// `Esc` leaves it; only the question is withdrawn.
+fn leaving_a_tab_puts_the_name_prompt_down(
+    mode: Res<crate::tiles::Mode>,
+    mut state: ResMut<EditorState>,
+) {
+    if !mode.is_changed() || *mode == crate::tiles::Mode::Map || state.grouping.is_none() {
+        return;
+    }
+    state.grouping = None;
+    // An unconfirmed replace is a question about a name that is no longer being asked.
+    state.replacing = None;
+    state.status.note("not named — the set is still in hand".to_owned());
+}
+
 fn group_name_keys(
     mut events: MessageReader<bevy::input::keyboard::KeyboardInput>,
     mut project: ResMut<Project>,

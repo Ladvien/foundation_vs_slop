@@ -1037,6 +1037,117 @@ mod compose {
             "the group before the focal one has to appear once there is one"
         );
     }
+
+    /// **Clicking a miniature brings it to the middle** — the one carousel verb no test had ever
+    /// exercised.
+    ///
+    /// # What this can and cannot reach
+    ///
+    /// It drives `pick_along`, which is everything from the ray onward: the hit test against the laid
+    /// out strip, the write to `selected`, and the member-cursor reset. It does **not** drive
+    /// `cursor_ray`, and that is a limit of the harness rather than a gap left open —
+    /// `MinimalPlugins` has no window, so the camera has no render target and both
+    /// `world_to_viewport` and `viewport_to_world` answer `Err`. A version of this test that went
+    /// through the projection was written first and asserted nothing at all; it only became visible
+    /// because it was made to fail loudly when the aim never happened.
+    ///
+    /// So `pick_along` is `pub` for the same reason `toggle_arm` is: the part that is ours is
+    /// separable from the part that is the engine's, and only one of them can be checked here.
+    #[test]
+    fn clicking_a_miniature_brings_it_to_the_middle() {
+        let root = Fixture::new("pickable")
+            .descriptor("floor", "alpha")
+            .bounded_composition("tile_a", (1.0, 2.4, 1.0), &[("floor", "floor", (0.0, 0.0))])
+            .bounded_composition("tile_b", (1.0, 2.4, 1.0), &[("floor", "floor", (0.0, 0.0))])
+            .build("m");
+        let mut app = emerge_mapper::harness::build_headless(&root, "m", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        *app.world_mut().resource_mut::<Mode>() = Mode::Compose;
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<ComposeState>().selected, 0);
+
+        // Where the neighbour actually stands, taken from the strip rather than assumed.
+        let strip = app.world().resource::<emerge_mapper::compose::StagedCarousel>().0.clone();
+        let neighbour = *strip
+            .slots
+            .iter()
+            .find(|s| s.offset == 1)
+            .unwrap_or_else(|| panic!("the neighbour has to be on the strip to be clicked"));
+
+        // Straight down at its centre, in the stage's own space — the ray a click there produces.
+        let origin = emerge_mapper::compose::COMPOSE_STAGE
+            + bevy::prelude::Vec3::new(neighbour.at.0, 10.0, neighbour.at.1);
+        let dir = bevy::prelude::Vec3::NEG_Y;
+
+        let mut state = std::mem::take(&mut *app.world_mut().resource_mut::<ComposeState>());
+        let moved = emerge_mapper::compose::pick_along(&strip, origin, dir, &mut state);
+        assert!(moved, "the ray has to hit the miniature it was aimed at");
+        assert_eq!(
+            state.selected, neighbour.index,
+            "clicking a miniature has to bring it to the middle"
+        );
+        assert_eq!(
+            state.member, 0,
+            "and the member cursor resets, because a different group has different members"
+        );
+
+        // **Clicking the one already selected is not a change**, so it must not reset anything —
+        // aimed at the same slot, because `strip` is still last frame's layout and the slot at the
+        // stage origin is the group that *was* focal.
+        state.member = 3;
+        assert!(
+            !emerge_mapper::compose::pick_along(&strip, origin, dir, &mut state),
+            "re-picking what is already selected is not a change"
+        );
+        assert_eq!(state.member, 3, "so the member cursor must survive it");
+    }
+}
+
+/// **The open name box is UI, and every "is the pointer over UI" test has to agree.**
+///
+/// That question is asked as "is any `Hovered` true" — `view::drive` for the scroll wheel,
+/// `place_on_click` for the world click, `compose::pick_slot` for the strip. The dialog carried no
+/// `Hovered` at all, so scrolling over a visible, open prompt zoomed the world behind it.
+///
+/// The full-screen backdrop deliberately stays click-through, which is why this asserts on the inner
+/// panel specifically rather than on "some entity under the pointer".
+#[test]
+fn the_open_name_box_answers_the_over_ui_question() {
+    use bevy::picking::hover::Hovered;
+
+    let root = Fixture::new("namebox").descriptor("floor", "alpha").build("m");
+    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let hoverable = app
+        .world_mut()
+        .query_filtered::<bevy::prelude::Entity, (
+            bevy::prelude::With<Hovered>,
+            bevy::prelude::With<emerge_mapper::chrome::NameBox>,
+        )>()
+        .iter(app.world())
+        .count();
+    assert_eq!(
+        hoverable, 0,
+        "the full-screen backdrop must stay click-through — it is a prompt, not a modal"
+    );
+
+    // The inner panel is a child of the box, and it is the part that has to answer.
+    let panel_has_hovered = app
+        .world_mut()
+        .query_filtered::<&bevy::prelude::Children, bevy::prelude::With<emerge_mapper::chrome::NameBox>>()
+        .iter(app.world())
+        .flat_map(|kids| kids.iter().collect::<Vec<_>>())
+        .any(|kid| app.world().get::<Hovered>(kid).is_some());
+    assert!(
+        panel_has_hovered,
+        "the visible dialog carries no `Hovered`, so every over-UI test reads it as open world and \
+         a scroll over it zooms the map behind it"
+    );
 }
 
 /// **The backdrop goes under the floor, and the floor is not where you would guess.**

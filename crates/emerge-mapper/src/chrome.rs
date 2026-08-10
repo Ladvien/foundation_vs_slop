@@ -611,6 +611,21 @@ fn spawn_name_box(mut commands: Commands) {
                     ..default()
                 },
                 BackgroundColor(PANEL_BG),
+                // **The dialog itself is UI; the dimmed backdrop behind it is not.**
+                //
+                // "Is the pointer over UI" is asked everywhere as "is any `Hovered` true"
+                // (`view::drive`, `place_on_click`, `compose::pick_slot`), and this panel carried no
+                // `Hovered` — so scrolling over a visible, open dialog zoomed the world behind it.
+                //
+                // This narrows the root's deliberate `Pickable::IGNORE` rather than undoing it. The
+                // root stays click-through, because a prompt is not a modal that has to be dismissed
+                // before anything else works; the 360 px box stops being, because a click landing *on*
+                // the dialog and placing a piece behind it is the same bug as the scroll.
+                //
+                // Not `Pickable::IGNORE` here — that would make it unhoverable and reopen the hole.
+                // `Hovered` is true for an entity or any descendant, so one on this panel answers for
+                // the title, the value and the hint.
+                Hovered::default(),
             ))
             .with_children(|b| {
                 b.spawn((
@@ -640,28 +655,32 @@ fn spawn_name_box(mut commands: Commands) {
 /// Reads the Map's own state rather than a shared projection, and formats the value the way the Map
 /// commits it — snake_case as you type. Relocating the prompt must not quietly change what is saved.
 fn paint_name_box(
-    mode: Res<crate::tiles::Mode>,
     editor: Res<crate::editor::EditorState>,
     mut roots: Query<&mut Node, With<NameBox>>,
     mut titles: Query<&mut Text, (With<NameBoxTitle>, Without<NameBoxValue>, Without<NameBoxHint>)>,
     mut values: Query<&mut Text, (With<NameBoxValue>, Without<NameBoxTitle>, Without<NameBoxHint>)>,
     mut hints: Query<&mut Text, (With<NameBoxHint>, Without<NameBoxTitle>, Without<NameBoxValue>)>,
 ) {
-    // **The Map's field, and only the Map's.** Compose used to ask this too; authoring moved to
-    // the Map, so there is one asker and the match is a guard rather than a choice. Kept as a match
-    // on `Mode` because that is what makes "which tab is asking" answerable in one place if a second
-    // tab ever asks again.
-    let asking: Option<(&str, String, String)> = match *mode {
-        crate::tiles::Mode::Map => editor.grouping.as_ref().map(|raw| {
-            (
-                "NAME THIS COMPOSITION",
-                // Forced to snake_case as it is typed, so the naming rule teaches itself.
-                format!("{}_", emerge_core::naming::to_snake_case(raw)),
-                "Enter keeps it.   Esc leaves the set in hand.".to_owned(),
-            )
-        }),
-        _ => None,
-    };
+    // **`grouping.is_some()` and the box being visible are the same condition**, and that is the
+    // invariant rather than a description of the code.
+    //
+    // This used to also match on `Mode::Map`, which looked like a harmless guard and was not:
+    // `EditorState::grouping` has no mode scope, so clicking the tab strip mid-name hid the box while
+    // `group_name_keys` kept consuming the keyboard — every keystroke vanished until `Esc`, with
+    // nothing on screen to say where they were going. Two conditions for one question is what made
+    // that state reachable.
+    //
+    // The tab switch now clears `grouping` (see `tiles::leaving_a_tab_puts_the_name_prompt_down`), so
+    // there is one owner and this reads it. The prompt is the Map's, and if a second tab ever asks
+    // again the answer is another field, not another condition on this one.
+    let asking: Option<(&str, String, String)> = editor.grouping.as_ref().map(|raw| {
+        (
+            "NAME THIS COMPOSITION",
+            // Forced to snake_case as it is typed, so the naming rule teaches itself.
+            format!("{}_", emerge_core::naming::to_snake_case(raw)),
+            "Enter keeps it.   Esc leaves the set in hand.".to_owned(),
+        )
+    });
     let display = if asking.is_some() { Display::Flex } else { Display::None };
     for mut node in &mut roots {
         if node.display != display {

@@ -144,6 +144,10 @@ impl Plugin for ComposePlugin {
         app.init_resource::<ComposeState>()
             .init_resource::<StagedCarousel>()
             .add_systems(Startup, spawn_compose_panel)
+            // **Before anything reads `selected`, and not gated on the mode.** The list can shrink
+            // while another tab is live — capturing on the Map rewrites the whole set — and a reader
+            // that clamped for itself is how three of them came to disagree. See `clamp_selection`.
+            .add_systems(Update, clamp_selection.before(keys::Phase::Act))
             .add_systems(
                 Update,
                 (walk, arm, cycle_focus, step_carousel, pick_slot)
@@ -167,6 +171,29 @@ impl Plugin for ComposePlugin {
             // Not gated on the mode: the armed group is shown on the Map tab too, and a panel that
             // stops updating when you leave it is a panel that lies the moment you come back.
             .add_systems(Update, rebuild.after(keys::Phase::Act));
+    }
+}
+
+/// **Keep `selected` inside the list, at the one place it can leave it.**
+///
+/// The list shrinks when a composition is removed or the project is reloaded, and `selected` is a bare
+/// index that knows nothing about either. It used to be clamped inside `lay_out` and nowhere else,
+/// which did not fix the problem so much as hide it from one reader: with `selected = 5` over three
+/// compositions the stage stood up `comps[2]`, the panel's `i == state.selected` marked nothing at all,
+/// and `toggle_arm`'s `.get(5)` answered *"no composition to arm"*. Three readers, three answers, and
+/// the only one that looked right was the picture.
+///
+/// Clamping where it goes stale means every reader can use the value as given. `member` rides along for
+/// the same reason `walk` resets it: a different group has different members.
+fn clamp_selection(project: Res<Project>, mut state: ResMut<ComposeState>) {
+    if !project.is_changed() {
+        return;
+    }
+    let n = project.compositions.compositions.len();
+    let want = state.selected.min(n.saturating_sub(1));
+    if state.selected != want {
+        state.selected = want;
+        state.member = 0;
     }
 }
 
@@ -393,6 +420,19 @@ pub struct Slot {
     pub size: (f32, f32),
     /// How tall it stands at that scale. The camera has to fit this, not just the floor plan.
     pub height: f32,
+    /// **Where the group's own contents sit relative to its origin**, in metres, unscaled.
+    ///
+    /// `(0, 0)` for a `Bounded` group, always: its envelope is centred on zero by construction —
+    /// `interface` builds its scratch map at the origin and `Map::floor_rect` centres there.
+    ///
+    /// An `Anchored` group claims no envelope, so its members sit wherever they were authored, and
+    /// they are frequently not centred on anything. [`footprint`] used to answer with the *span* and
+    /// throw the centre away, which every caller then treated as though it were centred on zero — so
+    /// a group whose members sat at `x ∈ [2, 3]` reported a width of 1, was drawn at the origin, and
+    /// rendered a metre and a half outside the slot reserved for it, on top of its neighbour.
+    ///
+    /// [`restage_group`] subtracts this, so what lands in the slot is the *content*.
+    pub centre: (f32, f32),
 }
 
 /// The focal group and its neighbours, laid out along the strip.
@@ -436,13 +476,18 @@ impl Carousel {
 ///
 /// The measured branch is floored at one `SNAP`. A group with no members yet is the ordinary state
 /// right after `N`, and a cell smaller than the editor's own quantum can be neither seen nor clicked.
+///
+/// **It answers with a centre as well as a size**, and the centre is not decoration — see
+/// [`Slot::centre`] for the bug that came of discarding it. `Bounded` reports `(0, 0)` because that is
+/// true of it by construction, which is what makes the two variants comparable instead of one of them
+/// quietly meaning something else.
 pub fn footprint(
     c: &Composition,
     comps: &[Composition],
     library: &emerge_core::library::Library,
-) -> Result<(f32, f32), String> {
+) -> Result<((f32, f32), (f32, f32)), String> {
     match c.envelope {
-        Envelope::Bounded { size } => Ok((size.0, size.2)),
+        Envelope::Bounded { size } => Ok(((0.0, 0.0), (size.0, size.2))),
         Envelope::Anchored => {
             let mut span: Option<(f32, f32, f32, f32)> = None;
             for m in &c.members {
@@ -457,9 +502,11 @@ pub fn footprint(
                     }
                 });
             }
-            let (w, d) = span.map_or((0.0, 0.0), |(x0, x1, z0, z1)| (x1 - x0, z1 - z0));
+            let (centre, (w, d)) = span.map_or(((0.0, 0.0), (0.0, 0.0)), |(x0, x1, z0, z1)| {
+                (((x0 + x1) * 0.5, (z0 + z1) * 0.5), (x1 - x0, z1 - z0))
+            });
             let floor = emerge_core::grid::SNAP;
-            Ok((w.max(floor), d.max(floor)))
+            Ok((centre, (w.max(floor), d.max(floor))))
         }
     }
 }
@@ -469,6 +516,22 @@ pub fn footprint(
 /// Framing on the footprint alone was measured to be wrong: four 1 × 1 tiles are 2.4 m tall, and a
 /// view sized to their floor plan cut their tops off. Same two-variant match as [`footprint`] — a
 /// `Bounded` group declares its height, an `Anchored` one is measured from what stands in it.
+///
+/// # A member is measured **through its host**, not from the floor
+///
+/// `stack::resolve_y` seats a member carrying `on: Some(host)` on **top of** that host, so a lamp on a
+/// table stands at the table's height plus its own. Taking `lift + own_height` for every member treats
+/// them all as floor-standing and reports the lamp alone — the same class of fault the `framing_height`
+/// correction already fixed once for `Bounded`, and it cuts the top off the view in exactly the same
+/// way.
+///
+/// Infinigen Indoors (`10.48550/arxiv.2406.11824`) names the relation this implements: *"**SupportedBy**
+/// specifies a relation using a child object's planar surface and a parent object's planar surface…
+/// the centroid of the child object is contained within the convex hull of the intersection"*. Two
+/// things follow, and both are here. Height is defined *through* the host, so resolving host-first is a
+/// topological walk over the support graph rather than an optimisation. And the relation is a
+/// predicate over a *pair*, so an absent host makes it unsatisfiable — a missing host is a refusal
+/// naming the member, never a silent fall back to the floor.
 pub fn height_of(
     c: &Composition,
     comps: &[Composition],
@@ -477,46 +540,106 @@ pub fn height_of(
     match c.envelope {
         Envelope::Bounded { size } => Ok(size.1),
         Envelope::Anchored => {
+            // Each member's own height, before anything is stacked on anything.
+            let mut own: std::collections::BTreeMap<&str, f32> = std::collections::BTreeMap::new();
+            for m in &c.members {
+                own.insert(m.id.as_str(), member_height(c, m, comps, library)?);
+            }
             let mut tallest = 0.0f32;
             for m in &c.members {
-                let top = match &m.body {
-                    composition::Body::Descriptor { id, patch, .. } => {
-                        let base = library.get(id).ok_or_else(|| {
-                            format!(
-                                "`{}` places descriptor `{id}`, which the library does not define",
-                                c.id
-                            )
-                        })?;
-                        let d = match patch {
-                            Some(p) => base.patched_with(p),
-                            None => base.clone(),
-                        };
-                        emerge_core::descriptor::placed_height(&d).ok_or_else(|| {
-                            format!("`{}` holds `{}`, which is unmeasured", c.id, m.id)
-                        })?
-                    }
-                    composition::Body::Composition { id } => {
-                        let child = comps.iter().find(|k| k.id == *id).ok_or_else(|| {
-                            format!("`{}` nests `{id}`, which is not a composition here", c.id)
-                        })?;
-                        match child.envelope {
-                            Envelope::Bounded { size } => size.1,
-                            // The same refusal `member_footprint` makes, for the same reason: an
-                            // anchored child declares no box, so a parent cannot bound it.
-                            Envelope::Anchored => {
-                                return Err(format!(
-                                    "`{}` nests `{id}`, which is anchored and so declares no height",
-                                    c.id
-                                ))
-                            }
-                        }
-                    }
-                };
-                tallest = tallest.max(m.lift + top);
+                tallest = tallest.max(m.lift + stacked_height(c, m, &own, 0)?);
             }
             Ok(tallest.max(emerge_core::grid::SNAP))
         }
     }
+}
+
+/// **How high the top of one member sits**, following `on` to the floor.
+///
+/// Depth-bounded rather than cycle-detected: `Composition::validate_shape` already refuses a member
+/// resting on itself, and a bound that names the group is a better failure than a stack overflow if it
+/// ever does not.
+fn stacked_height(
+    c: &Composition,
+    m: &composition::Member,
+    own: &std::collections::BTreeMap<&str, f32>,
+    depth: usize,
+) -> Result<f32, String> {
+    let mine = own.get(m.id.as_str()).copied().unwrap_or(0.0);
+    let composition::Body::Descriptor { on: Some(host), .. } = &m.body else {
+        return Ok(mine);
+    };
+    if depth > composition::MAX_RESOLVED_MEMBERS {
+        return Err(format!(
+            "`{}` has a member stack more than {} deep through `{}`, which cannot be a real \
+             arrangement",
+            c.id,
+            composition::MAX_RESOLVED_MEMBERS,
+            m.id
+        ));
+    }
+    let below = c.members.iter().find(|k| k.id == *host).ok_or_else(|| {
+        format!(
+            "`{}` seats `{}` on `{host}`, which is not a member of it — a member whose host is \
+             missing has no height, and guessing the floor would draw it in the wrong place",
+            c.id, m.id
+        )
+    })?;
+    Ok(below.lift + stacked_height(c, below, own, depth + 1)? + mine)
+}
+
+/// One member's own height, ignoring whatever it rests on.
+fn member_height(
+    c: &Composition,
+    m: &composition::Member,
+    comps: &[Composition],
+    library: &emerge_core::library::Library,
+) -> Result<f32, String> {
+    match &m.body {
+        composition::Body::Descriptor { id, patch, .. } => {
+            let base = library.get(id).ok_or_else(|| {
+                format!("`{}` places descriptor `{id}`, which the library does not define", c.id)
+            })?;
+            let d = match patch {
+                Some(p) => base.patched_with(p),
+                None => base.clone(),
+            };
+            emerge_core::descriptor::placed_height(&d)
+                .ok_or_else(|| format!("`{}` holds `{}`, which is unmeasured", c.id, m.id))
+        }
+        composition::Body::Composition { id } => {
+            let child = comps
+                .iter()
+                .find(|k| k.id == *id)
+                .ok_or_else(|| format!("`{}` nests `{id}`, which is not a composition here", c.id))?;
+            match child.envelope {
+                Envelope::Bounded { size } => Ok(size.1),
+                // The same refusal `member_footprint` makes, for the same reason: an anchored child
+                // declares no box, so a parent cannot bound it.
+                Envelope::Anchored => Err(format!(
+                    "`{}` nests `{id}`, which is anchored and so declares no height",
+                    c.id
+                )),
+            }
+        }
+    }
+}
+
+/// One group sized for the strip, before its distance along it is known.
+///
+/// A named struct rather than the 5-tuple this used to be: it grew a sixth field, and
+/// `focal.3`/`m.1` were already the kind of thing you have to count on your fingers.
+#[derive(Clone, Copy)]
+struct Measured {
+    index: usize,
+    offset: i32,
+    scale: f32,
+    /// At `scale`.
+    size: (f32, f32),
+    /// At `scale`.
+    height: f32,
+    /// Unscaled — see [`Slot::centre`].
+    centre: (f32, f32),
 }
 
 /// **Lay the focal group out with its neighbours either side.**
@@ -532,11 +655,18 @@ pub fn lay_out(
     if comps.is_empty() {
         return Carousel::default();
     }
-    let selected = selected.min(comps.len() - 1);
+    // **Not clamped here.** A stale `selected` used to be clamped locally, which made this the only
+    // reader that saw a valid index: the stage stood up `comps[len - 1]`, the panel's `i == selected`
+    // marked nothing, and `toggle_arm`'s `.get(selected)` said there was nothing to arm — three
+    // readers, three different answers. `clamp_selection` now fixes it at the one place it goes
+    // stale, which is the list shrinking, and this reads what everything else reads.
+    if selected >= comps.len() {
+        return Carousel::default();
+    }
 
     // Measure first. A group that cannot be sized is **left off the strip and named**, not allowed to
     // take the rest of the stage with it.
-    let mut measured: Vec<(usize, i32, f32, (f32, f32), f32)> = Vec::new();
+    let mut measured: Vec<Measured> = Vec::new();
     let mut unmeasured: Vec<String> = Vec::new();
     for offset in -WINGS..=WINGS {
         let Some(index) = selected.checked_add_signed(offset as isize) else {
@@ -545,9 +675,14 @@ pub fn lay_out(
         let Some(c) = comps.get(index) else { continue };
         let scale = MINIATURE.powi(offset.abs());
         match (footprint(c, comps, library), height_of(c, comps, library)) {
-            (Ok((w, d)), Ok(h)) => {
-                measured.push((index, offset, scale, (w * scale, d * scale), h * scale));
-            }
+            (Ok((centre, (w, d))), Ok(h)) => measured.push(Measured {
+                index,
+                offset,
+                scale,
+                size: (w * scale, d * scale),
+                height: h * scale,
+                centre,
+            }),
             (Err(e), _) | (_, Err(e)) => unmeasured.push(e),
         }
     }
@@ -558,33 +693,33 @@ pub fn lay_out(
         (size.0 * STRIP.0.abs() + size.1 * STRIP.1.abs()) * 0.5
     }
 
-    let Some(&focal) = measured.iter().find(|m| m.1 == 0) else {
+    let Some(&focal) = measured.iter().find(|m| m.offset == 0) else {
         // The one being edited is the one case where there is genuinely nothing to show.
         return Carousel { unmeasured, ..Default::default() };
     };
-    let slot = |(index, offset, scale, size, height): (usize, i32, f32, (f32, f32), f32),
-                distance: f32| Slot {
-        index,
-        offset,
+    let slot = |m: Measured, distance: f32| Slot {
+        index: m.index,
+        offset: m.offset,
         at: (distance * STRIP.0, distance * STRIP.1),
-        scale,
-        size,
-        height,
+        scale: m.scale,
+        size: m.size,
+        height: m.height,
+        centre: m.centre,
     };
 
     // The focal group sits at zero whatever its neighbours do, so stepping to the next composition
     // slides the strip past a fixed centre instead of re-centring a block that changed width.
     let mut slots = vec![slot(focal, 0.0)];
     for side in [1i32, -1] {
-        let mut edge = reach(focal.3);
+        let mut edge = reach(focal.size);
         for step in 1..=WINGS {
             // A skipped neighbour closes up rather than leaving a hole: the gap would read as a
             // group that is there and empty, which is a different and wronger thing.
-            let Some(&m) = measured.iter().find(|m| m.1 == side * step) else {
+            let Some(&m) = measured.iter().find(|m| m.offset == side * step) else {
                 continue;
             };
-            let distance = edge + SLOT_GAP + reach(m.3);
-            edge = distance + reach(m.3);
+            let distance = edge + SLOT_GAP + reach(m.size);
+            edge = distance + reach(m.size);
             slots.push(slot(m, distance * side as f32));
         }
     }
@@ -832,8 +967,18 @@ fn restage_group(
             .spawn((
                 Name::new(format!("staged {}", c.id)),
                 StagedGroup,
+                // **The slot's position, less where the group's own contents sit.** Scaled, because
+                // the offset is in the group's space and this transform scales that space. Zero for
+                // every `Bounded` group, so the tiles are placed exactly as before; it is only an
+                // `Anchored` group — whose members sit wherever they were authored — that would
+                // otherwise render outside the slot reserved for it. See `Slot::centre`.
                 Transform::from_translation(
-                    COMPOSE_STAGE + Vec3::new(slot.at.0, 0.0, slot.at.1),
+                    COMPOSE_STAGE
+                        + Vec3::new(
+                            slot.at.0 - slot.centre.0 * slot.scale,
+                            0.0,
+                            slot.at.1 - slot.centre.1 * slot.scale,
+                        ),
                 )
                 .with_scale(Vec3::splat(slot.scale)),
                 Visibility::Inherited,
@@ -1018,9 +1163,16 @@ fn rebuild_labels(
 /// The single owner of a label's `display`, so there is one rule for when a label is on screen rather
 /// than two systems disagreeing about it. Hidden when the tab is not live and when the projection has
 /// no answer.
+/// **`world_to_viewport` answers in logical viewport pixels; `Val::Px` is multiplied by [`UiScale`].**
+///
+/// Both entry points set `UiScale(1.2)` (`main.rs`, `harness.rs`), so writing the projection straight
+/// into a `Val::Px` put every label 20% further from the top-left than the point it names — invisible
+/// on the focal group at the centre of the screen, worst on the outermost miniatures, which is exactly
+/// the shape that reads as "the labels are a bit off" rather than as a bug.
 fn place_labels(
     mode: Res<Mode>,
     carousel: Res<StagedCarousel>,
+    ui_scale: Res<UiScale>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<crate::view::MainCamera>>>,
     mut labels: Query<(&SlotLabel, &Text, &mut Node)>,
 ) {
@@ -1046,7 +1198,12 @@ fn place_labels(
             // see `LABEL_CHAR_W`.
             Some((p, advance)) => {
                 let half = text.0.chars().count() as f32 * advance * 0.5;
-                let (left, top) = (Val::Px(p.x - half), Val::Px(p.y + LABEL_DROP));
+                // Into `Val::Px`'s own units, which are scaled ones. A zero or negative scale would be
+                // a host misconfiguration rather than a state to render around; guard so it cannot
+                // produce a NaN position.
+                let s = if ui_scale.0 > 0.0 { ui_scale.0 } else { 1.0 };
+                let (left, top) =
+                    (Val::Px((p.x - half) / s), Val::Px((p.y + LABEL_DROP) / s));
                 // **Guarded against the no-op write**, the way `editor::refresh_status` is: `Node` is
                 // change-detected, and touching it every frame makes Bevy re-lay the whole UI tree
                 // on every frame the camera happens to be still.
@@ -1123,14 +1280,32 @@ fn pick_slot(
     let Some((origin, dir)) = crate::view::cursor_ray(pointer.0, cam, cam_tf) else {
         return;
     };
+    pick_along(&carousel.0, origin, dir, &mut state);
+}
+
+/// **Bring whichever slot the ray hits to the middle**, and say whether it moved.
+///
+/// `pub` and separate for the reason `toggle_arm` is: everything above it needs a camera with a real
+/// render target, and `MinimalPlugins` has none — `world_to_viewport` and `viewport_to_world` both
+/// answer `Err` with no window, so a headless test that goes through them asserts nothing while
+/// looking like it asserts something. The projection is the engine's; this is the part that is ours.
+pub fn pick_along(
+    carousel: &Carousel,
+    origin: Vec3,
+    dir: Vec3,
+    state: &mut ComposeState,
+) -> bool {
     // Into the stage's own space, which is where the slots are laid out.
-    let Some(i) = slot_at(&carousel.0, origin - COMPOSE_STAGE, dir) else {
-        return;
+    let Some(i) = slot_at(carousel, origin - COMPOSE_STAGE, dir) else {
+        return false;
     };
-    if state.selected != i {
-        state.selected = i;
-        state.member = 0;
+    if state.selected == i {
+        return false;
     }
+    state.selected = i;
+    // A different group has different members, the same reason `walk` resets it.
+    state.member = 0;
+    true
 }
 
 /// **Everything the panel says, derived on the spot.**
@@ -2221,11 +2396,75 @@ mod carousel_tests {
             anchored("table", vec![member("l", "wall", (-1.0, 0.0)), member("r", "wall", (1.0, 0.0))]),
         ];
         let l = lib();
-        assert_eq!(footprint(&comps[0], &comps, &l).unwrap_or_else(|e| panic!("{e}")), (3.0, 2.0));
+        assert_eq!(
+            footprint(&comps[0], &comps, &l).unwrap_or_else(|e| panic!("{e}")),
+            ((0.0, 0.0), (3.0, 2.0)),
+            "a bounded group is centred on zero by construction"
+        );
         assert_eq!(height_of(&comps[0], &comps, &l).unwrap_or_else(|e| panic!("{e}")), 2.4);
         // Two 1 × 1 × 1 pieces two metres apart span 3 m in x, 1 m in z, and stand 1 m tall.
-        assert_eq!(footprint(&comps[1], &comps, &l).unwrap_or_else(|e| panic!("{e}")), (3.0, 1.0));
+        assert_eq!(
+            footprint(&comps[1], &comps, &l).unwrap_or_else(|e| panic!("{e}")),
+            ((0.0, 0.0), (3.0, 1.0))
+        );
         assert_eq!(height_of(&comps[1], &comps, &l).unwrap_or_else(|e| panic!("{e}")), 1.0);
+    }
+
+    /// **An anchored group whose members sit off their own origin reports where they are.**
+    ///
+    /// The span alone is not enough, and the missing half was invisible for as long as every test
+    /// used a symmetric group: `footprint` returned a width and every caller drew that width centred
+    /// on zero, so a group authored two metres east rendered two metres outside the slot reserved
+    /// for it — on top of its neighbour on the strip.
+    #[test]
+    fn an_off_centre_anchored_group_reports_where_its_contents_are() {
+        let comps = vec![anchored(
+            "shoved_east",
+            vec![member("l", "wall", (2.0, 0.0)), member("r", "wall", (4.0, 0.0))],
+        )];
+        let (centre, size) =
+            footprint(&comps[0], &comps, &lib()).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(size, (3.0, 1.0), "the span is unchanged — this is not a resize");
+        assert_eq!(centre, (3.0, 0.0), "and the centre says where that span actually sits");
+
+        // And it reaches the stage: the slot subtracts it, so what lands in the slot is the content.
+        let carousel = lay_out(&comps, &lib(), 0);
+        assert_eq!(carousel.slots[0].centre, (3.0, 0.0));
+    }
+
+    /// **A member resting on another is measured through its host, not from the floor.**
+    ///
+    /// `stack::resolve_y` seats a member with `on: Some(host)` on top of that host, so taking
+    /// `lift + own_height` for everything reports the lamp and forgets the table under it — and the
+    /// camera then frames a view that cuts the top off.
+    #[test]
+    fn a_stacked_member_is_measured_through_its_host() {
+        // `wall` is 1 × 1 × 1 in the fixture library, so a stack of two stands 2 m tall.
+        let mut top = member("top", "wall", (0.0, 0.0));
+        if let emerge_core::composition::Body::Descriptor { on, .. } = &mut top.body {
+            *on = Some("base".to_owned());
+        }
+        let comps = vec![anchored("stack", vec![member("base", "wall", (0.0, 0.0)), top])];
+        assert_eq!(
+            height_of(&comps[0], &comps, &lib()).unwrap_or_else(|e| panic!("{e}")),
+            2.0,
+            "the stacked member stands on its host, so the group is twice one piece"
+        );
+    }
+
+    /// A member whose host is missing is **a refusal naming the member**, never a fall back to the
+    /// floor — Infinigen's support relation is a predicate over a pair, and an absent parent makes it
+    /// unsatisfiable rather than defaulted.
+    #[test]
+    fn a_member_seated_on_a_missing_host_refuses_and_names_it() {
+        let mut orphan = member("lamp", "wall", (0.0, 0.0));
+        if let emerge_core::composition::Body::Descriptor { on, .. } = &mut orphan.body {
+            *on = Some("table_that_is_not_here".to_owned());
+        }
+        let comps = vec![anchored("orphaned", vec![orphan])];
+        let err = height_of(&comps[0], &comps, &lib()).expect_err("refuses");
+        assert!(err.contains("lamp"), "names the member: {err}");
+        assert!(err.contains("table_that_is_not_here"), "and the host it wanted: {err}");
     }
 
     /// A group that cannot be measured **refuses and names itself**, rather than being given a box
@@ -2278,7 +2517,10 @@ mod carousel_tests {
     fn a_group_with_nothing_in_it_still_gets_a_slot_the_lattice_can_express() {
         let comps = vec![anchored("fresh", Vec::new())];
         let l = lib();
-        assert_eq!(footprint(&comps[0], &comps, &l).unwrap_or_else(|e| panic!("{e}")), (SNAP, SNAP));
+        assert_eq!(
+            footprint(&comps[0], &comps, &l).unwrap_or_else(|e| panic!("{e}")),
+            ((0.0, 0.0), (SNAP, SNAP))
+        );
         assert_eq!(height_of(&comps[0], &comps, &l).unwrap_or_else(|e| panic!("{e}")), SNAP);
         let c = lay_out(&comps, &lib(), 0);
         assert_eq!(c.slots.len(), 1);
@@ -2286,17 +2528,31 @@ mod carousel_tests {
         assert_eq!(slot_at(&c, origin, dir), Some(0), "a fresh group has to be clickable");
     }
 
-    /// No groups is an empty stage, not a panic. A selection past the end clamps rather than dropping
-    /// the strip — the panel and the stage must never disagree about what is focal.
+    /// No groups is an empty stage, not a panic.
+    ///
+    /// **And a selection past the end now stages nothing rather than quietly standing up the last
+    /// group** — this test asserted the opposite until the clamp moved, so the change is recorded
+    /// here rather than only in the commit.
+    ///
+    /// `lay_out` clamping for itself was the whole defect: it made this the only reader that saw a
+    /// valid index, so with `selected = 99` over three compositions the stage showed `comps[2]`, the
+    /// panel's `i == selected` marked nothing, and `toggle_arm`'s `.get(99)` said there was nothing to
+    /// arm. Three readers, three answers, and the one that looked right was the picture. An empty
+    /// stage for one frame is the honest rendering of an index that is out of range;
+    /// `clamp_selection` then fixes the index itself, at the one place it can go stale.
     #[test]
-    fn an_empty_set_lays_out_to_nothing_and_a_stale_selection_clamps() {
+    fn an_empty_set_lays_out_to_nothing_and_a_stale_selection_stages_nothing() {
         let empty = lay_out(&[], &lib(), 3);
         assert!(empty.slots.is_empty());
         assert_eq!(empty.extent, (0.0, 0.0));
 
         let comps = kit(3);
         let c = lay_out(&comps, &lib(), 99);
-        assert_eq!(c.focal().map(|s| s.index), Some(2));
+        assert_eq!(
+            c.focal().map(|s| s.index),
+            None,
+            "an out-of-range selection is not silently retargeted at another group"
+        );
     }
 
     /// **The bug a captured frame found.** Framing on the floor plan alone cut the tops off four
