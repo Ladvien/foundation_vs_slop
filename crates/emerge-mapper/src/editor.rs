@@ -3529,7 +3529,32 @@ pub fn delete_stamp_for_test(id: &str, project: &mut Project, state: &mut Editor
     delete_stamp(id, project, state);
 }
 
-/// FVS-R-14's move arm, reachable from `tests/headless.rs` — the mouse path is not drivable
+/// **Turn the set in hand, if there is one** — and report the angle it came to rest at.
+///
+/// `pub` so a test can prove the aim keys REACH it: `CloneDrag::held` is private, so the arithmetic
+/// was pinned while the binding was not. The key handler calls this rather than repeating its two
+/// lines, on the rule `undo_for_test` states — a test driving a copy would pass while the real one
+/// was broken.
+pub fn turn_held_set(step: f32, clone_drag: &mut CloneDrag) -> Option<f32> {
+    let set = clone_drag.held.as_mut()?;
+    set.yaw = (set.yaw + step).rem_euclid(360.0);
+    Some(set.yaw)
+}
+
+/// Put a set in hand, so the function above has something to turn.
+pub fn hold_set_for_test(set: CloneSet, clone_drag: &mut CloneDrag) {
+    clone_drag.held = Some(set);
+}
+
+impl CloneDrag {
+    /// The held set's turn, for a test that has to read what a key wrote. Not the set itself: the
+    /// field stays private so nothing outside can put one down by writing to it.
+    pub fn held_for_test(&self) -> Option<f32> {
+        self.held.as_ref().map(|s| s.yaw)
+    }
+}
+
+/// FVS-R-14's move arm, reachable from `tests/headless.rs`/// FVS-R-14's move arm, reachable from `tests/headless.rs` — the mouse path is not drivable
 /// headless (`cursor_ground` needs a viewport), and a test re-implementing the body would pass
 /// while the real one was broken.
 pub fn move_stamp_for_test(
@@ -3952,9 +3977,8 @@ fn keys(
     // to preview, and the reason it is a rule rather than a second binding: an author reaching for
     // `Z` is asking to turn *this*, and which thing that is is already decided by what they picked
     // up.
-    if let Some(set) = clone_drag.held.as_mut() {
-        set.yaw = (set.yaw + step).rem_euclid(360.0);
-        state.status.note(format!("set turned to {:.0} deg", set.yaw));
+    if let Some(now) = turn_held_set(step, clone_drag) {
+        state.status.note(format!("set turned to {now:.0} deg"));
         return;
     }
     state.brush_yaw = (state.brush_yaw + step).rem_euclid(360.0);
@@ -4883,6 +4907,50 @@ mod capture_tests {
             note: None,
             compositions: Vec::new(),
         }
+    }
+
+    /// **The ghost stands where the drop lands** — the preview's one real claim.
+    ///
+    /// `drive_clone_ghost` cannot be driven headless: it needs `cursor_ground`, which needs a
+    /// viewport. So this asks the extracted half instead, and asks it the question that matters
+    /// rather than the one that is easy — the parent transform composed with a child's own local
+    /// offset must reproduce, piece for piece, what `stamp_set` computes through `CloneSet::placed`.
+    ///
+    /// Checked at a NON-ZERO set yaw, because at zero the parent rotation is identity and a ghost
+    /// that ignored the turn entirely would still pass.
+    #[test]
+    fn the_ghost_stands_where_the_drop_lands() {
+        let piece = ClonePiece {
+            descriptor: "chair".to_owned(),
+            offset: (2.0, 0.5),
+            yaw: 0.0,
+            tip: (0, 0),
+            lift: 0.0,
+            note: None,
+            owned: false,
+            owned_because: None,
+            on: CloneHost::Layer,
+        };
+        let mut set = held(vec![piece.clone()], (0.0, 0.0), (1.0, 0.5));
+        set.yaw = 90.0;
+
+        let origin = (10.0, 0.0, -4.0);
+        let target = (3.0, 7.0);
+
+        // The preview: parent transform, then the child at its own untouched local offset.
+        let (root, spin) = ghost_anchor(&set, target, origin);
+        let local = emerge_bevy::origin_of(piece.offset, (0.0, 0.0, 0.0), piece.lift);
+        let previewed = root + spin * local;
+
+        // The drop: the same piece, positioned by the arithmetic `stamp_set` uses.
+        let (at, _) = set.placed(&piece, target);
+        let landed = emerge_bevy::origin_of(at, origin, piece.lift);
+
+        assert!(
+            (previewed - landed).length() < 1e-4,
+            "the ghost promises {previewed:?} and the drop puts it at {landed:?} — a preview that \
+             computes either differently is a promise about a landing that will not happen"
+        );
     }
 
     /// **A turned set lands where a turned stamp would**, and comes back exactly.
@@ -6690,11 +6758,11 @@ fn drive_clone_ghost(
     // editor's previews are held to.
     let at = project.map.to_map_space((hit.x, hit.z));
     let target = (snap(at.0), snap(at.1));
-    let root = emerge_bevy::origin_of(target, project.map.origin, 0.0);
+    let (root, spin) = ghost_anchor(set, target, project.map.origin);
 
     if let Some((e, _)) = ghosts.iter().next() {
         if let Ok(mut tf) = transforms.get_mut(e) {
-            let want = Quat::from_rotation_y(set.yaw.to_radians());
+            let want = spin;
             // Written only on a change: this runs every frame the set is in hand.
             if tf.translation != root {
                 tf.translation = root;
@@ -6716,8 +6784,7 @@ fn drive_clone_ghost(
     let parent = commands
         .spawn((
             CloneGhost,
-            Transform::from_translation(root)
-                .with_rotation(Quat::from_rotation_y(set.yaw.to_radians())),
+            Transform::from_translation(root).with_rotation(spin),
             Visibility::default(),
         ))
         .id();
@@ -6755,7 +6822,28 @@ fn drive_clone_ghost(
     }
 }
 
-/// The parent of a held clone set's ghost pieces. See [`drive_clone_ghost`].
+/// **Where the ghost stands and how it is turned** — the pure half of [`drive_clone_ghost`].
+///
+/// Extracted for the reason `edit_subject` and `under_readout` were: the system needs
+/// `cursor_ground`, which needs a viewport, so a headless test cannot reach it at all. What a test
+/// *can* reach is the property that matters — **the preview lands where the drop lands** — and this
+/// is the whole of the preview's side of that.
+///
+/// It is deliberately NOT a re-test of `CloneSet::placed`, which
+/// `a_turned_set_lands_where_a_turned_stamp_would` already pins. The claim here is that the parent
+/// transform composed with a child's own local offset reproduces exactly what the *drop* computes
+/// per piece — which is what makes the ghost a promise rather than a picture.
+///
+/// **Still uncovered, and named rather than implied:** that the system spawns one child per piece,
+/// fades them, and clears them when the cursor leaves the world. Those are frame questions.
+pub fn ghost_anchor(set: &CloneSet, target: (f32, f32), origin: (f32, f32, f32)) -> (Vec3, Quat) {
+    (
+        emerge_bevy::origin_of(target, origin, 0.0),
+        Quat::from_rotation_y(set.yaw.to_radians()),
+    )
+}
+
+/// The parent of a held clone set's ghost pieces. See [`drive_clone_ghost`]./// The parent of a held clone set's ghost pieces. See [`drive_clone_ghost`].
 #[derive(Component)]
 struct CloneGhost;
 

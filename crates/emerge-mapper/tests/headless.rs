@@ -875,6 +875,83 @@ mod stepped {
         );
     }
 
+    /// **A candidate whose id is already taken is refused, and told where to update instead.**
+    ///
+    /// The other half of the Tiles-tab spec: *"update what's there, not replace it."* Enter on a
+    /// **library** entry updates it — `enter_on_a_library_tile_updates_it_rather_than_refusing`
+    /// pins that. Enter on a **candidate** that names the same id must not: a candidate is what a
+    /// mesh scan can see, so it carries no tags, note, mount or lattice, and writing it over the
+    /// entry would take those out. That is the replace the author ruled against.
+    ///
+    /// The candidate is staged directly rather than scanned, because the scan only offers meshes
+    /// the library does NOT have — which is precisely why this collision is hard to reach by hand
+    /// and worth pinning.
+    #[test]
+    fn a_candidate_that_names_a_taken_id_is_refused_and_names_the_update_route() {
+        let root = Fixture::new("collide")
+            .descriptor("wall", "alpha")
+            .pack("beta", &["spare"])
+            .build("m");
+        let mut app = harness::build_headless(&root, "m", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        app.update();
+
+        let tap = |app: &mut App, key: KeyCode, logical: bevy::input::keyboard::Key| {
+            for state in [bevy::input::ButtonState::Pressed, bevy::input::ButtonState::Released] {
+                app.world_mut().write_message(bevy::input::keyboard::KeyboardInput {
+                    key_code: key,
+                    logical_key: logical.clone(),
+                    state,
+                    text: None,
+                    repeat: false,
+                    window: Entity::PLACEHOLDER,
+                });
+                app.update();
+            }
+        };
+        tap(&mut app, KeyCode::Tab, bevy::input::keyboard::Key::Tab);
+        for _ in 0..3 {
+            app.update();
+        }
+
+        // Point the selected candidate's proposal at an id the library already owns.
+        {
+            let mut state = app
+                .world_mut()
+                .resource_mut::<emerge_mapper::tiles::ImportState>();
+            state.selected_library_id = None;
+            assert!(!state.candidates.is_empty(), "the fixture wrote an unimported mesh");
+            let at = state.selected;
+            state.candidates[at].proposed.id = "wall".to_owned();
+        }
+        for _ in 0..3 {
+            app.update();
+        }
+
+        let before = app.world().resource::<emerge_mapper::project::Project>().measured.descriptors.len();
+        tap(&mut app, KeyCode::Enter, bevy::input::keyboard::Key::Enter);
+        for _ in 0..3 {
+            app.update();
+        }
+
+        let project = app.world().resource::<emerge_mapper::project::Project>();
+        assert_eq!(
+            project.measured.descriptors.len(),
+            before,
+            "a colliding candidate must not be written — not as a second row, and not over the first"
+        );
+        let state = app.world().resource::<emerge_mapper::tiles::ImportState>();
+        let said = state.status.note_text();
+        assert!(
+            said.contains("already in the library"),
+            "the refusal must say why: `{said}`"
+        );
+        assert!(
+            said.contains("select it above") || said.contains("edit that tile"),
+            "and it must name the UPDATE route, not only offer a rename: `{said}`"
+        );
+    }
+
     // **The fold rule is unit-tested beside the code now** (`tiles::pack_fold_tests`), over a
     // synthetic project. It used to be here, asserting that a pack the *library* imports from stays
     // open — the rule until the question moved one step — and it could only check that by reading
@@ -1915,6 +1992,87 @@ fn the_pointer_is_over_the_panel_when_it_is_over_a_row() {
     }
     // No cursor is not "over the world" — it is no answer, and every other reader treats it so.
     assert!(!emerge_mapper::view::over_ui(None, 1.0, [].into_iter()));
+}
+
+/// **`Z` and `C` reach the set in hand, not the brush.**
+///
+/// The turn arithmetic is pinned by `a_turned_set_lands_where_a_turned_stamp_would`; what was not
+/// pinned is that the *binding* gets there. `CloneDrag::held` is private, so this goes through
+/// `hold_set_for_test` and then drives the real key message — the brush's own yaw is asserted
+/// unchanged, because "turned something" and "turned the right thing" are different claims.
+#[test]
+fn the_aim_keys_turn_the_set_in_hand_and_leave_the_brush_alone() {
+    let root = Fixture::new("turnset").descriptor("floor", "alpha").build("m");
+    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let before_brush = {
+        let mut state = app
+            .world_mut()
+            .resource_mut::<emerge_mapper::editor::EditorState>();
+        state.tool = emerge_mapper::editor::Tool::Clone;
+        state.brush_yaw
+    };
+    {
+        let set = emerge_mapper::editor::CloneSet {
+            pieces: vec![emerge_mapper::editor::ClonePiece {
+                descriptor: "floor".to_owned(),
+                offset: (0.0, 0.0),
+                yaw: 0.0,
+                tip: (0, 0),
+                lift: 0.0,
+                note: None,
+                owned: false,
+                owned_because: None,
+                on: emerge_mapper::editor::CloneHost::Layer,
+            }],
+            stamps: Vec::new(),
+            centre_off: (0.0, 0.0),
+            half: (0.5, 0.5),
+            yaw: 0.0,
+        };
+        let mut drag = app
+            .world_mut()
+            .resource_mut::<emerge_mapper::editor::CloneDrag>();
+        emerge_mapper::editor::hold_set_for_test(set, &mut drag);
+    }
+    app.update();
+
+    // `C` — the real message, so this cannot pass with the binding removed.
+    app.world_mut().write_message(bevy::input::keyboard::KeyboardInput {
+        key_code: KeyCode::KeyC,
+        logical_key: bevy::input::keyboard::Key::Character("c".into()),
+        state: bevy::input::ButtonState::Pressed,
+        text: None,
+        repeat: false,
+        window: Entity::PLACEHOLDER,
+    });
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let drag = app
+        .world()
+        .get_resource::<emerge_mapper::editor::CloneDrag>()
+        .unwrap_or_else(|| panic!("no clone drag"));
+    let turned = drag
+        .held_for_test()
+        .unwrap_or_else(|| panic!("the set left the hand"));
+    assert!(
+        turned > 0.0,
+        "the aim key must turn the set in hand; it is still at {turned} deg"
+    );
+    let after_brush = app
+        .world()
+        .resource::<emerge_mapper::editor::EditorState>()
+        .brush_yaw;
+    assert_eq!(
+        after_brush, before_brush,
+        "with a set in hand the brush is not the subject — turning it would aim something that is \
+         not going anywhere"
+    );
 }
 
 /// **The backdrop goes under the floor, and the floor is not where you would guess.**
