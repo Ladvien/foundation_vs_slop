@@ -156,6 +156,22 @@ pub struct EditorState {
     /// supplied by the editor would be a field nobody reads wearing a name nobody chose. The set it
     /// names is `CloneDrag::held`, which stays in hand until the name is committed or abandoned.
     pub grouping: Option<String>,
+    /// **Which descriptor `Cmd`+remove has armed for sending back**, and how many placements that
+    /// press will clear.
+    ///
+    /// The count is the point. This verb's blast radius is *every placement of the descriptor under
+    /// the cursor*, which is not what the cursor looks like it is pointing at — and it fired without
+    /// saying so while the REFUSAL path printed a message naming four compositions. The guarded case
+    /// was legible and the destructive one was not, which is inverted. The number is knowable before
+    /// anything is removed, so it is stated before anything is removed.
+    pub sending_back: Option<(String, usize)>,
+    /// **Which existing composition the open name field has armed for replacement.**
+    ///
+    /// Capturing over a name that exists redefines it, which every stamp of it in every map follows.
+    /// That is destructive enough to ask twice, and the arm is what makes the second `Enter` mean
+    /// "yes, redefine it" rather than "I pressed Enter again". Cleared the moment the name is edited,
+    /// because the confirmation was for THAT name — the rule `tiles::DemoteArm` already follows.
+    pub replacing: Option<String>,
     /// The raw text being typed into the name, or `None` when not renaming.
     ///
     /// Raw, with the snake_case spelling applied for display and on commit — so a backspace undoes a
@@ -423,6 +439,8 @@ impl Default for EditorState {
             collapsed: std::collections::HashSet::new(),
             pinning: None,
             grouping: None,
+            sending_back: None,
+            replacing: None,
             renaming: None,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -3104,11 +3122,18 @@ fn keys(
     // One tuple param, three tools: a Bevy system takes at most sixteen parameters, and this
     // one is full — a tuple of params counts as one.
     mut tools: (ResMut<MoveDrag>, ResMut<CloneDrag>, ResMut<TargetLock>),
-    // The Tiles tab's state, written by exactly one action here — `EditTile`. See `send_to_tiles`.
-    mut mode: ResMut<crate::tiles::Mode>,
-    mut import: ResMut<crate::tiles::ImportState>,
+    // **The Tiles tab's state, as one param.** Two actions here write it — `EditTile` sends a piece
+    // over to be edited, `SendBackToCandidates` clears its placements and sends it over armed. A
+    // Bevy system takes at most sixteen parameters and this one is full, so they travel as a tuple,
+    // which counts as one.
+    mut tiles: (
+        ResMut<crate::tiles::Mode>,
+        ResMut<crate::tiles::ImportState>,
+        ResMut<crate::tiles::DemoteArm>,
+    ),
 ) {
 
+    let (mode, import, demote_arm) = &mut tiles;
     let (move_drag, clone_drag, target) = &mut tools;
     // One clock for every key that repeats while held — see `keys::repeating`.
     let dt = time.delta_secs();
@@ -3125,8 +3150,16 @@ fn keys(
 
     // **Map to Tiles, carrying the piece.** Before the branches below, because they consume the
     // window and camera singles.
+    if keys::just_pressed(&keyboard, live.0, Action::SendBackToCandidates) {
+        send_back_to_candidates(
+            *pointer, camera, &mut commands, &mut project, &mut state, &placed, mode, import,
+            demote_arm,
+        );
+        return;
+    }
+
     if keys::just_pressed(&keyboard, live.0, Action::EditTile) {
-        send_to_tiles(*pointer, camera, &project, &mut state, &mut mode, &mut import);
+        send_to_tiles(*pointer, camera, &project, &mut state, mode, import);
         return;
     }
 
@@ -3210,7 +3243,7 @@ fn keys(
     // of them needs a key that means "I have read that". The *peel* below is still map-only, so this
     // one branch does need to know which tab is live — and `crate::notice::dismiss` handles the
     // other three so no tab is without it.
-    if *mode == crate::tiles::Mode::Map && keys::just_pressed(&keyboard, live.0, Action::Cancel) {
+    if **mode == crate::tiles::Mode::Map && keys::just_pressed(&keyboard, live.0, Action::Cancel) {
         // The outermost layer. Cleared here rather than in `notice::dismiss` so a single press
         // cannot both take the block down and peel a tool — the promise this comment makes.
         if state.status.has_problem() {
@@ -4562,6 +4595,138 @@ fn hide_carried(
 /// It sends the **descriptor**, not the placement: what the Tiles tab edits is the definition, so
 /// every copy on the map moves with the edit. That is the point of editing it there rather than
 /// patching one placement.
+/// **What `Cmd`+remove would clear, or why it would refuse** — the decision, without the ECS.
+///
+/// Rows are ascending, which is what lets the caller remove them back-to-front and record one
+/// [`Undo::RemovedMany`] that puts them back in order.
+///
+/// # It answers "would this be a wasted deletion" first
+///
+/// The blocker check comes before the set is computed and is the reason this returns a `Result`: a
+/// piece with no mesh, or one a composition holds, cannot finish the trip to the candidate list, and
+/// clearing its placements first would destroy map geometry for nothing.
+///
+/// # And the set is groups, not rows
+///
+/// `Placed::on` is a hard reference, so taking a host without its riders leaves them naming a row
+/// that no longer exists and `stack::resolve_y` refuses the whole map — the defect `remove_group`'s
+/// own note records, reached here by a different verb. `stack::group_of` is the same set the move and
+/// remove tools carry, so "this piece and what it holds up" means one thing everywhere.
+pub fn send_back_plan(project: &Project, id: &str) -> Result<Vec<usize>, String> {
+    crate::tiles::demote_blockers(id, project)?;
+    let mut doomed: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    for i in 0..project.map.placements.len() {
+        if project.map.placements[i].descriptor == id {
+            doomed.extend(emerge_core::stack::group_of(&project.map, i));
+        }
+    }
+    Ok(doomed.into_iter().collect())
+}
+
+/// **Clear every placement of the piece under the cursor, then hand it to the Tiles tab armed.**
+///
+/// "I got this piece wrong — let me define it again." The Tiles tab can already send a library entry
+/// back to the candidates, stripped, but only when nothing uses it — and from the Map you are always
+/// pointing at a placement, so that guard holds by construction and the verb could never be reached
+/// from here. This clears the thing in the way and then walks you to the door.
+///
+/// # Why it hands off instead of finishing the job
+///
+/// The two halves belong to two undo stacks. Removing rows is [`Undo`], which is closed under
+/// inversion and touches only the map; demoting rewrites `library.ron`, which the Tiles tab owns and
+/// records on its own `Snapshot`. One keypress doing both would leave `Cmd+Z` restoring the
+/// placements while the descriptor stayed demoted — one act, two undos, and a half-state between
+/// them. So this does the map half, arms the other, and each `Cmd+Z` is taken by the stack that made
+/// the mess.
+///
+/// # The blocker check comes first, and that ordering is the point
+///
+/// [`crate::tiles::demote_blockers`] is asked **before** anything is deleted. A piece with no mesh,
+/// or one a composition holds, cannot complete the trip — and discovering that after clearing seven
+/// placements would be a destructive half-act with nothing to show for it.
+#[allow(clippy::too_many_arguments)]
+fn send_back_to_candidates(
+    pointer: crate::view::Pointer,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    commands: &mut Commands,
+    project: &mut Project,
+    state: &mut EditorState,
+    placed: &Query<(Entity, &Placement)>,
+    mode: &mut crate::tiles::Mode,
+    import: &mut crate::tiles::ImportState,
+    arm: &mut crate::tiles::DemoteArm,
+) {
+    let Some(index) = nearest_placement(pointer, camera, project) else {
+        // A refusal, not a receipt: nothing visibly happens otherwise, which reads as a dead key.
+        state.sending_back = None;
+        state.status.problem("nothing under the cursor to send back".to_owned());
+        return;
+    };
+    let Some(id) = project.map.placements.get(index).map(|p| p.descriptor.clone()) else {
+        return;
+    };
+    if project.library.get(&id).is_none() {
+        state.status.problem(format!("`{id}` is not in this library, so there is nothing to send"));
+        return;
+    }
+    let doomed = match send_back_plan(project, &id) {
+        Ok(d) => d,
+        Err(e) => {
+            state.sending_back = None;
+            return state.status.problem(e);
+        }
+    };
+
+    // **Say what this will destroy, before it destroys it.** The confirmation is for THIS descriptor
+    // — the rule `tiles::DemoteArm` already follows — so pointing at a different piece re-asks rather
+    // than inheriting an answer given about something else.
+    if state.sending_back.as_ref().map(|(d, _)| d.as_str()) != Some(id.as_str()) {
+        state.sending_back = Some((id.clone(), doomed.len()));
+        return state.status.problem(format!(
+            "sending `{id}` back clears {} placement(s) of it from this map — every one, not just \
+             the one under the cursor. {}+{} again to do it.",
+            doomed.len(),
+            keys::MOD_NAME,
+            keys::REMOVE_NAME,
+        ));
+    }
+    state.sending_back = None;
+
+    let mut items: Vec<(usize, Box<Placed>)> = Vec::with_capacity(doomed.len());
+    // Back to front: removing an earlier row shifts every later one down.
+    for i in doomed.iter().rev() {
+        let removed = project.map.placements.remove(*i);
+        for (entity, marker) in placed {
+            if marker.0 == removed.id {
+                commands.entity(entity).despawn();
+            }
+        }
+        items.push((*i, Box::new(removed)));
+    }
+    // Ascending, which is the order `Undo::RemovedMany` puts them back in.
+    items.reverse();
+    let cleared = items.len();
+    if cleared > 0 {
+        project.dirty = true;
+        state.record(Undo::RemovedMany { items });
+    }
+
+    // Hand over, armed. The confirming press is the one the Tiles tab was always going to ask for,
+    // so this adds no new confirmation — it arrives at the existing one.
+    import.selected_library_id = Some(id.clone());
+    arm.0 = Some(id.clone());
+    *mode = crate::tiles::Mode::Tiles;
+    let shift_remove = format!("Shift+{}", keys::REMOVE_NAME);
+    import.status.problem(format!(
+        "`{id}` — {cleared} placement(s) cleared from the map. {shift_remove} sends it back to the \
+         candidates, stripped; anything else leaves it in the library."
+    ));
+    state.status.note(format!(
+        "cleared {cleared} placement(s) of `{id}` and sent it to the tiles tab — {shift_remove} there \
+         to send it back to the candidates"
+    ));
+}
+
 fn send_to_tiles(
     pointer: crate::view::Pointer,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
@@ -5034,67 +5199,166 @@ fn group_name_keys(
         }
         match &event.logical_key {
             Key::Enter => {
-                let Some(raw) = state.grouping.take() else { return };
+                // **Peeked, not taken.** An unconfirmed replace has to leave the field open, or the
+                // second press would have nothing to confirm.
+                let Some(raw) = state.grouping.clone() else { return };
                 let Some(set) = clone_drag.held.as_ref() else {
+                    state.grouping = None;
                     state.status.problem("the set was put down before the name was finished");
                     return;
                 };
-                match keep_as_group(&mut project, set, &raw) {
-                    Ok(id) => {
+                let confirmed = state.replacing.is_some();
+                match keep_as_group(&mut project, set, &raw, confirmed) {
+                    Ok(Kept::WouldReplace { id, stamps }) => {
+                        let held = match stamps {
+                            0 => "nothing in this map stamps it".to_owned(),
+                            1 => "1 stamp in this map follows it".to_owned(),
+                            n => format!("{n} stamps in this map follow it"),
+                        };
+                        state.replacing = Some(id.clone());
+                        state.status.problem(format!(
+                            "`{id}` already exists — {held}. Enter again to redefine it from this                              selection, Esc to leave it alone."
+                        ));
+                    }
+                    Ok(kept) => {
+                        let id = match &kept {
+                            Kept::Made(id) => id.clone(),
+                            Kept::Replaced { id, .. } => id.clone(),
+                            Kept::WouldReplace { id, .. } => id.clone(),
+                        };
                         // Armed, so the next click on the map stamps what was just made. The whole
                         // point of capturing is to place it again.
                         compose.armed = Some(id.clone());
                         clone_drag.held = None;
-                        state
-                            .status
-                            .note(format!("`{id}` kept — armed, so the next click stamps it"));
+                        state.grouping = None;
+                        state.replacing = None;
+                        state.status.note(match kept {
+                            Kept::Replaced { stamps: 0, .. } => {
+                                format!("`{id}` redefined — armed, so the next click stamps it")
+                            }
+                            Kept::Replaced { stamps, .. } => format!(
+                                "`{id}` redefined — {stamps} stamp(s) here now expand to it, and                                  read as STALE until re-recorded"
+                            ),
+                            _ => format!("`{id}` kept — armed, so the next click stamps it"),
+                        });
                     }
-                    Err(e) => state.status.problem(e),
+                    Err(e) => {
+                        state.grouping = None;
+                        state.replacing = None;
+                        state.status.problem(e);
+                    }
                 }
                 return;
             }
             Key::Escape => {
                 state.grouping = None;
-                state.status.note("the group was not kept — the set is still in hand");
+                // Abandoning the name abandons the confirmation with it.
+                state.replacing = None;
+                state.status.note("not kept — the set is still in hand");
                 return;
             }
             Key::Backspace => {
                 if let Some(raw) = state.grouping.as_mut() {
                     raw.pop();
-                }
+                    state.replacing = None;
+            }
             }
             Key::Character(text) => {
                 if let Some(raw) = state.grouping.as_mut() {
                     raw.push_str(text);
-                }
+                    state.replacing = None;
+            }
             }
             Key::Space => {
                 if let Some(raw) = state.grouping.as_mut() {
                     raw.push(' ');
-                }
+                    state.replacing = None;
+            }
             }
             _ => {}
         }
     }
 }
 
-/// **The commit door for a captured group** — `pub` so a test can drive it without a cursor. — validate the whole set, then write, then adopt.
+/// **What a capture did**, or what it is waiting for.
+///
+/// A three-state answer rather than a `Result<String, _>` because capturing over an existing name is
+/// neither a success nor a refusal until the author has said which they meant.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Kept {
+    /// A composition that did not exist before is now on disk.
+    Made(String),
+    /// An existing composition was **redefined**. Every stamp of it in this map now expands to the
+    /// new body — the count is how many, so the receipt can say what just moved.
+    Replaced { id: String, stamps: usize },
+    /// The name is taken and nothing was written. Press again to replace it.
+    WouldReplace { id: String, stamps: usize },
+}
+
+/// **The commit door for a captured composition** — validate the whole set, then write, then adopt.
+///
+/// `pub` so a test can drive it without a cursor.
 ///
 /// `record_selected`'s discipline: nothing in `project` moves until the file is on disk, and a
 /// refusal leaves both exactly as they were. The validation is deliberately the FULL one
-/// (`composition::validate` over every group, not just this one), because a new composition can only break
-/// the set as a whole — a duplicate id, or a nested reference that no longer resolves.
-pub fn keep_as_group(project: &mut Project, set: &CloneSet, raw: &str) -> Result<String, String> {
+/// (`composition::validate` over every composition, not just this one), because a new composition can
+/// only break the set as a whole — a duplicate id, or a nested reference that no longer resolves.
+///
+/// # Capturing over a name that exists is how a composition is edited
+///
+/// It used to refuse: *"pick another name — renaming one would strand every map that stamped it."*
+/// That was right while the Compose tab could edit a composition in place, and it stopped being right
+/// when authoring moved here: nothing else modifies, replaces or deletes a composition, so refusing
+/// made them **append-only** and made the demote verb's own advice — "edit the group first" —
+/// impossible to follow.
+///
+/// Replacing keeps the **id**, so no stamp is stranded; what changes is what those stamps expand to,
+/// which is the point. The schema already expects this: `Stamped::of_fingerprint` exists precisely to
+/// notice that a composition changed under a map and say so before the map stops loading.
+///
+/// `confirmed` is the second press. The first returns [`Kept::WouldReplace`] and writes nothing.
+pub fn keep_as_group(
+    project: &mut Project,
+    set: &CloneSet,
+    raw: &str,
+    confirmed: bool,
+) -> Result<Kept, String> {
     let comp = composition_from_set(set, raw, &project.library)?;
     let id = comp.id.clone();
-    if project.compositions.compositions.iter().any(|c| c.id == id) {
-        return Err(format!(
-            "`{id}` is already a group. Pick another name — renaming one would strand every map \
-             that stamped it."
-        ));
+    let at = project.compositions.compositions.iter().position(|c| c.id == id);
+
+    let stamps = project.map.stamps.iter().filter(|s| s.of == id).count();
+    if let Some(_existing) = at {
+        // **An override names a member, so redefining can strand one.** `expand` refuses a stamp
+        // whose override names a member the composition does not have, which means the map stops
+        // loading — for the game as well as here. Checked before anything is written, on the same
+        // rule the send-back verb follows: do not perform half a destructive act.
+        let members: std::collections::BTreeSet<&str> =
+            comp.members.iter().map(|m| m.id.as_str()).collect();
+        let mut stranded: Vec<String> = Vec::new();
+        for s in project.map.stamps.iter().filter(|s| s.of == id) {
+            for o in &s.overrides {
+                if !members.contains(o.member.as_str()) {
+                    stranded.push(format!("`{}` overrides `{}`", s.id, o.member));
+                }
+            }
+        }
+        if !stranded.is_empty() {
+            return Err(format!(
+                "replacing `{id}` would strand {}: the new definition has no such member, and a map                  with a dangling override does not load. Remove the override first.",
+                stranded.join(", ")
+            ));
+        }
+        if !confirmed {
+            return Ok(Kept::WouldReplace { id, stamps });
+        }
     }
+
     let mut proposed = project.compositions.clone();
-    proposed.compositions.push(comp);
+    match at {
+        Some(i) => proposed.compositions[i] = comp,
+        None => proposed.compositions.push(comp),
+    }
     proposed.compositions.sort_by(|a, b| a.id.cmp(&b.id));
     emerge_core::composition::validate(&proposed.compositions, &project.library)?;
 
@@ -5104,7 +5368,10 @@ pub fn keep_as_group(project: &mut Project, set: &CloneSet, raw: &str) -> Result
     let text = proposed.to_ron()?;
     emerge_core::ron_surgery::save_atomic(&path, &text).map_err(|e| format!("NOT WRITTEN: {e}"))?;
     project.compositions = proposed;
-    Ok(id)
+    Ok(match at {
+        Some(_) => Kept::Replaced { id, stamps },
+        None => Kept::Made(id),
+    })
 }
 
 fn pin_reason_keys(

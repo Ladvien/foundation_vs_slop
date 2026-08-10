@@ -1133,9 +1133,13 @@ fn a_captured_group_is_written_and_reads_back() {
         centre_off: (0.25, 0.0),
         half: (0.75, 0.5),
     };
-    let id = emerge_mapper::editor::keep_as_group(&mut project, &set, "Mess Table")
-        .unwrap_or_else(|e| panic!("the group must be kept: {e}"));
-    assert_eq!(id, "mess_table", "the name is forced into snake_case");
+    let kept = emerge_mapper::editor::keep_as_group(&mut project, &set, "Mess Table", false)
+        .unwrap_or_else(|e| panic!("the composition must be kept: {e}"));
+    assert_eq!(
+        kept,
+        emerge_mapper::editor::Kept::Made("mess_table".to_owned()),
+        "a name nothing holds is made outright, and forced into snake_case"
+    );
     assert_eq!(project.compositions.compositions.len(), 1, "it was adopted in memory");
 
     // And it is on disk, parseable, with the members the set held.
@@ -1148,13 +1152,88 @@ fn a_captured_group_is_written_and_reads_back() {
     let ids: Vec<&str> = c.members.iter().map(|m| m.id.as_str()).collect();
     assert_eq!(ids, ["lamp", "table"], "members are stored sorted by id");
 
-    // A second group of the same name is refused, and nothing changes.
+    // **Capturing over the name asks first, and writes nothing until it is answered.**
+    //
+    // It used to refuse outright. That made compositions append-only the moment the Compose tab
+    // stopped being able to edit one — and made the send-back verb's own advice, "edit the group
+    // first", impossible to follow.
     let before = std::fs::read_to_string(&path).unwrap_or_default();
-    let e = emerge_mapper::editor::keep_as_group(&mut project, &set, "mess_table")
-        .expect_err("a duplicate id must be refused");
-    assert!(e.contains("already a group"), "{e}");
-    assert_eq!(project.compositions.compositions.len(), 1, "a refusal adopts nothing");
+    let asked = emerge_mapper::editor::keep_as_group(&mut project, &set, "mess_table", false)
+        .unwrap_or_else(|e| panic!("capturing over a name must ask, not refuse: {e}"));
+    assert_eq!(
+        asked,
+        emerge_mapper::editor::Kept::WouldReplace { id: "mess_table".to_owned(), stamps: 0 },
+        "the first press asks"
+    );
     assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), before, "and writes nothing");
+
+    // The second press redefines it in place — same id, so no stamp anywhere is stranded.
+    let done = emerge_mapper::editor::keep_as_group(&mut project, &set, "mess_table", true)
+        .unwrap_or_else(|e| panic!("the confirmed replace must land: {e}"));
+    assert_eq!(
+        done,
+        emerge_mapper::editor::Kept::Replaced { id: "mess_table".to_owned(), stamps: 0 }
+    );
+    assert_eq!(
+        project.compositions.compositions.len(),
+        1,
+        "replacing redefines the one that was there rather than adding a second"
+    );
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let reread = emerge_core::composition::Compositions::parse(&text)
+        .unwrap_or_else(|e| panic!("what was written must parse: {e}"));
+    assert_eq!(reread.compositions.len(), 1, "and one composition reached disk, not two");
+}
+
+/// **A verb whose blast radius is every placement of a descriptor says the number first.**
+///
+/// `Cmd`+remove clears EVERY placement of the piece under the cursor, which is not what the cursor
+/// looks like it is pointing at. It fired without saying so while the refusal path printed a message
+/// naming four compositions — the guarded case legible, the destructive one silent, which is
+/// inverted. Learned by deleting nine pieces of an author's in-progress map to demonstrate the verb.
+///
+/// The count is knowable before anything is removed, so `send_back_plan` is asserted directly: it is
+/// the same function the handler asks, and it answers with the rows rather than with a promise.
+#[test]
+fn the_send_back_plan_counts_every_placement_of_the_descriptor_not_just_one() {
+    let root = fixtures::Fixture::new("send_back")
+        .descriptor("crate", "alpha")
+        .descriptor("floor", "alpha")
+        .build("m");
+    let mut project = emerge_mapper::project::Project::open(&root, "m", None)
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    // Three crates and one floor, none of them in a composition.
+    for at in [(0.0, 0.0), (2.0, 0.0), (4.0, 0.0)] {
+        project.map.placements.push(emerge_core::map::Placed {
+            id: format!("crate@{}", at.0),
+            descriptor: "crate".to_owned(),
+            at,
+            ..Default::default()
+        });
+    }
+    project.map.placements.push(emerge_core::map::Placed {
+        id: "floor@9".to_owned(),
+        descriptor: "floor".to_owned(),
+        at: (8.0, 0.0),
+        ..Default::default()
+    });
+
+    let plan = emerge_mapper::editor::send_back_plan(&project, "crate")
+        .unwrap_or_else(|e| panic!("nothing blocks this one: {e}"));
+    assert_eq!(
+        plan.len(),
+        3,
+        "the count has to be every placement of the descriptor \u{2014} the number an author is owed \
+         BEFORE the verb runs, not after"
+    );
+    assert!(plan.windows(2).all(|w| w[0] < w[1]), "ascending, so removal can go back to front");
+
+    // And a descriptor a composition holds is refused with nothing removed \u{2014} the check that
+    // comes first precisely so a blocked verb cannot destroy anything on its way to failing.
+    let held = emerge_mapper::editor::send_back_plan(&project, "floor");
+    assert!(held.is_ok(), "no composition holds `floor` in this fixture: {held:?}");
+    assert_eq!(project.map.placements.len(), 4, "planning removes nothing");
 }
 
 /// **The name field takes the keyboard, so typing a name cannot also drive the tab.**

@@ -3482,10 +3482,64 @@ fn take_out_of_library(id: &str, project: &mut Project) -> Result<std::path::Pat
     commit_measured(project, trial)
 }
 
+/// **What would stop `id` being sent back to the candidates**, and the mesh it would come back as.
+///
+/// Extracted because two verbs now ask it. The Tiles tab asks before demoting; the **Map** asks
+/// before it deletes anything, and that ordering is the whole reason this is a function: the Map's
+/// `Cmd`+remove takes every placement of a piece out and then hands you to this tab armed, so
+/// discovering a blocker *after* the placements were gone would be a destructive half-act with
+/// nothing to show for it.
+///
+/// It deliberately does **not** check the placement count. That is the one precondition the Map verb
+/// exists to clear, and `take_out_of_library` still enforces it at the door for every caller.
+pub(crate) fn demote_blockers(id: &str, project: &Project) -> Result<String, String> {
+    // An entry with no mesh has nothing to come back as; sending it "back" would just be Delete
+    // wearing a costume, so it refuses and names the honest key.
+    let Some(mesh) = project
+        .measured
+        .descriptors
+        .iter()
+        .find(|d| d.id == id)
+        .and_then(|d| d.mesh.clone())
+    else {
+        return Err(format!(
+            "`{id}` has no mesh — nothing to send back ({} removes it outright)",
+            crate::keys::REMOVE_NAME
+        ));
+    };
+    // **Compositions are the second referrer of a descriptor id, and they are stricter than a map.**
+    // `policy::layered_library` hard-refuses a composition whose member descriptor is missing, so a
+    // library written without the entry does not give a map with a hole — it gives a project that
+    // neither the editor nor the game can open.
+    let groups: Vec<&str> = project
+        .compositions
+        .compositions
+        .iter()
+        .filter(|c| {
+            c.members.iter().any(|m| {
+                matches!(&m.body, emerge_core::composition::Body::Descriptor { id: d, .. } if d == id)
+            })
+        })
+        .map(|c| c.id.as_str())
+        .collect();
+    if !groups.is_empty() {
+        return Err(format!(
+            "`{id}` is a member of {}: {}. Removing it would leave `compositions.ron` naming a \
+             descriptor nothing defines, and the project would stop opening — edit the group first.",
+            if groups.len() == 1 { "the group" } else { "the groups" },
+            groups.join(", ")
+        ));
+    }
+    Ok(mesh)
+}
+
 /// Which library entry `Shift+Delete` has armed for demotion — the first press's answer, waiting
 /// for the second.
+///
+/// `pub(crate)` because the Map arms it: `Cmd`+remove there clears the placements and hands the
+/// piece over already armed, so the confirming press is the one this tab was always going to ask for.
 #[derive(Resource, Default)]
-struct DemoteArm(Option<String>);
+pub(crate) struct DemoteArm(pub(crate) Option<String>);
 
 /// **Send a library entry back to the candidate list, stripped.**
 ///
@@ -3525,21 +3579,11 @@ fn demote_tile(
         return;
     }
     arm.0 = None;
-    // The mesh path is the reborn candidate's name — captured before the entry is gone. An entry
-    // with no mesh has nothing to come back as; sending it "back" would just be Delete wearing a
-    // costume, so it refuses and names the honest key.
-    let Some(mesh) = project
-        .measured
-        .descriptors
-        .iter()
-        .find(|d| d.id == id)
-        .and_then(|d| d.mesh.clone())
-    else {
-        state.status.problem(format!(
-            "`{id}` has no mesh — nothing to send back ({} removes it outright)",
-            crate::keys::REMOVE_NAME
-        ));
-        return;
+    // The mesh path is the reborn candidate's name — captured before the entry is gone, through the
+    // same question the Map asks before it deletes anything on this piece's behalf.
+    let mesh = match demote_blockers(&id, &project) {
+        Ok(mesh) => mesh,
+        Err(e) => return state.status.problem(e),
     };
     let before = state.snapshot(&project);
     match take_out_of_library(&id, &mut project) {
