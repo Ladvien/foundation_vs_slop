@@ -23,8 +23,69 @@
 //! doorway-bearing face, and `opening` marks the same tile as a puncture. Enclosure then measures
 //! *whether the boundary closes*; opening density measures *how punctured it is*.
 
+use crate::composition::Interface;
 use crate::placement::ir::Dir;
 use crate::wfc::{E, N, S, W};
+
+/// Reads a composition grammar's derived interfaces as the three predicates [`measure`] wants.
+///
+/// [`measure`] itself stays closure-based, so a caller whose grid means something else entirely can
+/// still use it. This is the adapter for the composition case, and **the token is a parameter** — the
+/// kit's vocabulary arrives from the caller, exactly as `agrees` does, so nothing here is pinned to
+/// one kit's spelling of "wall".
+///
+/// Build it from [`crate::grammar::Composed::faces`].
+pub struct Faces<'a> {
+    faces: &'a [Option<Interface>],
+    wall: &'a str,
+    /// A gap under a lintel at least this tall is a doorway; anything less is a plinth, not something
+    /// to walk under.
+    walkable: f32,
+}
+
+impl<'a> Faces<'a> {
+    pub fn new(faces: &'a [Option<Interface>], wall: &'a str, walkable: f32) -> Self {
+        Faces { faces, wall, walkable }
+    }
+
+    /// Whether prototype `p` presents a wall on face `dir`. A doorway does — it is the boundary.
+    pub fn wall(&self, p: usize, dir: Dir) -> bool {
+        self.bands(p, dir).is_some_and(|b| b.iter().any(|b| b.token.as_deref() == Some(self.wall)))
+    }
+
+    /// Whether prototype `p` is a doorway: it presents a wall on some face, but that face leaves a
+    /// walkable gap at the deck.
+    ///
+    /// Read off the geometry rather than off the tile's name — the shipped `site/tile_doorway_n` is a
+    /// lifted `site/wall_header` over open air, and a rule keyed to the id would miss the next one.
+    pub fn doorway(&self, p: usize) -> bool {
+        [N, E, S, W].iter().any(|&d| {
+            let Some(bands) = self.bands(p, d) else {
+                return false;
+            };
+            let lowest = bands
+                .iter()
+                .filter(|b| b.token.as_deref() == Some(self.wall))
+                .fold(f32::INFINITY, |lo, b| lo.min(b.y.0));
+            lowest.is_finite() && lowest >= self.walkable
+        })
+    }
+
+    /// Whether prototype `p` is floor a room could be made of.
+    ///
+    /// Every prototype but `Empty`, which [`crate::grammar`] pins at index 0 and which is the
+    /// grammar's way of saying *nothing goes here* — a hole, not a deck.
+    pub fn floor(&self, p: usize) -> bool {
+        p != 0 && p < self.faces.len()
+    }
+
+    fn bands(&self, p: usize, dir: Dir) -> Option<&'a Vec<crate::composition::Band>> {
+        match self.faces.get(p) {
+            Some(Some(i)) => i.faces.get(dir),
+            _ => None,
+        }
+    }
+}
 
 /// Ranges per dimension in the pre-registered domain grid (§4.5 step 1).
 ///

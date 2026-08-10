@@ -205,6 +205,17 @@ pub struct Solved {
     pub free_cells: usize,
     /// Cells pinned by the author.
     pub owned_cells: usize,
+    /// The collapsed grid itself: one prototype index per cell, indexed `z * width + x`.
+    ///
+    /// **Returned rather than rebuilt.** [`crate::range`] measures a solved grid, and reconstructing
+    /// it from `placements` would be a second answer to a question this function already answered —
+    /// pinned cells are not in `placements` at all, so the two could disagree about exactly the cells
+    /// the author cares most about.
+    pub grid: Vec<usize>,
+    /// The grid's width in cells; `grid.len()` is `width * height`.
+    pub width: usize,
+    /// The grid's height in cells.
+    pub height: usize,
 }
 
 /// **Fill the map's free cells with more of the author's arrangement.**
@@ -291,6 +302,9 @@ pub fn solve(
         placements,
         free_cells,
         owned_cells,
+        grid: chosen,
+        width: w,
+        height: h,
     })
 }
 
@@ -569,6 +583,136 @@ mod tests {
             "a solve that fills almost nothing is a grammar that cannot express a room: {} rows",
             solved.placements.len()
         );
+    }
+
+    /// **The control for FVS-R-9.** A room hand-assembled from the shipped kit's own prototypes,
+    /// measured by `crate::range` and found enclosed.
+    ///
+    /// Without this, the measurement's headline result — *every solve scored enclosure 0* — has two
+    /// explanations that look identical: the generator cannot close a boundary, or the metric cannot
+    /// see one. This separates them. The kit CAN build a closed room; four corners and four walls are
+    /// exactly what it has, and laying them by hand produces enclosure 1.
+    ///
+    /// So a zero from a solve is a statement about the solver, not about `range`.
+    #[test]
+    fn the_kit_can_build_a_room_the_metric_calls_enclosed() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/emerge/site");
+        let library: Library =
+            ron::from_str(&std::fs::read_to_string(root.join("library.ron")).expect("library"))
+                .expect("the site library parses");
+        let comps: crate::composition::Compositions =
+            ron::from_str(&std::fs::read_to_string(root.join("compositions.ron")).expect("groups"))
+                .expect("the site compositions parse");
+        let Composed { grammar: g, faces, .. } =
+            from_compositions(&comps.compositions, &library, 1, 1.0, crate::composition::agrees)
+                .expect("the shipped kit learns");
+
+        let ix = |id: &str, yaw: f32| -> usize {
+            g.prototypes
+                .iter()
+                .position(|p| matches!(p, Prototype::Piece { descriptor, yaw: y }
+                    if descriptor == id && (*y - yaw).abs() < 1e-6))
+                .unwrap_or_else(|| panic!("the kit has {id} at {yaw} degrees"))
+        };
+        // Which turn walls which face is read from the kit, not assumed — see the alphabet the
+        // `expressive_range` example prints.
+        let (nw, ne, sw, se) = (
+            ix("site/tile_corner_nw", 0.0),
+            ix("site/tile_corner_nw", 270.0),
+            ix("site/tile_corner_nw", 90.0),
+            ix("site/tile_corner_nw", 180.0),
+        );
+        let (n_, e_, s_, w_) = (
+            ix("site/tile_wall_n", 0.0),
+            ix("site/tile_wall_n", 270.0),
+            ix("site/tile_wall_n", 180.0),
+            ix("site/tile_wall_n", 90.0),
+        );
+        let floor_ix = ix("site/tile_floor", 0.0);
+
+        // A 5 x 5 room inside a 9 x 9 field of Empty.
+        const D: usize = 9;
+        let (lo, hi) = (2usize, 6usize);
+        let mut grid = vec![0usize; D * D];
+        for z in lo..=hi {
+            for x in lo..=hi {
+                let on_top = z == lo;
+                let on_bottom = z == hi;
+                let on_left = x == lo;
+                let on_right = x == hi;
+                grid[z * D + x] = match (on_top, on_bottom, on_left, on_right) {
+                    (true, _, true, _) => nw,
+                    (true, _, _, true) => ne,
+                    (_, true, true, _) => sw,
+                    (_, true, _, true) => se,
+                    (true, ..) => n_,
+                    (_, true, ..) => s_,
+                    (_, _, true, _) => w_,
+                    (_, _, _, true) => e_,
+                    _ => floor_ix,
+                };
+            }
+        }
+
+        // **Is that room even legal?** This is the difference between "the solver is unlikely to build
+        // one" and "the grammar cannot express one", and the two call for opposite fixes. Every
+        // orthogonally adjacent pair in the hand-laid room must be permitted by the learned support.
+        let mut illegal = Vec::new();
+        for z in 0..D {
+            for x in 0..D {
+                let p = grid[z * D + x];
+                for (dir, nx, nz) in [
+                    (N, x as i64, z as i64 - 1),
+                    (E, x as i64 + 1, z as i64),
+                    (S, x as i64, z as i64 + 1),
+                    (W, x as i64 - 1, z as i64),
+                ] {
+                    if nx < 0 || nz < 0 || nx as usize >= D || nz as usize >= D {
+                        continue;
+                    }
+                    let q = grid[nz as usize * D + nx as usize];
+                    if g.support[dir][p] & (1 << q) == 0 {
+                        illegal.push(format!(
+                            "{:?} may not sit {} of {:?}",
+                            g.prototypes[q],
+                            ["north", "east", "south", "west"][dir],
+                            g.prototypes[p]
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            illegal.is_empty(),
+            "the kit's own room is not a legal arrangement under its own grammar, so no solve could \
+             ever produce one: {illegal:#?}"
+        );
+
+        let f = crate::range::Faces::new(&faces, "wall", 0.5);
+        let sealed = crate::range::measure(D, D, &grid, |p, d| f.wall(p, d), |p| f.floor(p), |p| {
+            f.doorway(p)
+        })
+        .expect("a well-formed grid");
+        assert_eq!(sealed.enclosure, 1.0, "every cell of a walled room is inside it");
+        assert_eq!(sealed.regions, 1);
+        assert_eq!(sealed.opening_density, Some(0.0), "no doors yet");
+
+        // Swap one top-edge wall for the doorway tile: still closed, now with one opening.
+        grid[lo * D + (lo + 2)] = ix("site/tile_doorway_n", 0.0);
+        let with_door =
+            crate::range::measure(D, D, &grid, |p, d| f.wall(p, d), |p| f.floor(p), |p| f.doorway(p))
+                .expect("a well-formed grid");
+        assert_eq!(with_door.enclosure, 1.0, "a doorway is part of the boundary, not a hole in it");
+        assert_eq!(with_door.regions, 1);
+        assert_eq!(with_door.opening_density, Some(1.0));
+
+        // And knocking a wall out opens it, so the seal above is the walls' doing.
+        grid[lo * D + (lo + 1)] = 0;
+        let breached =
+            crate::range::measure(D, D, &grid, |p, d| f.wall(p, d), |p| f.floor(p), |p| f.doorway(p))
+                .expect("a well-formed grid");
+        assert_eq!(breached.enclosure, 0.0);
+        assert_eq!(breached.regions, 0);
     }
 
     /// A bounded one-cell composition with nothing in it — enough to carry an interface slot.
