@@ -465,6 +465,81 @@ mod tests {
         }
     }
 
+    /// **The turns are what make a kit solvable**, measured on the shipped one.
+    ///
+    /// An ASSET-CONTRACT test: it reads the real site kit on purpose, because what it asserts IS a
+    /// fact about what ships. FVS-R-7's "done when" is that this kit is solvable.
+    ///
+    /// **Before the four turns existed this failed, and the failure is the reason they do.** Every
+    /// wall tile's north support was `Empty` and nothing else: a wall tile presents `wall` outward on
+    /// one face, so the tile across that seam has to present `wall` back — and only the same tile
+    /// turned 180 degrees does. With yaw 0 alone the kit expressed floor, empty, and no wall meeting
+    /// anything. `tests/site_tiles.rs`'s `one_wall_tile_covers_four_orientations` is the authored
+    /// kit's own statement of the same thing.
+    #[test]
+    fn the_shipped_site_kit_learns_a_grammar_and_solves() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/emerge/site");
+        let Ok(lib_text) = std::fs::read_to_string(root.join("library.ron")) else {
+            panic!("the shipped site kit must be readable");
+        };
+        let library: Library = ron::from_str(&lib_text).expect("the site library parses");
+        let comps: crate::composition::Compositions =
+            ron::from_str(&std::fs::read_to_string(root.join("compositions.ron")).expect("groups"))
+                .expect("the site compositions parse");
+
+        let (g, skipped) =
+            from_compositions(&comps.compositions, &library, 1, 1.0, crate::composition::agrees)
+                .expect("the shipped kit learns");
+        assert!(skipped.is_empty(), "every authored tile is one cell and bounded: {skipped:?}");
+
+        // Four authored tiles; three are asymmetric and contribute four turns each, and the floor is
+        // symmetric so its four collapse to one. That count is the dedup rule working, not a
+        // coincidence — assert the SHAPE rather than the number, so authoring a fifth tile does not
+        // fail this for the wrong reason.
+        let turns_of = |id: &str| {
+            g.prototypes
+                .iter()
+                .filter(|p| matches!(p, Prototype::Piece { descriptor, .. } if descriptor == id))
+                .count()
+        };
+        assert_eq!(turns_of("site/tile_floor"), 1, "a symmetric tile is one prototype, not four");
+        assert_eq!(turns_of("site/tile_wall_n"), 4, "an asymmetric tile is four");
+
+        // **The property the turns exist for**: a wall tile can have something other than `Empty`
+        // beside it. Before them this was `0b1` — the empty prototype alone.
+        let wall = g
+            .prototypes
+            .iter()
+            .position(|p| matches!(p, Prototype::Piece { descriptor, yaw }
+                if descriptor == "site/tile_wall_n" && *yaw == 0.0))
+            .expect("the kit has a north wall tile");
+        assert!(
+            g.support[N][wall] & !1 != 0,
+            "a wall tile whose only northern neighbour is Empty cannot make a room; support is \
+             {:#b}",
+            g.support[N][wall]
+        );
+
+        // And a grid actually collapses.
+        let map = crate::map::Map {
+            name: "probe".into(),
+            bounds: (6.0, 3.0, 6.0),
+            ..crate::map::Map::default()
+        };
+        let mut n = 0;
+        let solved = solve(&map, &g, 1.0, 42, || {
+            n += 1;
+            format!("g@{n}")
+        })
+        .expect("the shipped kit solves a 6x6 grid");
+        assert_eq!(solved.free_cells, 36);
+        assert!(
+            solved.placements.len() > 20,
+            "a solve that fills almost nothing is a grammar that cannot express a room: {} rows",
+            solved.placements.len()
+        );
+    }
+
     /// A bounded one-cell composition with nothing in it — enough to carry an interface slot.
     fn empty_tile(id: &str) -> Composition {
         Composition {
@@ -758,6 +833,31 @@ mod tests {
 /// An unlabelled cell is `None`, and `None` equals only `None`. It is not a wildcard — which is what
 /// lets a doorway's open middle meet only another open middle, and is why a kit with a single token
 
+/// **A composition turned about its own anchor**, for deriving what it presents at that yaw.
+///
+/// Through `composition::rotate_xz` and `add_yaw` — the exact pair [`crate::composition::expand`]
+/// turns a stamp by — so a tile's learned faces and the faces it actually stamps with cannot come
+/// from two different conventions. `rotate_xz`'s doc names the cost of a second one: Bevy's yaw
+/// turns +X toward −Z, and getting it backwards "mirrors every composition without failing
+/// anything".
+///
+/// The envelope's x and z swap on a quarter turn, which matters for a non-square tile and is free
+/// for the square ones a grid uses.
+fn turn_composition(c: &Composition, yaw: f32) -> Composition {
+    let mut out = c.clone();
+    if let Envelope::Bounded { size } = out.envelope {
+        let quarter = ((yaw / 90.0).round() as i32).rem_euclid(4);
+        if quarter % 2 == 1 {
+            out.envelope = Envelope::Bounded { size: (size.2, size.1, size.0) };
+        }
+    }
+    for m in &mut out.members {
+        m.at = crate::composition::rotate_xz(m.at, yaw);
+        m.yaw = crate::composition::add_yaw(m.yaw, yaw);
+    }
+    out
+}
+
 /// **A grammar over compositions**, with adjacency behind a substitutable rule.
 ///
 /// FVS-R-7. The sibling of [`learn`] and [`declared`]: where those read placements and descriptor
@@ -826,22 +926,53 @@ pub fn from_compositions(
             ));
             continue;
         }
-        let iface = match crate::composition::interface(c, compositions, library, per_tile) {
-            Ok(Some(i)) => i,
-            Ok(None) => {
-                skipped.push(format!("`{}` derives no interface", c.id));
+        // **Four turns per tile, and that is not an optimisation — it is what makes the kit
+        // solvable at all.**
+        //
+        // Measured on the shipped site kit before this existed: every wall tile's north support was
+        // `Empty` and nothing else. A wall tile presents `wall` outward on ONE face, so the tile
+        // across that seam has to present `wall` back — and only the same tile turned 180 degrees
+        // does. With yaw 0 alone the kit could express floor, empty, and no wall meeting anything.
+        // `one_wall_tile_covers_four_orientations` is the authored kit's own statement of this: one
+        // wall tile IS four, by rotation.
+        //
+        // **The turned interface is DERIVED, never rotated.** Turning the composition through
+        // `rotate_xz` and `add_yaw` — the pair a stamp already turns by — and re-deriving the face
+        // means there is no second rotation convention to get backwards. `rotate_xz`'s own doc names
+        // that failure: a mirrored copy "mirrors every composition without failing anything".
+        let mut seen_faces: Vec<[Vec<crate::composition::Band>; 4]> = Vec::new();
+        for quarter in 0..4u8 {
+            let yaw = quarter as f32 * 90.0;
+            let turned = turn_composition(c, yaw);
+            let iface = match crate::composition::interface(&turned, compositions, library, per_tile)
+            {
+                Ok(Some(i)) => i,
+                Ok(None) => {
+                    if quarter == 0 {
+                        skipped.push(format!("`{}` derives no interface", c.id));
+                    }
+                    continue;
+                }
+                Err(e) => return Err(format!("composition grammar: `{}`: {e}", c.id)),
+            };
+            // **Deduplicated within one composition only**, on `declared`'s rule and for its reason:
+            // a symmetric tile presents the same four faces at 0 and at 180, and keeping both would
+            // spend two of the solver's thirty-two saying one thing. Across compositions it would be
+            // wrong — identical faces make two tiles interchangeable to the propagator, not the same
+            // tile.
+            if seen_faces.iter().any(|f| *f == iface.faces) {
                 continue;
             }
-            Err(e) => return Err(format!("composition grammar: `{}`: {e}", c.id)),
-        };
-        if prototypes.len() >= MAX_PROTOTYPES {
-            return Err(format!(
-                "composition grammar: more than {MAX_PROTOTYPES} tiles, which is what the solver \
-                 packs a domain into. Narrow the set before solving."
-            ));
+            if prototypes.len() >= MAX_PROTOTYPES {
+                return Err(format!(
+                    "composition grammar: more than {MAX_PROTOTYPES} tiles once turned, which is \
+                     what the solver packs a domain into. Narrow the set before solving."
+                ));
+            }
+            seen_faces.push(iface.faces.clone());
+            prototypes.push(Prototype::Piece { descriptor: c.id.clone(), yaw });
+            interfaces.push(Some(iface));
         }
-        prototypes.push(Prototype::Piece { descriptor: c.id.clone(), yaw: 0.0 });
-        interfaces.push(Some(iface));
     }
 
     let n = prototypes.len();
