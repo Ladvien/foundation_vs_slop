@@ -408,6 +408,15 @@ enum Undo {
     UnstampedMany {
         items: Vec<(usize, Box<emerge_core::composition::Stamped>)>,
     },
+    /// **Take these exact stamps off the list** — the inverse of [`Undo::UnstampedMany`], and the
+    /// stamp-side twin of [`Undo::RemoveAt`].
+    ///
+    /// `UnstampedMany` used to invert to [`Undo::Stamped`], which drains the **tail**. That is
+    /// correct for the only thing that recorded it — `stamp_here` appends, so the stamps it put down
+    /// *are* the tail — and wrong the moment a stamp is removed from the middle, which is what
+    /// FVS-R-14's delete does: undo would put it back at index 3 and redo would then take the last
+    /// one off instead. Indices, like every other paired removal in this file.
+    UnstampAt { indices: Vec<usize> },
     /// Put a placement's pin back, reason included. Its own inverse.
     Pinned {
         index: usize,
@@ -595,6 +604,9 @@ impl Plugin for EditorPlugin {
             .init_resource::<MoveDrag>()
             .init_resource::<CloneDrag>()
             .init_resource::<TargetLock>()
+            // Written by `redraw_stamps` and read by `pick_subject`'s callers, so this plugin owns
+            // it — a missing `ResMut` panics its system in Bevy 0.19 rather than skipping it.
+            .init_resource::<StampPicture>()
             // Read by `refresh_status`, so this plugin owns it — a missing `Res<T>` panics its
             // system in Bevy 0.19 rather than skipping it (`CLAUDE.md`).
             .init_resource::<UnderCursor>()
@@ -2469,6 +2481,7 @@ fn drive_removal(
     mut drag: ResMut<RemovalDrag>,
     mut project: ResMut<Project>,
     mut state: ResMut<EditorState>,
+    picture: Res<StampPicture>,
 ) {
     // Read, never write, unless something actually happened: `state` is watched by
     // `rebuild_palette`, so an unconditional deref here rebuilds the palette every frame.
@@ -2558,8 +2571,14 @@ fn drive_removal(
     };
 
     if (from.0 - at.0).abs() <= CLICK_EPS && (from.1 - at.1).abs() <= CLICK_EPS {
-        match pick_at(&project, at) {
-            Some(i) => delete_index(&mut commands, i, &mut project, &mut state, &placed),
+        match pick_subject(&project, &picture, at) {
+            Some(Subject::Placement(i)) => {
+                delete_index(&mut commands, i, &mut project, &mut state, &placed)
+            }
+            // **The instance, whole.** A click landed on one member of it; removing that member is
+            // reaching *through* the stamp, which is the thing `composition.rs`'s encapsulation rule
+            // forbids and which the missing `Placement` used to prevent by making it unreachable.
+            Some(Subject::Stamp(id)) => delete_stamp(&id, &mut project, &mut state),
             None => state.status.note("nothing here to remove"),
         }
         return;
@@ -2582,7 +2601,21 @@ fn drive_removal(
         .collect();
     doomed.sort_unstable();
     doomed.dedup();
-    if doomed.is_empty() {
+
+    // **A stamp the box touches goes whole**, on the same rule as a group of placements and for a
+    // stronger reason: a box clipping the corner of a nurse station cannot take a corner of it, so
+    // the choice is the instance or nothing. Caught by any drawn row's centre, which is the test the
+    // rows above use, so a stamp and a loose piece are caught by one rule rather than two.
+    let mut stamps: Vec<usize> = picture
+        .rows
+        .iter()
+        .filter(|r| r.at.0 >= x0 && r.at.0 <= x1 && r.at.1 >= z0 && r.at.1 <= z1)
+        .filter_map(|r| project.map.stamps.iter().position(|s| s.id == r.stamp))
+        .collect();
+    stamps.sort_unstable();
+    stamps.dedup();
+
+    if doomed.is_empty() && stamps.is_empty() {
         state.status.note("nothing inside that box");
         return;
     }
@@ -2602,13 +2635,71 @@ fn drive_removal(
     // Ascending again, which is the order `Undo::RemovedMany` puts them back in.
     items.reverse();
 
+    // Descending here too, and after the placements: taking a stamp off `map.stamps` does not shift
+    // `map.placements`, so the two lists are independent — but within the stamp list the same rule
+    // applies, and getting it wrong is silent.
+    let mut taken: Vec<(usize, Box<emerge_core::composition::Stamped>)> =
+        Vec::with_capacity(stamps.len());
+    for i in stamps.iter().rev() {
+        taken.push((*i, Box::new(project.map.stamps.remove(*i))));
+    }
+    taken.reverse();
+
     let n = items.len();
-    state.record(Undo::RemovedMany { items });
+    let m = taken.len();
+    // **One keypress, one undo.** A box that caught both leaves two edits behind, and `Undo::Group`
+    // exists so they come back together — its own doc: "two separate entries would make one keypress
+    // two undos". Inverses run in reverse order, which is what keeps the enum closed under
+    // inversion, so the stamps go on last and come back first.
+    let op = match (items.is_empty(), taken.is_empty()) {
+        (false, true) => Undo::RemovedMany { items },
+        (true, false) => Undo::UnstampedMany { items: taken },
+        _ => Undo::Group {
+            ops: vec![
+                Undo::RemovedMany { items },
+                Undo::UnstampedMany { items: taken },
+            ],
+        },
+    };
+    state.record(op);
     project.dirty = true;
     // The whole chord, rendered by the census — naming just the modifier told the author to press
     // `Cmd`, which is not a thing anyone can do.
+    let what = match (n, m) {
+        (n, 0) => format!("{n} placement(s)"),
+        (0, m) => format!("{m} stamp(s)"),
+        (n, m) => format!("{n} placement(s) and {m} stamp(s)"),
+    };
     state.status.note(format!(
-        "removed {n} placement(s) — {} puts them back",
+        "removed {what} — {} puts them back",
+        keys::chord_text(keys::binding(Action::Undo))
+    ));
+}
+
+/// **Take a stamp off the map, whole.**
+///
+/// FVS-R-14's Delete arm: *"Delete removes the **instance**."* Named by [`Stamped::id`] and never by
+/// an index, because the caller picked it a frame ago and the list can have moved since — the rule
+/// [`MoveDrag`] states for placements and which applies here for the same reason.
+///
+/// The entities are not despawned here. `redraw_stamps` rebuilds the whole stamped set from
+/// `map.stamps`, so there is one place that turns a stamp list into pictures rather than two that
+/// could disagree about what is on screen — the same argument the undo arms make.
+fn delete_stamp(id: &str, project: &mut Project, state: &mut EditorState) {
+    let Some(index) = project.map.stamps.iter().position(|s| s.id == id) else {
+        // Not an error worth a banner: the author clicked something that has since gone, which undo
+        // and a second click can both produce.
+        state.status.note(format!("`{id}` is not on this map any more"));
+        return;
+    };
+    let removed = project.map.stamps.remove(index);
+    let of = removed.of.clone();
+    state.record(Undo::UnstampedMany {
+        items: vec![(index, Box::new(removed))],
+    });
+    project.dirty = true;
+    state.status.note(format!(
+        "removed `{id}` — the whole `{of}`, not a piece of it. {} puts it back",
         keys::chord_text(keys::binding(Action::Undo))
     ));
 }
@@ -2959,14 +3050,22 @@ fn redraw_stamps(
     assets: Res<AssetServer>,
     project: Res<Project>,
     mut state: ResMut<EditorState>,
-    drawn: Query<Entity, With<StampedPiece>>,
+    mut picture: ResMut<StampPicture>,
+    drawn: Query<Entity, With<StampInstance>>,
 ) {
     if !project.is_changed() {
         return;
     }
+    // **The instance, not the rows.** `Children` is `linked_spawn`, so this takes the pieces with
+    // it; despawning the rows instead would leave a childless parent behind on every redraw, and
+    // those are what the tools pick against.
     for e in &drawn {
         commands.entity(e).despawn();
     }
+    // Cleared here and not on each `return` below: the index describes the entities that exist, and
+    // they are gone as of the line above. A path that rebuilds neither leaves both empty, which is
+    // the truth — a map whose stamps do not resolve is drawing nothing.
+    picture.rows.clear();
     if project.map.stamps.is_empty() {
         return;
     }
@@ -3001,6 +3100,11 @@ fn redraw_stamps(
     };
     let first = project.map.placements.len();
     let mut drawn = 0usize;
+    // **One parent per stamp, minted on first sight of a row belonging to it.** Identity, not a
+    // transform node: the rows already carry world positions from `spawn_piece`, and a parent with a
+    // translation would apply it twice. What the parent buys is a lifetime — `Children` is
+    // `linked_spawn`, so despawning it takes the rows — and something for a tool to name.
+    let mut instances: std::collections::HashMap<&str, Entity> = std::collections::HashMap::new();
     for (k, p) in expanded.placements.iter().enumerate() {
         let Some(base) = project.library.get(&p.descriptor) else {
             error!("emerge-mapper: stamped row `{}` names descriptor `{}`, which the library does not define", p.id, p.descriptor);
@@ -3011,6 +3115,16 @@ fn redraw_stamps(
             None => base.clone(),
         };
         let Some(&y) = ys.get(first + k) else { continue };
+        // **Provenance as structure.** `Expansion::from` is returned for exactly this, so that no
+        // consumer splits `<stamp>/<member>` back apart — its own doc says so.
+        let Some((stamp_id, _member)) = expanded.from.get(&p.id) else {
+            error!(
+                "emerge-mapper: expanded row `{}` has no provenance — it belongs to no stamp, which \
+                 `expand` is not supposed to be able to produce",
+                p.id
+            );
+            continue;
+        };
         if let Some(e) = spawn_piece(
             &mut commands,
             &assets,
@@ -3021,10 +3135,41 @@ fn redraw_stamps(
             project.map.origin,
             y,
         ) {
-            commands.entity(e).insert(StampedPiece);
+            let parent = match instances.get(stamp_id.as_str()) {
+                Some(&parent) => parent,
+                None => {
+                    let of = project
+                        .map
+                        .stamps
+                        .iter()
+                        .find(|s| &s.id == stamp_id)
+                        .map(|s| s.of.clone())
+                        .unwrap_or_default();
+                    let parent = commands
+                        .spawn((
+                            StampInstance { id: stamp_id.clone(), of },
+                            // A spatial node with nothing of its own to place: the children are
+                            // already where they belong, and `Visibility` is required for them to
+                            // inherit one.
+                            Transform::IDENTITY,
+                            Visibility::default(),
+                        ))
+                        .id();
+                    instances.insert(stamp_id.as_str(), parent);
+                    parent
+                }
+            };
+            commands.entity(e).insert((StampedPiece, ChildOf(parent)));
             if p.paint != 0 {
                 commands.entity(e).insert(emerge_bevy::Paint(p.paint));
             }
+            picture.rows.push(StampRow {
+                stamp: stamp_id.clone(),
+                row: p.id.clone(),
+                at: p.at,
+                yaw: p.yaw,
+                descriptor: p.descriptor.clone(),
+            });
             drawn += 1;
         }
     }
@@ -3039,6 +3184,77 @@ fn redraw_stamps(
 /// picture of it, rebuilt whole.
 #[derive(Component)]
 struct StampedPiece;
+
+/// **The stamp as one thing** — a parent entity per [`Stamped`] row, with the pieces it expands to
+/// as children.
+///
+/// FVS-R-14. Stamped rows deliberately carry no [`Placement`], *"so the remove, move and clone tools
+/// cannot see them at all"* — right while stamps were output-only, and wrong the moment authoring
+/// moved to the Map. **The fix is not to give them one.** A `Placement` on an expanded row makes
+/// every tool edit *rows*, which is the failure the omission prevented: delete would take one member
+/// out of an instance, clone would copy expanded geometry and flatten the reference
+/// `stamping_writes_a_reference_and_undo_takes_it_back` exists to protect.
+///
+/// What was missing is a **selectable identity for the instance**, which is this. `Children` in Bevy
+/// 0.19 is `#[relationship_target(relationship = ChildOf, linked_spawn)]`
+/// (`bevy_ecs-0.19.0/src/hierarchy.rs:148`), so despawning this despawns the rows — the lifetime is
+/// the engine's, not a bookkeeping list to keep in step. And `Query<&Placement>` still correctly
+/// matches nothing here, so every existing tool is unchanged by construction.
+///
+/// **One rule: tools act on the instance, never through it** — the USD-style encapsulation
+/// `composition.rs`'s header already states, *"a stamp may override values, never delete/re-parent/
+/// reach into a nested composition"*.
+#[derive(Component)]
+pub struct StampInstance {
+    /// The [`Stamped::id`] this stands for.
+    pub id: String,
+    /// The [`Composition::id`] it is an instance of — carried so a status line can name what an
+    /// author is about to remove without going back to the map to look it up.
+    pub of: String,
+}
+
+/// **Where the drawn stamped rows are**, so a tool can answer "which stamp is under the cursor".
+///
+/// The picture layer's own index, written by [`redraw_stamps`] alongside the entities and rebuilt
+/// with them — not a second source of truth, and exactly as derived as the entities are. It exists
+/// because the alternative is calling `composition::expand` over every stamp inside the hover
+/// marker's per-frame path; `site_67` alone is 144 of them.
+///
+/// **Provenance comes from `Expansion::from`, never from splitting an id.** That map's own doc says
+/// it exists so *"no consumer parses an id back apart"*.
+#[derive(Resource, Default)]
+pub struct StampPicture {
+    pub rows: Vec<StampRow>,
+}
+
+/// One drawn row, and the stamp it belongs to.
+pub struct StampRow {
+    /// [`Stamped::id`] — an id and never an index, the rule [`MoveDrag`] states: the stamp list can
+    /// shift under a held subject, and an index would then name a different stamp.
+    pub stamp: String,
+    /// The expanded row's own id. Unique across placements *and* stamped rows — `expand` refuses a
+    /// stamp id used twice for exactly this reason — which is what lets [`pick_subject`] rank both
+    /// lists in one competition with a total key.
+    pub row: String,
+    pub at: (f32, f32),
+    pub yaw: f32,
+    pub descriptor: String,
+}
+
+/// **What a click on the map is about** — one competition over both lists.
+///
+/// A loose piece and a stamped row can legally overlap, so "which did I mean" cannot be answered by
+/// asking one list and then the other: whichever is asked first wins regardless of what the author
+/// can see. [`pick_subject`] runs `pick_at`'s rule — smallest footprint covering the probe — across
+/// both, and a stamped row resolves to its **stamp**, which is the whole of "tools act on the
+/// instance, never through it".
+#[derive(Clone, Debug, PartialEq)]
+pub enum Subject {
+    /// An index into `map.placements`.
+    Placement(usize),
+    /// A [`Stamped::id`]. Not an index, for [`StampRow::stamp`]'s reason.
+    Stamp(String),
+}
 
 /// Undo and redo, reachable from `tests/headless.rs`.
 ///
@@ -3087,6 +3303,13 @@ pub fn stamp_here_for_test(
     at: (f32, f32),
 ) {
     stamp_here(project, state, compose, at);
+}
+
+/// FVS-R-14's Delete arm, reachable from `tests/headless.rs` — the same split, and for the same
+/// reason: the mouse path is not drivable headless, and a test that re-implemented the body would
+/// pass while the real one was broken.
+pub fn delete_stamp_for_test(id: &str, project: &mut Project, state: &mut EditorState) {
+    delete_stamp(id, project, state);
 }
 
 /// The tail of a descriptor id, so a generated placement id reads as `crate@7` rather than
@@ -3809,12 +4032,40 @@ fn apply(
         Undo::UnstampedMany { items } => {
             // Ascending by index, so each lands where it came from — `RemovedMany`'s rule.
             let count = items.len();
+            let mut at_indices: Vec<usize> = Vec::with_capacity(count);
             for (at, st) in items {
                 let at = at.min(project.map.stamps.len());
                 project.map.stamps.insert(at, *st);
+                at_indices.push(at);
             }
             state.status.note(format!("put {count} stamp(s) back"));
-            Undo::Stamped { count }
+            // Where they actually landed, not where they were asked to — the clamp above can move
+            // one, and an inverse naming the unclamped index would take a different stamp off.
+            Undo::UnstampAt {
+                indices: at_indices,
+            }
+        }
+        Undo::UnstampAt { indices } => {
+            // Descending, so removing an earlier stamp cannot shift a later one out from under us —
+            // the rule every removal in this file follows. The entities are not despawned here:
+            // `redraw_stamps` rebuilds the whole stamped set from `map.stamps`, so there is one
+            // place that turns a stamp list into pictures rather than two that could disagree.
+            let mut ordered = indices.clone();
+            ordered.sort_unstable();
+            let mut items: Vec<(usize, Box<emerge_core::composition::Stamped>)> =
+                Vec::with_capacity(ordered.len());
+            for i in ordered.iter().rev() {
+                if *i >= project.map.stamps.len() {
+                    continue;
+                }
+                items.push((*i, Box::new(project.map.stamps.remove(*i))));
+            }
+            if items.is_empty() {
+                return None;
+            }
+            items.reverse();
+            state.status.note(format!("took back {} stamp(s)", items.len()));
+            Undo::UnstampedMany { items }
         }
         Undo::Pinned {
             index,
@@ -4865,6 +5116,63 @@ pub fn pick_at(project: &Project, probe: (f32, f32)) -> Option<usize> {
         }
     }
     nearest.map(|(i, _, _)| i)
+}
+
+/// **[`pick_at`]'s rule, run over the loose pieces and the stamped rows together.**
+///
+/// Asking one list and then the other cannot work: a loose piece and a stamped row may legally
+/// overlap — a lamp put down on a stamped worktop — and whichever list is consulted first would then
+/// win every time, regardless of what the author can see. So there is one competition, `pick_at`'s
+/// own: **smallest footprint covering the probe**, because the piece you can see least of is the one
+/// you must have been aiming at.
+///
+/// The total key is `(area, row id)`. That is total *across* the two lists because the two id spaces
+/// are one: `expand` refuses a stamp id that a second stamp reuses, precisely so the rows it names
+/// `<stamp>/<member>` cannot collide with anything — see [`Stamped::id`].
+///
+/// A stamped row resolves to its **stamp**, never to itself. That is the whole of the rule, and it
+/// is why this returns a [`Subject`] rather than an index.
+///
+/// The second pass of `pick_at` — nearest centre within its own reach — deliberately does **not**
+/// extend to stamps. That pass is a grab assist for a piece too small to hit; a stamp is a tile-sized
+/// region and an author pointing near one but not at it is pointing at the floor.
+pub fn pick_subject(project: &Project, picture: &StampPicture, probe: (f32, f32)) -> Option<Subject> {
+    let mut best: Option<(Subject, f32, &str)> = None;
+    for (i, p) in project.map.placements.iter().enumerate() {
+        let Some(d) = project.library.get(&p.descriptor) else {
+            continue;
+        };
+        if !emerge_core::stack::covers(d, p.at, p.yaw, probe) {
+            continue;
+        }
+        let area = emerge_core::descriptor::placed_footprint(d)
+            .map_or(f32::INFINITY, |(w, depth)| w * depth);
+        let better = match &best {
+            None => true,
+            Some((_, best_area, best_id)) => (area, p.id.as_str()) < (*best_area, *best_id),
+        };
+        if better {
+            best = Some((Subject::Placement(i), area, p.id.as_str()));
+        }
+    }
+    for row in &picture.rows {
+        let Some(d) = project.library.get(&row.descriptor) else {
+            continue;
+        };
+        if !emerge_core::stack::covers(d, row.at, row.yaw, probe) {
+            continue;
+        }
+        let area = emerge_core::descriptor::placed_footprint(d)
+            .map_or(f32::INFINITY, |(w, depth)| w * depth);
+        let better = match &best {
+            None => true,
+            Some((_, best_area, best_id)) => (area, row.row.as_str()) < (*best_area, *best_id),
+        };
+        if better {
+            best = Some((Subject::Stamp(row.stamp.clone()), area, row.row.as_str()));
+        }
+    }
+    best.map(|(s, _, _)| s)
 }
 
 /// [`pick_at`], with the probe taken from the cursor — shared by pin, delete and turn, so "the thing

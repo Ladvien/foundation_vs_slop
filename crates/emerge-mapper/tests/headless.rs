@@ -1022,6 +1022,147 @@ mod compose {
         assert_eq!(project.map.stamps[0].of, "break_table");
     }
 
+    /// **A stamp is one thing, and Delete takes the instance — never a member of it.**
+    ///
+    /// FVS-R-14. Stamped rows carry no `Placement` on purpose, which kept every tool off them; what
+    /// was missing was an identity for the instance. This asserts the three halves that identity is
+    /// made of: the parent entity owns the rows' lifetime (`Children` is `linked_spawn` in Bevy
+    /// 0.19), `pick_subject` resolves a row to its stamp rather than to itself, and Delete removes
+    /// the whole instance and inverts cleanly in both directions.
+    ///
+    /// The composition has **two** members deliberately: with one, "removed the instance" and
+    /// "removed the row" are the same observation and the test would pass either way.
+    #[test]
+    fn a_stamp_is_one_thing_and_delete_takes_the_instance() {
+        use emerge_mapper::editor::{Subject, pick_subject};
+
+        let root = Fixture::new("instance")
+            .descriptor("table", "alpha")
+            .descriptor("chair", "alpha")
+            .composition(
+                "break_table",
+                &[("table", "table", (0.0, 0.0)), ("chair_north", "chair", (0.0, -1.0))],
+            )
+            .build("m");
+        let mut app = emerge_mapper::harness::build_headless(&root, "m", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        for _ in 0..3 {
+            app.update();
+        }
+
+        {
+            let world = app.world_mut();
+            world.resource_scope(|world, mut project: bevy::prelude::Mut<Project>| {
+                let mut state = world.resource_mut::<emerge_mapper::editor::EditorState>();
+                let mut compose = ComposeState {
+                    armed: Some("break_table".to_owned()),
+                    ..Default::default()
+                };
+                emerge_mapper::editor::stamp_here_for_test(
+                    &mut project,
+                    &mut state,
+                    &mut compose,
+                    (2.0, 2.0),
+                );
+            });
+        }
+        for _ in 0..3 {
+            app.update();
+        }
+
+        let stamp_id = {
+            let project = app.world().resource::<Project>();
+            assert_eq!(project.map.stamps.len(), 1, "no stamp landed");
+            project.map.stamps[0].id.clone()
+        };
+
+        // **One parent, and it owns the rows.** Counted rather than assumed: a parent per ROW would
+        // also satisfy "a parent exists", and it is the thing that would silently make Delete take
+        // one member.
+        let instances: Vec<(bevy::prelude::Entity, usize)> = {
+            let mut q = app
+                .world_mut()
+                .query::<(
+                    bevy::prelude::Entity,
+                    &emerge_mapper::editor::StampInstance,
+                    &bevy::prelude::Children,
+                )>();
+            q.iter(app.world())
+                .map(|(e, inst, kids)| {
+                    assert_eq!(inst.id, stamp_id, "an instance naming a stamp the map does not have");
+                    (e, kids.len())
+                })
+                .collect()
+        };
+        assert_eq!(instances.len(), 1, "one stamp must draw as one instance");
+        assert_eq!(
+            instances[0].1, 2,
+            "the instance must own both expanded rows, or Delete cannot be about the whole of it"
+        );
+
+        // **A row resolves to its stamp.** Probed at the chair, one metre north of the anchor — a
+        // member, not the stamp's own centre, because reaching through the instance is exactly the
+        // failure this rule exists to prevent.
+        {
+            let project = app.world().resource::<Project>();
+            let picture = app.world().resource::<emerge_mapper::editor::StampPicture>();
+            assert_eq!(picture.rows.len(), 2, "the picture index must describe every drawn row");
+            assert_eq!(
+                pick_subject(project, picture, (2.0, 1.0)),
+                Some(Subject::Stamp(stamp_id.clone())),
+                "a click on a member is a click on the instance"
+            );
+        }
+
+        // Delete, through the call the click makes.
+        {
+            let world = app.world_mut();
+            world.resource_scope(|world, mut project: bevy::prelude::Mut<Project>| {
+                let mut state = world.resource_mut::<emerge_mapper::editor::EditorState>();
+                emerge_mapper::editor::delete_stamp_for_test(&stamp_id, &mut project, &mut state);
+            });
+        }
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(
+            app.world().resource::<Project>().map.stamps.is_empty(),
+            "Delete on an instance must take the stamp off the map"
+        );
+        let left = {
+            let mut q = app
+                .world_mut()
+                .query::<&emerge_mapper::editor::StampInstance>();
+            q.iter(app.world()).count()
+        };
+        assert_eq!(left, 0, "the instance must be gone with its stamp");
+        assert!(
+            app.world()
+                .resource::<emerge_mapper::editor::StampPicture>()
+                .rows
+                .is_empty(),
+            "the picture index must describe the entities that exist, and there are none"
+        );
+
+        // **Closed under inversion, both ways.** `UnstampedMany` used to invert to a tail drain,
+        // which is right only when the stamps removed were the tail — so a redo after a mid-list
+        // removal took a different stamp off. One stamp cannot catch that; what this pins is that
+        // the pair round-trips at all.
+        emerge_mapper::editor::undo_for_test(app.world_mut());
+        app.update();
+        {
+            let project = app.world().resource::<Project>();
+            assert_eq!(project.map.stamps.len(), 1, "undo did not put the stamp back");
+            assert_eq!(project.map.stamps[0].id, stamp_id);
+        }
+        emerge_mapper::editor::redo_for_test(app.world_mut());
+        app.update();
+        assert!(
+            app.world().resource::<Project>().map.stamps.is_empty(),
+            "redo must take the same stamp off again"
+        );
+    }
+
     /// **The focal group stands up with its neighbours either side** — the carousel, asked of a
     /// running app rather than of the layout function.
     ///
