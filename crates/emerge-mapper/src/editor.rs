@@ -3115,14 +3115,10 @@ fn keys(
     // **The Tiles tab's state, as one param.** `EditTile` sends a piece over to be defined. A Bevy
     // system takes at most sixteen parameters and this one is full, so they travel as a tuple, which
     // counts as one.
-    mut tiles: (
-        ResMut<crate::tiles::Mode>,
-        ResMut<crate::tiles::ImportState>,
-        ResMut<crate::tiles::DemoteArm>,
-    ),
+    mut tiles: (ResMut<crate::tiles::Mode>, ResMut<crate::tiles::ImportState>),
 ) {
 
-    let (mode, import, demote_arm) = &mut tiles;
+    let (mode, import) = &mut tiles;
     let (move_drag, clone_drag, target) = &mut tools;
     // One clock for every key that repeats while held — see `keys::repeating`.
     let dt = time.delta_secs();

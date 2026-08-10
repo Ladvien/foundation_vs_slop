@@ -3549,11 +3549,8 @@ pub(crate) fn demote_blockers(id: &str, project: &Project) -> Result<String, Str
 
 /// Which library entry `Shift+Delete` has armed for demotion — the first press's answer, waiting
 /// for the second.
-///
-/// `pub(crate)` because the Map arms it: `Cmd`+remove there clears the placements and hands the
-/// piece over already armed, so the confirming press is the one this tab was always going to ask for.
 #[derive(Resource, Default)]
-pub(crate) struct DemoteArm(pub(crate) Option<String>);
+struct DemoteArm(Option<String>);
 
 /// **Send a library entry back to the candidate list, stripped.**
 ///
