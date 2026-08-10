@@ -3139,7 +3139,15 @@ fn keys(
     // **Map to Tiles, carrying the piece.** Before the branches below, because they consume the
     // window and camera singles.
     if keys::just_pressed(&keyboard, live.0, Action::EditTile) {
-        send_to_tiles(*pointer, camera, &project, &mut state, mode, import);
+        let on_ui = hovered_ui.iter().any(|h| h.0);
+        // The camera-dependent half stays here, and only runs when it is the half being asked —
+        // `nearest_placement` needs a viewport to answer, which is exactly what a headless test
+        // does not have and why the rule below is a separate, pure function.
+        let under = (!on_ui)
+            .then(|| nearest_placement(*pointer, camera, &project))
+            .flatten();
+        let subject = edit_subject(on_ui, &project, &state, under);
+        send_to_tiles(subject, &project, &mut state, mode, import);
         return;
     }
 
@@ -4566,7 +4574,38 @@ fn hide_carried(
     }
 }
 
-/// **Send the piece under the cursor to the Tiles tab**, and go there.
+/// **Which piece `Cmd`+remove is about — the pointer decides, and that is the whole rule.**
+///
+/// Over the map it is the piece under the cursor. Over the interface the author is pointing at the
+/// PLACE list, so it is the **armed brush** — the row that list draws as selected, and the subject
+/// every other verb on the tab already acts on. One question, asked of where the cursor is; there is
+/// no third case and no falling from one to the other, because a verb that answers about a piece the
+/// author was not pointing at is worse than one that says it found nothing.
+///
+/// Pure, and separate from the system, for the reason `compose::pick_along` is: the map half needs a
+/// viewport to answer and a headless test has none, so a test written against the whole system can
+/// only ever exercise one branch — and would pass while asserting nothing if that branch silently
+/// stopped resolving. `under` is `nearest_placement`'s answer, already taken.
+pub fn edit_subject(
+    on_ui: bool,
+    project: &Project,
+    state: &EditorState,
+    under: Option<usize>,
+) -> Result<String, String> {
+    if on_ui {
+        return state
+            .brush
+            .and_then(|ix| project.library.descriptors.get(ix))
+            .map(|d| d.id.clone())
+            .ok_or_else(|| "nothing is selected in PLACE".to_owned());
+    }
+    under
+        .and_then(|ix| project.map.placements.get(ix))
+        .map(|p| p.descriptor.clone())
+        .ok_or_else(|| "nothing here to edit".to_owned())
+}
+
+/// **Send a piece to the Tiles tab to be defined**, and go there.
 ///
 /// The gap this closes: a map is where you *notice* a piece is wrong — too big, floating, facing the
 /// wrong way — and until now the only route from noticing to fixing was to read its id off the status
@@ -4575,20 +4614,25 @@ fn hide_carried(
 /// It sends the **descriptor**, not the placement: what the Tiles tab edits is the definition, so
 /// every copy on the map moves with the edit. That is the point of editing it there rather than
 /// patching one placement.
+///
+/// **Which piece is the caller's question, not this function's.** It was `nearest_placement` inlined
+/// here, which quietly made the verb mean "a piece standing on the map" — so a piece the author had
+/// selected in the PLACE list, and was looking straight at, answered *"nothing here to edit"*. The
+/// subject arrives already resolved, with the refusal the resolution earned, so the two subjects
+/// share one door and one set of checks rather than growing a second copy of them.
 fn send_to_tiles(
-    pointer: crate::view::Pointer,
-    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    subject: Result<String, String>,
     project: &Project,
     state: &mut EditorState,
     mode: &mut crate::tiles::Mode,
     import: &mut crate::tiles::ImportState,
 ) {
-    let Some(index) = nearest_placement(pointer, camera, project) else {
-        state.status.note("nothing here to edit".to_owned());
-        return;
-    };
-    let Some(id) = project.map.placements.get(index).map(|p| p.descriptor.clone()) else {
-        return;
+    let id = match subject {
+        Ok(id) => id,
+        Err(why) => {
+            state.status.note(why);
+            return;
+        }
     };
     // A placement naming a descriptor the library does not have is a map/library mismatch, and
     // switching tabs to show an empty pane would report it as nothing happening.
@@ -4600,7 +4644,10 @@ fn send_to_tiles(
     // whole of "focus this piece" — the detail pane, the preview, the lattice and the fields all read
     // through that one accessor.
     import.selected_library_id = Some(id.clone());
-    import.status.note(format!("editing `{id}`, sent from the map"));
+    // "from the map" was true of the only subject there used to be, and is a lie about the other
+    // one. The tab an author lands on says what they are editing; where it came from is the thing
+    // they just did.
+    import.status.note(format!("editing `{id}`"));
     *mode = crate::tiles::Mode::Tiles;
     state.status.note(format!("`{id}` — opened on the tiles tab"));
 }

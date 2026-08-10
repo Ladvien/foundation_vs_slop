@@ -711,6 +711,102 @@ mod stepped {
         );
     }
 
+    /// **Enter on a tile already in the library updates it; it does not refuse.**
+    ///
+    /// Reported live: *"I make changes to a tile on the Tiles tab, but when I go to save it it says
+    /// there's already that item."* Every field on that pane writes through `persist` as it is
+    /// edited, so the author had already saved — and the save key answered *"already in the library
+    /// — pick a candidate below to add one"*, which reads as a refusal of the work they just did.
+    ///
+    /// Driven through the key MESSAGE rather than a hand-set `ButtonInput`, because the input plugin
+    /// clears `just_pressed` at the top of every frame.
+    #[test]
+    fn enter_on_a_library_tile_updates_it_rather_than_refusing() {
+        let root = Fixture::new("update").descriptor("wall", "alpha").build("m");
+        let mut app = harness::build_headless(&root, "m", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        app.update();
+
+        let tap = |app: &mut App, key: KeyCode, logical: bevy::input::keyboard::Key| {
+            for state in [bevy::input::ButtonState::Pressed, bevy::input::ButtonState::Released] {
+                app.world_mut().write_message(bevy::input::keyboard::KeyboardInput {
+                    key_code: key,
+                    logical_key: logical.clone(),
+                    state,
+                    text: None,
+                    repeat: false,
+                    window: Entity::PLACEHOLDER,
+                });
+                app.update();
+            }
+        };
+        tap(&mut app, KeyCode::Tab, bevy::input::keyboard::Key::Tab);
+        for _ in 0..3 {
+            app.update();
+        }
+
+        // Focus the library entry — exactly what `on_library_click` and the Map's `Cmd`+remove
+        // both write, and the one discriminant `ImportState::editing` follows.
+        {
+            let mut state = app
+                .world_mut()
+                .resource_mut::<emerge_mapper::tiles::ImportState>();
+            state.selected_library_id = Some("wall".to_owned());
+        }
+        for _ in 0..3 {
+            app.update();
+        }
+
+        // **Counted, not "is the log empty".** Entering the tab with nothing focused raises its own
+        // problem, so an emptiness check here would be reading somebody else's message and passing
+        // or failing for the wrong reason.
+        let before = app
+            .world()
+            .get_resource::<emerge_mapper::tiles::ImportState>()
+            .map(|s| s.status.problems().len())
+            .unwrap_or_else(|| panic!("no import state"));
+
+        tap(&mut app, KeyCode::Enter, bevy::input::keyboard::Key::Enter);
+        for _ in 0..3 {
+            app.update();
+        }
+
+        let state = app
+            .world()
+            .get_resource::<emerge_mapper::tiles::ImportState>()
+            .unwrap_or_else(|| panic!("no import state"));
+        assert_eq!(
+            state.status.problems().len(),
+            before,
+            "committing an unchanged library tile must raise nothing new: {}",
+            state.status.problem_text()
+        );
+        let said = state.status.note_text();
+        assert!(
+            !said.contains("pick a candidate"),
+            "the save key must not send an author who edited a tile off to add a different one: {said}"
+        );
+        assert!(
+            said.contains("up to date"),
+            "Enter has to report what it did to the focused tile, and it said: {said}"
+        );
+
+        // Nothing was replaced or dropped on the way through the write.
+        let project = app
+            .world()
+            .get_resource::<emerge_mapper::project::Project>()
+            .unwrap_or_else(|| panic!("no project"));
+        assert!(
+            project.library.get("wall").is_some(),
+            "an update must leave the tile in the library"
+        );
+        assert_eq!(
+            project.measured.descriptors.len(),
+            1,
+            "an update writes the entry that is there — it never adds a second"
+        );
+    }
+
     // **The fold rule is unit-tested beside the code now** (`tiles::pack_fold_tests`), over a
     // synthetic project. It used to be here, asserting that a pack the *library* imports from stays
     // open — the rule until the question moved one step — and it could only check that by reading
@@ -1147,6 +1243,90 @@ fn the_open_name_box_answers_the_over_ui_question() {
         panel_has_hovered,
         "the visible dialog carries no `Hovered`, so every over-UI test reads it as open world and \
          a scroll over it zooms the map behind it"
+    );
+}
+
+/// **`Cmd`+remove over the interface sends the PLACE selection**, not "nothing here to edit".
+///
+/// Reported live: *"I want to send back an item that is selected in the Place scroll area."* The
+/// verb resolved its subject with `nearest_placement`, so it only ever reached a piece standing on
+/// the map; over the list — where the author's cursor is, on the row they just clicked — it refused.
+///
+/// The armed row is deliberately **not** the descriptor the map places, so an assertion cannot be
+/// satisfied by the other branch answering first. Both branches are driven, including the two
+/// refusals, because a rule with an untested arm is a rule with an arm nobody has read.
+#[test]
+fn cmd_remove_over_the_interface_sends_the_place_selection() {
+    use emerge_mapper::editor::edit_subject;
+
+    let root = Fixture::new("sendback")
+        .descriptor("floor", "alpha")
+        .descriptor("wall", "alpha")
+        .place("floor", (0.0, 0.0))
+        .build("m");
+    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let wall = {
+        let project = app
+            .world()
+            .get_resource::<emerge_mapper::project::Project>()
+            .unwrap_or_else(|| panic!("no project"));
+        assert_eq!(
+            project.map.placements.first().map(|p| p.descriptor.as_str()),
+            Some("floor"),
+            "the map must place the OTHER piece, or this proves nothing"
+        );
+        project
+            .library
+            .descriptors
+            .iter()
+            .position(|d| d.id == "wall")
+            .unwrap_or_else(|| panic!("the fixture wrote `wall`"))
+    };
+
+    // Both resources are read live rather than copied out, so what the rule is asked about is what
+    // the editor actually holds — and neither one outlives a call, which is what lets the arming
+    // between them borrow the world back.
+    let arm = |app: &mut App, brush: Option<usize>| {
+        app.world_mut()
+            .resource_mut::<emerge_mapper::editor::EditorState>()
+            .brush = brush;
+    };
+    let ask = |app: &App, on_ui: bool, under: Option<usize>| {
+        let project = app
+            .world()
+            .get_resource::<emerge_mapper::project::Project>()
+            .unwrap_or_else(|| panic!("no project"));
+        let state = app
+            .world()
+            .get_resource::<emerge_mapper::editor::EditorState>()
+            .unwrap_or_else(|| panic!("no editor state"));
+        edit_subject(on_ui, project, state, under)
+    };
+
+    arm(&mut app, Some(wall));
+    // Over the interface: the armed row, whatever the map is showing.
+    assert_eq!(
+        ask(&app, true, Some(0)),
+        Ok("wall".to_owned()),
+        "the armed PLACE row is the subject when the pointer is on the interface"
+    );
+    // Over the map: the piece under the cursor, and the armed row is not consulted.
+    assert_eq!(
+        ask(&app, false, Some(0)),
+        Ok("floor".to_owned()),
+        "over the map the cursor decides, not the palette"
+    );
+    // Neither branch falls through to the other when its own subject is missing.
+    assert_eq!(ask(&app, false, None), Err("nothing here to edit".to_owned()));
+    arm(&mut app, None);
+    assert_eq!(
+        ask(&app, true, Some(0)),
+        Err("nothing is selected in PLACE".to_owned()),
+        "an empty palette selection must refuse, never quietly take the piece under the cursor"
     );
 }
 

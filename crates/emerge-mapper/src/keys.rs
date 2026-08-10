@@ -308,7 +308,11 @@ pub const BINDINGS: &[Binding] = &[
     // they reached for was the remove key with the command modifier — "get this out of my way and
     // let me fix it". The bare remove key is unbound on the Map, so this pairs with nothing and
     // collides with nothing.
-    b(Action::EditTile, REMOVE_KEY, true, Context::Global, REMOVE_NAME, "send the piece under the cursor to be defined"),
+    // **The pointer picks the subject.** It reached only pieces standing on the map, so a piece
+    // selected in PLACE — which the author is looking straight at — answered "nothing here to
+    // edit". Over the interface the subject is that selection; over the map it is what is under
+    // the cursor. One question, asked of where the cursor is.
+    b(Action::EditTile, REMOVE_KEY, true, Context::Global, REMOVE_NAME, "send the piece under the cursor, or the PLACE selection, to be defined"),
     // **Held, not toggled**, and read with `keys::pressed`. The list is a thing you glance at with a
     // thumb down, not a mode you enter and have to leave — and a modal you can forget you opened is a
     // modal that eats the next keystroke.
@@ -447,7 +451,10 @@ pub const BINDINGS: &[Binding] = &[
     // subgrid below has its own `layer y` picker for the lattice slice. One panel said "layer" twice
     // and meant two different things.
     b(Action::CycleMount, KeyCode::KeyM, false, Context::Tiles, "M", "mount"),
-    b(Action::Accept, KeyCode::Enter, false, Context::Tiles, "Enter", "add to library"),
+    // **One verb, two states of a tile.** It read "add to library", which named half of what it
+    // does and made the other half look like a refusal: Enter on a piece already in the library
+    // answered "already in the library", to an author who had just edited it.
+    b(Action::Accept, KeyCode::Enter, false, Context::Tiles, "Enter", "add / update this tile"),
     b(Action::Rescan, KeyCode::KeyR, false, Context::Tiles, "R", "rescan"),
     // The Cmd+Z shape again: one key, the shifted form for the reversible-but-destructive sibling.
     // Shift+Delete DEMOTES — back to the candidates, stripped — where bare Delete removes outright.

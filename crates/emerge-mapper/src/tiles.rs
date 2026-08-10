@@ -3315,7 +3315,7 @@ fn suggestion_keys(
     state.status.say(said);
 }
 
-/// **Accept a candidate into the library.**
+/// **Commit the focused tile** — add it if it is a candidate, update it if it is already a tile.
 ///
 /// Validated first, and refused rather than repaired: a descriptor that fails the vocabulary is one
 /// an author has not finished, and writing a broken entry would make the next `Library::parse` fail
@@ -3324,6 +3324,25 @@ fn suggestion_keys(
 /// The library is written immediately. An importer that batches its additions until some later save
 /// is one where a crash loses work an author believes they did — and the file is generated from the
 /// manifests today, so an unwritten addition would simply be regenerated away.
+///
+/// # Enter on a library entry is an update, and it used to be a refusal
+///
+/// It answered *"`{id}` is already in the library — pick a candidate below to add one"*, which is a
+/// true sentence that lands as a false one. Every field on this pane writes through [`persist`] the
+/// moment it changes, so an author who edits a tile and then reaches for save has *already* saved —
+/// and was being told, at the exact moment they asked, that their piece was not going in. The verb
+/// they pressed is "commit this tile"; the two destinations are the two states a tile can be in, not
+/// two different verbs, so this runs the same door again and reports what it did.
+///
+/// Re-running it is not a no-op dressed as one. [`commit_measured`] re-applies the policy, re-checks
+/// the lattices against the face bands and re-resolves the masks *before* it writes, so Enter is
+/// where an author finds out that the tile they have been editing still holds together — the one
+/// question the incremental writes answer piecemeal and never as a whole.
+///
+/// **A candidate whose id collides is still refused**, and that asymmetry is the point. Writing a
+/// freshly-measured candidate over a library entry is a *replace*: the entry's tags, note, mount and
+/// lattice are not in the candidate, so the write would take them out. The route to changing a tile
+/// is to edit the tile.
 fn commit_candidate(
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<crate::keys::Live>,
@@ -3334,7 +3353,20 @@ fn commit_candidate(
         return;
     }
     if let Some(id) = state.selected_library_id.clone() {
-        state.status.note(format!("`{id}` is already in the library — pick a candidate below to add one"));
+        match write_library(&mut project) {
+            Ok(path) => {
+                state.status.note(format!(
+                    "`{id}` is up to date — every edit on this tab is written as you make it"
+                ));
+                info!("re-wrote `{id}` to {}", path.display());
+            }
+            Err(e) => {
+                // The edits are in memory and the file is not, which is the one case where an
+                // author has to be told to fix something before they leave the tab.
+                state.status.problem(format!("`{id}` NOT WRITTEN: {e}"));
+                error!("{e}");
+            }
+        }
         return;
     }
     let Some(candidate) = state.current().cloned() else {
@@ -3350,7 +3382,16 @@ fn commit_candidate(
         return;
     }
     if project.library.get(&descriptor.id).is_some() {
-        state.status.note(format!("`{}` is already in the library — rename it (I)", descriptor.id));
+        // **Two routes, and they are not interchangeable.** Editing the tile above updates it;
+        // accepting this candidate over it would replace it, and a candidate is what a mesh scan
+        // can see — no tags, no note, no mount, no lattice — so the replace silently takes those
+        // out. The refusal names the one that keeps them.
+        state.status.note(format!(
+            "`{}` is already in the library — select it above to edit that tile, or rename this \
+             candidate (I). Accepting it here would replace the tile and take its tags and lattice \
+             with it.",
+            descriptor.id
+        ));
         return;
     }
 
@@ -3492,10 +3533,9 @@ fn take_out_of_library(id: &str, project: &mut Project) -> Result<std::path::Pat
 /// **What would stop `id` being sent back to the candidates**, and the mesh it would come back as.
 ///
 /// Extracted because two verbs now ask it. The Tiles tab asks before demoting; the **Map** asks
-/// before it deletes anything, and that ordering is the whole reason this is a function: the Map's
-/// `Cmd`+remove takes every placement of a piece out and then hands you to this tab armed, so
-/// discovering a blocker *after* the placements were gone would be a destructive half-act with
-/// nothing to show for it.
+/// before it deletes anything, and that ordering is the whole reason this is a function: a blocker
+/// discovered *after* placements were gone would be a destructive half-act with nothing to show
+/// for it.
 ///
 /// It deliberately does **not** check the placement count. That is the one precondition the Map verb
 /// exists to clear, and `take_out_of_library` still enforces it at the door for every caller.
