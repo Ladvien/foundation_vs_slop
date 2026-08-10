@@ -648,9 +648,17 @@ pub fn binding(action: Action) -> &'static Binding {
         .unwrap_or(&BINDINGS[0])
 }
 
-/// The chord for an action, for putting next to the control that does it.
-pub fn chord(action: Action) -> &'static str {
-    binding(action).chord
+/// **The chord for an action, rendered** — for putting next to the control that does it.
+///
+/// Goes through [`chord_text`], which is the one place a chord becomes text. It used to return the
+/// bare `chord` field, which **silently drops the modifier**: every message about `Cmd+2` came out
+/// saying "2 edits it in place", and an author reading that reasonably concluded the tool was
+/// broken. Two live callers were wrong that way and neither could be spotted by reading them.
+///
+/// `rows()` has the same note for the same reason — it pushed `b.chord` and collapsed `Cmd+Z` and
+/// `Shift+Cmd+Z` into "Cmd+Z, Z", naming a key that does not do that. One renderer, no exceptions.
+pub fn chord(action: Action) -> String {
+    chord_text(binding(action))
 }
 
 /// Everything live in one context, in declaration order — never sorted, never reordered by use.
@@ -1060,6 +1068,23 @@ mod tests {
                  starts being a reference card (docs/ui.md §3.5, Zheng et al. 2018)"
             );
         }
+    }
+
+    /// **A rendered chord carries its modifier**, or a message names a key that does something else.
+    ///
+    /// `chord` returned the bare field, so `Cmd+2` printed as "2" — and the refusal that told an
+    /// author to press it read as nonsense. Asserted against a binding that HAS a modifier, because
+    /// that is the only case the old version got wrong.
+    #[test]
+    fn a_rendered_chord_includes_the_modifier() {
+        let send = binding(Action::EditTile);
+        assert!(send.needs_mod, "this test is about a modified binding");
+        let text = chord(Action::EditTile);
+        assert!(
+            text.contains(MOD_NAME),
+            "a chord an author is told to press has to name the modifier: got `{text}`"
+        );
+        assert!(text.ends_with(send.chord), "and still end in the key itself: got `{text}`");
     }
 
     /// Four keys, one idea. The displayed list collapses them rather than repeating the word.

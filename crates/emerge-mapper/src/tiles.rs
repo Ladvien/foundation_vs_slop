@@ -3467,11 +3467,18 @@ fn take_out_of_library(id: &str, project: &mut Project) -> Result<std::path::Pat
         .map(|c| c.id.as_str())
         .collect();
     if !groups.is_empty() {
+        // **Name the verb that DOES work.** This used to end "edit the group first", which is true
+        // and unhelpful: an author reading it while pointing at `site/floor` — held by all four site
+        // tiles — sees a refusal with no next step and reports the feature as broken. Twice. Sending
+        // a piece back STRIPS it; editing it does not, and editing is almost always what was wanted.
         return Err(format!(
-            "`{id}` is a member of {}: {}. Removing it would leave `compositions.ron` naming a \
-             descriptor nothing defines, and the project would stop opening — edit the group first.",
-            if groups.len() == 1 { "the group" } else { "the groups" },
-            groups.join(", ")
+            "`{id}` is a member of {}: {}. It cannot be sent back while they hold it — the project \
+             would stop opening with `compositions.ron` naming a descriptor nothing defines. \
+             {} edits it in place without removing it; sending it back means redefining {} first.",
+            if groups.len() == 1 { "the composition" } else { "the compositions" },
+            groups.join(", "),
+            crate::keys::chord(crate::keys::Action::EditTile),
+            if groups.len() == 1 { "that composition" } else { "those compositions" },
         ));
     }
     let Some(at) = project.measured.descriptors.iter().position(|d| d.id == id) else {
@@ -3523,11 +3530,18 @@ pub(crate) fn demote_blockers(id: &str, project: &Project) -> Result<String, Str
         .map(|c| c.id.as_str())
         .collect();
     if !groups.is_empty() {
+        // **Name the verb that DOES work.** This used to end "edit the group first", which is true
+        // and unhelpful: an author reading it while pointing at `site/floor` — held by all four site
+        // tiles — sees a refusal with no next step and reports the feature as broken. Twice. Sending
+        // a piece back STRIPS it; editing it does not, and editing is almost always what was wanted.
         return Err(format!(
-            "`{id}` is a member of {}: {}. Removing it would leave `compositions.ron` naming a \
-             descriptor nothing defines, and the project would stop opening — edit the group first.",
-            if groups.len() == 1 { "the group" } else { "the groups" },
-            groups.join(", ")
+            "`{id}` is a member of {}: {}. It cannot be sent back while they hold it — the project \
+             would stop opening with `compositions.ron` naming a descriptor nothing defines. \
+             {} edits it in place without removing it; sending it back means redefining {} first.",
+            if groups.len() == 1 { "the composition" } else { "the compositions" },
+            groups.join(", "),
+            crate::keys::chord(crate::keys::Action::EditTile),
+            if groups.len() == 1 { "that composition" } else { "those compositions" },
         ));
     }
     Ok(mesh)
