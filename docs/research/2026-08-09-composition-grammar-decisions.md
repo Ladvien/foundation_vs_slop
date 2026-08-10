@@ -220,6 +220,106 @@ of content."*
 
 Committed as `2b` in the execution plan: **after the tile-gap census, before the first solve is judged.**
 
+### 4.5 Executed 2026-08-10 — step 3 was unexecutable, and what replaced it
+
+**Steps 1 and 2 stand. Step 3 is withdrawn.** It is recorded here rather than edited away, because it
+failed in the same way §4.3's two rejects failed and that is now three times.
+
+**Why it cannot be executed.** Step 3 wants the max-bin share of a uniform distribution over *"the bins
+the alphabet can actually reach"* — and §4.3 has already established that this solver cannot be asked
+whether it can reach a bin. `collapse_grid` takes a per-cell domain mask; enclosure is a global property
+of a finished grid. So the only available estimator for the denominator is **the bins the run itself
+occupied**, and `X = (1 / reachable_bins) × multiple` then reads its threshold off the same histogram it
+judges:
+
+| bins occupied | X at ×3 | largest possible max-bin share | fires? |
+|---|---|---|---|
+| 1 | 300% | 100% | **never** |
+| 2 | 150% | 100% | **never** |
+| 3 | 100% | < 100% | **never** |
+| 4 | 75% | 100% | only above 75% |
+| 9 | 33% | 100% | above 33% |
+
+A generator putting **every solve in one bin passes.** That is precisely the single-hot-spot regime the
+row exists to catch, and the rule then grows *stricter* the more diverse the generator is — wrong on
+both ends. It also reintroduces **bins occupied**, the statistic §4.3 rejected as "Rejected 2", as the
+term that sets the threshold, bringing back both of its faults (blind to concentration; monotone in *n*).
+
+And it does the one thing §4.4 deferred the number to avoid: a poverty-limited alphabet occupies few
+bins → small denominator → large X → **passes**. Counting the tile gap satisfied §4.4's precondition in
+letter while leaving untouched the problem that precondition names. Knowing the alphabet is poor does
+not tell you what X should be.
+
+**A number computed from the output is not pre-registered, whatever the commit order.** The history
+would show the *formula* preceded the run; it would not show that the *number* did.
+
+#### The replacement — two rows, both functions of the fixed grid alone
+
+Neither needs a reachable-bin term, so both were committed before the first solve. §4.3 named both
+statistics rather than choosing between them, and the table below is why: each is blind where the other
+sees.
+
+**Row 4a — normalised Shannon entropy, `H / ln 36 ≥ 0.25`.** §4.3 already sanctioned this as *"the
+acceptable alternative [which] degrades more gracefully at a bin boundary."* The floor is not a round
+number. Because `K = 36 = 6²`, `ln 6 / ln 36 = ½` **exactly**, so the two-bin and three-bin uniform
+values sum to ½ and are symmetric about ¼:
+
+```
+ln2/ln36 = 0.193428      0.250000 − 0.193428 = 0.056572
+ln3/ln36 = 0.306572      0.306572 − 0.250000 = 0.056572
+```
+
+Equivalently, `H/ln K = 0.25` is an effective support of `36^0.25 = √6`, the **geometric mean of 2 and
+3**. A floor equidistant between the two nearest canonical cases is the one that preserves the property
+the statistic was chosen for; anything nearer either is settled by float precision and where bin edges
+happen to land.
+
+**Row 4b — max-bin share, `≤ 50%`: no single bin holds a majority of all solves.** §4.3 committed the
+*form* — *"any single bin holds more than X% of solves"* — and deferred only X, and only because X had
+been tied to a uniform-over-reachable baseline. A majority needs no baseline at all: dimensionless,
+sample-size invariant, independent of K, derivable with zero run data.
+
+**Both, because entropy is forgiving of a hot spot with a broad tail:**
+
+| distribution | H/ln36 | max share | 4a @ 0.25 | 4b @ 50% |
+|---|---|---|---|---|
+| 90% one bin + 20 singles (§4.3's Rejected-2 case) | 0.174 | 0.90 | **FIRES** | **FIRES** |
+| 2 bins, 50/50 | 0.193 | 0.50 | **FIRES** | passes |
+| 3 bins, 80/10/10 | 0.178 | 0.80 | **FIRES** | **FIRES** |
+| 70% one bin + 10 at 3% | 0.363 | 0.70 | passes | **FIRES** |
+| 4 bins uniform | 0.387 | 0.25 | passes | passes |
+
+70% of every solve in one bin is §4.3's named target walking through row 4a alone.
+
+#### The rest of the method, pre-registered in the same commit
+
+Each of these otherwise gets decided by whatever the code happens to do, after the fact.
+
+- **Region:** 12 × 12 cells, matching `site_67`'s slab.
+- **Doubling sweep over *disjoint* seed blocks.** Nested seeds (`1..n` ⊂ `1..2n`) make
+  `TV(Hₙ, H₂ₙ) = ½ · TV(Hₙ, H′)` **exactly**, so a nested "TV ≤ 0.05" silently means 0.10 between
+  independent samples. Compare block A (`1..n`) against block B (`n+1..2n`); stop at **TV ≤ 0.05**;
+  report A ∪ B. Sizes 64, 128, 256, 512, 1024 (cap). The stopping rule sets the run length, not the cap
+  — Smith & Whitehead run **10,000 levels** for every graph in the paper this method comes from, and a
+  WFC solve over a 12 × 12 grid is far more expensive than a Launchpad level, so the cap is a budget and
+  is reported as one if it is hit.
+- **Zero enclosed regions** makes opening density undefined, and wall-confetti is the *expected* output
+  given `Empty` at 36%. Such solves are **excluded from the opening-density median and from the
+  histogram, and counted and reported as `no_enclosed_region`** — not mapped to 0, because 0 already
+  means "enclosed regions with no doors" and conflating the two would make row 2 unreadable. The
+  histogram's denominator is therefore solves with ≥ 1 enclosed region, and it is stated.
+- **The `[0, 4]` clamp on opening density is reported separately.** An unbounded tail folded into the top
+  bin inflates max-bin share by construction; row 4b must not fire on a binning artifact.
+- **Failed solves are excluded and counted.** Note the **survivorship bias**: failure correlates with
+  over-constrained configurations, so the surviving histogram tilts toward the easy region. §4.2's 20%
+  row only partly covers it.
+- **Row 3 is a gate, not a peer.** §4.2 says *"add tiles before judging the approach."* If more than 20%
+  of solves fail, rows 1, 2, 4a and 4b are **not interpretable**, and the report must say so rather than
+  printing co-equal verdicts.
+- **§4.1's flag on enclosure carries forward unresolved.** The alphabet is still not fixed, so enclosure
+  remains at risk of being *"highly correlated to an input parameter"* and therefore *"confirmatory."*
+  Opening density stays the safer of the two.
+
 ---
 
 ## 5. Withdrawn from the four-move recommendation

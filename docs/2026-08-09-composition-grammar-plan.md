@@ -102,8 +102,9 @@ below:**
 |---|---|
 | median enclosure **< 0.15** | the solver makes wall confetti, not rooms |
 | median enclosure **> 0.95** with opening density **< 0.5** | it makes sealed boxes nobody can enter |
-| **any single bin holds more than X% of solves** | one hot spot — uniform tiling or checkerboard, the two degenerate outcomes a small alphabet actually produces. **X is set by the rule below, not chosen here** |
-| **> 20%** of solves return the `no arrangement satisfies what you have pinned` error | the alphabet is over-constrained; add tiles before judging the approach |
+| normalised entropy **`H / ln 36 < 0.25`** | one hot spot — uniform tiling or checkerboard, the two degenerate outcomes a small alphabet actually produces |
+| **any single bin holds more than 50% of solves** | the same failure seen the other way; entropy alone passes a 70% hot spot with a broad tail |
+| **> 20%** of solves return the `no arrangement satisfies what you have pinned` error | the alphabet is over-constrained; add tiles before judging the approach. **This row is a gate:** if it fires, the others are not interpretable |
 
 The last row is the one the closed §6 buys us: a failed solve is *named and loud*, so it is countable
 rather than being mistaken for a mediocre success.
