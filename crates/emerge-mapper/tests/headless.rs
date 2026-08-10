@@ -983,6 +983,47 @@ mod compose {
             .collect();
         assert_eq!(ids, after, "the sheet was rebuilt with nothing having changed");
 
+        // **The strip is not rewritten when nothing changed.** `ResMut` marks a resource changed on
+        // any deref_mut, and `tiles::stage_camera` re-frames on that edge — so an unconditional write
+        // threw the author's pan and zoom away on every edit that re-ran the staging system.
+        use bevy::ecs::change_detection::DetectChanges;
+        let settled = app
+            .world()
+            .get_resource_ref::<emerge_mapper::compose::StagedCarousel>()
+            .map(|r| r.last_changed());
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(
+            app.world()
+                .get_resource_ref::<emerge_mapper::compose::StagedCarousel>()
+                .map(|r| r.last_changed()),
+            settled,
+            "the strip was rewritten with nothing having changed, which re-frames the camera and \
+             discards the author's pan and zoom"
+        );
+
+        // **The step key, driven.** This test used to assign `selected` directly, so `step_carousel`
+        // could have been unregistered or reading the wrong action and nothing would have noticed —
+        // which is exactly the registration question this file exists to answer.
+        //
+        // Pressed from a system rather than before `update()`: Bevy clears `ButtonInput` in
+        // `PreUpdate`, so a press written outside the frame is gone before `Phase::Act` runs. It
+        // fires once, because pressing an already-pressed key does not re-arm `just_pressed`.
+        fn press_step(mut keys: bevy::prelude::ResMut<bevy::input::ButtonInput<bevy::prelude::KeyCode>>) {
+            keys.press(emerge_mapper::keys::binding(emerge_mapper::keys::Action::CarouselNext).key);
+        }
+        app.add_systems(
+            bevy::prelude::Update,
+            bevy::prelude::IntoScheduleConfigs::before(press_step, emerge_mapper::keys::Phase::Act),
+        );
+        app.update();
+        assert_eq!(
+            app.world().resource::<ComposeState>().selected,
+            1,
+            "the carousel key has to move the focus, or the verb is unwired"
+        );
+
         // Stepping the carousel re-lays it: a different group becomes focal, and the wings change.
         app.world_mut().resource_mut::<ComposeState>().selected = 1;
         for _ in 0..3 {

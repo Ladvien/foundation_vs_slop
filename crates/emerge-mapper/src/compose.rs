@@ -404,6 +404,16 @@ pub struct Carousel {
     pub extent: (f32, f32),
     /// The tallest thing standing, at its own scale.
     pub tallest: f32,
+    /// **Groups in the window that could not be measured, and why.**
+    ///
+    /// Reported rather than fatal. `lay_out` used to propagate the first failure with `?`, so one
+    /// neighbour holding an unmeasured piece blanked the entire stage — including the group being
+    /// edited, its envelope and its lattice. A neighbour that cannot be placed is a neighbour that is
+    /// not on the strip; it is not a reason to stop showing the thing you are looking at.
+    ///
+    /// Only an `Anchored` group can land here: a `Bounded` one answers from its declared envelope and
+    /// cannot fail.
+    pub unmeasured: Vec<String>,
 }
 
 impl Carousel {
@@ -518,23 +528,28 @@ pub fn lay_out(
     comps: &[Composition],
     library: &emerge_core::library::Library,
     selected: usize,
-) -> Result<Carousel, String> {
+) -> Carousel {
     if comps.is_empty() {
-        return Ok(Carousel::default());
+        return Carousel::default();
     }
     let selected = selected.min(comps.len() - 1);
 
-    // Measure first, so a group that cannot be sized refuses before anything is positioned.
+    // Measure first. A group that cannot be sized is **left off the strip and named**, not allowed to
+    // take the rest of the stage with it.
     let mut measured: Vec<(usize, i32, f32, (f32, f32), f32)> = Vec::new();
+    let mut unmeasured: Vec<String> = Vec::new();
     for offset in -WINGS..=WINGS {
         let Some(index) = selected.checked_add_signed(offset as isize) else {
             continue;
         };
         let Some(c) = comps.get(index) else { continue };
         let scale = MINIATURE.powi(offset.abs());
-        let (w, d) = footprint(c, comps, library)?;
-        let h = height_of(c, comps, library)?;
-        measured.push((index, offset, scale, (w * scale, d * scale), h * scale));
+        match (footprint(c, comps, library), height_of(c, comps, library)) {
+            (Ok((w, d)), Ok(h)) => {
+                measured.push((index, offset, scale, (w * scale, d * scale), h * scale));
+            }
+            (Err(e), _) | (_, Err(e)) => unmeasured.push(e),
+        }
     }
 
     /// A box's reach from its own centre along the strip — half the projection of an axis-aligned
@@ -544,7 +559,8 @@ pub fn lay_out(
     }
 
     let Some(&focal) = measured.iter().find(|m| m.1 == 0) else {
-        return Ok(Carousel::default());
+        // The one being edited is the one case where there is genuinely nothing to show.
+        return Carousel { unmeasured, ..Default::default() };
     };
     let slot = |(index, offset, scale, size, height): (usize, i32, f32, (f32, f32), f32),
                 distance: f32| Slot {
@@ -562,6 +578,8 @@ pub fn lay_out(
     for side in [1i32, -1] {
         let mut edge = reach(focal.3);
         for step in 1..=WINGS {
+            // A skipped neighbour closes up rather than leaving a hole: the gap would read as a
+            // group that is there and empty, which is a different and wronger thing.
             let Some(&m) = measured.iter().find(|m| m.1 == side * step) else {
                 continue;
             };
@@ -582,7 +600,7 @@ pub fn lay_out(
         extent.1 = extent.1.max((s.at.1.abs() + s.size.1 * 0.5) * 2.0);
         tallest = tallest.max(s.height);
     }
-    Ok(Carousel { slots, extent, tallest })
+    Carousel { slots, extent, tallest, unmeasured }
 }
 
 /// **Where a ray enters an axis-aligned box**, or `None`. The standard slab test.
@@ -761,14 +779,11 @@ fn restage_group(
     }
     state.staged = Some((state.selected, comps.clone()));
 
-    let carousel = match lay_out(comps, &project.library, state.selected) {
-        Ok(c) => c,
-        Err(e) => {
-            // Nothing can be laid out, so nothing can be drawn over it either.
-            carousel_out.0 = Carousel::default();
-            return state.status.problem(e);
-        }
-    };
+    let carousel = lay_out(comps, &project.library, state.selected);
+    // **One message, however many groups fail.** `Status::problem` folds only CONSECUTIVE identical
+    // texts into a count, so two groups failing with different reasons used to accumulate as separate
+    // entries on every restage and push the log past `MAX_PROBLEMS`. Gathered and said once.
+    let mut refused: Vec<String> = carousel.unmeasured.clone();
     for slot in &carousel.slots {
         let Some(c) = comps.get(slot.index) else { continue };
         let size = match c.envelope {
@@ -800,7 +815,7 @@ fn restage_group(
             // Loud. An empty patch of floor where a composition should be, with nothing saying why,
             // is the failure this editor's own notes call the worst it had.
             Err(e) => {
-                state.status.problem(format!("`{}` does not resolve: {e}", c.id));
+                refused.push(format!("`{}` does not resolve: {e}", c.id));
                 continue;
             }
         };
@@ -809,7 +824,7 @@ fn restage_group(
         let ys = match emerge_core::stack::resolve_y(&with_rows, &project.library) {
             Ok(ys) => ys,
             Err(e) => {
-                state.status.problem(format!("`{}` has no height: {e}", c.id));
+                refused.push(format!("`{}` has no height: {e}", c.id));
                 continue;
             }
         };
@@ -865,8 +880,21 @@ fn restage_group(
             crate::view::MAX_ZOOM,
         ));
     }
-    // Published last, so everything drawn over the strip is drawn over the one that just went up.
-    carousel_out.0 = carousel;
+    if !refused.is_empty() {
+        state.status.problem(format!(
+            "{} group(s) are not on the stage: {}",
+            refused.len(),
+            refused.join("; ")
+        ));
+    }
+    // **Written only when it differs.** `ResMut` marks a resource changed on any deref_mut, and
+    // `tiles::stage_camera` re-frames on that edge — so an unconditional write threw the author's pan
+    // and zoom away on every edit that re-ran this system, which is the very thing `tiles.rs`'s own
+    // note warns about. `Carousel` derives `PartialEq` and the layout is a pure function of its
+    // inputs, so identical inputs compare equal and the camera stays where it was put.
+    if carousel_out.0 != carousel {
+        carousel_out.0 = carousel;
+    }
 }
 
 /// **Every visible group's envelope, and the lattice the focal one seats on.**
@@ -2051,7 +2079,7 @@ mod carousel_tests {
     fn the_focal_group_stands_at_the_centre_wherever_it_is_in_the_list() {
         let comps = kit(7);
         for selected in 0..comps.len() {
-            let c = lay_out(&comps, &lib(), selected).unwrap_or_else(|e| panic!("{e}"));
+            let c = lay_out(&comps, &lib(), selected);
             let focal = c.focal().unwrap_or_else(|| panic!("no focal slot at {selected}"));
             assert_eq!(focal.index, selected);
             assert_eq!(focal.at, (0.0, 0.0), "the focal group moved at {selected}");
@@ -2063,7 +2091,7 @@ mod carousel_tests {
     #[test]
     fn each_remove_from_the_focal_group_is_one_step_smaller() {
         let comps = kit(9);
-        let c = lay_out(&comps, &lib(), 4).unwrap_or_else(|e| panic!("{e}"));
+        let c = lay_out(&comps, &lib(), 4);
         for s in &c.slots {
             let want = MINIATURE.powi(s.offset.abs());
             assert!((s.scale - want).abs() < 1e-6, "offset {} scaled {}", s.offset, s.scale);
@@ -2076,16 +2104,16 @@ mod carousel_tests {
     #[test]
     fn the_ends_of_the_list_are_visible_as_missing_miniatures() {
         let comps = kit(6);
-        let first = lay_out(&comps, &lib(), 0).unwrap_or_else(|e| panic!("{e}"));
+        let first = lay_out(&comps, &lib(), 0);
         assert!(first.slots.iter().all(|s| s.offset >= 0), "nothing stands before the first group");
         assert_eq!(first.slots.len(), 1 + WINGS as usize);
 
-        let last = lay_out(&comps, &lib(), comps.len() - 1).unwrap_or_else(|e| panic!("{e}"));
+        let last = lay_out(&comps, &lib(), comps.len() - 1);
         assert!(last.slots.iter().all(|s| s.offset <= 0), "nothing stands after the last group");
 
         // A kit smaller than the strip is simply a shorter strip, not a repeated one.
         let small = kit(2);
-        let c = lay_out(&small, &lib(), 0).unwrap_or_else(|e| panic!("{e}"));
+        let c = lay_out(&small, &lib(), 0);
         assert_eq!(c.slots.len(), 2);
         let mut seen: Vec<usize> = c.slots.iter().map(|s| s.index).collect();
         seen.sort_unstable();
@@ -2098,7 +2126,7 @@ mod carousel_tests {
     #[test]
     fn neighbours_stand_clear_of_one_another_along_the_strip() {
         let comps = kit(9);
-        let c = lay_out(&comps, &lib(), 4).unwrap_or_else(|e| panic!("{e}"));
+        let c = lay_out(&comps, &lib(), 4);
         for pair in c.slots.windows(2) {
             let (a, b) = (pair[0], pair[1]);
             assert!(b.offset == a.offset + 1, "slots must come out in strip order");
@@ -2132,7 +2160,7 @@ mod carousel_tests {
     #[test]
     fn a_click_on_a_miniatures_body_picks_it_rather_than_missing_by_its_own_height() {
         let comps = kit(9);
-        let c = lay_out(&comps, &lib(), 4).unwrap_or_else(|e| panic!("{e}"));
+        let c = lay_out(&comps, &lib(), 4);
         for s in &c.slots {
             // Just under the top face, dead centre — the tallest visible part of the group.
             let top = bevy::prelude::Vec3::new(s.at.0, s.height * 0.95, s.at.1);
@@ -2155,7 +2183,7 @@ mod carousel_tests {
     #[test]
     fn a_click_that_lands_on_nothing_picks_nothing() {
         let comps = kit(9);
-        let c = lay_out(&comps, &lib(), 4).unwrap_or_else(|e| panic!("{e}"));
+        let c = lay_out(&comps, &lib(), 4);
         let a = c.slots.iter().find(|s| s.offset == 0).unwrap_or_else(|| panic!("no focal"));
         let b = c.slots.iter().find(|s| s.offset == 1).unwrap_or_else(|| panic!("no +1"));
         let between = bevy::prelude::Vec3::new(
@@ -2175,7 +2203,7 @@ mod carousel_tests {
     #[test]
     fn when_a_ray_crosses_two_slots_the_nearer_one_is_picked() {
         let comps = kit(9);
-        let c = lay_out(&comps, &lib(), 4).unwrap_or_else(|e| panic!("{e}"));
+        let c = lay_out(&comps, &lib(), 4);
         let near = c.slots.iter().find(|s| s.offset == 0).unwrap_or_else(|| panic!("no focal"));
         let dir = iso_dir();
         // A ray through the focal group, continued far enough that it would leave the strip.
@@ -2209,9 +2237,39 @@ mod carousel_tests {
         assert!(err.contains("mystery"), "{err}");
         let err = height_of(&comps[0], &comps, &lib()).expect_err("refuses");
         assert!(err.contains("mystery"), "{err}");
-        // And `lay_out` propagates rather than substituting a slot.
-        let err = lay_out(&comps, &lib(), 0).expect_err("refuses");
-        assert!(err.contains("mystery"), "{err}");
+        // **And `lay_out` reports it rather than blanking the stage.** It used to propagate the first
+        // failure with `?`, so one unmeasurable neighbour took the group being edited down with it.
+        let c = lay_out(&comps, &lib(), 0);
+        assert!(c.slots.is_empty(), "the focal group itself cannot be measured, so nothing stands");
+        assert_eq!(c.unmeasured.len(), 1, "and the reason is carried rather than thrown");
+        assert!(c.unmeasured[0].contains("mystery"), "{:?}", c.unmeasured);
+    }
+
+    /// **A neighbour that cannot be measured is left off the strip, not allowed to take it down.**
+    ///
+    /// `lay_out` propagated the first measurement failure with `?`, so one unmeasurable group within
+    /// two slots of the focal one blanked the WHOLE stage — the group being edited, its envelope, its
+    /// lattice and its ring. `compositions.ron` is hand-authored and the schema permits a member whose
+    /// descriptor the library does not define, so this is reachable by editing a file, not by a bug.
+    #[test]
+    fn an_unmeasurable_neighbour_is_left_off_rather_than_blanking_the_stage() {
+        let mut comps = kit(5);
+        // The neighbour at +1 holds a piece the library does not define.
+        comps[3] = anchored("broken", vec![member("m", "absent", (0.0, 0.0))]);
+        let c = lay_out(&comps, &lib(), 2);
+
+        assert_eq!(c.focal().map(|s| s.index), Some(2), "the group being edited still stands");
+        assert!(
+            c.slots.iter().all(|s| s.index != 3),
+            "and the one that cannot be measured is simply not on the strip"
+        );
+        assert_eq!(c.unmeasured.len(), 1, "its reason is carried, not thrown");
+        assert!(c.unmeasured[0].contains("broken"), "{:?}", c.unmeasured);
+        assert!(c.tallest > 0.0, "the stage is still framed around something");
+
+        // The far neighbour closes up rather than leaving a hole where the broken one was.
+        let offsets: Vec<i32> = c.slots.iter().map(|s| s.offset).collect();
+        assert!(offsets.contains(&2), "the group beyond it still gets a slot: {offsets:?}");
     }
 
     /// **The ordinary state right after `N`.** A group with nothing in it yet must still be clickable
@@ -2222,7 +2280,7 @@ mod carousel_tests {
         let l = lib();
         assert_eq!(footprint(&comps[0], &comps, &l).unwrap_or_else(|e| panic!("{e}")), (SNAP, SNAP));
         assert_eq!(height_of(&comps[0], &comps, &l).unwrap_or_else(|e| panic!("{e}")), SNAP);
-        let c = lay_out(&comps, &lib(), 0).unwrap_or_else(|e| panic!("{e}"));
+        let c = lay_out(&comps, &lib(), 0);
         assert_eq!(c.slots.len(), 1);
         let (origin, dir) = ray_through(bevy::prelude::Vec3::new(0.0, SNAP * 0.5, 0.0));
         assert_eq!(slot_at(&c, origin, dir), Some(0), "a fresh group has to be clickable");
@@ -2232,12 +2290,12 @@ mod carousel_tests {
     /// the strip — the panel and the stage must never disagree about what is focal.
     #[test]
     fn an_empty_set_lays_out_to_nothing_and_a_stale_selection_clamps() {
-        let empty = lay_out(&[], &lib(), 3).unwrap_or_else(|e| panic!("{e}"));
+        let empty = lay_out(&[], &lib(), 3);
         assert!(empty.slots.is_empty());
         assert_eq!(empty.extent, (0.0, 0.0));
 
         let comps = kit(3);
-        let c = lay_out(&comps, &lib(), 99).unwrap_or_else(|e| panic!("{e}"));
+        let c = lay_out(&comps, &lib(), 99);
         assert_eq!(c.focal().map(|s| s.index), Some(2));
     }
 
@@ -2262,7 +2320,7 @@ mod carousel_tests {
     #[test]
     fn the_extent_is_measured_from_the_focal_group_not_from_the_strips_own_middle() {
         let comps = kit(6);
-        let c = lay_out(&comps, &lib(), 0).unwrap_or_else(|e| panic!("{e}"));
+        let c = lay_out(&comps, &lib(), 0);
         let (hw, hd) = (c.extent.0 * 0.5, c.extent.1 * 0.5);
         for s in &c.slots {
             assert!(s.at.0.abs() + s.size.0 * 0.5 <= hw + 1e-4, "offset {} off the x edge", s.offset);
