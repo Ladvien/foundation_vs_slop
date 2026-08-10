@@ -18,9 +18,33 @@ because #25's output should determine them.
  ->  #23: tags vs variants
 ```
 
-#25 first because it is what produces more than four prototypes and real co-occurrence data. A
-grammar learned from a single harvested room is degenerate in one of two directions (§3), and the
-fix is more examples, which is what #25 yields.
+#25 first, and **the original reason for that has been tested against the map and did not hold.**
+
+It said: *"#25 first because it is what produces more than four prototypes and real co-occurrence
+data. A grammar learned from a single harvested room is degenerate in one of two directions (§3), and
+the fix is more examples, which is what #25 yields."*
+
+**It does not yield that.** Converted (2026-08-10), `site_67` is 139 `site/tile_floor` + 5
+`site/tile_wall_n`. The observable adjacency relation is **three pairs** — floor–floor,
+floor–wall_n, wall_n–wall_n. That is not "more examples"; it is the same single room in a new
+representation, with a *smaller* vocabulary than the placements it replaced. The map was a 12 × 12
+slab with one straight wall on its west edge and nothing else, which nobody had counted before
+converting it.
+
+So the ordering stands and the justification is replaced. **#25 goes first for the representation
+change and for the tile-gap census** — the thing that says nine tile kinds are missing, which is what
+actually sizes the work after it. It does **not** go first for the training data, and no later step
+should be scoped as though it did.
+
+The consequence for move 1 is §3's LGG failure mode, now concrete rather than hypothetical: a learner
+over three pairs can reproduce `site_67` and floor fields and nothing else. Karth & Smith's
+*"might not allow any new output to be constructed that was not an exact copy of the source image"*
+describes this input exactly, and the PCGML survey's *Learning from Small Datasets* is the general
+condition — *"games are likely to always be data-constrained"* (`10.1109/tg.2018.2846639`).
+
+**A second map is deliberately not in scope here** (author's call, 2026-08-10). It needs the corridor,
+dead-end and closet tiles authored first, which trips `tests/site_tiles.rs`'s `comps.len() == 4` and
+partly pre-empts #23. That ordering belongs to #23, not to #25.
 
 ---
 
