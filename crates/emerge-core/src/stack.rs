@@ -370,6 +370,25 @@ fn same_layer(a: &Descriptor, a_on: Option<&str>, b: &Descriptor, b_on: Option<&
 ///
 /// The first blocker **in map order** is returned — file order, stable for a status line. `on` is
 /// the host the new piece would rest on, so two lamps contest one table but not two tables.
+///
+/// # The bounded claim: **within a layer, in plan**
+///
+/// Stated because it is a real limitation that was scoped rather than missed, and the next person to
+/// find a floating interpenetration should not have to re-derive it.
+///
+/// `plans_overlap` is a separating-axis test over two oriented boxes in **X and Z**. Height never
+/// enters. That is right *within* a layer, because a layer is a horizontal stratum — but
+/// [`same_layer`] returns `false` for every heterogeneous pair, so nothing is checked *across* layers
+/// at all. So:
+///
+/// - a 2.2 m floor-standing cabinet and a sconce at 1.8 m on the wall behind it never contest, and
+///   interpenetrate silently;
+/// - a door and the wall it is set into cannot conflict, which is correct — but neither can a door
+///   and a crate standing in the doorway.
+///
+/// The information to close it exists: `Mount::OnWall` and `DecalHost::Wall` both carry a height and
+/// `Extent::height` is measured for every piece. Closing it is a decision about what an author wants
+/// refused, not a missing measurement.
 pub fn blocking<'a>(
     map: &'a Map,
     library: &Library,

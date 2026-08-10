@@ -739,6 +739,29 @@ pub struct Extent {
 
 /// Where a piece attaches — the layering axis, replacing `Role` + `rests_on` + the floor-marking
 /// height heuristic.
+///
+/// # Each variant names *where a piece sits* and decides *what it contests*
+///
+/// Those are two different things, and only the first is in the name. The second is what makes an
+/// edit refused, and it lives in [`crate::stack::same_layer`]'s match arms — invisible at the call
+/// site, so an author picking a mount is choosing collision semantics while reading a positional
+/// word. Three variants put a piece at deck level and mean three different things about collision.
+/// The table is the schema; it is restated here so choosing a mount does not require reading
+/// `stack.rs`.
+///
+/// | variant | height | contests |
+/// |---|---|---|
+/// | `OnFloor` (and an absent mount) | the deck | every other floor-standing piece |
+/// | `Tiled` | the deck | only other `Tiled` — which is what lets floor go under a dressed room |
+/// | `Decal { .. }` | its host's plane | **nothing.** Two decals may share a wall, which is the point of them |
+/// | `OnCeiling` | the ceiling | only other `OnCeiling` |
+/// | `InOpening { .. }` | the opening | only other `InOpening` — so a door and its wall cannot conflict |
+/// | `OnWall { height }` | that height | only `OnWall` **at the same height**, within 1 mm |
+/// | `OnSurface { class }` | its host's top | only `OnSurface` **on the same host** — two lamps contest one table, not two tables |
+///
+/// **A heterogeneous pair contests nothing at all** (`same_layer`'s `_ => false`), which is why the
+/// bounded claim on [`crate::stack::blocking`] matters: the rule is per-layer and in plan, so a tall
+/// floor-standing piece and a wall-mounted one behind it never meet.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Mount {

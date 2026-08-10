@@ -39,6 +39,10 @@ mechanical (`Mount::Overlay` has one construction site per kit file and one arm 
 
 ## 2. The family conflates *where a piece sits* with *what it contests*
 
+> **CLOSED 2026-08-10.** `Mount`'s own doc now carries the contest column for all seven variants,
+> including that a heterogeneous pair contests nothing (`same_layer`'s `_ => false`). The table is
+> restated there so choosing a mount does not require reading `stack.rs`.
+
 Three variants put a piece at floor level and mean three different things about collision:
 
 | variant | height | contests |
@@ -80,6 +84,9 @@ its own surface is not.
 go with it.
 
 ## 4. The overlap rule is 2-D, and the layer partition hides the rest
+
+> **CLOSED 2026-08-10.** `blocking`'s doc now states the bounded claim — *within a layer, in plan* —
+> with both worked cases and a note that the information to close it already exists.
 
 `blocking` compares **plan rectangles** — `plans_overlap` is a separating-axis test over two oriented
 boxes in X/Z. Height never enters. That is fine within a layer, because a layer is a horizontal
@@ -133,3 +140,25 @@ Order that follows from the above:
 3. **Rename `Overlay` → `Decal`**, so the mistake is not re-authorable.
 4. **Add the `same_layer` ratchet**, so the next variant cannot fail open.
 5. Decide, separately and unhurriedly, whether a stool offers `support`.
+
+
+---
+
+## Postscript, 2026-08-10 — the `front: Some(South)` loose end, and a correction
+
+`site/floor` and `site/wall` carried `front: Some(South)` from the labelling pass. Both are now
+`None`, which is the honest claim: the schema records *"`None` means the mesh is symmetric and has no
+front, which is a different claim from `Some(Face::South)`"*, and `site/wall_header` — the same family
+of piece — already said `None`.
+
+**The handoff's reason for leaving it was wrong, and the correction matters more than the change.**
+It read *"meaningless … since no rule reads it"*. A rule does read it: `composition.rs`'s descriptor
+**fingerprint** encodes `align.front`, so editing the field re-fingerprints every composition using
+that descriptor and would flip them to STALE.
+
+Measured before touching it, and the blast radius is nil: `assets/emerge/site/compositions.ron`
+records **no** `of_fingerprint` at all, no site map records one, and the root
+`assets/emerge/compositions.ron` shares no `site/` descriptors. The full suite is green either way and
+the expressive-range census is byte-identical across the change.
+
+Anything else editing an `align` field should re-run that check rather than inherit this answer.

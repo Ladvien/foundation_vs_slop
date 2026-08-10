@@ -11,7 +11,7 @@
                 y_offset: Some(-0.06),
                 pivot: None,
                 rotate: None,
-                front: Some(South),
+                front: None,
             ),
             extent: (
                 footprint: Some((1.0, 1.0)),
@@ -48,7 +48,7 @@
                 y_offset: None,
                 pivot: None,
                 rotate: None,
-                front: Some(South),
+                front: None,
             ),
             extent: (
                 footprint: Some((0.1, 1.0)),
