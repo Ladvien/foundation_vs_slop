@@ -5254,14 +5254,33 @@ pub struct UnderCursor(String);
 /// [`under_cursor_target`] and not a second pick: a readout that named a different piece than `R`
 /// turned would be worse than no readout, because it would be believed. That is the whole argument
 /// its own doc comment makes for being one resolver, extended to the line that reports it.
+///
+/// **And it stops at the panel, which it did not.** This had no over-the-interface gate at all,
+/// while every verb it reports on has one — so with the cursor resting on the PLACE list the block
+/// named whatever placement stood behind the panel and said *"`Cmd`+Delete edits it"*, which is a
+/// promise about a key that acts on the PLACE selection there. A readout that is believed and wrong
+/// is worse than none, by this function's own argument; the gate is the same `view::over_ui` the
+/// verbs ask, so the line and the key cannot disagree.
 fn sense_under_cursor(
     pointer: Res<crate::view::Pointer>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     project: Res<Project>,
     mut lock: ResMut<TargetLock>,
     mut under: ResMut<UnderCursor>,
+    ui_nodes: Query<(&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform), With<Hovered>>,
 ) {
-    let want = match under_cursor_target(&mut lock, *pointer, camera, &project) {
+    let on_ui = crate::view::over_ui(
+        pointer.0,
+        camera
+            .as_ref()
+            .and_then(|c| c.0.target_scaling_factor())
+            .unwrap_or(1.0),
+        ui_nodes.iter(),
+    );
+    let picked = (!on_ui)
+        .then(|| under_cursor_target(&mut lock, *pointer, camera, &project))
+        .flatten();
+    let want = match picked {
         // The chord comes from the census, never retyped — `keys.rs`'s one rule, and the reason
         // this line cannot come to name a key the build does not read.
         Some(i) => project.map.placements.get(i).map_or_else(String::new, |p| {
