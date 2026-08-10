@@ -4529,10 +4529,10 @@ pub fn composition_from_set(
 
 /// Does this piece's height depend on the ceiling — i.e. on the very bounds being derived?
 fn mounts_against_the_ceiling(d: &emerge_core::descriptor::Descriptor) -> bool {
-    use emerge_core::descriptor::{Mount, OverlayHost};
+    use emerge_core::descriptor::{Mount, DecalHost};
     matches!(
         d.mount,
-        Some(Mount::OnCeiling) | Some(Mount::Overlay { on: OverlayHost::Ceiling })
+        Some(Mount::OnCeiling) | Some(Mount::Decal { on: DecalHost::Ceiling })
     )
 }
 

@@ -33,7 +33,7 @@
 //! the product out by hand and dropped the `scale` factor. One definition now, in the schema layer
 //! both can reach.
 
-use crate::descriptor::{placed_footprint, placed_height, Descriptor, Mount, OverlayHost};
+use crate::descriptor::{placed_footprint, placed_height, Descriptor, Mount, DecalHost};
 use crate::library::Library;
 use crate::map::{Map, Placed};
 
@@ -258,12 +258,12 @@ pub fn datum(
             format!("`{who}` needs a `{class}` surface and there is none under it")
         })?,
         // A decal lies on the plane it names. The floor and the ceiling are the map's to state; a
-        // wall's height is nobody's, so `OverlayHost::Wall` carries it — this used to be the one arm
+        // wall's height is nobody's, so `DecalHost::Wall` carries it — this used to be the one arm
         // with no answer, and it returned an error rather than invent a number.
-        Some(Mount::Overlay { on }) => match on {
-            OverlayHost::Floor => map.origin.1,
-            OverlayHost::Ceiling => map.origin.1 + map.bounds.1,
-            OverlayHost::Wall { height } => map.origin.1 + height,
+        Some(Mount::Decal { on }) => match on {
+            DecalHost::Floor => map.origin.1,
+            DecalHost::Ceiling => map.origin.1 + map.bounds.1,
+            DecalHost::Wall { height } => map.origin.1 + height,
         },
     };
     // A geometric correction on the mesh, applied on top of whatever the layer decided rather than
@@ -344,7 +344,7 @@ fn plans_overlap(
 /// wall pieces share a wall only at the same height; two surface pieces contest only the same host
 /// (`on`); [`Mount::Tiled`] is its own stratum, which is what keeps a floor tile from "blocking"
 /// the crate standing on it — laying floor under a dressed room is `box_fill`'s documented
-/// ordinary case. `Overlay` never participates: *"claims no volume"* is its own doc's promise.
+/// ordinary case. `Decal` never participates: *"claims no volume"* is its own doc's promise.
 fn same_layer(a: &Descriptor, a_on: Option<&str>, b: &Descriptor, b_on: Option<&str>) -> bool {
     use Mount::*;
     match (a.mount.as_ref(), b.mount.as_ref()) {
@@ -542,8 +542,6 @@ pub fn restore_moved(map: &mut Map, moved: &Moved) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// **Every `Mount` variant contests itself, unless it is exempt on purpose.**
     ///
     /// [`same_layer`] ends in `_ => false`, so a variant added tomorrow contests **nothing —
@@ -551,14 +549,14 @@ mod tests {
     /// direction of "the edit is allowed", and silently.
     ///
     /// The hole is invisible without this test because the one variant that *should* fall through
-    /// does: `Overlay` claims no volume by design, so the fall-through looks deliberate for every
+    /// does: `Decal` claims no volume by design, so the fall-through looks deliberate for every
     /// variant. Naming the exemption is what separates "decided" from "not yet written".
     ///
     /// Exhaustive by construction — the `match` below has no wildcard, so a new variant does not
     /// compile until its author has answered the question.
     #[test]
     fn every_mount_variant_contests_itself_or_says_why_not() {
-        use crate::descriptor::{Extent, Mount, OverlayHost};
+        use crate::descriptor::{Extent, Mount, DecalHost};
 
         let every = [
             Mount::OnFloor,
@@ -566,14 +564,14 @@ mod tests {
             Mount::OnCeiling,
             Mount::InOpening { clear: None },
             Mount::OnSurface { class: "worktop".to_owned() },
-            Mount::Overlay { on: OverlayHost::Floor },
+            Mount::Decal { on: DecalHost::Floor },
             Mount::Tiled,
         ];
 
         for mount in every {
             // Answered per variant, with no wildcard: adding a `Mount` breaks this line first.
             let (exempt, why) = match &mount {
-                Mount::Overlay { .. } => (
+                Mount::Decal { .. } => (
                     true,
                     "claims no volume — two decals may share a wall, which is the point of them",
                 ),
@@ -932,8 +930,8 @@ mod tests {
         assert_eq!(y[0], 3.5);
     }
 
-    /// **Every layer has an answer.** A wall overlay carries its own height — the one arm that used
-    /// to return an error, because `OnWall` had a height and `Overlay` had nowhere to put one. The
+    /// **Every layer has an answer.** A wall decal carries its own height — the one arm that used
+    /// to return an error, because `OnWall` had a height and `Decal` had nowhere to put one. The
     /// floor and ceiling decals take theirs from the map, since that is whose business they are.
     #[test]
     fn a_decal_lies_on_the_plane_it_names() {
@@ -947,20 +945,20 @@ mod tests {
         let decal = |on| {
             let mut d = lamp();
             d.id = "decal".into();
-            d.mount = Some(Mount::Overlay { on });
+            d.mount = Some(Mount::Decal { on });
             d
         };
 
-        let floor = resolve_y(&m, &lib(vec![decal(OverlayHost::Floor)]))
+        let floor = resolve_y(&m, &lib(vec![decal(DecalHost::Floor)]))
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(floor[0], 10.0);
 
-        let ceiling = resolve_y(&m, &lib(vec![decal(OverlayHost::Ceiling)]))
+        let ceiling = resolve_y(&m, &lib(vec![decal(DecalHost::Ceiling)]))
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(ceiling[0], 13.0);
 
         // A poster at 1.6 m on the wall of a room whose floor is at 10.
-        let wall = resolve_y(&m, &lib(vec![decal(OverlayHost::Wall { height: 1.6 })]))
+        let wall = resolve_y(&m, &lib(vec![decal(DecalHost::Wall { height: 1.6 })]))
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(wall[0], 11.6);
     }

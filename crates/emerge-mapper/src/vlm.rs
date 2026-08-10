@@ -34,7 +34,7 @@
 //!   (OVAL-Prompt, Tong et al. 2024 — F 0.39 without retry, 0.71 with). Bounded at one retry:
 //!   same endpoint, same schema, same gate, and the gate's second verdict is final.
 
-use emerge_core::descriptor::{mount_label, mount_options, Face, Mount, OverlayHost};
+use emerge_core::descriptor::{mount_label, mount_options, Face, Mount, DecalHost};
 use emerge_core::vocab::{nearest, Vocabularies, Vocabulary};
 
 /// Where and what to ask. Endpoint, model and key are environment config so the bmb tunnel and
@@ -253,12 +253,12 @@ fn mount_lines(surfaces: &[String]) -> String {
             Mount::OnCeiling => r#"{"on": "ceiling"}"#.to_owned(),
             Mount::Tiled => r#"{"on": "tiled"}"#.to_owned(),
             Mount::InOpening { .. } => r#"{"on": "opening"}"#.to_owned(),
-            Mount::Overlay { on } => match on {
-                OverlayHost::Floor => r#"{"on": "overlay_floor"}"#.to_owned(),
-                OverlayHost::Wall { .. } => {
-                    r#"{"on": "overlay_wall", "height_m": 1.8}"#.to_owned()
+            Mount::Decal { on } => match on {
+                DecalHost::Floor => r#"{"on": "decal_floor"}"#.to_owned(),
+                DecalHost::Wall { .. } => {
+                    r#"{"on": "decal_wall", "height_m": 1.8}"#.to_owned()
                 }
-                OverlayHost::Ceiling => r#"{"on": "overlay_ceiling"}"#.to_owned(),
+                DecalHost::Ceiling => r#"{"on": "decal_ceiling"}"#.to_owned(),
             },
         };
         out.push_str(&format!("- {json} - {}\n", mount_label(Some(&m))));
@@ -502,14 +502,14 @@ fn valid_mount(raw: &RawMount, surfaces: &Vocabulary) -> Result<Mount, String> {
         "ceiling" => Ok(Mount::OnCeiling),
         "tiled" => Ok(Mount::Tiled),
         "opening" => Ok(Mount::InOpening { clear: None }),
-        "overlay_floor" => Ok(Mount::Overlay { on: OverlayHost::Floor }),
-        "overlay_wall" => Ok(Mount::Overlay {
-            on: OverlayHost::Wall { height: wall_height(raw.height_m)? },
+        "decal_floor" => Ok(Mount::Decal { on: DecalHost::Floor }),
+        "decal_wall" => Ok(Mount::Decal {
+            on: DecalHost::Wall { height: wall_height(raw.height_m)? },
         }),
-        "overlay_ceiling" => Ok(Mount::Overlay { on: OverlayHost::Ceiling }),
+        "decal_ceiling" => Ok(Mount::Decal { on: DecalHost::Ceiling }),
         other => Err(format!(
             "`{other}` is not a mount; the options are floor, surface, wall, ceiling, tiled, \
-             opening, overlay_floor, overlay_wall, overlay_ceiling"
+             opening, decal_floor, decal_wall, decal_ceiling"
         )),
     }
 }
@@ -840,12 +840,12 @@ mod tests {
             (r#"{"on": "ceiling"}"#, Mount::OnCeiling),
             (r#"{"on": "tiled"}"#, Mount::Tiled),
             (r#"{"on": "opening"}"#, Mount::InOpening { clear: None }),
-            (r#"{"on": "overlay_floor"}"#, Mount::Overlay { on: OverlayHost::Floor }),
+            (r#"{"on": "decal_floor"}"#, Mount::Decal { on: DecalHost::Floor }),
             (
-                r#"{"on": "overlay_wall", "height_m": 1.5}"#,
-                Mount::Overlay { on: OverlayHost::Wall { height: 1.5 } },
+                r#"{"on": "decal_wall", "height_m": 1.5}"#,
+                Mount::Decal { on: DecalHost::Wall { height: 1.5 } },
             ),
-            (r#"{"on": "overlay_ceiling"}"#, Mount::Overlay { on: OverlayHost::Ceiling }),
+            (r#"{"on": "decal_ceiling"}"#, Mount::Decal { on: DecalHost::Ceiling }),
         ];
         for (json, want) in cases {
             let full = format!(r#"{{"what": "a thing", "mount": {json}}}"#);

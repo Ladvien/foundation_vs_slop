@@ -60,7 +60,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::descriptor::{Descriptor, Dir as ClearDir, Mount, OverlayHost, Subgrid};
+use crate::descriptor::{Descriptor, Dir as ClearDir, Mount, DecalHost, Subgrid};
 use crate::library::Library;
 use crate::map::{Location, Map, Placed};
 use crate::placement::ir::Dir;
@@ -171,7 +171,7 @@ fn paint_is_zero(v: &i8) -> bool {
 ///
 /// The three fields below live in this variant rather than on [`Member`] so that the states they would
 /// otherwise make expressible are unrepresentable instead. A composition has no mesh to tip, no
-/// `Descriptor` shape for a patch to overlay, and its own members answer their own hosts; a `tip`,
+/// `Descriptor` shape for a patch to decal, and its own members answer their own hosts; a `tip`,
 /// `patch` or `on` on a group would each be a field with no meaning that some reader would eventually
 /// act on.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -188,7 +188,7 @@ pub enum Body {
         /// which [`expand`] resolves against the map the stamp lands in.
         #[serde(default)]
         on: Option<String>,
-        /// Per-member overlay on the library entry. Sparse: [`Descriptor`] is a patch type, so absence
+        /// Per-member decal on the library entry. Sparse: [`Descriptor`] is a patch type, so absence
         /// inherits.
         #[serde(default)]
         patch: Option<Descriptor>,
@@ -804,7 +804,7 @@ pub fn descriptor_fingerprint(d: &Descriptor) -> u64 {
     }
     // **Encoded by hand, not by `Debug`.** These were `format!("{x:?}")`, which is the same mistake
     // in kind as hashing a float's text: `Debug` output is not a stability contract, so renaming a
-    // `Mount` field or reordering `OverlayHost` would re-fingerprint every descriptor carrying one
+    // `Mount` field or reordering `DecalHost` would re-fingerprint every descriptor carrying one
     // and flip every composition using it to STALE with no real drift. A discriminant plus the
     // fields that matter says what it means and only changes when the meaning does.
     match d.align.front {
@@ -836,12 +836,12 @@ pub fn descriptor_fingerprint(d: &Descriptor) -> u64 {
         Some(Mount::OnSurface { class }) => {
             f.tag(5).str(class);
         }
-        Some(Mount::Overlay { on }) => {
+        Some(Mount::Decal { on }) => {
             f.tag(6);
             match on {
-                OverlayHost::Floor => f.tag(0),
-                OverlayHost::Ceiling => f.tag(1),
-                OverlayHost::Wall { height } => f.tag(2).f32(*height),
+                DecalHost::Floor => f.tag(0),
+                DecalHost::Ceiling => f.tag(1),
+                DecalHost::Wall { height } => f.tag(2).f32(*height),
             };
         }
         Some(Mount::Tiled) => {
@@ -1137,7 +1137,7 @@ pub fn expand(
             if matches!(member.map(|m| &m.body), Some(Body::Composition { .. })) {
                 return Err(format!(
                     "map: stamp `{}` overrides member `{}` of `{}`, which is a composition. A group \
-                     has no descriptor for a patch to overlay — override one of its own members, or \
+                     has no descriptor for a patch to decal — override one of its own members, or \
                      edit the group.",
                     s.id, o.member, comp.id
                 ));

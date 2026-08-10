@@ -5581,7 +5581,7 @@ fn rebuild_detail(
 #[cfg(test)]
 mod mount_cycle_tests {
     use emerge_core::descriptor::{
-        mount_height, mount_options, with_mount_height, Mount, OverlayHost,
+        mount_height, mount_options, with_mount_height, Mount, DecalHost,
     };
 
     /// The lookup `cycle_mount` performs, extracted so the rule can be tested without an `App`. It
@@ -5605,8 +5605,8 @@ mod mount_cycle_tests {
         for current in [
             Mount::OnWall { height: 1.2 },
             Mount::OnWall { height: 0.0 },
-            Mount::Overlay {
-                on: OverlayHost::Wall { height: 2.35 },
+            Mount::Decal {
+                on: DecalHost::Wall { height: 2.35 },
             },
         ] {
             let at = position_of(&options, &current)

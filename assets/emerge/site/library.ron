@@ -11,7 +11,7 @@
                 y_offset: Some(-0.06),
                 pivot: None,
                 rotate: None,
-                front: None,
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((1.0, 1.0)),
@@ -23,15 +23,21 @@
                 surfaces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "decor",
+                "structure",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "grey",
+                "clean",
+            ],
             placement: (
                 rooms: [],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("This is a floor tile asset used to construct the ground surface of a room. It has a clean, uniform appearance and is intended to be placed on the floor."),
         ),
         (
             id: "site/wall",
@@ -42,7 +48,7 @@
                 y_offset: None,
                 pivot: None,
                 rotate: None,
-                front: None,
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((0.1, 1.0)),
@@ -54,9 +60,14 @@
                 surfaces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "structure",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "grey",
+                "metal",
+            ],
             placement: (
                 rooms: [],
                 group: None,
@@ -125,7 +136,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("This is a vertical wall segment used as a structural element in the environment. It is mounted on the floor as an overlay and has a metallic grey finish."),
         ),
         (
             id: "site/wall_corner",
@@ -1470,20 +1481,26 @@
             mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
                 sockets: [],
             ),
             kind: [
                 "seating",
             ],
             effects: [],
-            look: [],
+            look: [
+                "white",
+                "orange",
+                "plastic",
+            ],
             placement: (
                 rooms: [],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The stool has a clean, modern design with a white frame and an orange seat. It is intended for seating and provides a support surface."),
         ),
         (
             id: "site/coffee_machine",
@@ -1553,32 +1570,39 @@
             align: (
                 scale: None,
                 stretch_y: None,
-                y_offset: None,
-                pivot: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
                 rotate: None,
                 front: None,
             ),
             extent: (
-                footprint: Some((0.55, 2.0)),
-                height: Some(0.45),
+                footprint: Some((0.54999995, 2.0)),
+                height: Some(0.4500001),
             ),
             mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
                 sockets: [],
             ),
             kind: [
                 "seating",
             ],
             effects: [],
-            look: [],
+            look: [
+                "white",
+                "grey",
+                "orange",
+                "plastic",
+            ],
             placement: (
                 rooms: [],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The bench is a simple, low-profile seating unit with a clean, modern design. The orange end caps provide a visual accent."),
         ),
         (
             id: "site/vending_machine",
