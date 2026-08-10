@@ -418,6 +418,27 @@ fn prompt_ctx(
         note_now: d.note.clone(),
         rooms_in_use,
         groups_in_use,
+        // **Measured, not seen.** `derive_front` reads the vertex buffer, which is the only thing
+        // that can settle symmetry; two three-quarter renders cannot. An unreadable mesh is honestly
+        // `None` — the prompt then says so and leaves the judgement to the images, rather than
+        // asserting a front nobody measured.
+        front_measured: project
+            .root
+            .join("assets")
+            .join(mesh)
+            .pipe_open()
+            .and_then(|g| g.derive_front().ok()),
+    }
+}
+
+/// A tiny read-and-measure step, named so the expression above reads as one thought.
+trait OpenGlb {
+    fn pipe_open(&self) -> Option<emerge_core::glb::Glb>;
+}
+
+impl OpenGlb for std::path::PathBuf {
+    fn pipe_open(&self) -> Option<emerge_core::glb::Glb> {
+        emerge_core::glb::Glb::open(self).ok()
     }
 }
 

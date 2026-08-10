@@ -227,6 +227,19 @@ pub struct PromptCtx {
     /// existing vocabulary of free text instead of coining synonyms.
     pub rooms_in_use: Vec<String>,
     pub groups_in_use: Vec<String>,
+    /// **What the MESH says about its own front**, measured off the vertices by
+    /// `emerge_core::glb::Glb::derive_front` — not something the model is asked to see.
+    ///
+    /// `Some(Some(face))` measured and asymmetric; `Some(None)` measured **symmetric**, so there is
+    /// no front to claim; `None` could not be measured at all (no mesh, unreadable file).
+    ///
+    /// This exists because the model got it wrong three times in one pass, on facts the code already
+    /// held: a front for a 1x1 floor tile, and a front for two seats that
+    /// `the_seat_meshes_declare_the_front_that_was_measured_off_them` asserts are symmetric and of
+    /// which *"none may be asserted"*. Two renders cannot settle symmetry; a vertex buffer can. The
+    /// prompt already takes this line about size — *"Sizes are measured and given to you"* — and
+    /// this is the same rule applied to the same class of question.
+    pub front_measured: Option<Option<Face>>,
 }
 
 /// One axis section of the system prompt: every token with its authored note. Generated LIVE from
@@ -239,31 +252,83 @@ fn axis_lines(title: &str, hint: &str, v: &Vocabulary) -> String {
     out
 }
 
+/// **The one place a `Mount` gets its wire name.**
+///
+/// This name was written out by hand in three places that all had to agree: the prompt's JSON
+/// example, `parse_mount`'s match arms, and the refusal listing the legal options. Renaming
+/// `Overlay` to `Decal` meant editing all three, and nothing would have failed if one had been
+/// missed — the model would simply have been offered a token the parser rejects, and the reprompt
+/// would have argued with it about a word neither side could win on.
+///
+/// The parser still needs literal arms, because parsing is by literal. What this removes is the
+/// possibility of the *offered* set and the *accepted* set disagreeing — `every_offered_mount_
+/// round_trips_through_its_own_token` walks `mount_options` and proves it.
+pub fn mount_token(m: &Mount) -> &'static str {
+    match m {
+        Mount::OnFloor => "floor",
+        Mount::OnSurface { .. } => "surface",
+        Mount::OnWall { .. } => "wall",
+        Mount::OnCeiling => "ceiling",
+        Mount::Tiled => "tiled",
+        Mount::InOpening { .. } => "opening",
+        Mount::Decal { on: DecalHost::Floor } => "decal_floor",
+        Mount::Decal { on: DecalHost::Wall { .. } } => "decal_wall",
+        Mount::Decal { on: DecalHost::Ceiling } => "decal_ceiling",
+    }
+}
+
 /// The mount options as JSON discriminants, generated from the same table the editor's `M` key
-/// cycles — every offered mount is one the schema can express.
+/// cycles — every offered mount is one the schema can express, named by [`mount_token`].
 fn mount_lines(surfaces: &[String]) -> String {
     let mut out = String::from(
         "mount - where THIS asset is placed (exactly one object, or null when unclear):\n",
     );
     for m in mount_options(surfaces) {
+        let token = mount_token(&m);
+        // Only the shape of the EXTRA fields is per-variant now; the name comes from one table.
         let json = match &m {
-            Mount::OnFloor => r#"{"on": "floor"}"#.to_owned(),
-            Mount::OnSurface { class } => format!(r#"{{"on": "surface", "class": "{class}"}}"#),
-            Mount::OnWall { .. } => r#"{"on": "wall", "height_m": 1.8}"#.to_owned(),
-            Mount::OnCeiling => r#"{"on": "ceiling"}"#.to_owned(),
-            Mount::Tiled => r#"{"on": "tiled"}"#.to_owned(),
-            Mount::InOpening { .. } => r#"{"on": "opening"}"#.to_owned(),
-            Mount::Decal { on } => match on {
-                DecalHost::Floor => r#"{"on": "decal_floor"}"#.to_owned(),
-                DecalHost::Wall { .. } => {
-                    r#"{"on": "decal_wall", "height_m": 1.8}"#.to_owned()
-                }
-                DecalHost::Ceiling => r#"{"on": "decal_ceiling"}"#.to_owned(),
-            },
+            Mount::OnSurface { class } => format!(r#"{{"on": "{token}", "class": "{class}"}}"#),
+            Mount::OnWall { .. } | Mount::Decal { on: DecalHost::Wall { .. } } => {
+                format!(r#"{{"on": "{token}", "height_m": 1.8}}"#)
+            }
+            _ => format!(r#"{{"on": "{token}"}}"#),
         };
         out.push_str(&format!("- {json} - {}\n", mount_label(Some(&m))));
     }
     out
+}
+
+/// **The one place a `Face` gets its wire name** — [`mount_token`]'s twin, and added for the same
+/// reason: the parser knew these four words and nothing could write them, so stating a measured
+/// front in the prompt meant inventing a fifth spelling of "south".
+pub fn face_token(f: Face) -> &'static str {
+    match f {
+        Face::North => "north",
+        Face::East => "east",
+        Face::South => "south",
+        Face::West => "west",
+    }
+}
+
+/// **The measured front, stated as a fact rather than asked as a question.**
+///
+/// The mesh is the authority here and the renders are not: symmetry is a property of the vertex
+/// buffer, and two three-quarter views cannot settle it. An unmeasurable mesh says so and leaves the
+/// judgement where it was, which is the honest third state — not a default.
+fn front_measured_line(measured: Option<Option<Face>>) -> String {
+    match measured {
+        Some(Some(face)) => format!(
+            "  The mesh MEASURES a front at \"{}\" (its upper mass sits to that side). Answer that \
+             unless the images plainly contradict it, and lower `confidence` if they do.\n",
+            face_token(face)
+        ),
+        Some(None) => "  The mesh MEASURES SYMMETRIC: it has no front. Answer null. Do not infer one \
+             from the images — a symmetric prop presenting a \"front\" is a claim about the art that \
+             the geometry does not support.\n"
+            .to_owned(),
+        None => "  This mesh could not be measured, so judge the front from the images alone.\n"
+            .to_owned(),
+    }
 }
 
 /// Build the `(system, user)` prompt pair.
@@ -310,6 +375,7 @@ pub fn build_prompt(vocab: &Vocabularies, ctx: &PromptCtx) -> (String, String) {
          front - which face is the item's visual FRONT, the side it should present to the room \
          (a sofa fronts where you sit, a screen where it is watched): \"north\", \"east\", \
          \"south\", \"west\", or null for items with no front (symmetric props).\n\
+         {front_measured}\
          needs_turn - null when the asset stands upright as authored. ONLY when it clearly lies \
          on its side or back, {{\"axis\": \"x\"|\"z\", \"why\": \"...\"}} names the horizontal \
          quarter turn that would stand it up. Never guess; unsure means null.\n\
@@ -332,6 +398,7 @@ pub fn build_prompt(vocab: &Vocabularies, ctx: &PromptCtx) -> (String, String) {
         mounts = mount_lines(&surface_names),
         rooms_in_use = ctx.rooms_in_use.join(", "),
         groups_in_use = ctx.groups_in_use.join(", "),
+        front_measured = front_measured_line(ctx.front_measured),
         schema = schema,
     );
 
@@ -507,9 +574,24 @@ fn valid_mount(raw: &RawMount, surfaces: &Vocabulary) -> Result<Mount, String> {
             on: DecalHost::Wall { height: wall_height(raw.height_m)? },
         }),
         "decal_ceiling" => Ok(Mount::Decal { on: DecalHost::Ceiling }),
+        // **Listed from the same table the prompt offers**, so a refusal can never name a set the
+        // model was not shown — which is how a reprompt turns into an argument about a word.
         other => Err(format!(
-            "`{other}` is not a mount; the options are floor, surface, wall, ceiling, tiled, \
-             opening, decal_floor, decal_wall, decal_ceiling"
+            "`{other}` is not a mount; the options are {}",
+            mount_options(
+                &surfaces.tokens.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
+            )
+            .iter()
+            .map(mount_token)
+            .fold(Vec::new(), |mut acc: Vec<&str>, t| {
+                // One `OnSurface` per surface class collapses to one `surface` here: the class is a
+                // separate field, and listing it twice reads as two different mounts.
+                if !acc.contains(&t) {
+                    acc.push(t);
+                }
+                acc
+            })
+            .join(", ")
         )),
     }
 }
@@ -756,6 +838,11 @@ mod tests {
         }
     }
 
+    /// [`ctx`] with a stated measurement, so the front cases read as one line each.
+    fn ctx_with_front(front_measured: Option<Option<Face>>) -> PromptCtx {
+        PromptCtx { front_measured, ..ctx() }
+    }
+
     fn ctx() -> PromptCtx {
         PromptCtx {
             id: "wall_light".to_owned(),
@@ -770,6 +857,7 @@ mod tests {
             note_now: None,
             rooms_in_use: vec!["kitchen".to_owned(), "office".to_owned()],
             groups_in_use: vec!["desk_set".to_owned()],
+                    front_measured: None,
         }
     }
 
@@ -825,6 +913,90 @@ mod tests {
             .err()
             .unwrap_or_else(|| panic!("accepted"));
         assert!(e.contains("did you mean `light`"), "{e}");
+    }
+
+    /// **A measured front reaches the prompt, and a measured-symmetric mesh forbids one.**
+    ///
+    /// The labelling pass that prompted this asserted a front for a 1x1 floor tile and for two seats
+    /// the kit measures symmetric — three claims about the art that the geometry does not support.
+    /// The model was never told what the mesh said, so it answered from two renders, which cannot
+    /// settle symmetry. This pins that the measurement is in the prompt and that it is stated as an
+    /// instruction rather than as a hint.
+    ///
+    /// Also pins the spelling: `face_token` is the one place a `Face` becomes a word, and the
+    /// parser's four literals are the other side of it — a fifth spelling would be a question the
+    /// model cannot answer correctly.
+    #[test]
+    fn the_measured_front_is_told_to_the_model_and_symmetric_forbids_one() {
+        let v = vocab();
+
+        let (measured, _) = build_prompt(&v, &ctx_with_front(Some(Some(Face::East))));
+        assert!(
+            measured.contains("MEASURES a front at \"east\""),
+            "a measured front must reach the prompt, spelled the way the parser reads it"
+        );
+
+        let (symmetric, _) = build_prompt(&v, &ctx_with_front(Some(None)));
+        assert!(
+            symmetric.contains("MEASURES SYMMETRIC") && symmetric.contains("Answer null"),
+            "a symmetric mesh must be told to answer null, not left to the images"
+        );
+
+        let (unknown, _) = build_prompt(&v, &ctx_with_front(None));
+        assert!(
+            unknown.contains("could not be measured"),
+            "an unmeasurable mesh says so rather than asserting a front nobody measured"
+        );
+        assert!(
+            !unknown.contains("MEASURES"),
+            "and it must not claim a measurement it does not have"
+        );
+
+        // Every face the parser accepts is one `face_token` can write, and back again.
+        for f in [Face::North, Face::East, Face::South, Face::West] {
+            let json = format!(r#"{{"what": "a thing", "front": "{}"}}"#, face_token(f));
+            let got = validate(raw(&json), &v).unwrap_or_else(|e| panic!("{json}: {e}"));
+            assert_eq!(got.front, Some(f), "{json} did not round trip");
+        }
+    }
+
+    /// **Every mount the prompt OFFERS is one the parser ACCEPTS**, walked from `mount_options`
+    /// rather than from a list written beside it.
+    ///
+    /// The hand-written cases below are worth keeping — they pin the exact wire shapes, including
+    /// the `height_m` and `class` payloads. What they cannot do is notice a *new* `Mount` variant:
+    /// they would go on passing while the model was offered a token nothing parses, and the reprompt
+    /// would argue with it about a word neither side could win on. This walks the offered set, so a
+    /// variant added tomorrow fails here until its token exists on both sides.
+    ///
+    /// The assertion is on the **token**, not the value: `mount_options` supplies representative
+    /// heights and this must not be coupled to which ones.
+    #[test]
+    fn every_offered_mount_round_trips_through_its_own_token() {
+        let v = vocab();
+        let surfaces: Vec<String> = v.surfaces.tokens.iter().map(|t| t.name.clone()).collect();
+        for m in mount_options(&surfaces) {
+            let token = mount_token(&m);
+            let json = match &m {
+                Mount::OnSurface { class } => {
+                    format!(r#"{{"on": "{token}", "class": "{class}"}}"#)
+                }
+                Mount::OnWall { .. } | Mount::Decal { on: DecalHost::Wall { .. } } => {
+                    format!(r#"{{"on": "{token}", "height_m": 1.8}}"#)
+                }
+                _ => format!(r#"{{"on": "{token}"}}"#),
+            };
+            let full = format!(r#"{{"what": "a thing", "mount": {json}}}"#);
+            let got = validate(raw(&full), &v)
+                .unwrap_or_else(|e| panic!("the prompt offers `{json}` and the parser refuses it: {e}"))
+                .mount
+                .unwrap_or_else(|| panic!("`{json}` parsed to no mount at all"));
+            assert_eq!(
+                mount_token(&got),
+                token,
+                "`{json}` came back as a different mount than the one it names"
+            );
+        }
     }
 
     #[test]
