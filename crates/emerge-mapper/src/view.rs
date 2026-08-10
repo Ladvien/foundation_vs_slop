@@ -261,19 +261,45 @@ pub fn sense_pointer(
 ///
 /// Takes the position rather than the `Window` so that there is exactly one place deciding *which*
 /// position that is — see [`Pointer`].
+/// **The ray under the cursor**, as `(origin, unit direction)` in world metres.
+///
+/// Split out of [`cursor_ground`] because the ground point is not enough to pick a thing that stands
+/// up. Under this rig a screen point over a feature at height `h` intersects `y = 0` roughly `h`
+/// metres away from where that feature actually is, so testing a ground point against an object's
+/// FLOOR footprint misses everything but its base. Anything picking a volume wants the ray; anything
+/// picking a position on the floor wants the intersection below.
+///
+/// Returned as a pair rather than `Ray3d` so callers do the arithmetic in plain `Vec3` — the picking
+/// this feeds is a slab test, not a Bevy query.
+pub fn cursor_ray(
+    cursor: Option<Vec2>,
+    camera: &Camera,
+    cam_tf: &GlobalTransform,
+) -> Option<(Vec3, Vec3)> {
+    let cursor = cursor?;
+    let ray = camera.viewport_to_world(cam_tf, cursor).ok()?;
+    Some((ray.origin, *ray.direction))
+}
+
 pub fn cursor_ground(
     cursor: Option<Vec2>,
     camera: &Camera,
     cam_tf: &GlobalTransform,
 ) -> Option<Vec3> {
-    let cursor = cursor?;
-    let ray = camera.viewport_to_world(cam_tf, cursor).ok()?;
-    let denom = ray.direction.y;
+    let (origin, dir) = cursor_ray(cursor, camera, cam_tf)?;
+    let ray = Ray { origin, dir };
+    let denom = ray.dir.y;
     if denom.abs() < 1e-6 {
         return None;
     }
     let t = -ray.origin.y / denom;
-    (t > 0.0).then(|| ray.origin + *ray.direction * t)
+    (t > 0.0).then(|| ray.origin + ray.dir * t)
+}
+
+/// A ray in plain vectors, so the two readers above share one spelling of it.
+struct Ray {
+    origin: Vec3,
+    dir: Vec3,
 }
 
 /// **Which way the world moves for a pan key**, in world metres on the ground plane.

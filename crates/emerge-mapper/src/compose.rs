@@ -585,19 +585,60 @@ pub fn lay_out(
     Ok(Carousel { slots, extent, tallest })
 }
 
-/// **Which slot a point on the ground belongs to** — the inverse of [`lay_out`], for clicks.
+/// **Where a ray enters an axis-aligned box**, or `None`. The standard slab test.
 ///
-/// Returns the *composition* index, which is what a click is for: putting the miniature you pointed
-/// at into the focal position. Slots never overlap, so `position` picking the first match is
-/// deterministic rather than incidental.
-pub fn slot_at(carousel: &Carousel, at: (f32, f32)) -> Option<usize> {
-    carousel
-        .slots
-        .iter()
-        .find(|s| {
-            (at.0 - s.at.0).abs() <= s.size.0 * 0.5 && (at.1 - s.at.1).abs() <= s.size.1 * 0.5
-        })
-        .map(|s| s.index)
+/// Returns the entry distance, so a caller comparing several boxes picks the nearest — which is what
+/// makes a tall near group win over a short far one whose ground footprint the ray also crosses.
+fn ray_box(origin: Vec3, dir: Vec3, centre: Vec3, half: Vec3) -> Option<f32> {
+    let (mut near, mut far) = (f32::NEG_INFINITY, f32::INFINITY);
+    for a in 0..3 {
+        if dir[a].abs() < 1e-6 {
+            // Parallel to this pair of planes: either inside them forever, or never.
+            if (origin[a] - centre[a]).abs() > half[a] {
+                return None;
+            }
+            continue;
+        }
+        let t1 = (centre[a] - half[a] - origin[a]) / dir[a];
+        let t2 = (centre[a] + half[a] - origin[a]) / dir[a];
+        near = near.max(t1.min(t2));
+        far = far.min(t1.max(t2));
+    }
+    let entry = near.max(0.0);
+    (far >= entry).then_some(entry)
+}
+
+/// **Which composition the cursor is pointing at** — the inverse of [`lay_out`], for clicks.
+///
+/// Takes the ray in the stage's own space and tests it against each slot's **box**, nearest first.
+///
+/// # It used to test the ground point, and that was wrong by about a metre
+///
+/// The first version intersected the cursor with `y = 0` and asked which slot's floor footprint
+/// contained it. Under this rig a screen point over a feature at height `h` lands on the ground
+/// roughly `h` metres away from where that feature stands — so for a 2.4 m tile scaled to a 0.55 m
+/// miniature, only ground points within 0.275 m of the slot centre were accepted, and clicking the
+/// wall you can actually see returned `None`. Most of what was drawn for a slot was dead.
+///
+/// A ray against the box is exact at any yaw and elevation, which a closed-form inverse of the
+/// projection would not be — it would bake in today's `ISO_ELEVATION` and break the moment the anim
+/// bench's ground-level presets or a `Q`/`E` detent moved the eye.
+///
+/// The box is the **envelope** a `Bounded` group claims — the same wireframe `draw_stage` draws — so
+/// what is clickable is what is visibly outlined, rather than the meshes' own silhouette.
+pub fn slot_at(carousel: &Carousel, origin: Vec3, dir: Vec3) -> Option<usize> {
+    let mut best: Option<(f32, usize)> = None;
+    for s in &carousel.slots {
+        let centre = Vec3::new(s.at.0, s.height * 0.5, s.at.1);
+        let half = Vec3::new(s.size.0 * 0.5, s.height * 0.5, s.size.1 * 0.5);
+        let Some(t) = ray_box(origin, dir, centre, half) else {
+            continue;
+        };
+        if best.is_none_or(|(best_t, _)| t < best_t) {
+            best = Some((t, s.index));
+        }
+    }
+    best.map(|(_, index)| index)
 }
 
 /// **The orthographic viewport height that shows the whole strip.**
@@ -1051,11 +1092,13 @@ fn pick_slot(
     }
     let Some(camera) = camera else { return };
     let (cam, cam_tf) = *camera;
-    let Some(ground) = crate::view::cursor_ground(pointer.0, cam, cam_tf) else {
+    let Some((origin, dir)) = crate::view::cursor_ray(pointer.0, cam, cam_tf) else {
         return;
     };
-    let at = (ground.x - COMPOSE_STAGE.x, ground.z - COMPOSE_STAGE.z);
-    let Some(i) = slot_at(&carousel.0, at) else { return };
+    // Into the stage's own space, which is where the slots are laid out.
+    let Some(i) = slot_at(&carousel.0, origin - COMPOSE_STAGE, dir) else {
+        return;
+    };
     if state.selected != i {
         state.selected = i;
         state.member = 0;
@@ -2066,22 +2109,80 @@ mod carousel_tests {
         }
     }
 
-    /// `slot_at` inverts `lay_out`, which is what makes a click a lookup rather than a raycast — and
-    /// it answers with the *composition* index, because a click's whole job is choosing the next
-    /// focal group.
+    /// The view direction of the default rig, normalised — `ISO_OFFSET` is `(12, 12, 12)`, so the
+    /// camera looks along `(-1, -1, -1)`.
+    fn iso_dir() -> bevy::prelude::Vec3 {
+        bevy::prelude::Vec3::new(-1.0, -1.0, -1.0).normalize()
+    }
+
+    /// A ray that passes through `target`, coming from far away along the view direction.
+    fn ray_through(target: bevy::prelude::Vec3) -> (bevy::prelude::Vec3, bevy::prelude::Vec3) {
+        let dir = iso_dir();
+        (target - dir * 100.0, dir)
+    }
+
+    /// **The bug this test exists for.** Picking used to intersect the cursor with `y = 0` and ask
+    /// which slot's FLOOR footprint contained the result. Under this rig a screen point over a
+    /// feature at height `h` lands on the ground about `h` metres away from where that feature is —
+    /// so clicking the visible wall of a miniature returned nothing, and only the sliver of floor at
+    /// its base worked. Most of what was drawn for a slot was dead.
+    ///
+    /// Aimed at the TOP of each slot, which is the part an author actually clicks and the part the
+    /// old ground test could never resolve.
     #[test]
-    fn clicking_a_miniature_names_the_group_drawn_there() {
+    fn a_click_on_a_miniatures_body_picks_it_rather_than_missing_by_its_own_height() {
         let comps = kit(9);
         let c = lay_out(&comps, &lib(), 4).unwrap_or_else(|e| panic!("{e}"));
         for s in &c.slots {
-            assert_eq!(slot_at(&c, s.at), Some(s.index), "the centre of offset {}", s.offset);
+            // Just under the top face, dead centre — the tallest visible part of the group.
+            let top = bevy::prelude::Vec3::new(s.at.0, s.height * 0.95, s.at.1);
+            let (origin, dir) = ray_through(top);
+            assert_eq!(
+                slot_at(&c, origin, dir),
+                Some(s.index),
+                "a click on the body of offset {} has to pick it; its ground point is {:.2} m away",
+                s.offset,
+                s.height * 0.95
+            );
+            // And the base still works, which is all the old test ever checked.
+            let base = bevy::prelude::Vec3::new(s.at.0, 0.01, s.at.1);
+            let (origin, dir) = ray_through(base);
+            assert_eq!(slot_at(&c, origin, dir), Some(s.index), "offset {} at its base", s.offset);
         }
-        // The air between two slots belongs to neither.
+    }
+
+    /// The air between two slots belongs to neither, and off the strip picks nothing.
+    #[test]
+    fn a_click_that_lands_on_nothing_picks_nothing() {
+        let comps = kit(9);
+        let c = lay_out(&comps, &lib(), 4).unwrap_or_else(|e| panic!("{e}"));
         let a = c.slots.iter().find(|s| s.offset == 0).unwrap_or_else(|| panic!("no focal"));
         let b = c.slots.iter().find(|s| s.offset == 1).unwrap_or_else(|| panic!("no +1"));
-        let between = ((a.at.0 + b.at.0) * 0.5, (a.at.1 + b.at.1) * 0.5);
-        assert_eq!(slot_at(&c, between), None, "a click between slots picks neither");
-        assert_eq!(slot_at(&c, (1000.0, 1000.0)), None, "and off the strip picks nothing");
+        let between = bevy::prelude::Vec3::new(
+            (a.at.0 + b.at.0) * 0.5,
+            a.height * 0.5,
+            (a.at.1 + b.at.1) * 0.5,
+        );
+        let (origin, dir) = ray_through(between);
+        assert_eq!(slot_at(&c, origin, dir), None, "the gap between two slots picks neither");
+
+        let (origin, dir) = ray_through(bevy::prelude::Vec3::new(1000.0, 1.0, 1000.0));
+        assert_eq!(slot_at(&c, origin, dir), None, "and off the strip picks nothing");
+    }
+
+    /// **Nearest wins.** Two boxes can both lie on one ray — a tall near group in front of a far one —
+    /// and the answer has to be the one you can see, not whichever the loop reached first.
+    #[test]
+    fn when_a_ray_crosses_two_slots_the_nearer_one_is_picked() {
+        let comps = kit(9);
+        let c = lay_out(&comps, &lib(), 4).unwrap_or_else(|e| panic!("{e}"));
+        let near = c.slots.iter().find(|s| s.offset == 0).unwrap_or_else(|| panic!("no focal"));
+        let dir = iso_dir();
+        // A ray through the focal group, continued far enough that it would leave the strip.
+        let through = bevy::prelude::Vec3::new(near.at.0, near.height * 0.5, near.at.1);
+        let origin = through - dir * 100.0;
+        let hit = slot_at(&c, origin, dir).unwrap_or_else(|| panic!("the ray must hit something"));
+        assert_eq!(hit, near.index, "the nearest box on the ray is the one that was clicked");
     }
 
     /// A bounded group declares its box; an anchored one is measured from what stands in it.
@@ -2123,7 +2224,8 @@ mod carousel_tests {
         assert_eq!(height_of(&comps[0], &comps, &l).unwrap_or_else(|e| panic!("{e}")), SNAP);
         let c = lay_out(&comps, &lib(), 0).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(c.slots.len(), 1);
-        assert_eq!(slot_at(&c, (0.0, 0.0)), Some(0), "a fresh group has to be clickable");
+        let (origin, dir) = ray_through(bevy::prelude::Vec3::new(0.0, SNAP * 0.5, 0.0));
+        assert_eq!(slot_at(&c, origin, dir), Some(0), "a fresh group has to be clickable");
     }
 
     /// No groups is an empty stage, not a panic. A selection past the end clamps rather than dropping
