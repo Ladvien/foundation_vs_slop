@@ -1231,6 +1231,99 @@ mod compose {
         );
     }
 
+    /// **A stamp moves as one thing, and the move inverts both ways.**
+    ///
+    /// FVS-R-14's move arm. The rows are derived, so moving is one field — `Stamped::at` — and
+    /// `redraw_stamps` puts the pieces where the new value says. Asserting on the ROWS rather than
+    /// on the field is what makes that a claim rather than a restatement: a move that wrote `at` and
+    /// left the picture behind would pass a field check.
+    #[test]
+    fn moving_a_stamp_takes_every_row_with_it_and_undo_brings_them_back() {
+        let root = Fixture::new("movestamp")
+            .descriptor("table", "alpha")
+            .descriptor("chair", "alpha")
+            .composition(
+                "break_table",
+                &[("table", "table", (0.0, 0.0)), ("chair_north", "chair", (0.0, -1.0))],
+            )
+            .build("m");
+        let mut app = emerge_mapper::harness::build_headless(&root, "m", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        for _ in 0..3 {
+            app.update();
+        }
+        {
+            let world = app.world_mut();
+            world.resource_scope(|world, mut project: bevy::prelude::Mut<Project>| {
+                let mut state = world.resource_mut::<emerge_mapper::editor::EditorState>();
+                let mut compose = ComposeState {
+                    armed: Some("break_table".to_owned()),
+                    ..Default::default()
+                };
+                emerge_mapper::editor::stamp_here_for_test(
+                    &mut project,
+                    &mut state,
+                    &mut compose,
+                    (2.0, 2.0),
+                );
+            });
+        }
+        for _ in 0..3 {
+            app.update();
+        }
+
+        let id = app.world().resource::<Project>().map.stamps[0].id.clone();
+        // Where the picture says the rows are, before.
+        let rows_at = |app: &bevy::prelude::App| -> Vec<(f32, f32)> {
+            let mut v: Vec<(f32, f32)> = app
+                .world()
+                .resource::<emerge_mapper::editor::StampPicture>()
+                .rows
+                .iter()
+                .map(|r| r.at)
+                .collect();
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            v
+        };
+        let before = rows_at(&app);
+        assert_eq!(before.len(), 2, "both rows must be drawn to begin with");
+
+        {
+            let world = app.world_mut();
+            world.resource_scope(|world, mut project: bevy::prelude::Mut<Project>| {
+                let mut state = world.resource_mut::<emerge_mapper::editor::EditorState>();
+                emerge_mapper::editor::move_stamp_for_test(&id, (7.0, 5.0), &mut project, &mut state);
+            });
+        }
+        for _ in 0..3 {
+            app.update();
+        }
+
+        assert_eq!(
+            app.world().resource::<Project>().map.stamps[0].at,
+            (7.0, 5.0),
+            "the move writes `Stamped::at`"
+        );
+        let after = rows_at(&app);
+        assert_eq!(after.len(), 2, "the instance must still own both rows after moving");
+        let shift = (5.0_f32, 3.0_f32);
+        for (a, b) in before.iter().zip(after.iter()) {
+            assert!(
+                (b.0 - a.0 - shift.0).abs() < 1e-3 && (b.1 - a.1 - shift.1).abs() < 1e-3,
+                "every row moves by the same offset — {a:?} -> {b:?}, wanted +{shift:?}"
+            );
+        }
+
+        // Closed under inversion in both directions: a move is a move either way.
+        emerge_mapper::editor::undo_for_test(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<Project>().map.stamps[0].at, (2.0, 2.0));
+        assert_eq!(rows_at(&app), before, "undo puts every row back");
+        emerge_mapper::editor::redo_for_test(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<Project>().map.stamps[0].at, (7.0, 5.0));
+    }
+
     /// **The focal group stands up with its neighbours either side** — the carousel, asked of a
     /// running app rather than of the layout function.
     ///

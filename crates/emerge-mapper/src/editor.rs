@@ -269,7 +269,25 @@ pub struct RemovalDrag {
 /// exactly what the first one did.
 #[derive(Resource, Default)]
 pub struct MoveDrag {
-    pub held: Option<String>,
+    pub held: Option<Held>,
+}
+
+/// **What the move tool has picked up.**
+///
+/// Ids, never indices, for [`MoveDrag`]'s own reason: an undo or a fill between the grab and the
+/// drop can move a row, and an index would then name a different piece. The two arms are the two
+/// things a click can land on — see [`Subject`], which answers *which* and is resolved to this.
+///
+/// FVS-R-14: a stamp moves as **one thing**. Grabbing a member and dragging it would be reaching
+/// *through* the instance, which is what `composition.rs`'s encapsulation rule forbids and what the
+/// missing `Placement` on stamped rows used to prevent by making it unreachable.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Held {
+    /// A loose placement, by [`emerge_core::map::Placed::id`]. Its riders come with it.
+    Piece(String),
+    /// A stamp, by [`emerge_core::composition::Stamped::id`]. Moving it writes `Stamped::at`; the
+    /// rows follow because `redraw_stamps` rebuilds them from the list.
+    Stamp(String),
 }
 
 /// The translucent red marker: the hovered piece's footprint, or the dragged rectangle.
@@ -461,6 +479,12 @@ enum Undo {
     /// FVS-R-14's delete does: undo would put it back at index 3 and redo would then take the last
     /// one off instead. Indices, like every other paired removal in this file.
     UnstampAt { indices: Vec<usize> },
+    /// **Put a stamp back where it was.** Its own inverse — a move is a move either way, so unlike
+    /// the placement pair there is no second variant.
+    ///
+    /// By id rather than index, because [`Undo::UnstampAt`] can reorder the list between the move
+    /// and the undo, and an index would then move somebody else.
+    MovedStamp { id: String, from: (f32, f32) },
     /// Put a placement's pin back, reason included. Its own inverse.
     Pinned {
         index: usize,
@@ -3369,6 +3393,28 @@ pub fn delete_stamp_for_test(id: &str, project: &mut Project, state: &mut Editor
     delete_stamp(id, project, state);
 }
 
+/// FVS-R-14's move arm, reachable from `tests/headless.rs` — the mouse path is not drivable
+/// headless (`cursor_ground` needs a viewport), and a test re-implementing the body would pass
+/// while the real one was broken.
+pub fn move_stamp_for_test(
+    id: &str,
+    to: (f32, f32),
+    project: &mut Project,
+    state: &mut EditorState,
+) {
+    let Some(st) = project.map.stamps.iter_mut().find(|s| s.id == id) else {
+        state.status.problem(format!("`{id}` is gone — nothing was moved"));
+        return;
+    };
+    let from = st.at;
+    if from == to {
+        return;
+    }
+    st.at = to;
+    project.dirty = true;
+    state.record(Undo::MovedStamp { id: id.to_owned(), from });
+}
+
 /// The other half of `Cmd`+remove, reachable from `tests/headless.rs`.
 ///
 /// [`edit_subject`] answers *which* piece and is tested on its own; this is what happens to the
@@ -4181,6 +4227,19 @@ fn apply(
             state.status.note(format!("took back {} stamp(s)", items.len()));
             Undo::UnstampedMany { items }
         }
+        Undo::MovedStamp { id, from } => {
+            let Some(st) = project.map.stamps.iter_mut().find(|s| s.id == id) else {
+                state.status.problem(format!("`{id}` is not on this map any more"));
+                return None;
+            };
+            let now = st.at;
+            st.at = from;
+            state.status.note(format!("`{id}` back at ({:.1}, {:.1})", from.0, from.1));
+            // The entities are not touched: `redraw_stamps` rebuilds the whole stamped set from the
+            // list, so there is one place that turns stamps into pictures — the same argument every
+            // other stamp arm here makes.
+            Undo::MovedStamp { id, from: now }
+        }
         Undo::Pinned {
             index,
             owned,
@@ -4968,16 +5027,41 @@ fn hide_carried(
     drag: Res<MoveDrag>,
     project: Res<Project>,
     mut placed: Query<(&Placement, &mut Visibility)>,
+    mut instances: Query<(&StampInstance, &mut Visibility), Without<Placement>>,
 ) {
-    let carried: Vec<String> = drag
-        .held
-        .as_ref()
-        .and_then(|id| project.map.placements.iter().position(|p| &p.id == id))
-        .map(|ix| emerge_core::stack::group_of(&project.map, ix))
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|i| project.map.placements.get(i).map(|p| p.id.clone()))
-        .collect();
+    // **The instance, one write, every row.** A carried stamp's pieces carry no `Placement`, so the
+    // query below cannot see them; the parent's visibility is inherited by all of them, which is
+    // the same property that makes moving a stamp one field rather than N.
+    let carried_stamp = match drag.held.as_ref() {
+        Some(Held::Stamp(id)) => Some(id.clone()),
+        _ => None,
+    };
+    for (inst, mut vis) in &mut instances {
+        let want = if carried_stamp.as_deref() == Some(inst.id.as_str()) {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+        if *vis != want {
+            *vis = want;
+        }
+    }
+    let carried: Vec<String> = match drag.held.as_ref() {
+        Some(Held::Piece(id)) => project
+            .map
+            .placements
+            .iter()
+            .position(|p| &p.id == id)
+            .map(|ix| emerge_core::stack::group_of(&project.map, ix))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|i| project.map.placements.get(i).map(|p| p.id.clone()))
+            .collect(),
+        // **A carried stamp hides through its instance**, not through this query: stamped rows
+        // carry no `Placement`, so none of them match here — and the parent's `Visibility` reaches
+        // every row it owns, which is the same one-write property the move itself relies on.
+        Some(Held::Stamp(_)) | None => Vec::new(),
+    };
 
     for (marker, mut vis) in &mut placed {
         let want = if carried.iter().any(|id| *id == marker.0) {
@@ -5101,6 +5185,7 @@ fn drive_move(
     mut state: ResMut<EditorState>,
     mut drag: ResMut<MoveDrag>,
     anchor: Res<FineAnchor>,
+    picture: Res<StampPicture>,
 ) {
     // Read, never write, unless something happened: `state` is watched by `rebuild_palette`, and an
     // unconditional deref here rebuilds all forty-odd rows every frame. Same rule as `drive_removal`.
@@ -5130,20 +5215,60 @@ fn drive_move(
         // cursor actually is — snapping first would answer it about the middle of a cell.
         None => {
             let probe = project.map.to_map_space((hit.x, hit.z));
-            let Some(index) = pick_at(&project, probe) else {
-                state.status.note("nothing here to move".to_owned());
-                return;
+            // **One competition over both lists** — see `pick_subject`. A stamped row resolves to
+            // its stamp, so grabbing a member picks up the instance rather than reaching into it.
+            let held = match pick_subject(&project, &picture, probe) {
+                Some(Subject::Placement(index)) => {
+                    let Some(p) = project.map.placements.get(index) else {
+                        return;
+                    };
+                    Held::Piece(p.id.clone())
+                }
+                Some(Subject::Stamp(id)) => Held::Stamp(id),
+                None => {
+                    state.status.note("nothing here to move".to_owned());
+                    return;
+                }
             };
-            let Some(p) = project.map.placements.get(index) else {
-                return;
+            let what = match &held {
+                Held::Piece(id) => id.clone(),
+                Held::Stamp(id) => format!("`{id}`, whole"),
             };
-            let id = p.id.clone();
-            state.status.note(format!("{id} in hand — click to put it down, Esc to put it back"));
-            drag.held = Some(id);
+            state.status.note(format!("{what} in hand — click to put it down, Esc to put it back"));
+            drag.held = Some(held);
         }
         // **Drop.** Snapped like a placement, and free with the modifier held, so a move lands on the
         // same grid a place would.
-        Some(id) => {
+        // **A stamp moves as one thing**, and moving it is one field: the rows are derived, so
+        // `redraw_stamps` puts them where the new `at` says. FVS-R-14's move arm.
+        Some(Held::Stamp(id)) => {
+            let free = keys::mod_held(&keyboard);
+            let at = map_at(&project, hit, free, &anchor);
+            // Resolved now, not at grab — the list can have moved under it, exactly as for a piece.
+            let Some(st) = project.map.stamps.iter_mut().find(|s| s.id == id) else {
+                drag.held = None;
+                state.status.problem(format!("`{id}` is gone — nothing was moved"));
+                return;
+            };
+            let from = st.at;
+            if from == at {
+                // Put down where it was picked up: not an edit, and recording one would put an
+                // undo step on the stack that does nothing when taken.
+                drag.held = None;
+                state.status.note(format!("`{id}` put back where it was"));
+                return;
+            }
+            st.at = at;
+            drag.held = None;
+            project.dirty = true;
+            state.record(Undo::MovedStamp { id: id.clone(), from });
+            let how = if free { " free" } else { "" };
+            state.status.note(format!(
+                "moved `{id}` to ({:.1}, {:.1}){how}",
+                at.0, at.1
+            ));
+        }
+        Some(Held::Piece(id)) => {
             // Resolved now, not at grab: an undo or a fill between the two clicks may have moved this
             // row, and it may have removed it outright.
             let Some(index) = project.map.placements.iter().position(|p| p.id == id) else {
@@ -6162,9 +6287,15 @@ fn drive_ghost(
         // The clone tool draws its own marker — the set's bounds riding the cursor — and a brush
         // ghost beside it would be a second preview for a click that stamps, not places.
         Tool::Clone => None,
+        // A carried STAMP previews as itself — its rows stay drawn while it is in hand and the
+        // drop moves them — so the brush ghost has nothing to add and would be a second subject.
         Tool::Move => held
             .held
             .as_ref()
+            .and_then(|h| match h {
+                Held::Piece(id) => Some(id),
+                Held::Stamp(_) => None,
+            })
             .and_then(|id| project.map.placements.iter().find(|p| &p.id == id))
             .and_then(|p| {
                 project
@@ -6198,7 +6329,7 @@ fn drive_ghost(
     // removed; so must the preview, or it is a promise about something that is not going to happen —
     // the one thing this editor's previews are held to.
     let probe_map = match (state.tool, held.held.as_ref()) {
-        (Tool::Move, Some(id)) => {
+        (Tool::Move, Some(Held::Piece(id))) => {
             let mut reduced = project.map.clone();
             if let Some(ix) = reduced.placements.iter().position(|p| &p.id == id) {
                 let mut group = emerge_core::stack::group_of(&reduced, ix);
