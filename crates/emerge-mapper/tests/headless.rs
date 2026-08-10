@@ -1545,6 +1545,115 @@ fn cmd_remove_falls_to_the_place_selection() {
     );
 }
 
+/// **`Shift+B` puts the armed piece down.**
+///
+/// Reported live: arming the box left the palette showing a highlighted row and the brush ghost
+/// previewing a placement while the author dragged a capture box — two subjects under one cursor.
+/// Driven through the real key message, because what is being asserted is that the *binding* reaches
+/// it: setting `state.tool` by hand would pass with the handler deleted.
+#[test]
+fn arming_the_box_clears_the_armed_piece() {
+    let root = Fixture::new("armclear")
+        .descriptor("floor", "alpha")
+        .descriptor("wall", "alpha")
+        .build("m");
+    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..3 {
+        app.update();
+    }
+
+    {
+        let mut state = app
+            .world_mut()
+            .resource_mut::<emerge_mapper::editor::EditorState>();
+        state.brush = Some(0);
+    }
+    app.update();
+
+    // Shift+B, both halves in one frame so the modifier is held as the key goes down.
+    for (key, logical) in [
+        (KeyCode::ShiftLeft, bevy::input::keyboard::Key::Shift),
+        (KeyCode::KeyB, bevy::input::keyboard::Key::Character("b".into())),
+    ] {
+        app.world_mut().write_message(bevy::input::keyboard::KeyboardInput {
+            key_code: key,
+            logical_key: logical,
+            state: bevy::input::ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        });
+    }
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let state = app
+        .world()
+        .get_resource::<emerge_mapper::editor::EditorState>()
+        .unwrap_or_else(|| panic!("no editor state"));
+    assert!(
+        matches!(state.tool, emerge_mapper::editor::Tool::Clone),
+        "Shift+B has to arm the clone tool, or this test is asserting nothing about it"
+    );
+    assert!(
+        state.brush.is_none(),
+        "arming the box must put the brush down — a highlighted palette row and a capture box are \
+         two subjects under one cursor"
+    );
+}
+
+/// **The UNDER readout stops at the panel**, like the verbs it reports on.
+///
+/// `sense_under_cursor` had no over-the-interface gate at all, so with the cursor resting on the
+/// PLACE list the status block named whatever placement stood behind the panel and said
+/// "Cmd+Delete edits it" — a promise about a key that acts on the PLACE selection there.
+///
+/// **Asked of `under_readout` rather than of the running system, and that is the finding.** The
+/// first version of this test drove the whole app, put `view::Pointer` on a real node's centre, and
+/// asserted the block was blank. It passed — and it passed just as well with the gate deleted,
+/// because headless has no viewport, so `under_cursor_target` returns `None` and the line is blank
+/// whatever the rule does. Mutation-testing caught it. The rule is a pure function now so the
+/// assertion has something to bite on.
+#[test]
+fn the_under_readout_is_blank_while_the_pointer_is_on_a_panel() {
+    use emerge_mapper::editor::under_readout;
+
+    let piece = emerge_core::map::Placed {
+        paint: 0,
+        id: "crate@7".to_owned(),
+        descriptor: "alpha/crate".to_owned(),
+        at: (1.0, 1.0),
+        yaw: 0.0,
+        lift: 0.0,
+        tip: (0, 0),
+        on: None,
+        owned: false,
+        owned_because: None,
+        patch: None,
+        note: None,
+    };
+
+    // Over the world, pointing at something: the line names it and the key that acts on it.
+    let said = under_readout(false, Some(&piece));
+    assert!(said.contains("crate@7"), "the readout must name the piece: `{said}`");
+    assert!(
+        said.contains(&emerge_mapper::keys::chord_text(emerge_mapper::keys::binding(
+            emerge_mapper::keys::Action::EditTile
+        ))),
+        "the chord comes from the census so this line cannot name a key the build does not read: \
+         `{said}`"
+    );
+    // Over a panel, with the very same piece behind it: silent.
+    assert_eq!(
+        under_readout(true, Some(&piece)),
+        "",
+        "a panel is drawn over the map, so the block must not promise an edit to what is behind it"
+    );
+    // And bare floor stays blank, or the row is never empty and the eye stops reading it.
+    assert_eq!(under_readout(false, None), "");
+}
+
 /// **"Is the pointer on a panel" answered against the real layout.**
 ///
 /// Reported live, twice: with the cursor on a PLACE row, `Cmd`+remove picked up the tile *underneath

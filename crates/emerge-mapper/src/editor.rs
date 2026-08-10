@@ -5376,6 +5376,15 @@ fn nearest_placement(
 #[derive(Resource, Default)]
 pub struct UnderCursor(String);
 
+impl UnderCursor {
+    /// What the block is showing. An accessor rather than a public field: the string is written by
+    /// exactly one system and read by the panel, and a test asserting the readout stays silent over
+    /// a panel should not be able to write it.
+    pub fn line(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Name what the verbs would act on, through **the same resolver the verbs use**.
 ///
 /// [`under_cursor_target`] and not a second pick: a readout that named a different piece than `R`
@@ -5404,25 +5413,38 @@ fn sense_under_cursor(
             .unwrap_or(1.0),
         ui_nodes.iter(),
     );
-    let picked = (!on_ui)
-        .then(|| under_cursor_target(&mut lock, *pointer, camera, &project))
-        .flatten();
-    let want = match picked {
+    let picked = under_cursor_target(&mut lock, *pointer, camera, &project)
+        .and_then(|i| project.map.placements.get(i));
+    let want = under_readout(on_ui, picked);
+    if under.0 != want {
+        under.0 = want;
+    }
+}
+
+/// **What the block says**, given whether the pointer is on a panel and what it is over.
+///
+/// Pure and separate from the system for the reason `edit_subject` is: `under_cursor_target` needs a
+/// viewport to answer, and a headless test has none — so a test written against the whole system is
+/// blank whatever the rule does, and **passes with the gate deleted**. That is not a hypothetical:
+/// the first version of this test was written that way, mutation-tested, and found to assert
+/// nothing. The rule lives here so it can be asked directly.
+pub fn under_readout(on_ui: bool, picked: Option<&Placed>) -> String {
+    // A panel is drawn over the map, so a pointer on one is not over the piece behind it — and this
+    // line ends "edits it" about a key that acts on the PLACE selection there.
+    if on_ui {
+        return String::new();
+    }
+    match picked {
         // The chord comes from the census, never retyped — `keys.rs`'s one rule, and the reason
         // this line cannot come to name a key the build does not read.
-        Some(i) => project.map.placements.get(i).map_or_else(String::new, |p| {
-            format!(
-                "{}  — {} edits it",
-                p.id,
-                keys::chord_text(keys::binding(Action::EditTile))
-            )
-        }),
+        Some(p) => format!(
+            "{}  — {} edits it",
+            p.id,
+            keys::chord_text(keys::binding(Action::EditTile))
+        ),
         // Empty over bare floor. A row saying "nothing" would be a row that is never blank, and the
         // eye stops reading a line that always has something in it.
         None => String::new(),
-    };
-    if under.0 != want {
-        under.0 = want;
     }
 }
 
