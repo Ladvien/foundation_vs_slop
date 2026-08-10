@@ -3408,7 +3408,7 @@ fn keys(
         return;
     }
 
-    // **X puts the brush back where it started.** Turning is relative, so a piece three quarters round
+    // **V puts the brush back where it started.** Turning is relative, so a piece three quarters round
     // is one press from straight in one direction and three in the other — and an author who has been
     // tapping `Z` has no reason to be keeping count. This is the only absolute among the aim keys.
     if keys::just_pressed(&keyboard, live.0, Action::AimReset) {
