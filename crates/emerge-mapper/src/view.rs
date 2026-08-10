@@ -252,6 +252,41 @@ pub fn sense_pointer(
     }
 }
 
+/// **Is the pointer over a panel** — asked of the layout, not of the picking backend.
+///
+/// `bevy_picking`'s `Hovered` answers the same question for the mouse verbs, and correctly: a click
+/// is delivered by the picking backend, so the two agree by construction. A **keyboard** verb asking
+/// it is a different matter, and got this wrong in one shipped commit: `Hovered` is written from the
+/// *window's* cursor, which is the one thing [`sense_pointer`] refuses to move for an agent — so the
+/// answer is unreachable over BRP and untestable headless. That is the same trap `Pointer` exists to
+/// close, entered from the other side.
+///
+/// So this reads the rects. `ComputedNode::size` is in physical pixels and the pointer is logical,
+/// which is what `inverse_scale_factor` converts — the distinction `crate::tiles`'s list arithmetic
+/// already had to make once.
+///
+/// A node with `Pickable::IGNORE` is deliberately still counted: this asks *"is a panel drawn here"*,
+/// which is a question about the layout, and click-through is a question about clicks.
+pub fn over_ui<'a>(
+    cursor: Option<Vec2>,
+    nodes: impl IntoIterator<Item = (&'a bevy::ui::ComputedNode, &'a GlobalTransform)>,
+) -> bool {
+    let Some(cursor) = cursor else {
+        // No cursor is not "over the world" — there is no honest answer, and the callers treat a
+        // missing pointer as no answer everywhere else in this file.
+        return false;
+    };
+    nodes.into_iter().any(|(node, tf)| {
+        let size = node.size() * node.inverse_scale_factor();
+        if size.x <= 0.0 || size.y <= 0.0 {
+            return false;
+        }
+        let centre = tf.translation().truncate() * node.inverse_scale_factor();
+        let half = size * 0.5;
+        (cursor.x - centre.x).abs() <= half.x && (cursor.y - centre.y).abs() <= half.y
+    })
+}
+
 /// Where the pointer meets the ground plane, in world metres.
 ///
 /// The editor's whole spatial input is this one function, so it is worth being exact about: a ray

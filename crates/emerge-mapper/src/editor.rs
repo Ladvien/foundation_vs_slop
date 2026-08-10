@@ -3312,6 +3312,21 @@ pub fn delete_stamp_for_test(id: &str, project: &mut Project, state: &mut Editor
     delete_stamp(id, project, state);
 }
 
+/// The other half of `Cmd`+remove, reachable from `tests/headless.rs`.
+///
+/// [`edit_subject`] answers *which* piece and is tested on its own; this is what happens to the
+/// answer, and the two failed separately — a subject resolved correctly and then handed to a door
+/// that did not open is indistinguishable, from the author's chair, from the subject being wrong.
+pub fn send_to_tiles_for_test(
+    subject: Result<String, String>,
+    project: &Project,
+    state: &mut EditorState,
+    mode: &mut crate::tiles::Mode,
+    import: &mut crate::tiles::ImportState,
+) {
+    send_to_tiles(subject, project, state, mode, import);
+}
+
 /// The tail of a descriptor id, so a generated placement id reads as `crate@7` rather than
 /// `kenney_prototype-kit/crate@7`.
 fn short_id(descriptor_id: &str) -> &str {
@@ -3324,7 +3339,12 @@ fn keys(
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<keys::Live>,
     assets: Res<AssetServer>,
-    hovered_ui: Query<&Hovered>,
+    // **The layout, not `Hovered`.** Every verb in this system that acts on "the piece under the
+    // cursor" has to know whether the cursor is on a panel, and asking the picking backend makes
+    // that answer depend on the *window's* cursor — unreachable by an injected one, so an agent
+    // driving this editor gets `false` always and a person who moved the mouse off a row gets it
+    // too. One definition, read off the rects: `crate::view::over_ui`.
+    ui_nodes: Query<(&bevy::ui::ComputedNode, &GlobalTransform)>,
     pointer: Res<crate::view::Pointer>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     placed: Query<(Entity, &Placement)>,
@@ -3362,14 +3382,14 @@ fn keys(
     // **Map to Tiles, carrying the piece.** Before the branches below, because they consume the
     // window and camera singles.
     if keys::just_pressed(&keyboard, live.0, Action::EditTile) {
-        let on_ui = hovered_ui.iter().any(|h| h.0);
-        // The camera-dependent half stays here, and only runs when it is the half being asked —
-        // `nearest_placement` needs a viewport to answer, which is exactly what a headless test
-        // does not have and why the rule below is a separate, pure function.
-        let under = (!on_ui)
+        // **A panel is drawn over the map, so a cursor on one is not pointing at the world.** Asked
+        // of the layout rather than of `Hovered` — see `view::over_ui`, which carries why. Without
+        // it "the piece under the cursor" would answer with whatever happens to stand behind the
+        // PLACE list, which is the one place an author is certainly not aiming at.
+        let under = (!crate::view::over_ui(pointer.0, ui_nodes.iter()))
             .then(|| nearest_placement(*pointer, camera, &project))
             .flatten();
-        let subject = edit_subject(on_ui, &project, &state, under);
+        let subject = edit_subject(&project, &state, under);
         send_to_tiles(subject, &project, &mut state, mode, import);
         return;
     }
@@ -3536,7 +3556,7 @@ fn keys(
         (Action::TurnPieceRight, YAW_STEP),
     ] {
         if keys::repeating(&keyboard, live.0, action, &mut repeat, dt)
-            && !hovered_ui.iter().any(|h| h.0)
+            && !crate::view::over_ui(pointer.0, ui_nodes.iter())
         {
             turn_under_cursor(
                 &mut commands,
@@ -3555,7 +3575,7 @@ fn keys(
 
     // **`H` targets the stack** — see `cycle_target`; the verbs below act on its pick.
     if keys::just_pressed(&keyboard, live.0, Action::CycleTarget)
-        && !hovered_ui.iter().any(|h| h.0)
+        && !crate::view::over_ui(pointer.0, ui_nodes.iter())
     {
         cycle_target(*pointer, camera, &project, &mut state, target.as_mut());
         return;
@@ -3565,7 +3585,7 @@ fn keys(
     // Deliberately `just_pressed` where the yaw keys repeat: each axis has four states, and a held
     // key cycling them at repeat pace reads as flicker, not control.
     for (action, about_x) in [(Action::TipX, true), (Action::TipZ, false)] {
-        if keys::just_pressed(&keyboard, live.0, action) && !hovered_ui.iter().any(|h| h.0) {
+        if keys::just_pressed(&keyboard, live.0, action) && !crate::view::over_ui(pointer.0, ui_nodes.iter()) {
             tip_under_cursor(
                 &mut commands,
                 &assets,
@@ -3585,7 +3605,7 @@ fn keys(
     // three metres up is a long tap-tap-tap otherwise.
     for (action, sign) in [(Action::LiftUp, 1.0), (Action::LiftDown, -1.0)] {
         if keys::repeating(&keyboard, live.0, action, &mut repeat, dt)
-            && !hovered_ui.iter().any(|h| h.0)
+            && !crate::view::over_ui(pointer.0, ui_nodes.iter())
         {
             lift_under_cursor(
                 &mut commands,
@@ -3603,7 +3623,7 @@ fn keys(
     }
 
     // **O pins or unpins the piece under the cursor.** A pin is what the solver routes around.
-    if keys::just_pressed(&keyboard, live.0, Action::OwnToggle) && !hovered_ui.iter().any(|h| h.0) {
+    if keys::just_pressed(&keyboard, live.0, Action::OwnToggle) && !crate::view::over_ui(pointer.0, ui_nodes.iter()) {
         toggle_pin(*pointer, camera, &mut project, &mut state, target.as_mut());
         return;
     }
@@ -3627,7 +3647,7 @@ fn keys(
 
     // **F floods.** From the cell under the cursor outward, stopping at anything already placed and
     // at the map's edge — see `crate::fill`.
-    if keys::just_pressed(&keyboard, live.0, Action::Fill) && !hovered_ui.iter().any(|h| h.0) {
+    if keys::just_pressed(&keyboard, live.0, Action::Fill) && !crate::view::over_ui(pointer.0, ui_nodes.iter()) {
         flood_from_cursor(
             &mut commands,
             &assets,
@@ -4825,35 +4845,44 @@ fn hide_carried(
     }
 }
 
-/// **Which piece `Cmd`+remove is about — the pointer decides, and that is the whole rule.**
+/// **Which piece `Cmd`+remove is about** — one question with an ordered answer.
 ///
-/// Over the map it is the piece under the cursor. Over the interface the author is pointing at the
-/// PLACE list, so it is the **armed brush** — the row that list draws as selected, and the subject
-/// every other verb on the tab already acts on. One question, asked of where the cursor is; there is
-/// no third case and no falling from one to the other, because a verb that answers about a piece the
-/// author was not pointing at is worse than one that says it found nothing.
+/// 1. The piece **under the cursor**, when there is one.
+/// 2. Failing that, the **PLACE selection** — the row that list draws as selected, and the subject
+///    every other verb on the tab already acts on.
+/// 3. Failing both, a refusal that names both places it looked.
 ///
-/// Pure, and separate from the system, for the reason `compose::pick_along` is: the map half needs a
-/// viewport to answer and a headless test has none, so a test written against the whole system can
-/// only ever exercise one branch — and would pass while asserting nothing if that branch silently
-/// stopped resolving. `under` is `nearest_placement`'s answer, already taken.
+/// That is the shape [`pick_at`] already has — footprint covering the probe first, then nearest
+/// within reach — and it is one rule rather than a fallback: the question is "which piece do you
+/// mean", and these are where the answer can come from, in the order an author means them.
+///
+/// **It replaced a rule keyed on whether the pointer was over the interface, which was wrong in a
+/// way worth keeping written down.** That question was asked as `Hovered`, which `bevy_picking`
+/// writes from the *window's* cursor — the one an injected pointer never moves — so the verb was
+/// unreachable over BRP, untestable headless, and answered "no" whenever the author had moved the
+/// mouse off the row they had just selected. Reported as the feature not working, twice. `under`
+/// still comes from where the cursor is, but nothing now depends on the cursor *resting* anywhere.
+///
+/// Pure, and separate from the system, for the reason `compose::pick_along` is: `nearest_placement`
+/// needs a viewport to answer and a headless test has none, so a test written against the whole
+/// system could only ever exercise one branch — and would pass while asserting nothing if the other
+/// silently stopped resolving. `under` is that answer, already taken.
 pub fn edit_subject(
-    on_ui: bool,
     project: &Project,
     state: &EditorState,
     under: Option<usize>,
 ) -> Result<String, String> {
-    if on_ui {
-        return state
-            .brush
-            .and_then(|ix| project.library.descriptors.get(ix))
-            .map(|d| d.id.clone())
-            .ok_or_else(|| "nothing is selected in PLACE".to_owned());
-    }
-    under
+    if let Some(id) = under
         .and_then(|ix| project.map.placements.get(ix))
         .map(|p| p.descriptor.clone())
-        .ok_or_else(|| "nothing here to edit".to_owned())
+    {
+        return Ok(id);
+    }
+    state
+        .brush
+        .and_then(|ix| project.library.descriptors.get(ix))
+        .map(|d| d.id.clone())
+        .ok_or_else(|| "nothing under the cursor, and nothing selected in PLACE".to_owned())
 }
 
 /// **Send a piece to the Tiles tab to be defined**, and go there.

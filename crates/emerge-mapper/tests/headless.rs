@@ -516,6 +516,74 @@ mod stepped {
 
     /// **An ASSET-CONTRACT test — it reads the shipped corpus on purpose.**
     ///
+    /// Reported live: sending `site/floor` over from the PLACE list "didn't open the item in Tiles",
+    /// and a second piece did. `edit_subject` is unit-tested and answers `site/floor` correctly, so
+    /// what is asserted here is the other half — that the door the answer is handed to actually
+    /// opens, **on the first send of a session**, for the piece that failed.
+    ///
+    /// It reads the shipped kit deliberately: the report is about `site/floor`, which is a member of
+    /// all four authored site tiles, and a fixture would be checking that the fixture is what the
+    /// fixture is. The pair `rebuild_detail` guards on is the thing under suspicion — it needs the
+    /// id in **both** `measured` and the layered library, while the door only checked the latter.
+    #[test]
+    fn the_first_send_of_a_session_opens_the_piece_it_names() {
+        let mut app = harness::build_headless(&root(), "untitled_map", Some("site"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        for _ in 0..10 {
+            app.update();
+        }
+
+        // Untouched: this is the first send of the session, which is the case reported.
+        assert!(
+            !app.world()
+                .resource::<emerge_mapper::tiles::ImportState>()
+                .scanned,
+            "this test is about the FIRST send — a scanned tab is a different case"
+        );
+
+        let world = app.world_mut();
+        world.resource_scope(|world, project: bevy::prelude::Mut<emerge_mapper::project::Project>| {
+            world.resource_scope(|world, mut import: bevy::prelude::Mut<emerge_mapper::tiles::ImportState>| {
+                let mut mode = world.resource_mut::<emerge_mapper::tiles::Mode>();
+                let mut state = emerge_mapper::editor::EditorState::default();
+                emerge_mapper::editor::send_to_tiles_for_test(
+                    Ok("site/floor".to_owned()),
+                    &project,
+                    &mut state,
+                    &mut mode,
+                    &mut import,
+                );
+                assert!(
+                    !state.status.has_problem(),
+                    "the door refused `site/floor`: {}",
+                    state.status.problem_text()
+                );
+                assert_eq!(
+                    import.selected_library_id.as_deref(),
+                    Some("site/floor"),
+                    "the piece was not focused on the Tiles tab"
+                );
+                assert!(
+                    matches!(*mode, emerge_mapper::tiles::Mode::Tiles),
+                    "the tab did not change"
+                );
+                // **The pair the detail pane guards on.** `send_to_tiles` checks the layered
+                // library; the pane needs the measurements too, and returns early showing nothing
+                // when they disagree — which is exactly "it switched tabs and the item wasn't there".
+                assert!(
+                    import.editing(&project.measured).is_some(),
+                    "`site/floor` is not in the MEASURED layer, so the detail pane draws nothing"
+                );
+                assert!(
+                    import.placed(&project).is_some(),
+                    "`site/floor` is not in the layered library as placed"
+                );
+            });
+        });
+    }
+
+    /// **An ASSET-CONTRACT test — it reads the shipped corpus on purpose.**
+    ///
     /// The rule is that a test about the *editor* uses `Fixture` and never the real `assets/`, so
     /// importing a kit cannot break the suite. This one is the exception the rule needs: what it
     /// asserts IS a fact about what ships, and checking it against a fixture would be checking that
@@ -1387,17 +1455,23 @@ fn the_open_name_box_answers_the_over_ui_question() {
     );
 }
 
-/// **`Cmd`+remove over the interface sends the PLACE selection**, not "nothing here to edit".
+/// **`Cmd`+remove falls to the PLACE selection when nothing is under the cursor.**
 ///
 /// Reported live: *"I want to send back an item that is selected in the Place scroll area."* The
 /// verb resolved its subject with `nearest_placement`, so it only ever reached a piece standing on
-/// the map; over the list — where the author's cursor is, on the row they just clicked — it refused.
+/// the map; over the list it refused.
 ///
-/// The armed row is deliberately **not** the descriptor the map places, so an assertion cannot be
-/// satisfied by the other branch answering first. Both branches are driven, including the two
-/// refusals, because a rule with an untested arm is a rule with an arm nobody has read.
+/// **The first fix for that was wrong and this test is the shape of why.** It keyed on whether the
+/// pointer was over the interface, asked as `Hovered` — which `bevy_picking` writes from the
+/// *window's* cursor, so it is false for an injected pointer and false for an author who moved the
+/// mouse off the row they had just selected. A test could not reach the branch at all, so it passed
+/// while the feature did not work, and it was reported twice. The rule is now ordered rather than
+/// conditional, which is a rule a test can drive whole.
+///
+/// The armed row is deliberately **not** the descriptor the map places, so no assertion here can be
+/// satisfied by the other arm answering first.
 #[test]
-fn cmd_remove_over_the_interface_sends_the_place_selection() {
+fn cmd_remove_falls_to_the_place_selection() {
     use emerge_mapper::editor::edit_subject;
 
     let root = Fixture::new("sendback")
@@ -1436,7 +1510,7 @@ fn cmd_remove_over_the_interface_sends_the_place_selection() {
             .resource_mut::<emerge_mapper::editor::EditorState>()
             .brush = brush;
     };
-    let ask = |app: &App, on_ui: bool, under: Option<usize>| {
+    let ask = |app: &App, under: Option<usize>| {
         let project = app
             .world()
             .get_resource::<emerge_mapper::project::Project>()
@@ -1445,29 +1519,29 @@ fn cmd_remove_over_the_interface_sends_the_place_selection() {
             .world()
             .get_resource::<emerge_mapper::editor::EditorState>()
             .unwrap_or_else(|| panic!("no editor state"));
-        edit_subject(on_ui, project, state, under)
+        edit_subject(project, state, under)
     };
 
     arm(&mut app, Some(wall));
-    // Over the interface: the armed row, whatever the map is showing.
+    // **A piece under the cursor is the answer**, and the armed row is not consulted for it.
     assert_eq!(
-        ask(&app, true, Some(0)),
-        Ok("wall".to_owned()),
-        "the armed PLACE row is the subject when the pointer is on the interface"
-    );
-    // Over the map: the piece under the cursor, and the armed row is not consulted.
-    assert_eq!(
-        ask(&app, false, Some(0)),
+        ask(&app, Some(0)),
         Ok("floor".to_owned()),
-        "over the map the cursor decides, not the palette"
+        "pointing at a piece has to open that piece"
     );
-    // Neither branch falls through to the other when its own subject is missing.
-    assert_eq!(ask(&app, false, None), Err("nothing here to edit".to_owned()));
-    arm(&mut app, None);
+    // **Failing that, the PLACE selection** — the whole of the reported gap. `wall` is deliberately
+    // not the descriptor the map places, so this cannot be satisfied by the first arm answering.
     assert_eq!(
-        ask(&app, true, Some(0)),
-        Err("nothing is selected in PLACE".to_owned()),
-        "an empty palette selection must refuse, never quietly take the piece under the cursor"
+        ask(&app, None),
+        Ok("wall".to_owned()),
+        "with nothing under the cursor the armed PLACE row is the subject"
+    );
+    // **And a refusal that names both places it looked**, rather than one of them.
+    arm(&mut app, None);
+    let refused = ask(&app, None).unwrap_err();
+    assert!(
+        refused.contains("cursor") && refused.contains("PLACE"),
+        "a refusal has to say where it looked, and said: {refused}"
     );
 }
 

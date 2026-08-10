@@ -308,10 +308,11 @@ pub const BINDINGS: &[Binding] = &[
     // they reached for was the remove key with the command modifier — "get this out of my way and
     // let me fix it". The bare remove key is unbound on the Map, so this pairs with nothing and
     // collides with nothing.
-    // **The pointer picks the subject.** It reached only pieces standing on the map, so a piece
-    // selected in PLACE — which the author is looking straight at — answered "nothing here to
-    // edit". Over the interface the subject is that selection; over the map it is what is under
-    // the cursor. One question, asked of where the cursor is.
+    // **One question, with an ordered answer**: the piece under the cursor, and failing that the
+    // PLACE selection. It reached only pieces standing on the map, so a piece selected in PLACE —
+    // which the author is looking straight at — answered "nothing here to edit". The first fix keyed
+    // on whether the pointer was over the interface, which made the answer depend on where the mouse
+    // happened to be resting; ordering it does not.
     b(Action::EditTile, REMOVE_KEY, true, Context::Global, REMOVE_NAME, "send the piece under the cursor, or the PLACE selection, to be defined"),
     // **Held, not toggled**, and read with `keys::pressed`. The list is a thing you glance at with a
     // thumb down, not a mode you enter and have to leave — and a modal you can forget you opened is a
