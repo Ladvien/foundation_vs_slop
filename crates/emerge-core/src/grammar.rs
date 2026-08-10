@@ -36,10 +36,10 @@
 
 use std::collections::HashMap;
 
-use crate::composition::{Composition, Envelope, Interface};
+use crate::composition::{Composition, Envelope, Interface, Stamped};
 use crate::library::Library;
-use crate::placement::ir::Dir;
 use crate::map::{Map, Placed};
+use crate::placement::ir::Dir;
 use crate::wfc;
 use crate::wfc::{E, N, S, W};
 
@@ -54,6 +54,15 @@ pub enum Prototype {
     /// express "nothing goes here" cannot leave a doorway.
     Empty,
     Piece { descriptor: String, yaw: f32 },
+    /// One whole composition, named by [`crate::composition::Composition::id`].
+    ///
+    /// **A separate variant rather than a `Piece` carrying a composition id**, which is what
+    /// [`from_compositions`] used to push. The two ids live in different namespaces and resolve
+    /// against different files, so a composition id in `Piece::descriptor` type-checks and then fails
+    /// silently at the far end: `library.get(&p.descriptor)` finds nothing, the row is dropped, and
+    /// the author sees a generate that did nothing. Naming it makes [`solve`] able to emit the right
+    /// kind of row instead of the wrong kind quietly.
+    Composed { composition: String, yaw: f32 },
 }
 
 /// How far a piece's footprint may be from the solver's cell and still count as one tile, metres.
@@ -200,7 +209,16 @@ pub fn learn(map: &Map, cell: f32) -> Result<Grammar, String> {
 /// What a solve produced.
 pub struct Solved {
     /// New placements for the cells the solver filled. Owned and existing pieces are not repeated.
+    ///
+    /// Empty for a grammar over compositions — those cells come back as [`Solved::stamps`].
     pub placements: Vec<Placed>,
+    /// New stamps, for a grammar whose prototypes are whole compositions.
+    ///
+    /// **Produced here rather than by a translator over [`Solved::grid`].** A caller outside this
+    /// function cannot see `initial`, so it would have to re-derive which cells the author pinned —
+    /// a second answer to a question this loop already answers, and it would differ on exactly the
+    /// cells the author cared enough about to pin.
+    pub stamps: Vec<Stamped>,
     /// Cells the solver was free to choose.
     pub free_cells: usize,
     /// Cells pinned by the author.
@@ -275,6 +293,7 @@ pub fn solve(
         })?;
 
     let mut placements = Vec::new();
+    let mut stamps = Vec::new();
     let mut free_cells = 0usize;
     for y in 0..h {
         for x in 0..w {
@@ -285,21 +304,31 @@ pub fn solve(
                 continue;
             }
             free_cells += 1;
-            let Prototype::Piece { descriptor, yaw } = &grammar.prototypes[ix] else {
-                continue;
-            };
-            placements.push(Placed {
-                id: next_id(),
-                descriptor: descriptor.clone(),
-                at: cell_centre(map, cell, c),
-                yaw: *yaw,
-                ..Placed::default()
-            });
+            match &grammar.prototypes[ix] {
+                Prototype::Empty => {}
+                Prototype::Piece { descriptor, yaw } => placements.push(Placed {
+                    id: next_id(),
+                    descriptor: descriptor.clone(),
+                    at: cell_centre(map, cell, c),
+                    yaw: *yaw,
+                    ..Placed::default()
+                }),
+                Prototype::Composed { composition, yaw } => stamps.push(Stamped {
+                    id: next_id(),
+                    of: composition.clone(),
+                    at: cell_centre(map, cell, c),
+                    yaw: *yaw,
+                    // `None` is what every stamp the editor writes carries today; recording a
+                    // fingerprint here would be a second convention for the same field.
+                    ..Stamped::default()
+                }),
+            }
         }
     }
 
     Ok(Solved {
         placements,
+        stamps,
         free_cells,
         owned_cells,
         grid: chosen,
@@ -399,6 +428,7 @@ mod declared_tests {
             .iter()
             .filter_map(|p| match p {
                 Prototype::Piece { descriptor, .. } => Some(descriptor.as_str()),
+                Prototype::Composed { composition, .. } => Some(composition.as_str()),
                 Prototype::Empty => None,
             })
             .collect();
@@ -519,7 +549,7 @@ mod tests {
         let turns_of = |id: &str| {
             g.prototypes
                 .iter()
-                .filter(|p| matches!(p, Prototype::Piece { descriptor, .. } if descriptor == id))
+                .filter(|p| matches!(p, Prototype::Composed { composition, .. } if composition == id))
                 .count()
         };
         assert_eq!(turns_of("site/tile_floor"), 1, "a symmetric tile is one prototype, not four");
@@ -530,8 +560,8 @@ mod tests {
         let wall = g
             .prototypes
             .iter()
-            .position(|p| matches!(p, Prototype::Piece { descriptor, yaw }
-                if descriptor == "site/tile_wall_n" && *yaw == 0.0))
+            .position(|p| matches!(p, Prototype::Composed { composition, yaw }
+                if composition == "site/tile_wall_n" && *yaw == 0.0))
             .expect("the kit has a north wall tile");
         assert!(
             g.support[N][wall] & !1 != 0,
@@ -549,7 +579,7 @@ mod tests {
             g.prototypes
                 .iter()
                 .zip(g.weights.iter())
-                .filter(|(p, _)| matches!(p, Prototype::Piece { descriptor, .. } if descriptor == id))
+                .filter(|(p, _)| matches!(p, Prototype::Composed { composition, .. } if composition == id))
                 .map(|(_, w)| *w)
                 .sum()
         };
@@ -578,10 +608,24 @@ mod tests {
         })
         .expect("the shipped kit solves a 6x6 grid");
         assert_eq!(solved.free_cells, 36);
+        // **Stamps, not placements** — and this assertion used to read `placements` and pass, which is
+        // the whole reason `Prototype::Composed` exists. Those rows were `Placed` carrying a
+        // COMPOSITION id in `descriptor`; the editor resolves that against the library, finds nothing,
+        // and drops every row while reporting success. The test agreed with the bug because both sides
+        // spelled it the same way.
         assert!(
-            solved.placements.len() > 20,
-            "a solve that fills almost nothing is a grammar that cannot express a room: {} rows",
-            solved.placements.len()
+            solved.placements.is_empty(),
+            "a grammar over compositions places no descriptors: {:?}",
+            solved.placements
+        );
+        assert!(
+            solved.stamps.len() > 20,
+            "a solve that fills almost nothing is a grammar that cannot express a room: {} stamps",
+            solved.stamps.len()
+        );
+        assert!(
+            solved.stamps.iter().all(|s| comps.compositions.iter().any(|c| c.id == s.of)),
+            "every stamp names a composition the kit actually has"
         );
     }
 
@@ -610,8 +654,8 @@ mod tests {
         let ix = |id: &str, yaw: f32| -> usize {
             g.prototypes
                 .iter()
-                .position(|p| matches!(p, Prototype::Piece { descriptor, yaw: y }
-                    if descriptor == id && (*y - yaw).abs() < 1e-6))
+                .position(|p| matches!(p, Prototype::Composed { composition, yaw: y }
+                    if composition == id && (*y - yaw).abs() < 1e-6))
                 .unwrap_or_else(|| panic!("the kit has {id} at {yaw} degrees"))
         };
         // Which turn walls which face is read from the kit, not assumed — see the alphabet the
@@ -1174,7 +1218,7 @@ pub fn from_compositions(
                 ));
             }
             seen_faces.push(iface.faces.clone());
-            prototypes.push(Prototype::Piece { descriptor: c.id.clone(), yaw });
+            prototypes.push(Prototype::Composed { composition: c.id.clone(), yaw });
             interfaces.push(Some(iface));
         }
         // **One tile, one unit of weight — split across the turns it survived as.**

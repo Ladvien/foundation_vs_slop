@@ -126,6 +126,8 @@ pub enum Action {
     Generate,
     /// Fill from what the kit's tiles DECLARE, rather than from what the map already shows.
     GenerateDeclared,
+    /// Fill from the kit's COMPOSITIONS — whole tiles, laid as stamps rather than as placements.
+    GenerateComposed,
     /// Step the drawn grid's spacing. A view setting, not an edit — see `editor::GridSpacing`.
     CycleGrid,
     /// Keep the set in hand as a reusable group — see `editor::composition_from_set`.
@@ -421,8 +423,13 @@ pub const BINDINGS: &[Binding] = &[
     // **Two sources, one row.** `rows()` collapses adjacent bindings sharing a `does` string, so the
     // Map context stays at its twelve-row ceiling while gaining a verb. The two are not a fallback
     // pair — each either produces a grammar or refuses by name.
-    bs(Action::Generate, KeyCode::KeyG, false, false, Context::Map, "G", "continue the layout / Shift: from the kit's tokens"),
-    bs(Action::GenerateDeclared, KeyCode::KeyG, false, true, Context::Map, "G", "continue the layout / Shift: from the kit's tokens"),
+    // Three sources, one displayed row. `rows` collapses consecutive bindings that share a `does`
+    // and renders each chord with its modifier, so this reads "G, Shift+G, {MOD}+G" against one
+    // description and costs the Map context nothing against its twelve-row ceiling. They must stay
+    // adjacent and keep the same string, or the third one buys a row this context has not got.
+    bs(Action::Generate, KeyCode::KeyG, false, false, Context::Map, "G", "continue the layout: from the map, the kit's tokens, or its compositions"),
+    bs(Action::GenerateDeclared, KeyCode::KeyG, false, true, Context::Map, "G", "continue the layout: from the map, the kit's tokens, or its compositions"),
+    bs(Action::GenerateComposed, KeyCode::KeyG, true, false, Context::Map, "G", "continue the layout: from the map, the kit's tokens, or its compositions"),
 
     // **The camera is Global — pan included.** This briefly moved to `Context::Map` to free
     // `W, A, S, D` for the Tiles lattice cursor, on the argument that panning off a staged tile has
@@ -938,7 +945,8 @@ mod tests {
             Action::Save, Action::Undo, Action::Redo, Action::Shortcuts, Action::EditTile,
             Action::AimLeft, Action::AimRight, Action::AimReset, Action::Cancel,
             Action::Fill, Action::Remove, Action::MoveMode, Action::CloneMode, Action::RenameMap,
-            Action::OwnToggle, Action::Generate, Action::GenerateDeclared, Action::CycleGrid,
+            Action::OwnToggle, Action::Generate, Action::GenerateDeclared, Action::GenerateComposed,
+            Action::CycleGrid,
             Action::GroupFromSet,
             Action::PanForward, Action::PanBack, Action::PanLeft, Action::PanRight,
             Action::TurnViewLeft, Action::TurnViewRight,
@@ -1351,6 +1359,58 @@ mod tests {
             !just_pressed(&input, Context::Map, Action::Undo),
             "bare Z must not undo"
         );
+    }
+
+    /// **Three sources on one key, and none of them shadows another.**
+    ///
+    /// `G` is bound three times — bare, Shift, and the platform modifier — and the dispatcher runs all
+    /// three checks in a row with no `return` between them. That is only safe because `just_pressed`
+    /// requires the modifier state to match *exactly*, so this is the assertion the dispatcher's lack
+    /// of ordering rests on. Written when the third arm landed; the pairwise tests above cover other
+    /// keys but say nothing about a triple.
+    #[test]
+    fn the_three_generate_sources_do_not_shadow_each_other() {
+        let cases = [
+            (vec![], Action::Generate, "bare G"),
+            (vec![SHIFT_KEYS[0]], Action::GenerateDeclared, "Shift+G"),
+            (vec![MOD_KEYS[0]], Action::GenerateComposed, "modified G"),
+        ];
+        for (mods, wanted, name) in cases {
+            // A fresh input each time: `clear()` keeps the pressed state, so a key already held never
+            // registers as just-pressed again.
+            let mut input = ButtonInput::<KeyCode>::default();
+            for m in &mods {
+                input.press(*m);
+            }
+            input.press(KeyCode::KeyG);
+            for other in [Action::Generate, Action::GenerateDeclared, Action::GenerateComposed] {
+                let fired = just_pressed(&input, Context::Map, other);
+                assert_eq!(
+                    fired,
+                    other == wanted,
+                    "{name} must fire {wanted:?} and nothing else, but {other:?} answered {fired}"
+                );
+            }
+        }
+    }
+
+    /// The three share one displayed row, which is what keeps the Map context inside the ceiling
+    /// `no_context_carries_more_than_a_learnable_vocabulary` enforces. They collapse only while they
+    /// are adjacent and carry the same `does`, so this pins both.
+    #[test]
+    fn the_three_generate_sources_collapse_into_one_row() {
+        let rows = rows(Context::Map);
+        let generate: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.chord.split(", ").any(|c| c.ends_with('G')))
+            .map(|r| r.chord.as_str())
+            .collect();
+        assert_eq!(generate.len(), 1, "three bindings, one row: {generate:?}");
+        let chords: Vec<&str> = generate[0].split(", ").collect();
+        assert_eq!(chords.len(), 3, "all three chords are on it: {:?}", generate[0]);
+        assert!(chords.iter().any(|c| *c == "G"), "{chords:?}");
+        assert!(chords.iter().any(|c| c.starts_with("Shift")), "{chords:?}");
+        assert!(chords.iter().any(|c| c.starts_with(MOD_NAME)), "{chords:?}");
     }
 
     /// Every binding can be rendered next to the thing it does, which is the whole point of carrying

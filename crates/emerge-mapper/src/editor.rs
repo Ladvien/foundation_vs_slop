@@ -3929,6 +3929,20 @@ fn keys(
             Source::Declared,
         );
     }
+    // The three arms need no `return` between them and no ordering: `just_pressed` refuses a binding
+    // whose modifier state does not match exactly (`keys.rs`, `b.needs_mod != mod_held || !shift_ok`),
+    // so bare, Shift and the platform modifier are mutually exclusive by construction. `keys`'
+    // `the_three_generate_sources_do_not_shadow_each_other` is what keeps that true.
+    if keys::just_pressed(&keyboard, live.0, Action::GenerateComposed) {
+        generate_from(
+            &mut commands,
+            &assets,
+            &mut project,
+            &mut state,
+            &placed,
+            Source::Composed,
+        );
+    }
     if keys::just_pressed(&keyboard, live.0, Action::Generate) {
         generate(&mut commands, &assets, &mut project, &mut state, &placed);
         return;
@@ -6309,6 +6323,12 @@ enum Source {
     Learned,
     /// Read off the kit's declared edge tokens. Works on an empty map.
     Declared,
+    /// Built from the kit's **compositions** — whole tiles rather than single pieces.
+    ///
+    /// The one source that draws in stamps rather than placements, which is what makes a kit whose
+    /// meshes are never cell-sized solvable at all. Not a fallback for the other two: each either
+    /// produces a grammar or refuses by name.
+    Composed,
 }
 
 fn generate(
@@ -6332,13 +6352,25 @@ fn generate_from(
     // One metre: the tile the kits are authored on, and coarse enough that a 32 m map is a grid the
     // solver finishes rather than 4,096 cells of half-metre noise.
 
-    let built = match source {
-        Source::Learned => emerge_core::grammar::learn(&project.map, CELL),
+    // `from_compositions` also reports what it could not make a tile of, by name. `learn` and
+    // `declared` refuse whole or succeed whole, so they carry an empty report rather than a different
+    // shape — one type here, and the refusals reach the status line either way.
+    let built: Result<(emerge_core::grammar::Grammar, Vec<String>), String> = match source {
+        Source::Learned => emerge_core::grammar::learn(&project.map, CELL).map(|g| (g, Vec::new())),
         Source::Declared => {
             emerge_core::grammar::declared(&project.library, project.policy.face_bands, CELL)
+                .map(|g| (g, Vec::new()))
         }
+        Source::Composed => emerge_core::grammar::from_compositions(
+            &project.compositions.compositions,
+            &project.library,
+            project.policy.face_bands,
+            CELL,
+            emerge_core::composition::agrees,
+        )
+        .map(|c| (c.grammar, c.skipped)),
     };
-    let grammar = match built {
+    let (grammar, skipped) = match built {
         Ok(g) => g,
         Err(e) => {
             state.status.problem(e);
@@ -6393,14 +6425,36 @@ fn generate_from(
     // the solver output and stopped, with a success message), and every index-based entry already on
     // the stack — Moved, Turned, Pinned, RemoveAt — was left pointing at rows that had shifted, so a
     // second Cmd+Z rewrote whatever now sat at those indices with the dead sketch's data.
-    let removed: Vec<(usize, Box<Placed>)> = project
-        .map
-        .placements
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| !p.owned)
-        .map(|(i, p)| (i, Box::new(p.clone())))
-        .collect();
+    // **A solve replaces the sketch in the medium it draws in.** A grammar over descriptors lays
+    // placements, so it clears the unpinned placements; a grammar over compositions lays stamps, so it
+    // clears the unpinned stamps and must leave the author's placements alone. Clearing both would
+    // make `Shift+G` silently delete every group an author had stamped.
+    let composes = matches!(source, Source::Composed);
+
+    let removed: Vec<(usize, Box<Placed>)> = if composes {
+        Vec::new()
+    } else {
+        project
+            .map
+            .placements
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.owned)
+            .map(|(i, p)| (i, Box::new(p.clone())))
+            .collect()
+    };
+    let unstamped: Vec<(usize, Box<emerge_core::composition::Stamped>)> = if composes {
+        project
+            .map
+            .stamps
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.owned)
+            .map(|(i, s)| (i, Box::new(s.clone())))
+            .collect()
+    } else {
+        Vec::new()
+    };
     for (entity, marker) in placed {
         if removed.iter().any(|(_, p)| p.id == marker.0) {
             commands.entity(entity).despawn();
@@ -6410,6 +6464,9 @@ fn generate_from(
     for (i, _) in removed.iter().rev() {
         project.map.placements.remove(*i);
     }
+    for (i, _) in unstamped.iter().rev() {
+        project.map.stamps.remove(*i);
+    }
 
     // **Into the map first, drawn second.** The solver lays pieces on the floor grid; how high each
     // one ends up is a question about the finished map, so the map has to be finished before it is
@@ -6418,18 +6475,40 @@ fn generate_from(
     let first = project.map.placements.len();
     project.map.placements.extend(solved.placements);
     spawn_range(commands, assets, project, state, first);
+
+    // **Stamps need no spawn call.** `redraw_stamps` rebuilds the whole stamped picture from
+    // `map.stamps` whenever it changes, so writing the rows is the whole job — unlike the placement
+    // path above, which owns its entities.
+    let stamped = solved.stamps.len();
+    project.map.stamps.extend(solved.stamps);
     project.dirty = true;
-    // One act, one entry: undoing a generate first strips the solver rows (the `Added`), then puts
-    // the sketch back at its own indices (the `RemovedMany`) — [`Undo::Group`] applies in order and
-    // inverts by reversing.
-    state.record(Undo::Group {
-        ops: vec![
-            Undo::Added { count },
-            Undo::RemovedMany { items: removed },
-        ],
-    });
+
+    // One act, one entry: undoing a generate first strips the solver rows (the `Added`/`Stamped`),
+    // then puts the sketch back at its own indices (the `RemovedMany`/`UnstampedMany`) —
+    // [`Undo::Group`] applies in order and inverts by reversing.
+    let mut ops = Vec::new();
+    if count > 0 {
+        ops.push(Undo::Added { count });
+    }
+    if stamped > 0 {
+        ops.push(Undo::Stamped { count: stamped });
+    }
+    if !removed.is_empty() {
+        ops.push(Undo::RemovedMany { items: removed });
+    }
+    if !unstamped.is_empty() {
+        ops.push(Undo::UnstampedMany { items: unstamped });
+    }
+    if !ops.is_empty() {
+        state.record(Undo::Group { ops });
+    }
+
+    for s in &skipped {
+        state.status.problem(format!("not a tile: {s}"));
+    }
     state.status.note(format!(
-        "continued the layout: {count} placed around {} pinned cell(s), from {} prototype(s)",
+        "continued the layout: {} around {} pinned cell(s), from {} prototype(s)",
+        if composes { format!("{stamped} stamped") } else { format!("{count} placed") },
         solved.owned_cells,
         grammar.len() - 1
     ));

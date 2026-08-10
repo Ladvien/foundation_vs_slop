@@ -1167,6 +1167,83 @@ mod compose {
         assert_eq!(project.map.stamps[0].of, "break_table");
     }
 
+    /// **The composition grammar, driven from the editor** — FVS-R-7's remaining half.
+    ///
+    /// The modified `G` builds a grammar whose prototypes are whole compositions and lays the result
+    /// as **stamps**, not placements. Asserting the medium is the point: the solver's rows used to
+    /// come back as `Placed` carrying a composition id, which the library cannot resolve, so every row
+    /// was dropped while the status line said it had worked.
+    ///
+    /// Driven through the key rather than by calling the writer, because the registration and the
+    /// binding are exactly what this file exists to answer — and pressed from a system before
+    /// `Phase::Act`, since Bevy clears `ButtonInput` in `PreUpdate`.
+    #[test]
+    fn the_modified_generate_lays_compositions_as_stamps_and_undo_takes_them_back() {
+        let root = Fixture::new("gen-composed")
+            .descriptor("floor", "alpha")
+            .descriptor("rug", "alpha")
+            .bounded_composition("tile_floor", (1.0, 1.0, 1.0), &[("floor", "floor", (0.0, 0.0))])
+            .bounded_composition("tile_rug", (1.0, 1.0, 1.0), &[("rug", "rug", (0.0, 0.0))])
+            // A hand-placed row, so "leaves the placements alone" is an observation rather than a
+            // vacuous truth. Without it the routing is unexercised and deleting every placement here
+            // would pass.
+            .place("rug", (0.5, 0.5))
+            .build("m");
+        let mut app = emerge_mapper::harness::build_headless(&root, "m", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        for _ in 0..3 {
+            app.update();
+        }
+        let placements_before = app.world().resource::<Project>().map.placements.len();
+        assert!(placements_before > 0, "the fixture must hand-place something for this to mean anything");
+        assert!(app.world().resource::<Project>().map.stamps.is_empty(), "nothing stamped yet");
+
+        fn press_composed(
+            mut keys: bevy::prelude::ResMut<bevy::input::ButtonInput<bevy::prelude::KeyCode>>,
+        ) {
+            let b = emerge_mapper::keys::binding(emerge_mapper::keys::Action::GenerateComposed);
+            keys.press(emerge_mapper::keys::MOD_KEYS[0]);
+            keys.press(b.key);
+        }
+        app.add_systems(
+            bevy::prelude::Update,
+            bevy::prelude::IntoScheduleConfigs::before(
+                press_composed,
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+
+        let project = app.world().resource::<Project>();
+        let stamped = project.map.stamps.len();
+        assert!(stamped > 0, "the modified G laid nothing — the composition source is unwired");
+        assert!(
+            project.map.stamps.iter().all(|s| s.of.starts_with("tile_")),
+            "every stamp names one of the fixture's compositions: {:?}",
+            project.map.stamps.iter().map(|s| s.of.clone()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            project.map.placements.len(),
+            placements_before,
+            "a grammar over compositions writes references, never expanded rows"
+        );
+
+        // Closed under inversion, the same standard every other bulk edit here is held to.
+        emerge_mapper::editor::undo_for_test(app.world_mut());
+        app.update();
+        assert!(
+            app.world().resource::<Project>().map.stamps.is_empty(),
+            "undo left the generated stamps in the map"
+        );
+        emerge_mapper::editor::redo_for_test(app.world_mut());
+        app.update();
+        assert_eq!(
+            app.world().resource::<Project>().map.stamps.len(),
+            stamped,
+            "redo did not put the generated stamps back"
+        );
+    }
+
     /// **A stamp is one thing, and Delete takes the instance — never a member of it.**
     ///
     /// FVS-R-14. Stamped rows carry no `Placement` on purpose, which kept every tool off them; what

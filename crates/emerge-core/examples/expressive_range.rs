@@ -217,6 +217,7 @@ fn main() {
         let name = match &g.prototypes[p] {
             Prototype::Empty => "(empty)".to_owned(),
             Prototype::Piece { descriptor, yaw } => format!("{descriptor} @ {yaw:.0}"),
+            Prototype::Composed { composition, yaw } => format!("{composition} @ {yaw:.0}"),
         };
         println!(
             "  {:>6.2}% actual   {:>6.2}% by weight   {name}",
@@ -413,6 +414,7 @@ fn print_alphabet(g: &Grammar, faces: &[Option<Interface>]) {
         let name = match proto {
             Prototype::Empty => "(empty)".to_owned(),
             Prototype::Piece { descriptor, yaw } => format!("{descriptor} @ {yaw:.0}"),
+            Prototype::Composed { composition, yaw } => format!("{composition} @ {yaw:.0}"),
         };
         let sides: String = [(N, 'N'), (E, 'E'), (S, 'S'), (W, 'W')]
             .iter()
