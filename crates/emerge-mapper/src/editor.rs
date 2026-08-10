@@ -798,7 +798,7 @@ impl Plugin for EditorPlugin {
                     // two previews: one piece keyed by library index, and a whole set. Not folded
                     // into one system — that would be one system with two subjects and two
                     // lifetimes.
-                    (drive_ghost, drive_clone_ghost).run_if(in_map_mode),
+                    (drive_ghost, drive_clone_ghost, drive_stamp_ghost).run_if(in_map_mode),
                     // **Not gated on the mode.** The stamped rows are part of the map, so they stay
                     // drawn while an author is on Tiles or Compose looking at the group that made
                     // them — a world that empties out when you change tabs would read as the stamp
@@ -6937,6 +6937,144 @@ fn drive_ghost(
 /// riding the cursor is then one transform write instead of N. Rebuilt only when the set in hand
 /// changes — a clone set is fixed once taken, so a per-frame rebuild would be tearing down and
 /// respawning a dozen GLB scenes at frame rate for a preview that only moves.
+/// **The armed composition, previewed as its own meshes** — turned, seated, where the click will
+/// put it.
+///
+/// `drive_ghost` keys its preview on a **library descriptor index**, and an armed composition has
+/// none, so a stamp got no mesh preview at all: an author arming a tile and pressing `R` saw a marker
+/// change nothing, because the marker never knew what it was standing for. That is the module note's
+/// own rule broken — *"a preview drawn somewhere the piece will not end up is worse than no
+/// preview"* — with "somewhere" replaced by "as something else".
+///
+/// **Built by `composition::expand`, which is the same call the stamp makes.** A preview that laid the
+/// members out by its own arithmetic would be a second answer to where they go, and the two would
+/// drift the first time seating or `paint` changed. Expanding a scratch stamp means the ghost is
+/// wrong only if the drop is wrong too.
+///
+/// **Rebuilt on change, not per frame** — and snapping is what makes that cheap. The target only moves
+/// when the cursor crosses a lattice boundary, so a rebuild happens a few times a second rather than
+/// sixty; respawning a GLB every frame would thrash the asset server and never finish loading, which
+/// is the reason `GhostOf` exists on the brush path.
+#[derive(Component)]
+struct StampGhost {
+    of: String,
+    yaw: f32,
+    at: (f32, f32),
+}
+
+fn drive_stamp_ghost(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    project: Res<Project>,
+    state: Res<EditorState>,
+    compose: Res<crate::compose::ComposeState>,
+    anchor: Res<FineAnchor>,
+    pointer: Res<crate::view::Pointer>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    ui_nodes: Query<(&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform), With<Hovered>>,
+    ghosts: Query<(Entity, &StampGhost)>,
+) {
+    let clear = |commands: &mut Commands| {
+        for (e, _) in &ghosts {
+            commands.entity(e).despawn();
+        }
+    };
+
+    // Only the place tool stamps; anything else and the preview would be promising a click that does
+    // something different.
+    let Some(armed) = compose.armed.clone().filter(|_| state.tool == Tool::Place) else {
+        clear(&mut commands);
+        return;
+    };
+    let Some(camera) = camera else {
+        clear(&mut commands);
+        return;
+    };
+    let (cam, cam_tf) = *camera;
+    let on_ui = ui_nodes
+        .iter()
+        .any(|(node, tf)| node.contains_point(*tf, pointer.0.unwrap_or(Vec2::NEG_ONE)));
+    let Some(hit) = cursor_ground(pointer.0, cam, cam_tf).filter(|_| !on_ui) else {
+        clear(&mut commands);
+        return;
+    };
+
+    // **Exactly the arithmetic the stamp uses**, through the same two calls — `stamp_snap` for the
+    // rung and the span, `map_at` for the snap. Anything else here is a promise about a landing that
+    // will not happen.
+    let (level, span) = stamp_snap(&project, &compose, &keyboard);
+    let at = map_at(
+        &project,
+        hit,
+        keys::alt_held(&keyboard),
+        &anchor,
+        level,
+        span,
+    );
+    let yaw = state.brush_yaw;
+
+    // Already showing this composition, at this turn, in this cell — nothing to do.
+    if let Ok((_, g)) = ghosts.single() {
+        if g.of == armed && (g.yaw - yaw).abs() < 1e-3 && g.at == at {
+            return;
+        }
+    }
+    clear(&mut commands);
+
+    // A scratch stamp, expanded against the real map: the rows the drop would produce, before it
+    // produces them. Not written anywhere — `expand` takes the map by reference and answers.
+    let scratch = emerge_core::composition::Stamped {
+        id: "ghost".to_owned(),
+        of: armed.clone(),
+        at,
+        yaw,
+        ..Default::default()
+    };
+    let Ok(expansion) = emerge_core::composition::expand(
+        &project.map,
+        std::slice::from_ref(&scratch),
+        &project.compositions.compositions,
+        &project.library,
+    ) else {
+        // A composition that cannot expand cannot be stamped either, and `stamp_here` will say so by
+        // name on the click. Drawing nothing is the honest preview of a refusal.
+        return;
+    };
+
+    let parent = commands
+        .spawn((
+            StampGhost { of: armed, yaw, at },
+            Transform::default(),
+            Visibility::default(),
+        ))
+        .id();
+    let mut drawn = 0usize;
+    for p in &expansion.placements {
+        let Some(d) = project.library.get(&p.descriptor) else {
+            continue;
+        };
+        if let Some(e) = spawn_piece(
+            &mut commands,
+            &assets,
+            d,
+            p.at,
+            p.yaw,
+            p.tip,
+            project.map.origin,
+            p.lift,
+        ) {
+            // `Ghost` so `fade_ghost` makes it translucent through the one path that already exists.
+            commands.entity(e).insert((Ghost, ChildOf(parent)));
+            drawn += 1;
+        }
+    }
+    if drawn == 0 {
+        // An empty parent would satisfy the "already built" check above and never try again.
+        commands.entity(parent).despawn();
+    }
+}
+
 ///
 /// The pieces carry [`Ghost`] so [`fade_ghost`] fades them through the one path that already exists,
 /// and **not** [`GhostOf`], which keys the brush ghost by library index — two pieces of one
