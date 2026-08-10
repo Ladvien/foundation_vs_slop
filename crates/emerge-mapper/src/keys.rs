@@ -144,10 +144,6 @@ pub enum Action {
     Accept,
     Rescan,
     RemoveTile,
-    /// **From the Map**: clear every placement of the piece under the cursor, then hand it to the
-    /// Tiles tab armed for demotion. The two halves land on the two tabs' own undo stacks, which is
-    /// why it is a hand-off rather than one act — see `editor::send_back_to_candidates`.
-    SendBackToCandidates,
     /// Send a library entry back to the candidate list, stripped — it re-enters as a freshly
     /// measured candidate with no tags, note or mount. Destructive, so it takes two presses:
     /// the first arms with a warning, the second sends.
@@ -305,7 +301,14 @@ pub const BINDINGS: &[Binding] = &[
     // have to hold `K` to see — so the verb was reported missing by someone looking straight at it.
     // Every other row in this census names its subject; this one said "this" and left the reader to
     // guess whether it meant the armed brush, the selected row, or what the mouse was over.
-    b(Action::EditTile, KeyCode::Digit2, true, Context::Global, "2", "edit the piece under the cursor"),
+    // **`Cmd`+remove opens the piece under the cursor for editing.** It was `Cmd`+the tab key, on the
+    // argument that one key could carry both "the Tiles tab" and "the Tiles tab, about this piece".
+    // That was tidy and it was not what an author reached for: asked what should happen when they
+    // press a chord on a piece they got wrong, the answer was "open it for editing", and the chord
+    // they reached for was the remove key with the command modifier — "get this out of my way and
+    // let me fix it". The bare remove key is unbound on the Map, so this pairs with nothing and
+    // collides with nothing.
+    b(Action::EditTile, REMOVE_KEY, true, Context::Global, REMOVE_NAME, "send the piece under the cursor to be defined"),
     // **Held, not toggled**, and read with `keys::pressed`. The list is a thing you glance at with a
     // thumb down, not a mode you enter and have to leave — and a modal you can forget you opened is a
     // modal that eats the next keystroke.
@@ -388,17 +391,9 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::LiftDown, KeyCode::BracketLeft, false, Context::Map, "[", "lift / lower this"),
     b(Action::LiftUp, KeyCode::BracketRight, false, Context::Map, "]", "lift / lower this"),
     b(Action::Fill, KeyCode::KeyF, false, Context::Map, "F", "flood fill"),
-    // **Two ways to stop seeing a piece, on one row.** `X` arms the removal tool; `Cmd`+remove takes
-    // every placement of the piece under the cursor out AND hands it to the Tiles tab armed to go
-    // back to the candidates — "I got this piece wrong, let me define it again".
-    //
-    // They share a `does` because `Context::Map` is AT the twelve-row ceiling
-    // `no_context_carries_more_than_a_learnable_vocabulary` enforces, and because the Tiles tab
-    // already pairs exactly these two meanings on one row ("remove / Shift: back to candidates").
-    // `Cmd` rather than that tab's `Shift`: this one also deletes map geometry, which is not the
-    // variant-of-the-same-thing that Shift means everywhere else here.
-    b(Action::Remove, KeyCode::KeyX, false, Context::Map, "X", "removal mode / Cmd+remove: back to candidates"),
-    b(Action::SendBackToCandidates, REMOVE_KEY, true, Context::Map, REMOVE_NAME, "removal mode / Cmd+remove: back to candidates"),
+    // **The delete key arms a tool; it does not delete.** Removing on the keypress meant the only
+    // preview of what was about to go was the author's memory of where the cursor was.
+    b(Action::Remove, KeyCode::KeyX, false, Context::Map, "X", "removal mode"),
     // **`B` is the last free key under the left hand.** The cluster an author's hand already rests on
     // is `Q W E R T / A S D F G / Z X C V B`, and every other letter in it is spoken for — pan, turn
     // view, aim, aim-reset, turn-piece, fill, remove. `B` is bound in the Tiles tab too (`ScanMesh`),
@@ -936,7 +931,6 @@ mod tests {
             Action::AimLeft, Action::AimRight, Action::AimReset, Action::Cancel,
             Action::Fill, Action::Remove, Action::MoveMode, Action::CloneMode, Action::RenameMap,
             Action::OwnToggle, Action::Generate, Action::GenerateDeclared, Action::CycleGrid,
-            Action::SendBackToCandidates,
             Action::GroupFromSet,
             Action::PanForward, Action::PanBack, Action::PanLeft, Action::PanRight,
             Action::TurnViewLeft, Action::TurnViewRight,

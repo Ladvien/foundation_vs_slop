@@ -112,36 +112,37 @@ fn the_editor_plugin_registers_the_tool_resources_its_systems_take() {
     }
 }
 
-/// **`Cmd+2` is the bare `2` with a subject**, and the two do not shadow each other.
+/// **`Cmd`+remove opens the piece under the cursor for editing**, and does not collide with the bare
+/// remove key the Tiles tab uses.
 ///
-/// The same pairing `S`/`Cmd+S` and `Z`/`Cmd+Z` already rely on: `just_pressed` refuses a bare
-/// binding while the modifier is down and a modified one while it is not, so one key can carry both
-/// "the Tiles tab" and "the Tiles tab, about this piece". Asserted here because getting it wrong is
-/// silent — the bare key would simply switch tabs and the send would look unimplemented.
+/// It was `Cmd`+the tab key, paired with "2 switches to Tiles" so one key carried both the tab and
+/// the tab-about-this-piece. An author asked for it on the remove chord instead — "get this out of my
+/// way and let me fix it" — and the bare remove key is unbound on the Map, so the new home pairs with
+/// nothing. The collision that WOULD matter is the Tiles tab's own bare and shifted remove, and
+/// `just_pressed` separates them by modifier the same way `S`/`Cmd+S` are separated.
 #[test]
-fn sending_a_tile_to_be_edited_is_the_modified_tab_key() {
-    use emerge_mapper::keys::{binding, just_pressed, Action, Context, MOD_KEYS};
+fn opening_a_piece_to_be_defined_is_the_modified_remove_key() {
+    use emerge_mapper::keys::{binding, just_pressed, Action, Context, MOD_KEYS, REMOVE_KEY};
 
     let send = binding(Action::EditTile);
-    let tab = binding(Action::TilesTab);
-    assert_eq!(send.key, tab.key, "it is the tab key, with a modifier");
-    assert!(send.needs_mod && !tab.needs_mod);
+    assert_eq!(send.key, REMOVE_KEY, "it is the remove key, with the command modifier");
+    assert!(send.needs_mod);
 
-    // Bare `2` switches tabs and does not send.
+    // Bare remove on the Tiles tab removes; it does not send anything to be defined.
     let mut input = ButtonInput::<KeyCode>::default();
-    input.press(KeyCode::Digit2);
-    assert!(just_pressed(&input, Context::Map, Action::TilesTab));
-    assert!(!just_pressed(&input, Context::Map, Action::EditTile));
+    input.press(REMOVE_KEY);
+    assert!(just_pressed(&input, Context::Tiles, Action::RemoveTile));
+    assert!(!just_pressed(&input, Context::Tiles, Action::EditTile));
 
     // A FRESH input, not `clear()`: `clear` keeps the pressed state, so an already-held key never
-    // re-registers as just-pressed and the assertion below would fail for an unrelated reason.
+    // re-registers as just-pressed.
     let mut input = ButtonInput::<KeyCode>::default();
     input.press(MOD_KEYS[0]);
-    input.press(KeyCode::Digit2);
+    input.press(REMOVE_KEY);
     assert!(just_pressed(&input, Context::Map, Action::EditTile));
     assert!(
-        !just_pressed(&input, Context::Map, Action::TilesTab),
-        "the modified chord must not also switch tabs, or the send would be one frame of a tab change"
+        !just_pressed(&input, Context::Tiles, Action::RemoveTile),
+        "the modified chord must not also remove, or one press would do two things"
     );
 }
 
@@ -1224,57 +1225,6 @@ fn a_captured_group_is_written_and_reads_back() {
     let reread = emerge_core::composition::Compositions::parse(&text)
         .unwrap_or_else(|e| panic!("what was written must parse: {e}"));
     assert_eq!(reread.compositions.len(), 1, "and one composition reached disk, not two");
-}
-
-/// **A verb whose blast radius is every placement of a descriptor says the number first.**
-///
-/// `Cmd`+remove clears EVERY placement of the piece under the cursor, which is not what the cursor
-/// looks like it is pointing at. It fired without saying so while the refusal path printed a message
-/// naming four compositions — the guarded case legible, the destructive one silent, which is
-/// inverted. Learned by deleting nine pieces of an author's in-progress map to demonstrate the verb.
-///
-/// The count is knowable before anything is removed, so `send_back_plan` is asserted directly: it is
-/// the same function the handler asks, and it answers with the rows rather than with a promise.
-#[test]
-fn the_send_back_plan_counts_every_placement_of_the_descriptor_not_just_one() {
-    let root = fixtures::Fixture::new("send_back")
-        .descriptor("crate", "alpha")
-        .descriptor("floor", "alpha")
-        .build("m");
-    let mut project = emerge_mapper::project::Project::open(&root, "m", None)
-        .unwrap_or_else(|e| panic!("{e}"));
-
-    // Three crates and one floor, none of them in a composition.
-    for at in [(0.0, 0.0), (2.0, 0.0), (4.0, 0.0)] {
-        project.map.placements.push(emerge_core::map::Placed {
-            id: format!("crate@{}", at.0),
-            descriptor: "crate".to_owned(),
-            at,
-            ..Default::default()
-        });
-    }
-    project.map.placements.push(emerge_core::map::Placed {
-        id: "floor@9".to_owned(),
-        descriptor: "floor".to_owned(),
-        at: (8.0, 0.0),
-        ..Default::default()
-    });
-
-    let plan = emerge_mapper::editor::send_back_plan(&project, "crate")
-        .unwrap_or_else(|e| panic!("nothing blocks this one: {e}"));
-    assert_eq!(
-        plan.len(),
-        3,
-        "the count has to be every placement of the descriptor \u{2014} the number an author is owed \
-         BEFORE the verb runs, not after"
-    );
-    assert!(plan.windows(2).all(|w| w[0] < w[1]), "ascending, so removal can go back to front");
-
-    // And a descriptor a composition holds is refused with nothing removed \u{2014} the check that
-    // comes first precisely so a blocked verb cannot destroy anything on its way to failing.
-    let held = emerge_mapper::editor::send_back_plan(&project, "floor");
-    assert!(held.is_ok(), "no composition holds `floor` in this fixture: {held:?}");
-    assert_eq!(project.map.placements.len(), 4, "planning removes nothing");
 }
 
 /// **The name field takes the keyboard, so typing a name cannot also drive the tab.**
