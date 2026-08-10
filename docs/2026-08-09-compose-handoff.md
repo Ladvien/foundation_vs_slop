@@ -155,3 +155,41 @@ box that region defines, so it can never fire. `10.48550_arXiv.2003.03377` (Alva
 Togelius, *Interactive Constrained MAP-Elites*) is the paper for it, and also carries `FVS-R-7`'s
 missing authoring half already shipped: *"Brush painting with the lock button on preserves selected
 tiles in all procedurally generated suggestions."* §4 says it must be committed **before any solve**.
+
+---
+
+## 7. Closed out, 2026-08-10
+
+Everything §2 queued is done, plus the two decisions §5 and §6 were owed.
+
+| Item | Outcome |
+|---|---|
+| `library.ron` (§5) | Reverted whole, on the author's call. Both the `site/wall` rescan damage *and* the `site/floor_button` subgrid went. `the_authored_edge_tokens_reach_the_editor` and `site_tiles` green. |
+| §6's owed §4 thresholds | Committed — and the replacement I first wrote was **also wrong**. Bin-occupancy is blind to concentration, so the degenerate case passes it. The row is a max-bin share now, and the *number* is deliberately deferred to a committed calibration rule, because the achievable region depends on an alphabet that turned out to be missing nine kinds. |
+| `FVS-R-12` (§2.1) | Landed. Injected input writes the message stream Bevy folds, not the fold — so `text` and `Escape` reach a field. An agent typed `porch_a` into a running editor and it is on disk. |
+| The seven findings (§2.2) | All seven fixed with tests. Three were the stage lying about its own geometry. |
+| `FVS-R-5` (§2.3) | Converted: 149 rows → 144 stamps, verified per batch against the saved file, run unbroken in a frame. |
+
+**One thing in the plan is not done, and it is not done because it cannot be yet.** The §4
+calibration — running solves until the histogram stabilises and committing the number — needs a
+grammar that produces solves, and `FVS-R-7` has not been built. It is scheduled *before the first
+solve*, so it belongs with `FVS-R-7` rather than ahead of it. What is committed now is the rule that
+will set the number, which is the property §4 exists to protect.
+
+**And one blocker that is infrastructure, not work.** Re-fetching Smith & Whitehead
+(`10.1145_1814256.1814260` is still a 1-page HTML landing page) needs the papers store, and
+`/Users/ladvien/mnt/home-still` — `localhost:/garage` over NFS — returns **Stale NFS file handle**.
+The inbox daemon is unaffected because it talks S3 directly. Remounting is a `umount -f` on the whole
+store and was left for the author. Lagae & Dutré is blocked behind the same mount, which also means
+the 50 mm inset in `FVS-R-5` has no corpus support either way and rests on internal coherence.
+
+### What is worth reading before the next session
+
+- **`FVS-R-14` moved.** It is no longer a nice-to-have waiting on a trigger: `FVS-R-5` needed 144
+  individual stamps because no verb places a region of them.
+- **`FVS-R-7`'s input is degenerate**, measured rather than feared — three adjacency pairs. The
+  decisions doc §1's reason for the ordering has been struck and replaced.
+- **The traps from driving an editor over BRP** are in the `FVS-R-5` and `FVS-R-12` archive entries.
+  The one that costs the most time: a click **stamps** when a set is in hand, `Escape` dismisses a
+  problem banner *before* it puts a set down, a third `Escape` disarms the tool, and removal mode
+  stays armed and silently eats the next stamp. None of it is visible from outside the process.
