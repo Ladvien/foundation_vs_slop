@@ -396,8 +396,38 @@ fn deterministic_core_is_bit_identical() {
 ///     containment ceiling were re-derived from that measurement, and the genome BOUNDS were widened
 ///     for the same reason: the old `(0.05, 0.80)` put *every* genome in the inert region, so a
 ///     world search would have spent its entire budget on an anomaly that never fires.
+/// ### Re-pinned 2026-08-10 — `0x4d170fd316e6e5bf` → `0xac8196c4a1bfb0d0`, and **the two arms now agree**
+///
+/// The value above was last correct on 2026-08-01 and then went stale for nine days, because nobody
+/// in this project has an x86_64 machine in the loop and the only lane that checks it is advisory
+/// *and* was fail-fasting before `replay.rs` ran (`ci.yml`). The aarch64 arm was pinned to the
+/// current value on 2026-08-05; this arm was not, and could not be.
+///
+/// **Measured on Linux/x86_64** (AMD Ryzen 9 5900X, `big`), on `8cd53e8`, with no `target-cpu` or
+/// `rustflags` set — the same baseline codegen CI uses:
+///
+/// | | actor | field |
+/// |---|---|---|
+/// | measured x86_64 | `0xac8196c4a1bfb0d0` | `0xe090401cb48e2ae3` |
+/// | pinned aarch64 | `0xac8196c4a1bfb0d0` | `0xe090401cb48e2ae3` |
+///
+/// **Identical. So this is not a re-pin that accepts new behaviour** — it makes a lagging arm agree
+/// with a value the project already blessed on the other platform four days earlier.
+///
+/// # What that says about the per-platform model, stated carefully
+///
+/// These two hashes do **not** diverge between `aarch64` (macOS/M5) and `x86_64` (Linux/Zen 3). The
+/// split below is still the right shape — it costs nothing and it is how a future divergence would be
+/// *recorded* rather than argued — but the divergence it was built to absorb has not been observed
+/// here. Two hashes, one commit, two platforms is not a proof for all time, and it says nothing about
+/// f32 gameplay math elsewhere; `determinism-arm` remains the lane that would find that, and note it
+/// could never have found *this*, since it runs `cargo test --workspace` and so never reaches this
+/// file.
+///
+/// The endpoints were measured rather than assumed, which matters because an earlier attempt at this
+/// bisected from an *assumed*-good commit and produced a confident wrong answer twice.
 #[cfg(target_arch = "x86_64")]
-const GOLDEN: u64 = 0x4d170fd316e6e5bf;
+const GOLDEN: u64 = 0xac8196c4a1bfb0d0;
 
 /// **The same golden, measured on `aarch64`** (macOS, Apple M5) 2026-08-05.
 ///
@@ -648,8 +678,14 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
 // and the two `deterministic_core_is_bit_identical*` tests were green on the same tree first.
 /// Re-pinned 2026-08-01 alongside [`GOLDEN`], twice in one day — see there for why the second
 /// re-pin went back to this file's pre-watch-feed value, and what that implies about the feed.
+///
+/// ### Re-pinned 2026-08-10 — `0x8145db22fc83542c` → `0xe090401cb48e2ae3`
+///
+/// Measured on Linux/x86_64 alongside [`GOLDEN`], and **identical to the aarch64 arm below**. See
+/// [`GOLDEN`] for the measurement, why this arm went stale for nine days, and what the agreement does
+/// and does not license concluding about the per-platform model.
 #[cfg(target_arch = "x86_64")]
-const GOLDEN_FIELD: u64 = 0x8145db22fc83542c;
+const GOLDEN_FIELD: u64 = 0xe090401cb48e2ae3;
 
 /// Per-platform, like [`GOLDEN`] — measured on `aarch64` (macOS, Apple M5) 2026-08-05, stable across
 /// three separate processes. See [`GOLDEN`] for why these are pinned and what a `determinism-arm`
