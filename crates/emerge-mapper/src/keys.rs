@@ -408,14 +408,14 @@ pub const BINDINGS: &[Binding] = &[
     // **The Map context is at its twelve-row ceiling.** There is no headroom left; the next verb
     // here has to share a `does` with a neighbour or take something else's key — which is exactly
     // what the clone tool does: the Cmd+Z shape, one key, the shifted form for the sibling verb.
-    bs(Action::MoveMode, KeyCode::KeyB, false, false, Context::Map, "B", "move / clone a set / keep as a composition"),
-    bs(Action::CloneMode, KeyCode::KeyB, false, true, Context::Map, "B", "move / clone a set / keep as a composition"),
+    bs(Action::MoveMode, KeyCode::KeyB, false, false, Context::Map, "B", "move / Shift: clone a set / M: keep as a composition"),
+    bs(Action::CloneMode, KeyCode::KeyB, false, true, Context::Map, "B", "move / Shift: clone a set / M: keep as a composition"),
     // **A third verb on a state that already exists.** `Shift+B` drags a box and leaves a set in
     // hand; this keeps that set as a reusable group instead of stamping it. Declared adjacent to the
     // pair above and sharing their `does`, so `rows()` collapses all three into one line — the Map
     // context is AT its twelve-row ceiling and `no_context_carries_more_than_a_learnable_vocabulary`
     // enforces it. `M` for module; it is one of four letters this context has left.
-    b(Action::GroupFromSet, KeyCode::KeyM, false, Context::Map, "M", "move / clone a set / keep as a composition"),
+    b(Action::GroupFromSet, KeyCode::KeyM, false, Context::Map, "M", "move / Shift: clone a set / M: keep as a composition"),
     b(Action::RenameMap, KeyCode::KeyN, false, Context::Map, "N", "rename map"),
     b(Action::OwnToggle, KeyCode::KeyO, false, Context::Map, "O", "pin / unpin"),
     // **Two sources, one row.** `rows()` collapses adjacent bindings sharing a `does` string, so the
@@ -1046,6 +1046,41 @@ mod tests {
         // Typing shadows everything — that is the focus guard.
         assert!(Context::Typing.overlaps(Context::Map));
         assert!(Context::Typing.overlaps(Context::Global));
+    }
+
+    /// **The composition verb names its own key**, because it was reported missing twice while on
+    /// screen.
+    ///
+    /// `Context::Map` is at the row ceiling the test below enforces, so `B`, `Shift+B` and `M` share
+    /// one `does` and collapse into a single line. That line read `move / clone a set / keep as a
+    /// composition` — three chords and three phrases paired only by position, one of which (`M`) has
+    /// no relationship to the other two. An author with the overlay open asked twice how to keep a
+    /// selection as a composition.
+    ///
+    /// **Deliberately about this row rather than a general rule**, and that is the finding. Two
+    /// attempts at a lint over every collapsed row both flagged prose that is fine: `Cmd+Z,
+    /// Shift+Cmd+Z / undo / redo` and `[, ] / lift / lower` pair by a convention older than this
+    /// editor, and `Z, X, C, V / solid / edge / anchor / clear` is a contiguous run read as a keypad,
+    /// like `W, A, S, D`. A lint that forces `Shift:` into those makes the panel worse to satisfy
+    /// itself. What was actually wrong here is one unrelated key hiding in a family row.
+    #[test]
+    fn the_composition_verb_names_its_key_in_the_map_census() {
+        let row = rows(Context::Map)
+            .into_iter()
+            .find(|r| r.does.contains("composition"))
+            .unwrap_or_else(|| panic!("the Map census no longer offers a composition verb at all"));
+        let chord = chord_text(binding(Action::GroupFromSet));
+        assert!(
+            row.chord.split(", ").any(|c| c == chord),
+            "the row's chord column must list `{chord}`, and it reads `{}`",
+            row.chord
+        );
+        assert!(
+            row.does.contains(&format!("{chord}:")),
+            "`{chord}` is one of {} chords on this row, so the phrase has to name it — it reads `{}`",
+            row.chord.split(", ").count(),
+            row.does
+        );
     }
 
     /// ~12 per context, counted as ROWS — what a reader actually sees. Zheng et al. 2018 found a
