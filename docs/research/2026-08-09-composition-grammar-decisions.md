@@ -328,6 +328,43 @@ Each of these otherwise gets decided by whatever the code happens to do, after t
   remains at risk of being *"highly correlated to an input parameter"* and therefore *"confirmatory."*
   Opening density stays the safer of the two.
 
+### 4.6 Amendment — an empty histogram is its own outcome
+
+**Pre-registered 2026-08-11, before the enclosure run.** FVS-R-18. The ordering is the whole point:
+these two faults were found by the 2026-08-10 run and *recorded rather than fixed*, because amending a
+criterion after seeing its output is exactly what §4 exists to forbid. They are fixed now, before the
+next run, and **the four numeric rows in §4.2 and §4.5 are not touched.**
+
+**The fault.** Both blind spots have the same root — an empty histogram was treated as a *value*
+rather than as a distinct outcome.
+
+1. *The stopping rule mistook blankness for convergence.* It stops when two disjoint blocks agree
+   within `TV ≤ 0.05`, and the total variation between two **empty** histograms is 0 by definition. So
+   the run stopped at its first block having measured nothing, and the report said "stable".
+2. *Rows 4a and 4b disagreed on an empty histogram, and neither meant anything.* Normalised entropy
+   read 0 and **fired**; max-bin share read 0 and **passed**. Both are statements about how mass is
+   distributed, and there was no mass.
+
+**The amendment, in three parts.**
+
+- **`histogram_empty` is a reportable outcome**, listed beside `did_not_converge`, `no_enclosed_region`
+  and `clamped`. When it holds, the run's finding is *"the generator did not reach the plane"* and that
+  is the verdict — not a set of statistics about nothing.
+- **Rows 4a and 4b are not evaluated on an empty histogram.** They report `n/a`, and `n/a` is not a
+  pass. A concentration statistic over zero samples is undefined, and printing either verdict invites
+  the reader to believe a measurement happened.
+- **The stopping rule requires a non-empty histogram.** Two blocks agreeing counts as convergence only
+  when at least one of them holds a sample. An all-empty sweep runs to the cap and is reported as
+  having reached the cap without ever reaching the plane, which is the honest description.
+
+**Rows 1, 2 and 3 are unchanged and still evaluated.** Row 1 reads the median enclosure over *solves*,
+not over histogram bins, so it is well defined when nothing reached the plane — and it was the finding
+in the 2026-08-10 run. Row 3 is a gate over solve outcomes and never touched the histogram at all.
+
+**What this does not do.** It does not make an empty histogram a pass. The 2026-08-10 verdict stands
+exactly as written: row 1 fired, the approach as configured was falsified, and nothing here revisits
+that. This changes what the *next* run is allowed to claim, in the direction of claiming less.
+
 ---
 
 ## 5. Withdrawn from the four-move recommendation

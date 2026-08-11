@@ -152,8 +152,23 @@ fn main() {
         let a = histogram(&mut cache, &g, &faces, 1..=n as u64, source);
         let b = histogram(&mut cache, &g, &faces, n as u64 + 1..=2 * n as u64, source);
         let tv = range::total_variation(&a.bins, &b.bins);
-        println!("  n = {n:>5} vs {n:>5}   TV = {tv:.4}{}", if tv <= STABLE_TV { "   <- stable" } else { "" });
-        if tv <= STABLE_TV {
+        // **§4.6: two blocks agreeing is convergence only if one of them holds a sample.** The total
+        // variation between two EMPTY histograms is 0 by definition, so before this the sweep stopped
+        // at its first block having measured nothing and reported "stable". Pre-registered 2026-08-11,
+        // before the enclosure run — FVS-R-18.
+        let measured = a.total() + b.total() > 0;
+        let stable = measured && tv <= STABLE_TV;
+        println!(
+            "  n = {n:>5} vs {n:>5}   TV = {tv:.4}{}",
+            if stable {
+                "   <- stable"
+            } else if !measured {
+                "   (both blocks empty — not convergence)"
+            } else {
+                ""
+            }
+        );
+        if stable {
             chosen = Some((n, tv));
             break;
         }
@@ -217,16 +232,25 @@ fn main() {
         med_open.unwrap_or(f32::NAN)
     );
     println!("    opening density < 0.5");
-    println!(
-        "  H / ln {BINS} < {ENTROPY_FLOOR}                {}   ({entropy:.3})",
-        verdict(entropy < ENTROPY_FLOOR)
-    );
-    println!(
-        "  max bin share > {:.0}%             {}   ({:.1}%)",
-        MAX_BIN_CEILING * 100.0,
-        verdict(top > MAX_BIN_CEILING),
-        top * 100.0
-    );
+    // **§4.6: a concentration statistic over zero samples is undefined, so it is not evaluated.**
+    // Before this, entropy read 0 and FIRED while max-bin share read 0 and PASSED — two verdicts about
+    // how mass is distributed, with no mass. `n/a` is not a pass.
+    let empty = run.total() == 0;
+    if empty {
+        println!("  H / ln {BINS} < {ENTROPY_FLOOR}                n/a     (the histogram is empty)");
+        println!("  max bin share > {:.0}%             n/a", MAX_BIN_CEILING * 100.0);
+    } else {
+        println!(
+            "  H / ln {BINS} < {ENTROPY_FLOOR}                {}   ({entropy:.3})",
+            verdict(entropy < ENTROPY_FLOOR)
+        );
+        println!(
+            "  max bin share > {:.0}%             {}   ({:.1}%)",
+            MAX_BIN_CEILING * 100.0,
+            verdict(top > MAX_BIN_CEILING),
+            top * 100.0
+        );
+    }
     println!(
         "\n  bins occupied {} of {BINS} — a LOWER BOUND on reachability, measured by sampling and",
         run.bins.iter().filter(|&&c| c > 0).count()
@@ -239,10 +263,17 @@ fn main() {
     println!("\n{}", "=".repeat(78));
     let any = med_enc.is_some_and(|m| m < 0.15)
         || (med_enc.is_some_and(|m| m > 0.95) && med_open.is_some_and(|o| o < 0.5))
-        || entropy < ENTROPY_FLOOR
-        || top > MAX_BIN_CEILING
+        || (!empty && entropy < ENTROPY_FLOOR)
+        || (!empty && top > MAX_BIN_CEILING)
         || gate_fired;
     println!("VERDICT: {}", if any { "the approach FAILS at least one committed row" } else { "no committed row fires" });
+    // §4.6's own outcome, reported beside the rows rather than inferred from them.
+    if empty {
+        println!(
+            "OUTCOME: the histogram is EMPTY — the generator did not reach the plane. That is the\n\
+             finding, not a set of statistics about nothing (§4.6, pre-registered 2026-08-11)."
+        );
+    }
 
     // Printed after the verdict on purpose: it explains a result rather than contributing to one.
     println!("\nCELL CENSUS — what won the cells, and what the weights asked for");
