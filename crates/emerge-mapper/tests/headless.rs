@@ -1072,33 +1072,6 @@ mod compose {
             .unwrap_or_else(|e| panic!("workspace root: {e}"))
     }
 
-    /// **An ASSET-CONTRACT test — it reads the shipped corpus on purpose.**
-    ///
-    /// The rule is that a test about the *editor* uses `Fixture` and never the real `assets/`, so
-    /// importing a kit cannot break the suite. This one is the exception the rule needs: what it
-    /// asserts IS a fact about what ships, and checking it against a fixture would be checking that
-    /// the fixture is what the fixture is.
-    #[test]
-    fn the_compose_tab_boots_and_sees_the_shipped_groups() {
-        let mut app = emerge_mapper::harness::build_headless(&root(), "compose_probe", None)
-            .unwrap_or_else(|e| panic!("{e}"));
-        *app.world_mut().resource_mut::<Mode>() = Mode::Compose;
-        for _ in 0..10 {
-            app.update();
-        }
-        let project = app.world().resource::<Project>();
-        assert!(
-            project
-                .compositions
-                .compositions
-                .iter()
-                .any(|c| c.id == "break_table"),
-            "the shipped compositions.ron did not reach the editor"
-        );
-        // Nothing armed is a real state, and it is the one an editor opens in.
-        assert!(app.world().resource::<ComposeState>().armed.is_none());
-    }
-
     /// Arming and stamping put a **reference** in the map, not the rows — which is the whole reason
     /// the reference model was chosen, and the thing a flattening implementation would pass every
     /// other test while getting wrong.

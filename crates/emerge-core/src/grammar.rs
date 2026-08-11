@@ -673,6 +673,8 @@ mod declared_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The fixture kit `site_kit` builds needs the same pieces the module above uses to build one.
+    use crate::descriptor::{Descriptor, Extent, SubCell, Subgrid};
 
     /// An interface presenting one token across the whole of every face.
     fn iface(token: Option<&str>) -> crate::composition::Interface {
@@ -706,19 +708,7 @@ mod tests {
     /// kit's own statement of the same thing.
     #[test]
     fn the_shipped_site_kit_learns_a_grammar_and_solves() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/emerge/site");
-        let Ok(lib_text) = std::fs::read_to_string(root.join("library.ron")) else {
-            panic!("the shipped site kit must be readable");
-        };
-        let library: Library = ron::from_str(&lib_text).expect("the site library parses");
-        let comps: crate::composition::Compositions =
-            ron::from_str(&std::fs::read_to_string(root.join("compositions.ron")).expect("groups"))
-                .expect("the site compositions parse");
-
-        let composed =
-            from_compositions(&comps.compositions, &library, 1, 1.0, crate::composition::agrees)
-                .expect("the shipped kit learns");
-        let Composed { grammar: g, skipped, faces } = composed;
+        let Composed { grammar: g, skipped, faces } = super::tests::site_kit();
         assert!(skipped.is_empty(), "every authored tile is one cell and bounded: {skipped:?}");
         // The interfaces come back alongside the prototypes, and `Empty` has none — which is what
         // `crate::range` reads to tell a wall face from an open one without learning the kit's tokens.
@@ -808,7 +798,11 @@ mod tests {
             solved.stamps.len()
         );
         assert!(
-            solved.stamps.iter().all(|s| comps.compositions.iter().any(|c| c.id == s.of)),
+            solved.stamps.iter().all(|s| {
+                g.prototypes.iter().any(
+                    |p| matches!(p, Prototype::Composed { composition, .. } if *composition == s.of),
+                )
+            }),
             "every stamp names a composition the kit actually has"
         );
     }
@@ -824,16 +818,7 @@ mod tests {
     /// So a zero from a solve is a statement about the solver, not about `range`.
     #[test]
     fn the_kit_can_build_a_room_the_metric_calls_enclosed() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/emerge/site");
-        let library: Library =
-            ron::from_str(&std::fs::read_to_string(root.join("library.ron")).expect("library"))
-                .expect("the site library parses");
-        let comps: crate::composition::Compositions =
-            ron::from_str(&std::fs::read_to_string(root.join("compositions.ron")).expect("groups"))
-                .expect("the site compositions parse");
-        let Composed { grammar: g, faces, .. } =
-            from_compositions(&comps.compositions, &library, 1, 1.0, crate::composition::agrees)
-                .expect("the shipped kit learns");
+        let Composed { grammar: g, faces, .. } = super::tests::site_kit();
 
         let ix = |id: &str, yaw: f32| -> usize {
             g.prototypes
@@ -1016,17 +1001,124 @@ mod tests {
     /// **Swapping the rule changes the grammar** — driven through the learner, not just asserted of
     // ── solve_constrained, against the shipped kit ───────────────────────────────────────────────
 
-    /// The shipped Site kit, learned — the same fixture the two tests above use.
-    fn site_kit() -> Composed {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/emerge/site");
-        let library: Library =
-            ron::from_str(&std::fs::read_to_string(root.join("library.ron")).expect("library"))
-                .expect("the site library parses");
-        let comps: crate::composition::Compositions =
-            ron::from_str(&std::fs::read_to_string(root.join("compositions.ron")).expect("groups"))
-                .expect("the site compositions parse");
-        from_compositions(&comps.compositions, &library, 1, 1.0, crate::composition::agrees)
-            .expect("the shipped kit learns")
+    /// **A four-tile kit, built here rather than read off disk.**
+    ///
+    /// This used to load `assets/emerge/site`, which was a rule violation hiding in plain sight:
+    /// `emerge-mapper/CLAUDE.md` states *"Tests do not read the shipped assets… The shipped `assets/`
+    /// is corpus, and a suite bound to it fails the day somebody imports a kit, which is the thing
+    /// this editor exists to do."* Seven solver tests were bound to four authored tiles, so clearing
+    /// the project to author new ones took the constraint solver's whole real-data coverage with it.
+    ///
+    /// The shape is the shipped kit's, because that is what made it a useful fixture: a bare floor, a
+    /// wall on one side, a corner on two, and an opening — enough for the learner to find four
+    /// prototypes, four turns each, and an adjacency graph that can actually enclose something.
+    ///
+    /// The **deliberate exception** the crate's own rule names is an asset-contract test, one whose
+    /// assertion *is* a fact about what ships. These are not that: they are about the solver.
+    pub(super) fn site_kit() -> Composed {
+        // A 1 m tile-sized piece. `floor` says nothing about its edges; `wall` says `wall` on the
+        // face it fills, which is what `range::Faces` reads to decide a cell is enclosed.
+        let plate = |id: &str| Descriptor {
+            id: id.to_owned(),
+            extent: Extent { footprint: Some((1.0, 1.0)), height: Some(0.1) },
+            ..Default::default()
+        };
+        let mut wall = Descriptor {
+            id: "wall".to_owned(),
+            extent: Extent { footprint: Some((0.1, 1.0)), height: Some(2.4) },
+            ..Default::default()
+        };
+        // Its whole lattice presents `wall`, which is what `range::Faces` reads to decide a cell is
+        // enclosed. Derived from the piece's own extent — a lattice that does not match the piece
+        // describes a different piece.
+        let div = crate::descriptor::divisions(&wall, 1).expect("measured");
+        let mut cells = Vec::new();
+        for x in 0..div.0 {
+            for y in 0..div.1 {
+                for z in 0..div.2 {
+                    cells.push(SubCell {
+                        at: (x, y, z),
+                        solid: true,
+                        edge: Some(WALL_TOKEN.to_owned()),
+                    });
+                }
+            }
+        }
+        wall.subgrid = Some(Subgrid { cells });
+
+        // **A lintel**, which is what makes an opening expressible: 0.4 m of wall at the top of the
+        // tile and nothing below it, so the face presents `wall` in one band and `None` through the
+        // gap. That is the shape the shipped `site/tile_doorway_n` had — `wall_header` lifted over
+        // open air — and the reason a kit without one can only alternate wall and empty.
+        let mut header = Descriptor {
+            id: "header".to_owned(),
+            extent: Extent { footprint: Some((0.1, 1.0)), height: Some(0.4) },
+            ..Default::default()
+        };
+        let div = crate::descriptor::divisions(&header, 1).expect("measured");
+        let mut cells = Vec::new();
+        for x in 0..div.0 {
+            for y in 0..div.1 {
+                for z in 0..div.2 {
+                    cells.push(SubCell {
+                        at: (x, y, z),
+                        solid: true,
+                        edge: Some(WALL_TOKEN.to_owned()),
+                    });
+                }
+            }
+        }
+        header.subgrid = Some(Subgrid { cells });
+
+        let library = Library {
+            version: crate::library::LIBRARY_VERSION,
+            note: None,
+            descriptors: vec![plate("floor"), wall, header],
+        };
+
+        use crate::composition::{Body, Envelope, Member};
+        let member = |id: &str, at: (f32, f32)| Member {
+            id: id.to_owned(),
+            body: Body::Descriptor { id: id.to_owned(), tip: (0, 0), on: None, patch: None },
+            at,
+            yaw: 0.0,
+            lift: 0.0,
+            paint: 0,
+            of_fingerprint: None,
+            note: None,
+        };
+        // Members sorted by id — the canonical order `validate` holds every group to.
+        let tile = |id: &str, members: Vec<Member>| Composition {
+            id: id.to_owned(),
+            envelope: Envelope::Bounded { size: (1.0, 2.4, 1.0) },
+            members,
+            locations: Vec::new(),
+            note: None,
+        };
+        // The wall sits flush against the face it presents — its minimum corner on the tile's edge,
+        // which is where `build::drop_at` puts a piece dropped in the edge cell.
+        let north = || Member { at: (0.0, -0.45), yaw: 90.0, ..member("wall", (0.0, -0.45)) };
+        let west = || Member {
+            id: "wall_2".to_owned(),
+            at: (-0.45, 0.0),
+            ..member("wall", (-0.45, 0.0))
+        };
+        // The lintel rides at 2.0 m, leaving 2.0 m of clear opening under it.
+        let lintel = || Member {
+            id: "header".to_owned(),
+            at: (0.0, -0.45),
+            yaw: 90.0,
+            lift: 2.0,
+            ..member("header", (0.0, -0.45))
+        };
+        let comps = vec![
+            tile("site/tile_corner_nw", vec![member("floor", (0.0, 0.0)), north(), west()]),
+            tile("site/tile_doorway_n", vec![member("floor", (0.0, 0.0)), lintel()]),
+            tile("site/tile_floor", vec![member("floor", (0.0, 0.0))]),
+            tile("site/tile_wall_n", vec![member("floor", (0.0, 0.0)), north()]),
+        ];
+        from_compositions(&comps, &library, 1, 1.0, crate::composition::agrees)
+            .expect("the fixture kit learns")
     }
 
     /// A square region of `n` cells a side, with nothing pinned.

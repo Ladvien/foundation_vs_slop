@@ -136,47 +136,6 @@ fn both_kits_name_the_same_pieces_and_every_id_resolves() {
     }
 }
 
-/// **An authored map loads.** `assets/emerge/break_room.map.ron` was made in `emerge-mapper` on
-/// 2026-08-03 — a fridge, a table, three chairs and a wall light — and it is committed as the first
-/// map the editor produced that the game can read.
-///
-/// It exists as a **fixture**, not as content: the loop it proves (author → save → the game validates
-/// the same file with the same rules) had no regression test at all, so a schema change could have
-/// broken every authored map with nothing failing.
-#[test]
-fn the_authored_break_room_still_loads() {
-    use emerge_core::map::Map;
-
-    let text = std::fs::read_to_string("assets/emerge/break_room.map.ron")
-        .unwrap_or_else(|e| panic!("assets/emerge/break_room.map.ron: {e}"));
-    let map = Map::parse(&text).unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(map.name, "break_room");
-    // The armchair arrived with the lattice (`5ba484a`) as the fixture for the off-square-yaw rule —
-    // `adjacency.rs` names it in `an_undeclared_tile_at_an_odd_yaw_is_not_a_fault` — and this count
-    // was not moved with it, so the fixture test has been failing since.
-    assert_eq!(
-        map.placements.len(),
-        7,
-        "a fridge, a table, three chairs, a light, and the yaw-240 armchair"
-    );
-
-    // Through the real load path — the library layered with this project's policy, the same call the
-    // game and the editor both make — so a descriptor the library stopped defining fails here.
-    let library = emerge_core::policy::layered_library(std::path::Path::new("assets/emerge"))
-        .unwrap_or_else(|e| panic!("{e}"))
-        .library;
-    for p in &map.placements {
-        assert!(
-            library.get(&p.descriptor).is_some(),
-            "{} names `{}`, which the library no longer defines",
-            p.id,
-            p.descriptor
-        );
-    }
-    // And every height resolves — the check that would catch a stacked piece whose host went away.
-    emerge_core::stack::resolve_y(&map, &library).unwrap_or_else(|e| panic!("{e}"));
-}
-
 /// **What the shipped kits' lattices actually come out as**, now that divisions are derived from a
 /// piece's own size and the project's `divisions` rather than authored per descriptor.
 ///

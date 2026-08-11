@@ -190,6 +190,38 @@ mod tests {
         let layered = emerge_core::policy::layered_library(std::path::Path::new("assets/emerge"))
             .unwrap_or_else(|e| panic!("{e}"));
 
+        // **The group is carried here, not read off disk.** It used to come from
+        // `assets/emerge/compositions.ron`, which made this an asset-contract test — and the contract
+        // dissolved the day the project was cleared to author tiles with the editor's own BUILD mode.
+        // What it actually pins is the expand-to-rows-and-locations loop, which is a fact about this
+        // code rather than about which groups happen to ship, so the fixture belongs with the test.
+        // Recovered verbatim from the deleted file, notes trimmed.
+        let comps: emerge_core::composition::Compositions = ron::from_str(
+            r#"(
+                version: 1,
+                compositions: [(
+                    id: "break_table",
+                    envelope: Anchored,
+                    members: [
+                        (id: "chair_north", body: Descriptor(id: "dining_chair", tip: (0, 0), on: None, patch: None), at: (0.0, -1.0), yaw: 180.0, lift: 0.0),
+                        (id: "chair_south", body: Descriptor(id: "dining_chair", tip: (0, 0), on: None, patch: None), at: (0.0, 1.0), yaw: 0.0, lift: 0.0),
+                        (id: "table", body: Descriptor(id: "table", tip: (0, 0), on: None, patch: None), at: (0.0, 0.0), yaw: 0.0, lift: 0.0),
+                    ],
+                    locations: [(
+                        id: "meal",
+                        props: ["table", "chair_north", "chair_south"],
+                        interactions: [(
+                            verb: "eat",
+                            roles: [(name: "diner", kind: Supporting, min: 1, max: 2, socket_role: Some("diner"), requires: ["eat"])],
+                            guard: None,
+                            effects: [Restore(drive: "hunger", rate: 0.15)],
+                        )],
+                    )],
+                )],
+            )"#,
+        )
+        .unwrap_or_else(|e| panic!("the fixture group parses: {e}"));
+
         let map = Map {
             name: "stamped".into(),
             stamps: vec![emerge_core::composition::Stamped {
@@ -205,9 +237,9 @@ mod tests {
             layered.library,
             map,
             vocab,
-            &layered.compositions.compositions,
+            &comps.compositions,
         )
-        .unwrap_or_else(|e| panic!("a shipped composition does not stamp: {e}"));
+        .unwrap_or_else(|e| panic!("the fixture group does not stamp: {e}"));
 
         let ids: Vec<&str> = world.map.placements.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, ["mess_a/chair_north", "mess_a/chair_south", "mess_a/table"]);
