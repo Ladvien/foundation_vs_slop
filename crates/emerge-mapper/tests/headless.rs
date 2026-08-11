@@ -1244,6 +1244,61 @@ mod compose {
         );
     }
 
+    /// **A wish the kit cannot grant is reported, not refused — the editor keeps drawing.**
+    ///
+    /// The composed generate asks for a quarter of the region to close into rooms. This fixture has
+    /// two floor tiles and no wall anywhere, so that is unreachable by construction. Before the
+    /// constraint solver, an unmeetable region produced `status.problem` and an empty map; now the
+    /// arrangement lands and the shortfall is a note beside it.
+    ///
+    /// The distinction is the whole editor-facing point of the change: a red banner means *nothing
+    /// happened*, and something did.
+    #[test]
+    fn a_region_that_cannot_make_rooms_still_generates_and_says_so() {
+        let root = Fixture::new("gen-no-walls")
+            .descriptor("floor", "alpha")
+            .descriptor("rug", "alpha")
+            .bounded_composition("tile_floor", (1.0, 1.0, 1.0), &[("floor", "floor", (0.0, 0.0))])
+            .bounded_composition("tile_rug", (1.0, 1.0, 1.0), &[("rug", "rug", (0.0, 0.0))])
+            .place("rug", (0.5, 0.5))
+            .build("m");
+        let mut app = emerge_mapper::harness::build_headless(&root, "m", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        for _ in 0..3 {
+            app.update();
+        }
+        // Driven through the real binding, like the test above — there is no test-only entry point
+        // to the generate, and adding one would be a second way to run it.
+        fn press_composed(
+            mut keys: bevy::prelude::ResMut<bevy::input::ButtonInput<bevy::prelude::KeyCode>>,
+        ) {
+            let b = emerge_mapper::keys::binding(emerge_mapper::keys::Action::GenerateComposed);
+            keys.press(emerge_mapper::keys::MOD_KEYS[0]);
+            keys.press(b.key);
+        }
+        app.add_systems(
+            bevy::prelude::Update,
+            bevy::prelude::IntoScheduleConfigs::before(
+                press_composed,
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+
+        let state = app.world().resource::<emerge_mapper::editor::EditorState>();
+        assert!(
+            !state.status.has_problem(),
+            "an unmeetable wish must not read as a failure: {}",
+            state.status.problem_text()
+        );
+        let said = state.status.note_text();
+        assert!(said.contains("could not close"), "the shortfall must be said out loud: {said}");
+        assert!(
+            !app.world().resource::<Project>().map.stamps.is_empty(),
+            "and the arrangement must still be on the map"
+        );
+    }
+
     /// **A stamp is one thing, and Delete takes the instance — never a member of it.**
     ///
     /// FVS-R-14. Stamped rows carry no `Placement` on purpose, which kept every tool off them; what

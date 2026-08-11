@@ -629,6 +629,21 @@ pub struct Placement(pub String);
 /// the solver does not think touch.
 const CELL: f32 = grid::TILE;
 
+/// How much of a generated region should close into rooms, and what that wish is worth.
+///
+/// **Constants rather than controls, deliberately for now.** This crate has no slider widget of any
+/// kind, so a knob is a marker, a resource, an observer, a keystroke filter and a repaint system —
+/// real work that should follow evidence about what an author actually wants to turn, not precede it.
+/// The wish being *soft* is what makes a fixed number safe: a region that cannot reach the target
+/// returns its best arrangement and says so, rather than refusing.
+///
+/// The weight is what the wish is worth against everything else asked of the solve. It is the only
+/// soft constraint in play — the per-cell texture is a preference and costs nothing — so any positive
+/// value makes it decisive; this one is round and leaves room for a second wish to be weighed against
+/// it later.
+const ENCLOSURE_WISH: f32 = 0.25;
+const ENCLOSURE_WEIGHT: u32 = 200;
+
 /// The see-through preview of the armed brush.
 #[derive(Component)]
 struct Ghost;
@@ -6499,11 +6514,19 @@ fn generate_from(
     // `from_compositions` also reports what it could not make a tile of, by name. `learn` and
     // `declared` refuse whole or succeed whole, so they carry an empty report rather than a different
     // shape — one type here, and the refusals reach the status line either way.
-    let built: Result<(emerge_core::grammar::Grammar, Vec<String>), String> = match source {
-        Source::Learned => emerge_core::grammar::learn(&project.map, CELL).map(|g| (g, Vec::new())),
+    //
+    // **The interfaces travel with the grammar**, and that is what makes rooms possible. Only
+    // `from_compositions` derives them, and `solve_constrained` needs them to know which face of a
+    // tile presents a wall — so an enclosure wish is expressible for the composition source and for
+    // no other. `learn` and `declared` carry an empty list rather than a different shape.
+    type Built = (emerge_core::grammar::Grammar, Vec<String>, Vec<Option<emerge_core::composition::Interface>>);
+    let built: Result<Built, String> = match source {
+        Source::Learned => {
+            emerge_core::grammar::learn(&project.map, CELL).map(|g| (g, Vec::new(), Vec::new()))
+        }
         Source::Declared => {
             emerge_core::grammar::declared(&project.library, project.policy.face_bands, CELL)
-                .map(|g| (g, Vec::new()))
+                .map(|g| (g, Vec::new(), Vec::new()))
         }
         Source::Composed => emerge_core::grammar::from_compositions(
             &project.compositions.compositions,
@@ -6512,9 +6535,9 @@ fn generate_from(
             CELL,
             emerge_core::composition::agrees,
         )
-        .map(|c| (c.grammar, c.skipped)),
+        .map(|c| (c.grammar, c.skipped, c.faces)),
     };
-    let (grammar, skipped) = match built {
+    let (grammar, skipped, faces) = match built {
         Ok(g) => g,
         Err(e) => {
             state.status.problem(e);
@@ -6550,10 +6573,33 @@ fn generate_from(
             }
         }
     }
-    let solved = match emerge_core::grammar::solve(&scratch, &grammar, CELL, state.seed, || {
+    // **The composition source solves under constraints; the other two collapse.**
+    //
+    // Not two ways to do one thing — two sources with different information. A grammar learned from
+    // placements derives no interfaces, so it has no walls to close and nothing to ask for; the
+    // composition grammar does, and asking is the whole point. `docs/research/2026-08-10-expressive-range.md`
+    // measured the collapse at zero enclosed regions in 128 solves and falsified both the vocabulary
+    // and the weight explanations for it — a closed boundary is a property over distance, and local
+    // adjacency has no term for it.
+    let mut mint = || {
         n += 1;
         format!("gen@{n}")
-    }) {
+    };
+    let outcome = match source {
+        Source::Composed => {
+            let wishes = emerge_core::grammar::Wishes {
+                enclosure: ENCLOSURE_WISH,
+                enclosure_weight: Some(ENCLOSURE_WEIGHT),
+            };
+            emerge_core::grammar::solve_constrained(
+                &scratch, &grammar, &faces, &wishes, CELL, state.seed, &mut mint,
+            )
+        }
+        Source::Learned | Source::Declared => {
+            emerge_core::grammar::solve(&scratch, &grammar, CELL, state.seed, &mut mint)
+        }
+    };
+    let solved = match outcome {
         Ok(s) => s,
         Err(e) => {
             state.status.problem(e);
@@ -6650,8 +6696,20 @@ fn generate_from(
     for s in &skipped {
         state.status.problem(format!("not a tile: {s}"));
     }
+    // **A wish it could not grant is a note, not a problem.** The arrangement is real and on screen;
+    // what the solver could not do is a fact about the region, not a failure of the tool — so it
+    // rides the same line rather than the red banner, which is reserved for "nothing happened".
+    // Before this, a region that could not meet what was asked returned an error and an empty map.
+    let shortfall = if solved.unmet > 0 {
+        format!(
+            " — but could not close {}% of it into rooms; the kit's rules do not allow one here",
+            (ENCLOSURE_WISH * 100.0).round() as u32
+        )
+    } else {
+        String::new()
+    };
     state.status.note(format!(
-        "continued the layout: {} around {} pinned cell(s), from {} prototype(s)",
+        "continued the layout: {} around {} pinned cell(s), from {} prototype(s){shortfall}",
         if composes { format!("{stamped} stamped") } else { format!("{count} placed") },
         solved.owned_cells,
         grammar.len() - 1
