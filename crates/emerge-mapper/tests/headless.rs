@@ -131,8 +131,8 @@ fn opening_a_piece_to_be_defined_is_the_modified_remove_key() {
     // Bare remove on the Tiles tab removes; it does not send anything to be defined.
     let mut input = ButtonInput::<KeyCode>::default();
     input.press(REMOVE_KEY);
-    assert!(just_pressed(&input, Context::Tiles, Action::RemoveTile));
-    assert!(!just_pressed(&input, Context::Tiles, Action::EditTile));
+    assert!(just_pressed(&input, Context::Meshes, Action::RemoveTile));
+    assert!(!just_pressed(&input, Context::Meshes, Action::EditTile));
 
     // A FRESH input, not `clear()`: `clear` keeps the pressed state, so an already-held key never
     // re-registers as just-pressed.
@@ -141,7 +141,7 @@ fn opening_a_piece_to_be_defined_is_the_modified_remove_key() {
     input.press(REMOVE_KEY);
     assert!(just_pressed(&input, Context::Map, Action::EditTile));
     assert!(
-        !just_pressed(&input, Context::Tiles, Action::RemoveTile),
+        !just_pressed(&input, Context::Meshes, Action::RemoveTile),
         "the modified chord must not also remove, or one press would do two things"
     );
 }
@@ -158,8 +158,8 @@ fn the_move_tool_sits_in_the_left_hand_cluster() {
     assert_eq!(binding(Action::MoveMode).context, Context::Map);
     // Shared with the Tiles tab's mesh rescan, deliberately.
     assert_eq!(binding(Action::ScanMesh).key, KeyCode::KeyB);
-    assert_eq!(binding(Action::ScanMesh).context, Context::Tiles);
-    assert!(!Context::Map.overlaps(Context::Tiles));
+    assert_eq!(binding(Action::ScanMesh).context, Context::Meshes);
+    assert!(!Context::Map.overlaps(Context::Meshes));
 }
 
 /// **The census answers for the action it was asked about.**
@@ -564,7 +564,7 @@ mod stepped {
                     "the piece was not focused on the Tiles tab"
                 );
                 assert!(
-                    matches!(*mode, emerge_mapper::tiles::Mode::Tiles),
+                    matches!(*mode, emerge_mapper::tiles::Mode::Meshes),
                     "the tab did not change"
                 );
                 // **The pair the detail pane guards on.** `send_to_tiles` checks the layered
@@ -2410,16 +2410,101 @@ fn naming_a_composition_takes_the_keyboard_from_the_verbs() {
     );
 }
 
-/// **BUILD mode is reachable and it builds.**
+/// **A refusal raised on the Tiles tab is on screen, and does not follow you off it.**
 ///
-/// The arithmetic is unit-tested in `build.rs`; what no unit test can see is the wiring — that `C`
-/// reaches a system at all, that `Context::Build` takes the keyboard from `Context::Tiles` without
-/// the two firing into each other, and that the resources every one of those systems takes exist
-/// before the first frame. In Bevy 0.19 a missing `Res<T>` **panics its system** rather than skipping
-/// it, and no unit test can answer "does this app survive its first frame".
+/// The Meshes and Tiles tabs share one panel, and `ProblemBanner` carries the tab it speaks for —
+/// so the split needed a second banner, and the visibility pass needed to *hide* the banner that is
+/// not live rather than skip it. Skipping was safe only while every banner sat in a panel
+/// `apply_mode` hid for it. Both halves are asserted here: a refusal shows on the tab that raised
+/// it, and is gone on the tab that did not.
 #[test]
-fn the_build_mode_opens_a_tile_and_walks_its_grid() {
-    use emerge_mapper::build::{Build, TileMode};
+fn a_refusal_on_the_tiles_tab_is_visible_and_stays_there() {
+    use bevy::prelude::{App, IntoScheduleConfigs, KeyCode, ResMut, Update};
+    use bevy::ui::Display;
+    use bevy::input::ButtonInput;
+    use emerge_mapper::keys::{binding, Action};
+
+    let root = Fixture::new("tiles_banner")
+        .descriptor("wall", "alpha")
+        .build("test_map");
+    let mut app = harness::build_headless(&root, "test_map", None)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    app.update();
+
+    // **One-shot, because a held key does not re-arm `just_pressed`.** Release everything first, so
+    // the press this frame is a fresh edge rather than a key the previous system left down.
+    fn once(app: &mut App, chord: Vec<KeyCode>) {
+        app.add_systems(
+            Update,
+            IntoScheduleConfigs::before(
+                move |mut keys: ResMut<ButtonInput<KeyCode>>, mut done: bevy::prelude::Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        for k in &chord {
+                            keys.press(*k);
+                        }
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    }
+
+    once(&mut app, vec![binding(Action::TilesTab).key]);
+    // **Shift+Enter drops a hole, and the fixture declares no `slot` tokens** — so this is a refusal
+    // by construction rather than by contrivance, and it is the one a real author meets first on a
+    // project whose vocabulary has not grown a slot axis yet. A bare `Enter` would *succeed*:
+    // `ImportState::editing` falls back to the selected candidate, so a piece is always in hand.
+    once(&mut app, vec![KeyCode::ShiftLeft, binding(Action::BuildSlot).key]);
+    app.update();
+
+    assert!(
+        app.world()
+            .resource::<emerge_mapper::tiles::ImportState>()
+            .status
+            .has_problem(),
+        "the premise: Shift+Enter with no slot tokens must refuse, or this test proves nothing"
+    );
+
+    let banner = |app: &mut App, want: emerge_mapper::tiles::Mode| -> Display {
+        let mut q = app
+            .world_mut()
+            .query::<(&bevy::prelude::Node, &emerge_mapper::chrome::ProblemBanner)>();
+        q.iter(app.world())
+            .find(|(_, b)| b.0 == want)
+            .map(|(n, _)| n.display)
+            .unwrap_or_else(|| panic!("the shared panel must carry a banner for {}", want.label()))
+    };
+
+    assert_eq!(
+        banner(&mut app, emerge_mapper::tiles::Mode::Tiles),
+        Display::Flex,
+        "a refusal the Tiles tab raised must be on the Tiles tab's banner"
+    );
+
+    // And it does not leak: switching tabs hides it, rather than leaving the shared panel showing a
+    // line about work the author is no longer doing.
+    once(&mut app, vec![binding(Action::MeshesTab).key]);
+    app.update();
+    assert_eq!(
+        banner(&mut app, emerge_mapper::tiles::Mode::Tiles),
+        Display::None,
+        "the Tiles tab's banner must hide when the Meshes tab is live — they share a panel"
+    );
+}
+
+/// **The Tiles tab is reachable and it builds.**
+///
+/// The arithmetic is unit-tested in `build.rs`; what no unit test can see is the wiring — that the
+/// tab key reaches a system at all, that `Context::Tiles` takes the keyboard from `Context::Meshes`
+/// without the two firing into each other, and that the resources every one of those systems takes
+/// exist before the first frame. In Bevy 0.19 a missing `Res<T>` **panics its system** rather than
+/// skipping it, and no unit test can answer "does this app survive its first frame".
+#[test]
+fn the_tiles_tab_opens_a_tile_and_walks_its_grid() {
+    use emerge_mapper::build::Build;
 
     let root = Fixture::new("build_mode")
         .descriptor("wall", "alpha")
@@ -2433,11 +2518,6 @@ fn the_build_mode_opens_a_tile_and_walks_its_grid() {
     fn to_tiles(mut keys: bevy::prelude::ResMut<bevy::input::ButtonInput<bevy::prelude::KeyCode>>) {
         keys.press(emerge_mapper::keys::binding(emerge_mapper::keys::Action::TilesTab).key);
     }
-    fn enter_build(
-        mut keys: bevy::prelude::ResMut<bevy::input::ButtonInput<bevy::prelude::KeyCode>>,
-    ) {
-        keys.press(emerge_mapper::keys::binding(emerge_mapper::keys::Action::EnterBuild).key);
-    }
     fn walk(mut keys: bevy::prelude::ResMut<bevy::input::ButtonInput<bevy::prelude::KeyCode>>) {
         keys.press(emerge_mapper::keys::binding(emerge_mapper::keys::Action::BuildRight).key);
     }
@@ -2450,13 +2530,7 @@ fn the_build_mode_opens_a_tile_and_walks_its_grid() {
     };
 
     before(&mut app, to_tiles);
-    before(&mut app, enter_build);
 
-    assert_eq!(
-        *app.world().resource::<TileMode>(),
-        TileMode::Build,
-        "`C` on the Tiles tab must reach BUILD"
-    );
     let build = app.world().resource::<Build>();
     let comp = build
         .open
@@ -2475,19 +2549,25 @@ fn the_build_mode_opens_a_tile_and_walks_its_grid() {
     assert_eq!(
         app.world().resource::<Build>().at,
         (1, 0, 0),
-        "`H` must walk the tile's grid in BUILD, not the map's"
+        "`H` must walk the tile's grid on the Tiles tab, not the map's"
     );
 
-    // **And the panel shows it.** This is the half that shipped broken: the mode flipped, the status
+    // **And the panel shows it.** This is the half that shipped broken: the tab changed, the status
     // line said so, and the detail pane went on showing the mesh inspector — which reads as the key
-    // having done nothing. `rebuild_detail` watches `ImportState`, so without `TileMode` and `Build`
-    // in its run condition nothing ever rebuilt the pane.
+    // having done nothing. `rebuild_detail` watches `ImportState`, so without `Mode` and `Build` in
+    // its run condition nothing ever rebuilt the pane.
     app.update();
     let mut texts = app.world_mut().query::<&bevy::prelude::Text>();
     let shown: Vec<String> = texts.iter(app.world()).map(|t| t.0.clone()).collect();
+    // **The strip names the tab and the pane names its subject.** Splitting the tab retired the
+    // mode indicator by retiring the mode: a strip is a thing you cannot forget you are looking at.
     assert!(
-        shown.iter().any(|t| t.contains("BUILD")),
-        "the pane must say which mode it is in — a mode you cannot see is one you can forget. Saw: {shown:?}"
+        shown.iter().any(|t| t == "TILES"),
+        "the strip must name the tab. Saw: {shown:?}"
+    );
+    assert!(
+        shown.iter().any(|t| t == "TILE"),
+        "the pane must say it is showing a tile rather than a mesh. Saw: {shown:?}"
     );
     let id = app
         .world()
@@ -2515,7 +2595,7 @@ fn the_build_mode_opens_a_tile_and_walks_its_grid() {
 /// whichever member sorted first.
 #[test]
 fn a_dropped_piece_is_staged_and_takes_the_focus() {
-    use emerge_mapper::build::{Build, StagedTile, TileMode};
+    use emerge_mapper::build::{Build, StagedTile};
 
     let root = Fixture::new("build_stage")
         // `wall` sorts after `floor`, so a focus that does not follow the drop lands on the wrong one
@@ -2544,9 +2624,6 @@ fn a_dropped_piece_is_staged_and_takes_the_focus() {
     fn to_tiles(mut done: bevy::prelude::Local<bool>, mut k: Keys) {
         once(&mut done, &mut k, emerge_mapper::keys::Action::TilesTab);
     }
-    fn enter(mut done: bevy::prelude::Local<bool>, mut k: Keys) {
-        once(&mut done, &mut k, emerge_mapper::keys::Action::EnterBuild);
-    }
     fn drop_a(mut done: bevy::prelude::Local<bool>, mut k: Keys) {
         once(&mut done, &mut k, emerge_mapper::keys::Action::BuildDrop);
     }
@@ -2562,7 +2639,6 @@ fn a_dropped_piece_is_staged_and_takes_the_focus() {
     };
 
     step(&mut app, to_tiles);
-    step(&mut app, enter);
     // Pick a piece, which is what the right-hand list's arrow keys write. Set directly rather than
     // driven, because the walking is `move_selection`'s own tested job and what is under test here is
     // what happens to the piece *after* it is picked.
@@ -2601,7 +2677,6 @@ fn a_dropped_piece_is_staged_and_takes_the_focus() {
         "the focus must be the member just dropped — `R` and Delete act on it, and here that is \
          `wall`, not the `floor` that happens to sort first"
     );
-    assert_eq!(*app.world().resource::<TileMode>(), TileMode::Build);
 
     let mut staged = app.world_mut().query::<&StagedTile>();
     assert_eq!(

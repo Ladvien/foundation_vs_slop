@@ -1,17 +1,23 @@
-//! **Assembling a tile** — the Tiles tab's second half.
+//! **Assembling a tile** — the Tiles tab.
 //!
 //! A tile is a floor mesh, a wall over it, a fixture on the wall, maybe a decal. The author walks a
 //! grid inside the tile with the keyboard and drops meshes onto it; when it is finished they save it,
 //! and the Map places it as one thing.
 //!
-//! # Why this is a mode and not a tab
+//! # Why this is a tab and not a mode
 //!
-//! Bringing a mesh in and arranging meshes are the same activity a minute apart, and `keys.rs` caps a
-//! context at twelve rows — *"past about a dozen a key list stops being learnable"*. Tiles was at
-//! eleven. Two modes give each half its own budget and its own list, which is the same answer
-//! Lai, Latham & Leymarie's second pillar gives: *"providing a short iterative loop that provides
-//! enough feedback to the user that it does not break their creative process"*
-//! (`10.1145/3402942.3402946`). Liapis's **user fatigue** is the failure being avoided, and one of its
+//! It was a mode for a day. Bringing a mesh in and arranging meshes looked like the same activity a
+//! minute apart, so they shared a tab and a `C` key flipped between them — which worked, and was
+//! wrong for a reason the key budget hid: `docs/research/2026-08-08-kitbashing-guidance.md` says *"A
+//! good kit is hierarchical: parts -> sub-assemblies -> assemblies"*, the editor already gave a tab
+//! to every other level, and only that one carried two.
+//!
+//! A mesh is a measurement written to `library.ron` and described once; a tile is an arrangement
+//! written to `compositions.ron` and built constantly. Splitting them retired the mode key with the
+//! mode: a tab strip is a mode nobody can forget, which is Raskin's whole condition. FVS-R-21.
+//!
+//! The twelve-row cap is what made two contexts affordable —
+//! `no_context_carries_more_than_a_learnable_vocabulary`, and Liapis's **user fatigue**, one of whose
 //! named causes is *"when there are too many options"*.
 //!
 //! # The grid is the tile's own, and it is the project's
@@ -38,36 +44,6 @@ use bevy::prelude::*;
 
 use emerge_core::composition::{Body, Composition, Envelope, Member};
 use emerge_core::grid::SnapLevel;
-
-/// Which half of the Tiles tab has the keyboard.
-///
-/// Drawn on screen, never inferred: Raskin's objection to modes is that *"humans simply forget which
-/// mode they're in"*, and a mode you can see is not one you can forget. That is also why the rung is
-/// latched rather than held — see [`Build::rung`].
-#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum TileMode {
-    /// Bring a mesh in and say what it is. The tab's original job.
-    #[default]
-    Describe,
-    /// Arrange meshes into a tile.
-    Build,
-}
-
-impl TileMode {
-    pub fn label(self) -> &'static str {
-        match self {
-            TileMode::Describe => "DESCRIBE",
-            TileMode::Build => "BUILD",
-        }
-    }
-
-    pub fn next(self) -> Self {
-        match self {
-            TileMode::Describe => TileMode::Build,
-            TileMode::Build => TileMode::Describe,
-        }
-    }
-}
 
 /// **The tile being assembled**, and where the cursor is in it.
 #[derive(Resource, Default)]
@@ -306,7 +282,7 @@ pub fn pitch(build: &Build, project: &crate::project::Project) -> f32 {
 pub fn build_keys(
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<crate::keys::Live>,
-    mut tile_mode: ResMut<TileMode>,
+    mode: Res<crate::tiles::Mode>,
     mut build: ResMut<Build>,
     mut state: ResMut<crate::tiles::ImportState>,
     // **`ResMut`, dereferenced mutably only in the save branch.** Bevy flags a resource changed when
@@ -317,40 +293,37 @@ pub fn build_keys(
     mut project: ResMut<crate::project::Project>,
 ) {
     use crate::keys::{just_pressed, Action};
+    if *mode != crate::tiles::Mode::Tiles {
+        return;
+    }
     let pressed = |a: Action| just_pressed(&keyboard, live.0, a);
 
-    // The door, from either side. Entering with nothing in hand opens a blank tile, so the first
-    // keystroke after `C` is already a useful one rather than "now press N".
-    if pressed(Action::EnterBuild) {
-        *tile_mode = TileMode::Build;
-        if build.open.is_none() {
-            // **As tall as the space it fills**, taken from the map rather than from a constant. A
-            // number here would be one facility's ceiling height baked into the editor — the same
-            // mistake `stack::datum` records fixing, where `OnCeiling` was hardcoded 2.4 m and hung
-            // the lights of a 3.5 m room in mid-air. The map states its own height; that is the only
-            // number entitled to answer this.
-            build.open = Some(blank(&next_tile_id(&project), project.map.bounds.1));
-            build.rung = DEFAULT_RUNG;
-        }
-        // **Arrive with something in hand.** The selection persists across the mode flip already, so
-        // this only fires when nothing was ever picked — and without it an author's first keystroke
-        // in BUILD is a refusal, which is the worst possible first impression of a mode. Liapis names
-        // the failure: a tool that will not let the designer converge is where user fatigue starts.
+    // **Arriving on the tab opens a tile**, so the first keystroke does something rather than asking
+    // for another. This hung off a mode key until the tab existed; the tab becoming live is the same
+    // moment, and one fewer thing to press.
+    if build.open.is_none() {
+        // **As tall as the space it fills**, taken from the map rather than from a constant. A number
+        // here would be one facility's ceiling height baked into the editor — the mistake
+        // `stack::datum` records fixing, where `OnCeiling` was hardcoded 2.4 m and hung the lights of
+        // a 3.5 m room in mid-air. The map states its own height; that is the only number entitled to
+        // answer this.
+        build.open = Some(blank(&next_tile_id(&project), project.map.bounds.1));
+        build.rung = DEFAULT_RUNG;
+        build.at = (0, 0, 0);
+        build.focus = 0;
+        // **Arrive with something in hand.** Only fires when nothing was ever picked — the selection
+        // otherwise persists — and without it the first `Enter` is a refusal, which is the worst
+        // possible first impression of a tab. Liapis names the failure: a tool that will not let the
+        // designer converge is where user fatigue starts.
         if state.editing(&project.library).is_none()
             && let Some(first) = project.library.descriptors.first().map(|d| d.id.clone())
         {
             state.selected_library_id = Some(first);
         }
         let id = build.open.as_ref().map(|c| c.id.clone()).unwrap_or_default();
-        state.status.note(format!("building `{id}` — T F G H walk, Enter drops, Cmd+S saves"));
-        return;
-    }
-    if pressed(Action::LeaveBuild) {
-        *tile_mode = TileMode::Describe;
-        state.status.note("describing meshes".to_owned());
-        return;
-    }
-    if *tile_mode != TileMode::Build {
+        state
+            .status
+            .note(format!("building `{id}` — T F G H walk, Enter drops, Cmd+S saves"));
         return;
     }
 
@@ -405,9 +378,9 @@ pub fn build_keys(
         return;
     }
 
-    // **Drop what the library list has picked.** The piece is chosen in DESCRIBE and dropped in
-    // BUILD, which is the same right-hand list serving both halves rather than a second browser —
-    // the objection §3.2 of the compose-authoring plan raised against adding one.
+    // **Drop what the library list has picked.** The piece is chosen on the mesh tab and dropped
+    // here, which is the same right-hand list serving both tabs rather than a second browser — the
+    // objection §3.2 of the compose-authoring plan raised against adding one.
     if pressed(Action::BuildDrop) {
         let Some(d) = state.editing(&project.library).cloned() else {
             state.status.problem("nothing picked — choose a piece in the list first".to_owned());
@@ -549,13 +522,12 @@ pub fn drive_build_preview(
     mut commands: Commands,
     assets: Res<AssetServer>,
     mode: Res<crate::tiles::Mode>,
-    tile_mode: Res<TileMode>,
     build: Res<Build>,
     project: Res<crate::project::Project>,
     mut state: ResMut<crate::tiles::ImportState>,
     staged: Query<Entity, With<StagedTile>>,
 ) {
-    if !(build.is_changed() || tile_mode.is_changed() || mode.is_changed() || project.is_changed()) {
+    if !(build.is_changed() || mode.is_changed() || project.is_changed()) {
         return;
     }
     // A system that stops running cannot despawn what it drew, so leaving the mode clears here rather
@@ -563,7 +535,7 @@ pub fn drive_build_preview(
     for e in &staged {
         commands.entity(e).despawn();
     }
-    if *mode != crate::tiles::Mode::Tiles || *tile_mode != TileMode::Build {
+    if *mode != crate::tiles::Mode::Tiles {
         return;
     }
     let Some(comp) = build.open.as_ref() else {
@@ -655,12 +627,11 @@ pub fn drive_build_preview(
 /// walking the grid moves a number in a panel and nothing on the stage.
 pub fn draw_build_grid(
     mode: Res<crate::tiles::Mode>,
-    tile_mode: Res<TileMode>,
     build: Res<Build>,
     project: Res<crate::project::Project>,
     mut gizmos: Gizmos,
 ) {
-    if *mode != crate::tiles::Mode::Tiles || *tile_mode != TileMode::Build {
+    if *mode != crate::tiles::Mode::Tiles {
         return;
     }
     let Some(Envelope::Bounded { size }) = build.open.as_ref().map(|c| c.envelope) else {

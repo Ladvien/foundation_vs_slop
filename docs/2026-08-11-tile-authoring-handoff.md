@@ -1,8 +1,9 @@
 # Tile authoring — handoff, 2026-08-11
 
-**Read this first if you are picking up the editor work.** Two commits landed today on
-`constraint-solver`: `54998e2` (the tile becomes authorable) and `fe015af` (the project cleared to a
-blank slate). The next job is agreed and not started: **split the Tiles tab in two.**
+**Read this first if you are picking up the editor work.** Three commits landed today on
+`constraint-solver`: `54998e2` (the tile becomes authorable), `fe015af` (the project cleared to a
+blank slate) and the tab split. **The next job is to author two or three tiles with the tool** — that
+is the acceptance test the plan named, and the fastest way to find what is wrong with the loop.
 
 ## Where it started
 
@@ -42,7 +43,7 @@ Shipped in `54998e2`:
   nothing, and there is a test that says so.
 - **`Mount::OnFace` + `Offers::faces`** — a fixture attaches to a wall rather than to a number.
 - **`SubCell::anchor` retired**; its vocabulary axis inherited by slots.
-- **BUILD mode** — `crates/emerge-mapper/src/build.rs`, `Context::Build`, panel, 3-D stage, gizmos.
+- **The tile assembler** — `crates/emerge-mapper/src/build.rs`, panel, 3-D stage, gizmos.
 - **`Project::commit_composition`** — the one door to `compositions.ron`.
 
 Shipped in `fe015af`: every authored map and composition deleted; measurements, policy, vocabulary
@@ -52,47 +53,44 @@ and all 462 meshes kept.
 *no* BRP server exists — it inverts whenever a game or editor is listening on 15702. Environmental,
 not a regression; check `lsof -nP -iTCP:15702 -sTCP:LISTEN` before believing it.
 
-## The next job: split the Tiles tab
+## The split shipped
 
-**Decided 2026-08-11.** `MESHES → TILES → COMPOSE → MAP → ANIM`.
+**Done 2026-08-11.** `MESHES` and `TILES` are two tabs; `Mode::ALL` is
+`[Map, Meshes, Tiles, Compose, Anim]` — Map first because it is the job. `build::TileMode` and the `C`
+flip are gone, which was the point: a tab strip is a mode you cannot forget. The right-hand library
+list is still shared, because describing picks a mesh to edit and building picks a mesh to drop.
 
-The argument is the **hierarchy**, not crowding. `docs/research/2026-08-08-kitbashing-guidance.md`:
-*"A good kit is hierarchical: parts → sub-assemblies → assemblies."* The editor already gives a tab
-per level — Compose is scenes, Map is worlds — and Tiles is the only tab carrying two: a mesh (part)
-and a tile (sub-assembly). Different object, different file, different frequency: a mesh is a
-measurement written to `library.ron` and described once; a tile is an arrangement written to
-`compositions.ron` and built constantly.
+The argument was the **hierarchy** — `docs/research/2026-08-08-kitbashing-guidance.md`: *"A good kit is
+hierarchical: parts → sub-assemblies → assemblies."* Crowding was already handled by giving each half its own key context.
+The known cost stands: I10 of the editor-model guide argues for *fewer* contexts and this added one,
+weighed and overridden. **The corpus could not settle it** — a search for information architecture
+returns Ousterhout and Bass, and Raskin has never been ingested; the gap is recorded in
+`docs/research/2026-08-10-snapping-corpus-vetting.md`.
 
-The crowding argument is already spent — `Context::Build` gave each half its own twelve-row budget.
-What remains is conceptual.
+**Two bugs the split introduced, and how they were caught.** Both are the same shape — something that
+was safe only because of a fact the split changed:
 
-**The shape:**
+- **`ProblemBanner` carries the tab it speaks for**, and the visibility pass `continue`d past every
+  other banner. That was safe while each banner sat in a panel `apply_mode` hid for it. Meshes and
+  Tiles now share one panel, so the Tiles tab had no banner at all, and once given one it kept
+  showing a refusal after the author switched away. Fixed both ways: a second banner in the shared
+  panel, and **hide** rather than skip the one that is not live.
+- **`build_keys` shared `Phase::Act` with `toggle_mode` and `tab_shortcuts` and was unordered against
+  them.** Arriving on the tab is what opens a tile, so whether that happened on the arrival frame or
+  the next was Bevy's choice. The symptom was a test that passed alone and failed in the suite —
+  which reads as an unrelated flake until you look. `build_keys` is now `.after` both.
 
-- `tiles::Mode` gains `Meshes`; `Mode::ALL` becomes five; number keys go to 5.
-- `Context::Tiles` becomes the **mesh** tab's context. `Context::Build` becomes the **Tiles** tab's
-  only context.
-- **`build::TileMode` and the `C` flip disappear** — that is the point. A tab strip is the most
-  visible mode indicator there is, so the mode stops being something to indicate.
-- `rebuild_detail`'s BUILD branch (`tiles::build_detail`) moves to the Tiles tab's own panel; the
-  mesh inspector keeps the rest.
-- The right-hand library list is needed by **both** — describing picks a mesh to edit, building picks
-  a mesh to drop. It stays a shared piece, not two.
+*Verified the way this doc's own trap section demands:* `a_refusal_on_the_tiles_tab_is_visible_and_stays_there`
+was checked against a revert of **each** fix separately, and the ordering fix was confirmed by six
+consecutive green runs where the suite had been a coin flip.
 
-**Known cost.** I10 of `docs/research/2026-08-08-editor-model-design-guide.md` argued for *fewer*
-contexts — *"a single Compose key context… rather than three near-identical contexts that drift."* A
-fifth tab cuts against that. Weighed and overridden, because a tab is a mode you cannot forget.
-
-**The corpus cannot settle this**, and that is worth knowing before anyone re-litigates it: a search
-for information architecture returns Ousterhout and Bass — software module design, not UI. The gap is
-already recorded in `docs/research/2026-08-10-snapping-corpus-vetting.md`: *"a graphics/PCG corpus
-with no HCI direct-manipulation holdings."* Raskin is cited throughout and has never been ingested.
-
-## After the split
+## What is next
 
 Rough order, and none of it is blocking:
 
-1. **Author two or three tiles with BUILD** — floor, wall, corner. This is the acceptance test the
-   plan named, and the fastest way to find what is wrong with the loop.
+1. **Author two or three tiles on the Tiles tab** — floor, wall, corner. This is the acceptance test
+   the plan named, and the fastest way to find what is wrong with the loop. Nothing below is
+   blocking; this is.
 2. **`Member::paint` has no writer** (`composition_from_set` hard-codes `paint: 0`,
    `editor.rs:4878`), so decal ordering is not authorable. The author's *"a decal or two"*.
 3. **Re-pin the solver against real tiles.** `grammar.rs`'s `site_kit()` now builds a synthetic
@@ -107,8 +105,8 @@ Rough order, and none of it is blocking:
 - **A comment describing a fix nobody wrote.** I left one in `keys.rs` claiming the Save handler
   "asks which mode is live" before writing it. This codebase has been bitten by that exact shape
   before (`site::pieces` and the header course). Caught and closed the same day.
-- **A test that cannot fail reads as a guarantee.** The BUILD panel test passed before the fix was
-  in, because entering BUILD happened to touch `ImportState`. Verified by reverting the fix; it now
+- **A test that cannot fail reads as a guarantee.** The tile-panel test passed before the fix was in,
+  because changing tab happened to touch `ImportState`. Verified by reverting the fix; it now
   fails on the *cursor*, which is the freeze rather than the flip. Do this for every ratchet.
 - **The headless press idiom fires once.** *"Pressing an already-pressed key does not re-arm
   `just_pressed`."* Two keystrokes need one-shot systems that `release_all()` first — see

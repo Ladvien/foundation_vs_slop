@@ -669,12 +669,12 @@ pub(crate) fn paint_labels_badge(
     let Some(suggestions) = suggestions else { return };
     let pending = suggestions.pending();
     let want = if pending == 0 {
-        crate::tiles::Mode::Tiles.label().to_owned()
+        crate::tiles::Mode::Meshes.label().to_owned()
     } else {
-        format!("{} ({pending} PROPOSED)", crate::tiles::Mode::Tiles.label())
+        format!("{} ({pending} PROPOSED)", crate::tiles::Mode::Meshes.label())
     };
     for (tab, children) in &tabs {
-        if tab.0 != crate::tiles::Mode::Tiles {
+        if tab.0 != crate::tiles::Mode::Meshes {
             continue;
         }
         for child in children {

@@ -2903,3 +2903,29 @@ The original item, for the record:
   **Two lists rather than one enum, forced not chosen:** `CloneHost::InSet` is an index into `pieces`, so interleaving a second kind would have silently repointed every host a captured set carries.
   **Three defects found on the way, all live.** `Undo::UnstampedMany` inverted to `Undo::Stamped`, which drains the **tail** — correct only because `stamp_here` appends, and wrong for any mid-list removal: undo put a stamp back at index 3 and redo took the last one off. It inverts to `UnstampAt { indices }` now, the stamp-side twin of `RemoveAt`. The capture anchor averaged over placements alone, so a box holding only stamps divided by zero. And `envelope_size` skipped `Body::Composition`, so a group holding only a nested one derived a height of zero and was refused for enclosing nothing — a true statement about a measurement that never looked; it measures through the reference now and refuses an **anchored** nested member by name rather than folding in a zero.
   *Every assertion mutation-tested.* The nesting test asserts the body KIND and then that the outer stamp puts the inner composition's pieces on the map through the reference — two rows drawn is what proves it resolved rather than parsed. · *Unblocks:* FVS-R-7's fixed tiles, and nesting.
+
+## FVS-R-21 · Split the Tiles tab: meshes get their own — DONE 2026-08-11
+
+**FVS-R-21 · Split the Tiles tab: meshes get their own.** Decided and shipped 2026-08-11; the full argument and the shape are in `docs/2026-08-11-tile-authoring-handoff.md`. `MESHES -> TILES -> COMPOSE -> MAP -> ANIM`. **The argument is the hierarchy, not crowding** — `docs/research/2026-08-08-kitbashing-guidance.md`: *"A good kit is hierarchical: parts -> sub-assemblies -> assemblies"*, and the editor already gives a tab per level while Tiles carries two. A mesh is a measurement written to `library.ron` and described once; a tile is an arrangement written to `compositions.ron` and built constantly. Crowding is already handled — `Context::Build` gave each half its own twelve rows. **`build::TileMode` and the `C` flip disappear**, which is the point: a tab strip is a mode you cannot forget, so the mode stops needing an indicator. **Known cost, weighed:** I10 of the editor-model guide argues for *fewer* contexts, and this adds one. **The corpus cannot settle it** — a search for information architecture returns Ousterhout and Bass; the HCI gap is recorded in `2026-08-10-snapping-corpus-vetting.md` and Raskin has never been ingested. *Done when:* describing a mesh and assembling a tile are two tabs, `TileMode` is gone, and the library list still serves both.
+
+**How it landed.** `Mode::ALL` is `[Map, Meshes, Tiles, Compose, Anim]` — Map stays first because it is
+the job, which is the argument the original ordering made and which a reorder to pipeline order threw
+away until the stepped tests caught it. `Context::Tiles` is the **Tiles** tab's context and
+`Context::Meshes` the mesh tab's; `build::TileMode`, `Action::EnterBuild` and `Action::LeaveBuild` are
+gone, and with them the `C` flip. All five tab digits share one `does` string so the census stays
+inside its twelve-row Global budget.
+
+**Two bugs the split introduced, both found and pinned rather than shipped:**
+
+- **The problem banner is keyed to a tab, and the two tabs share a panel.** `ProblemBanner(Mode)` and
+  `if banner.0 != tab { continue }` were safe only while every banner sat in a panel `apply_mode` hid
+  for it. The shared panel now carries **two** banners, and the visibility pass **hides** the one that
+  is not live instead of skipping it — otherwise a refusal raised on Tiles went on showing after
+  switching to Meshes. Measured: `Flex` where `None` belongs.
+- **`build_keys` was unordered against `toggle_mode` and `tab_shortcuts`.** All three sat in
+  `Phase::Act`, so whether arriving on the tab opened a tile that frame or the next was Bevy's choice.
+  The tab test passed alone and failed in the suite. `build_keys` is now `.after` both.
+
+*Verified:* `a_refusal_on_the_tiles_tab_is_visible_and_stays_there` fails without either fix (checked
+by reverting each), and the tab test ran green six times consecutively where it had been a coin flip.
+103 test binaries green.

@@ -1838,7 +1838,6 @@ pub fn not_typing(
 /// somebody else has to remember to consult.
 pub fn sense_context(
     mode: Res<crate::tiles::Mode>,
-    tile_mode: Res<crate::build::TileMode>,
     state: Res<EditorState>,
     edit: Res<SizeEdit>,
     import: Res<crate::tiles::ImportState>,
@@ -1863,15 +1862,7 @@ pub fn sense_context(
         || note.typing()
         || width.typing()
         || height.typing();
-    // **The Tiles tab has two halves and they do not share a keyboard.** BUILD reuses `T`/`F`/`G`/`H`
-    // for walking a lattice — the shape the hand already has from DESCRIBE — which is only legal
-    // because `Context::Build` never overlaps `Context::Tiles`. Deciding that here, once, is what
-    // keeps the two lists from firing into each other.
-    let ctx = match (*mode, *tile_mode) {
-        (crate::tiles::Mode::Tiles, crate::build::TileMode::Build) => keys::Context::Build,
-        _ => mode.context(),
-    };
-    let want = keys::Live(keys::live(ctx, typing));
+    let want = keys::Live(keys::live(mode.context(), typing));
     // Written through the change detector only when it actually moves, so `Live` staying put does not
     // wake every `resource_changed` reader in the editor every frame.
     if *live != want {
@@ -4014,12 +4005,12 @@ fn keys(
         return;
     }
 
-    // **`Cmd+S` saves what is open, and in BUILD that is the tile.** The key is `Context::Global`
+    // **`Cmd+S` saves what is open, and on the Tiles tab that is the tile.** The key is `Global`
     // because the verb is global; what it saves is not. Guarded here rather than bound twice —
     // `the_key_space_has_no_collisions` refuses a second `S`, and it is right to: two bindings would
     // be two names for one act. `build::build_keys` takes the other half of this branch.
     if keys::just_pressed(&keyboard, live.0, Action::Save)
-        && live.0 != keys::Context::Build
+        && live.0 != keys::Context::Tiles
     {
         match project.save() {
             Ok(()) => {
@@ -5669,7 +5660,7 @@ fn send_to_tiles(
     // one. The tab an author lands on says what they are editing; where it came from is the thing
     // they just did.
     import.status.note(format!("editing `{id}`"));
-    *mode = crate::tiles::Mode::Tiles;
+    *mode = crate::tiles::Mode::Meshes;
     state.status.note(format!("`{id}` — opened on the tiles tab"));
 }
 

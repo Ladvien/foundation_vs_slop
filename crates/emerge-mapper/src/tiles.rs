@@ -40,6 +40,8 @@ pub enum Mode {
     #[default]
     Map,
     /// Bring meshes in and say what they are.
+    Meshes,
+    /// Assemble a cell-sized tile out of meshes, on the tile's own grid.
     Tiles,
     /// Preview and tune a rig's clips.
     Anim,
@@ -56,11 +58,25 @@ impl Mode {
     /// level, and the rig bench is a different job that happens to live in the same binary. Grouping
     /// the three that share a subject puts the boundary where the work changes rather than where the
     /// tabs were added.
-    pub const ALL: [Mode; 4] = [Mode::Map, Mode::Tiles, Mode::Compose, Mode::Anim];
+    ///
+    /// **Map still first**, and the three kit tabs after it in hierarchy order:
+    /// `docs/research/2026-08-08-kitbashing-guidance.md` — *"A good kit is hierarchical: parts ->
+    /// sub-assemblies -> assemblies."* A mesh is a part, a tile is a sub-assembly, a composition is an
+    /// assembly. Ordering those three by level was the whole reason for the split; moving Map out of
+    /// first place was not, and the original argument for it still holds — it is the job, and the
+    /// other tabs are what you do in order to do it.
+    ///
+    /// **This used to be four**, with meshes and tiles sharing one tab and a mode key between them.
+    /// The mode was the giveaway: every other level already had a tab and only that one carried two.
+    /// A tab strip is a mode nobody can forget, so the split retired the indicator along with the
+    /// mode (FVS-R-21).
+    pub const ALL: [Mode; 5] =
+        [Mode::Map, Mode::Meshes, Mode::Tiles, Mode::Compose, Mode::Anim];
 
     pub fn label(self) -> &'static str {
         match self {
             Mode::Map => "MAP",
+            Mode::Meshes => "MESHES",
             Mode::Tiles => "TILES",
             Mode::Anim => "ANIM",
             Mode::Compose => "COMPOSE",
@@ -74,6 +90,7 @@ impl Mode {
     pub fn action(self) -> crate::keys::Action {
         match self {
             Mode::Map => crate::keys::Action::MapTab,
+            Mode::Meshes => crate::keys::Action::MeshesTab,
             Mode::Tiles => crate::keys::Action::TilesTab,
             Mode::Anim => crate::keys::Action::AnimTab,
             Mode::Compose => crate::keys::Action::ComposeTab,
@@ -86,6 +103,7 @@ impl Mode {
     pub fn context(self) -> crate::keys::Context {
         match self {
             Mode::Map => crate::keys::Context::Map,
+            Mode::Meshes => crate::keys::Context::Meshes,
             Mode::Tiles => crate::keys::Context::Tiles,
             Mode::Anim => crate::keys::Context::Anim,
             Mode::Compose => crate::keys::Context::Compose,
@@ -214,7 +232,7 @@ fn stage_camera(
     // On a *change*, never every frame: `rig.focus` is also written by `view::drive`, so holding it
     // here would take panning away on this tab. A lift is a discrete event, exactly like a tab change.
     let want_lift = state.placed(&project).map(stage_lift).unwrap_or(0.0);
-    let lift_moved = *mode == Mode::Tiles && (staged.0 - want_lift).abs() > 1e-4;
+    let lift_moved = *mode == Mode::Meshes && (staged.0 - want_lift).abs() > 1e-4;
     // A preset cycle is a discrete event on the Anim tab, exactly like a lift on the Tiles tab.
     let preset_moved =
         *mode == Mode::Anim && preset.as_ref().is_some_and(|p| p.is_changed());
@@ -229,7 +247,8 @@ fn stage_camera(
         staged.0 = want_lift;
     }
     match *mode {
-        Mode::Tiles => {
+        // Both tabs look at the same far stage — one shows a mesh on it, the other a tile.
+        Mode::Meshes | Mode::Tiles => {
             if saved.0.is_none() {
                 saved.0 = Some(crate::view::Rig {
                     focus: rig.focus,
@@ -1590,7 +1609,7 @@ fn pick_lattice(
             pick.0 = None;
         }
     };
-    if *mode != Mode::Tiles || hovered_ui.iter().any(|h| h.0) {
+    if *mode != Mode::Meshes || hovered_ui.iter().any(|h| h.0) {
         clear(&mut pick);
         return;
     }
@@ -2511,10 +2530,9 @@ impl Plugin for TilesPlugin {
             .init_resource::<HeightEdit>()
             .init_resource::<StagedLift>()
             .init_resource::<DemoteArm>()
-            // **The tab's other half.** Registered here rather than in its own plugin because it is
-            // this tab in another mode, and a `Res<T>` a system takes must exist before the first
-            // frame — a missing one panics rather than skipping (`CLAUDE.md`).
-            .init_resource::<crate::build::TileMode>()
+            // **The Tiles tab's state**, registered here rather than in its own plugin because both
+            // tabs are this file's, and a `Res<T>` a system takes must exist before the first frame —
+            // a missing one panics rather than skipping (`CLAUDE.md`).
             .init_resource::<crate::build::Build>()
             .add_systems(Startup, (spawn_tab_strip, spawn_tiles_panel))
             .add_systems(
@@ -2528,31 +2546,41 @@ impl Plugin for TilesPlugin {
                     toggle_mode.in_set(crate::keys::Phase::Act),
                     move_selection.in_set(crate::keys::Phase::Act),
                     // **The two lattice walkers, nested as one.** A system tuple caps at twenty and
-                    // this pair is one idea in two modes: DESCRIBE walks a mesh's own lattice,
-                    // BUILD walks the tile's. `Context` keeps them from firing into each other.
+                    // this pair is one idea on two tabs: Meshes walks a mesh's own lattice, Tiles
+                    // walks the tile's. `Context` keeps them from firing into each other.
                     (
                         lattice_keys.in_set(crate::keys::Phase::Act),
-                        crate::build::build_keys.in_set(crate::keys::Phase::Act),
+                        // **After the tab is settled**, because arriving on the Tiles tab is what
+                        // opens a tile — and `toggle_mode`/`tab_shortcuts` are the two systems that
+                        // decide which tab that is. Unordered, they share `Phase::Act` with this
+                        // one, so whether the tile opened on the arrival frame or the next was
+                        // Bevy's choice rather than ours: the first assertion after a tab key was
+                        // true only sometimes. A frame's delay is invisible to an author and a coin
+                        // flip is not something to build a contract on.
+                        crate::build::build_keys
+                            .in_set(crate::keys::Phase::Act)
+                            .after(toggle_mode)
+                            .after(tab_shortcuts),
                     ),
-                    autoscan_candidate.run_if(in_tiles_mode),
+                    autoscan_candidate.run_if(in_meshes_mode),
                     // Nested: a system tuple caps out, and these three are one feature anyway —
                     // point at the piece, click a cell, see which one is under the cursor.
                     // Nested: a system tuple caps out at twenty, and these five are one feature —
                     // the staged piece, what the cursor is on, and what a click does to it.
                     (
                         pick_lattice,
-                        click_lattice.run_if(in_tiles_mode),
-                        draw_pick.run_if(in_tiles_mode),
-                        draw_preview_footprint.run_if(in_tiles_mode),
-                        draw_subgrid.run_if(in_tiles_mode),
+                        click_lattice.run_if(in_meshes_mode),
+                        draw_pick.run_if(in_meshes_mode),
+                        draw_preview_footprint.run_if(in_meshes_mode),
+                        draw_subgrid.run_if(in_meshes_mode),
                     ),
                     // Nested as a pair, because a system tuple caps out at twenty and these two are
                     // one rule: a selection the filter has hidden must not stay selected, in either
                     // list. Accept and Remove both act on a selection.
                     (
-                        keep_library_selection_visible.run_if(in_tiles_mode),
-                        keep_selection_on_screen.run_if(in_tiles_mode),
-                        keep_candidate_selection_visible.run_if(in_tiles_mode),
+                        keep_library_selection_visible.run_if(in_meshes_mode),
+                        keep_selection_on_screen.run_if(in_meshes_mode),
+                        keep_candidate_selection_visible.run_if(in_meshes_mode),
                     ),
                     cycle_mount.in_set(crate::keys::Phase::Act),
                     suggestion_keys.in_set(crate::keys::Phase::Act),
@@ -2571,19 +2599,19 @@ impl Plugin for TilesPlugin {
                     rebuild_candidates.run_if(resource_changed::<ImportState>.or_else(resource_changed::<crate::filter::Filters>)),
                     // **Structure only.** The selection and the carets are repainted in place by
                     // `refresh_cells`; rebuilding the pane for them is the bounce.
-                    // **And on the tile in hand.** `TileMode` and `Build` are here because the pane
-                    // shows them: without the two, `C` flipped the mode and left the mesh inspector
-                    // on screen, and walking the cursor moved nothing anybody could see.
+                    // **And on the tile in hand.** `Mode` and `Build` are here because this one pane
+                    // serves two tabs: without them the tab key changed the strip and left the mesh
+                    // inspector on screen, and walking the cursor moved nothing anybody could see.
                     rebuild_detail.run_if(
                         resource_changed::<ImportState>
                             .or_else(resource_changed::<crate::labels::LabelGeneration>)
-                            .or_else(resource_changed::<crate::build::TileMode>)
+                            .or_else(resource_changed::<Mode>)
                             .or_else(resource_changed::<crate::build::Build>),
                     ),
                     refresh_lines,
                     // **Both stages, nested as one.** A system tuple caps at twenty in 0.19, and these
-                    // are one idea in two modes: DESCRIBE stands one mesh up, BUILD stands the tile
-                    // up with the grid you steer it by. They are mutually exclusive on the mode.
+                    // are one idea on two tabs: Meshes stands one mesh up, Tiles stands the tile up
+                    // with the grid you steer it by. They are mutually exclusive on the tab.
                     (
                         drive_preview,
                         crate::build::drive_build_preview,
@@ -2701,7 +2729,7 @@ fn on_tab_click(
         return;
     }
     *mode = tab.0;
-    if *mode == Mode::Tiles && !state.scanned {
+    if *mode == Mode::Meshes && !state.scanned {
         scan(&project, &mut state);
     }
 }
@@ -2762,7 +2790,7 @@ fn tab_shortcuts(
     for want in Mode::ALL {
         if keys::just_pressed(&keyboard, live.0, want.action()) && *mode != want {
             *mode = want;
-            if want == Mode::Tiles && !state.scanned {
+            if want == Mode::Meshes && !state.scanned {
                 scan(&project, &mut state);
             }
             return;
@@ -2790,7 +2818,11 @@ fn spawn_tiles_panel(mut commands: Commands) {
     )
     .insert(TilesRoot)
     .with_children(|p| {
-        crate::chrome::title(p, "TILE CONFIGURATION");
+        crate::chrome::title(p, "MESHES AND TILES");
+        // **One banner per tab, both in the shared panel.** `ProblemBanner` carries the tab it speaks
+        // for and `notice.rs` shows only the matching one, so a panel serving two tabs needs two —
+        // without the second, every refusal the Tiles tab's verbs write would be invisible on it.
+        crate::chrome::problem_banner(p, Mode::Meshes);
         crate::chrome::problem_banner(p, Mode::Tiles);
         crate::chrome::shortcut_hint(p);
 
@@ -2821,7 +2853,7 @@ fn spawn_tiles_panel(mut commands: Commands) {
             },
             ScrollArea::default(),
             DetailPane,
-            crate::notice::CopyPane(Mode::Tiles),
+            crate::notice::CopyPane(Mode::Meshes),
         ));
 
         p.spawn((
@@ -2837,7 +2869,7 @@ fn spawn_tiles_panel(mut commands: Commands) {
         // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
         // the panel, and an auto margin in a column absorbs the free space above it — so
         // placed any earlier it pushes every sibling after it down with it.
-        crate::chrome::problem_log(p, Mode::Tiles);
+        crate::chrome::problem_log(p, Mode::Meshes);
     });
 
     // **The candidate list, in its own panel against the right edge** — the same shape, the same
@@ -2873,9 +2905,9 @@ fn toggle_mode(
         // Cycle, not toggle: a third tab then costs a row in `Mode::ALL` and nothing else.
         let at = Mode::ALL.iter().position(|m| m == &*mode).unwrap_or(0);
         *mode = Mode::ALL[(at + 1) % Mode::ALL.len()];
-        *mode == Mode::Tiles && !state.scanned
+        *mode == Mode::Meshes && !state.scanned
     } else {
-        *mode == Mode::Tiles && keys::just_pressed(&keyboard, live.0, Action::Rescan)
+        *mode == Mode::Meshes && keys::just_pressed(&keyboard, live.0, Action::Rescan)
     };
 
     if want_scan {
@@ -4031,9 +4063,13 @@ fn apply_mode(
         return;
     }
     for (mut node, is_map, is_tiles, is_anim, is_compose) in &mut panels {
+        // **`TilesRoot` serves both tabs.** The left pane shows a mesh or a tile depending on which
+        // is live (`rebuild_detail`), and the right-hand library list is needed by both — describing
+        // picks a mesh to edit, building picks one to drop. Two copies of that list would be two
+        // things to keep in step for no gain.
         let mine = match *mode {
             Mode::Map => is_map,
-            Mode::Tiles => is_tiles,
+            Mode::Meshes | Mode::Tiles => is_tiles,
             Mode::Anim => is_anim,
             Mode::Compose => is_compose,
         };
@@ -4049,8 +4085,8 @@ fn apply_mode(
     }
 }
 
-fn in_tiles_mode(mode: Res<Mode>) -> bool {
-    *mode == Mode::Tiles
+fn in_meshes_mode(mode: Res<Mode>) -> bool {
+    *mode == Mode::Meshes
 }
 
 /// Keep one preview alive, showing the selected candidate at the origin with its PROPOSED alignment
@@ -4063,7 +4099,7 @@ fn in_tiles_mode(mode: Res<Mode>) -> bool {
 fn drive_preview(
     mut commands: Commands,
     mode: Res<Mode>,
-    tile_mode: Res<crate::build::TileMode>,
+
     assets: Res<AssetServer>,
     mut state: ResMut<ImportState>,
     project: Res<Project>,
@@ -4088,10 +4124,9 @@ fn drive_preview(
             commands.entity(e).despawn();
         }
     };
-    // **BUILD stages the tile instead**, on the same stage — see `build::drive_build_preview`. Left
-    // running, this would stand the picked mesh up inside the tile being assembled: one piece at the
-    // origin, overlapping whatever is already there, which reads as a member nobody placed.
-    if *mode != Mode::Tiles || *tile_mode == crate::build::TileMode::Build {
+    // **The Tiles tab stages the tile instead**, on its own stage — see
+    // `build::drive_build_preview`. This one shows the mesh being described.
+    if *mode != Mode::Meshes {
         clear(&mut commands);
         return;
     }
@@ -4681,7 +4716,7 @@ fn rebuild_candidates(
     }
 }
 
-/// **The tile in hand** — what BUILD shows where DESCRIBE shows a mesh.
+/// **The tile in hand** — what the Tiles tab shows where the mesh tab shows a mesh.
 ///
 /// Everything here answers a question the author is about to act on: which mode am I in, what am I
 /// building, how big is a cell, where is the cursor, and what is already in the tile. That is the
@@ -4698,7 +4733,7 @@ fn build_detail(
     };
 
     let Some(comp) = build.open.as_ref() else {
-        crate::chrome::section(p, "BUILD");
+        crate::chrome::section(p, "TILE");
         line(
             p,
             "no tile open — press N to start one".to_owned(),
@@ -4708,12 +4743,12 @@ fn build_detail(
         return;
     };
     let emerge_core::composition::Envelope::Bounded { size } = comp.envelope else {
-        crate::chrome::section(p, "BUILD");
+        crate::chrome::section(p, "TILE");
         line(p, format!("`{}` claims no tile", comp.id), DANGER, 10.0);
         return;
     };
 
-    crate::chrome::section(p, "BUILD");
+    crate::chrome::section(p, "TILE");
     line(p, comp.id.clone(), TEXT, 12.0);
     line(
         p,
@@ -4795,19 +4830,17 @@ fn rebuild_detail(
     height_edit: Res<HeightEdit>,
     suggestions: Option<Res<crate::labels::Suggestions>>,
     project: Res<Project>,
-    tile_mode: Res<crate::build::TileMode>,
+    mode: Res<Mode>,
     build: Res<crate::build::Build>,
     panes: Query<Entity, With<DetailPane>>,
 ) {
     for pane in &panes {
         commands.entity(pane).despawn_related::<Children>();
         commands.entity(pane).with_children(|p| {
-            // **BUILD draws the tile, not the mesh.** Without this the mode flipped, the status line
-            // said so, and the pane went on showing the mesh inspector — which reads as the key
-            // having done nothing, and is worse than an absent feature because it looks like a bug in
-            // whatever you press next. Raskin's argument for a visible mode is exactly this: a mode
-            // is safe to be in only when you can see you are in it.
-            if *tile_mode == crate::build::TileMode::Build {
+            // **The Tiles tab draws the tile, not the mesh.** One pane serves both tabs: they show
+            // different subjects but the same shape of thing, and two panes would be two layouts to
+            // keep in step. Which subject is the tab's to say.
+            if *mode == Mode::Tiles {
                 build_detail(p, &build, &project);
                 return;
             }

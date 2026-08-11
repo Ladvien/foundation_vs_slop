@@ -56,7 +56,7 @@ fn watch_drive(
     for verb in text.split_whitespace() {
         match verb {
             "tiles" => {
-                *mode = crate::tiles::Mode::Tiles;
+                *mode = crate::tiles::Mode::Meshes;
                 // The same first-entry scan every real entry path performs.
                 if !state.scanned {
                     crate::tiles::scan(&project, &mut state);
