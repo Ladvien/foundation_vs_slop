@@ -136,6 +136,22 @@ impl Fixture {
         Fixture { dir, descriptors: Vec::new(), placements: Vec::new(), compositions: Vec::new() }
     }
 
+    /// **A `slot` token, so a tile can declare a hole.**
+    ///
+    /// `new` writes an empty slot axis, which is the honest default: a project that has not grown
+    /// one refuses `Shift+Enter` by name rather than inventing a token. A test about holes needs
+    /// one, and rewriting the file is how any other axis would be set too.
+    pub fn slot_token(self, name: &str) -> Fixture {
+        let at = self.dir.join("assets/emerge/vocab.ron");
+        let was = std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("cannot read {at:?}: {e}"));
+        let empty = "slot: (tokens: []),";
+        assert!(was.contains(empty), "the fixture's slot axis must start empty, or this is a no-op");
+        let full = format!("slot: (tokens: [( name: \"{name}\", note: \"a hole\" )]),");
+        std::fs::write(&at, was.replace(empty, &full))
+            .unwrap_or_else(|e| panic!("cannot write {at:?}: {e}"));
+        self
+    }
+
     /// **A pack of meshes on disk**, none of them in the library — i.e. import candidates.
     pub fn pack(self, pack: &str, meshes: &[&str]) -> Fixture {
         let at = self.dir.join("assets").join(pack);

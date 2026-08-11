@@ -2410,6 +2410,126 @@ fn naming_a_composition_takes_the_keyboard_from_the_verbs() {
     );
 }
 
+/// **A tile survives being saved and reopened — members, hole and all.**
+///
+/// The round-trip §7 of the tile-authoring plan asked for and which did not exist: *"build floor +
+/// wall + a slot, save, reopen, assert members and slot survive."* Every part of it has its own unit
+/// test — `build::place`, `Project::commit_composition`, `composition::validate`, the RON codec —
+/// and none of them answers whether the whole path holds, which is the only question an author is
+/// actually asking when they press `Cmd+S`.
+///
+/// It is driven through the **keys**, not the resources, on purpose. Calling `commit_composition`
+/// directly would pass with the tab unwired, and a tile you cannot reach is not a tile you can save.
+#[test]
+fn a_tile_survives_a_save_and_a_reopen() {
+    use bevy::input::ButtonInput;
+    use bevy::prelude::{App, IntoScheduleConfigs, KeyCode, ResMut, Update};
+    use emerge_mapper::keys::{binding, Action};
+
+    let root = Fixture::new("tile_round_trip")
+        .descriptor("floor", "alpha")
+        .descriptor("wall", "alpha")
+        .slot_token("wall-fixture")
+        .build("test_map");
+    let mut app = harness::build_headless(&root, "test_map", None)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    app.update();
+
+    fn once(app: &mut App, chord: Vec<KeyCode>) {
+        app.add_systems(
+            Update,
+            IntoScheduleConfigs::before(
+                move |mut keys: ResMut<ButtonInput<KeyCode>>, mut done: bevy::prelude::Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        for k in &chord {
+                            keys.press(*k);
+                        }
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    }
+
+    // A floor, a wall a cell away, and a hole above the wall — the shape the author described:
+    // "floor mesh at the lowest, a wall mesh over it, a wall mounted light fixture on the wall mesh".
+    once(&mut app, vec![binding(Action::TilesTab).key]);
+    once(&mut app, vec![binding(Action::BuildDrop).key]);
+    once(&mut app, vec![binding(Action::BuildNextPiece).key]);
+    once(&mut app, vec![binding(Action::BuildRight).key]);
+    once(&mut app, vec![binding(Action::BuildDrop).key]);
+    once(&mut app, vec![binding(Action::BuildUp).key]);
+    once(&mut app, vec![KeyCode::ShiftLeft, binding(Action::BuildSlot).key]);
+
+    let id = {
+        let build = app.world().resource::<emerge_mapper::build::Build>();
+        let open = build
+            .open
+            .as_ref()
+            .unwrap_or_else(|| panic!("a tile must be open after arriving on the tab"));
+        assert_eq!(
+            open.members.len(),
+            3,
+            "two pieces and a hole were dropped; the status line said: {}",
+            app.world().resource::<emerge_mapper::tiles::ImportState>().status.note_text()
+        );
+        open.id.clone()
+    };
+
+    // `Cmd+S` — Global, and the handler asks which tab is live rather than there being a second key.
+    once(&mut app, vec![KeyCode::SuperLeft, binding(Action::Save).key]);
+    assert!(
+        !app.world()
+            .resource::<emerge_mapper::tiles::ImportState>()
+            .status
+            .has_problem(),
+        "the save must not refuse: {:?}",
+        app.world()
+            .resource::<emerge_mapper::tiles::ImportState>()
+            .status
+            .problems()
+            .iter()
+            .map(|p| p.line())
+            .collect::<Vec<_>>()
+    );
+
+    // **A second app on the same directory**, which is what reopening the editor is. Reading the
+    // file back through `Project::open` also proves it validates — `commit_composition` refuses on
+    // the way out, and this is the other end of that.
+    let reopened = harness::build_headless(&root, "test_map", None)
+        .unwrap_or_else(|e| panic!("the saved project must reopen: {e}"));
+    let project = reopened.world().resource::<emerge_mapper::project::Project>();
+    let saved = project
+        .compositions
+        .compositions
+        .iter()
+        .find(|c| c.id == id)
+        .unwrap_or_else(|| {
+            panic!(
+                "`{id}` must be in compositions.ron after a save; found {:?}",
+                project.compositions.compositions.iter().map(|c| &c.id).collect::<Vec<_>>()
+            )
+        });
+
+    assert_eq!(saved.members.len(), 3, "every member must survive the round trip");
+    let holes = saved
+        .members
+        .iter()
+        .filter(|m| matches!(m.body, emerge_core::composition::Body::Slot { .. }))
+        .count();
+    assert_eq!(holes, 1, "the hole is a member like any other, and must come back as one");
+
+    // And it is a tile the map can actually place: cell-sized in plan, or `from_compositions`
+    // refuses it by name and the whole authoring loop produces something the solver cannot use.
+    let emerge_core::composition::Envelope::Bounded { size } = saved.envelope else {
+        panic!("a tile claims a tile");
+    };
+    assert_eq!((size.0, size.2), (emerge_core::grid::TILE, emerge_core::grid::TILE));
+}
+
 /// **The library is walkable from the Tiles tab, by keyboard.**
 ///
 /// Picking the piece is half of building a tile, and it was the half that still cost a tab

@@ -165,6 +165,42 @@ pub fn fresh_id(members: &[Member], descriptor: &str) -> String {
     short.to_owned()
 }
 
+/// **A member id for a hole, derived from the vocabulary token it accepts.**
+///
+/// Separate from [`fresh_id`] because the two have different preconditions, and conflating them is
+/// what broke: `fresh_id` assumes its seed is already a legal id segment, which is true of a
+/// descriptor id (`naming::is_id` validates every one on the way into `library.ron`) and **false of
+/// a vocabulary token**. Tokens are deliberately not ids — `vocab.rs` documents
+/// `"uses-electricity"` and `"stamina-recharge"` — so seeding a member id with `wall-fixture`
+/// produced a member `composition::validate` refuses, and a tile carrying any hole could not be
+/// saved at all. Both slot tokens the project actually declares are hyphenated, so on the real
+/// project this was every hole.
+///
+/// The conversion is checked against `naming::is_id` rather than assumed correct by construction,
+/// so it cannot drift from the rule it is trying to satisfy. A token that cannot yield an id —
+/// one starting with a digit, say — is **refused by name** rather than silently renamed to
+/// something that happens to parse.
+pub fn slot_id(members: &[Member], accepts: &str) -> Result<String, String> {
+    let mut seed = String::with_capacity(accepts.len());
+    for c in accepts.chars() {
+        let c = c.to_ascii_lowercase();
+        if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            seed.push(c);
+        } else if !seed.is_empty() && !seed.ends_with('_') {
+            seed.push('_');
+        }
+    }
+    while seed.ends_with('_') {
+        seed.pop();
+    }
+    if !emerge_core::naming::is_id(&seed) {
+        return Err(format!(
+            "slot token `{accepts}` cannot name a member — ids start with a lowercase letter and              carry only letters, digits and `_`. Rename the token in vocab.ron."
+        ));
+    }
+    Ok(fresh_id(members, &seed))
+}
+
 /// **Members stay sorted by id**, which is what `composition::validate` holds every group to so that
 /// one group has one encoding. Called after every insertion rather than at save, so the list an
 /// author reads is the list that will be written.
@@ -216,12 +252,21 @@ pub fn place_slot(build: &mut Build, accepts: &str, pitch: f32) -> Result<usize,
     let Envelope::Bounded { size } = comp.envelope else {
         return Err(format!("`{}` claims no tile, so it has no grid to drop into", comp.id));
     };
-    // A hole has no footprint, so it sits at the cell's corner exactly. `validate` refuses one on or
-    // outside the envelope, and the *last* cell's corner is inside by less than a rung — so a slot
-    // dropped in the far corner is legal and a slot is never placed on the seam.
-    let (at, lift) = drop_at(size, pitch, build.at, (0.0, 0.0));
+    // **A hole sits at the centre of its cell**, which is why it is measured as occupying one.
+    //
+    // It used to take a zero span, putting it on the cell's *corner*, under a comment reasoning that
+    // "the last cell's corner is inside by less than a rung". That was true of the last cell and
+    // false of the first: **cell zero's corner is the tile edge**, and `validate` requires a slot to
+    // be strictly inside the envelope — so a hole dropped anywhere in row or column zero was
+    // refused, including the cell the cursor starts in. The first thing an author would try.
+    //
+    // The centre is interior for every cell by construction rather than by luck, and it is the
+    // honest position anyway: a slot marks *which cell* is a hole, and whatever fills it brings its
+    // own footprint and its own `Mount` to resolve against. The lift stays at the cell's floor,
+    // which is a legal datum (`0.0` is inside) and the one a fixture mounts from.
+    let (at, lift) = drop_at(size, pitch, build.at, (pitch, pitch));
     let m = Member {
-        id: fresh_id(&comp.members, accepts),
+        id: slot_id(&comp.members, accepts)?,
         body: Body::Slot { accepts: accepts.to_owned() },
         at,
         yaw: 0.0,
@@ -762,6 +807,72 @@ mod tests {
         assert_eq!(fresh_id(&ms, "site/wall"), "wall_3");
         // A piece with no namespace keeps its whole name.
         assert_eq!(fresh_id(&ms, "floor"), "floor");
+    }
+
+    /// **A vocabulary token is not an id**, and a hole's member id is derived from one.
+    ///
+    /// `vocab.rs` documents tokens like `"uses-electricity"` — hyphens are correct there and illegal
+    /// in an id. Seeding a member id with the token directly produced a member
+    /// `composition::validate` refuses, so **a tile carrying any hole could not be saved**, and both
+    /// slot tokens the real project declares are hyphenated.
+    #[test]
+    fn a_slot_id_is_a_legal_id_whatever_the_token_looks_like() {
+        let ms: Vec<Member> = Vec::new();
+        assert_eq!(slot_id(&ms, "wall-fixture").as_deref(), Ok("wall_fixture"));
+        assert_eq!(slot_id(&ms, "floor-decal").as_deref(), Ok("floor_decal"));
+        // Whatever it produces must satisfy the rule it exists to satisfy, checked rather than
+        // assumed — the two can otherwise drift apart silently.
+        for token in ["wall-fixture", "floor-decal", "a b c", "Trailing--", "UPPER"] {
+            if let Ok(id) = slot_id(&ms, token) {
+                assert!(emerge_core::naming::is_id(&id), "`{token}` produced `{id}`, not an id");
+            }
+        }
+        // And a token that cannot yield one is refused by name, not renamed into something that
+        // happens to parse.
+        assert!(slot_id(&ms, "2nd-socket").is_err(), "an id cannot start with a digit");
+        assert!(slot_id(&ms, "---").is_err(), "nothing to make an id out of");
+        // Uniquing still applies, since it is the same job `fresh_id` does for pieces.
+        let taken = vec![desc("wall_fixture")];
+        assert_eq!(slot_id(&taken, "wall-fixture").as_deref(), Ok("wall_fixture_2"));
+    }
+
+    /// **A hole in the cell the cursor starts in is legal**, which it was not.
+    ///
+    /// A slot took a zero span and so landed on its cell's *corner*, under a comment reasoning that
+    /// the last cell's corner is inside the envelope by less than a rung. True of the last cell —
+    /// and **cell zero's corner is the tile edge**, which `composition::validate` refuses because a
+    /// slot on the seam is a filler reaching a face the tile never said it presented. So a hole
+    /// dropped anywhere in row or column zero was refused, starting with the cell the cursor opens
+    /// on. Every cell is checked here rather than only cell zero, because "the first one" and "the
+    /// last one" is exactly the pair of cases the original reasoning got half right.
+    #[test]
+    fn a_hole_is_strictly_inside_the_tile_from_any_cell() {
+        let comp = blank("kit/t", 2.4);
+        let Envelope::Bounded { size } = comp.envelope else {
+            panic!("a tile claims a tile");
+        };
+        // The rung a tile opens on, as a number — `pitch` needs a `Project` and the arithmetic
+        // under test does not.
+        let step = FINE;
+        let (nx, ny, nz) = cells(size, step);
+        for x in 0..nx {
+            for y in 0..ny {
+                for z in 0..nz {
+                    let mut b = Build {
+                        open: Some(blank("kit/t", 2.4)),
+                        rung: DEFAULT_RUNG,
+                        at: (x as i32, y as i32, z as i32),
+                        ..Default::default()
+                    };
+                    place_slot(&mut b, "wall-fixture", step)
+                        .unwrap_or_else(|e| panic!("cell ({x},{y},{z}) refused the drop: {e}"));
+                    let open = b.open.take().unwrap_or_else(|| panic!("the tile is open"));
+                    open.validate_shape().unwrap_or_else(|e| {
+                        panic!("a hole in cell ({x},{y},{z}) must be legal: {e}")
+                    });
+                }
+            }
+        }
     }
 
     /// **The list stays in the canonical order**, so what an author reads is what gets written and
