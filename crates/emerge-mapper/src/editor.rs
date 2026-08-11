@@ -6540,6 +6540,12 @@ fn generate_from(
     let (grammar, skipped, faces) = match built {
         Ok(g) => g,
         Err(e) => {
+            // **Logged as well as shown, and that is not belt-and-braces.** The status line lives in
+            // a UI panel, and the panel is the one thing neither an offscreen mirror capture nor an
+            // unfocused devshot can see — so without this an agent driving the editor cannot tell a
+            // refusal from a keystroke that never arrived, which are opposite diagnoses.
+            // `redraw_stamps` has paired the two since it was written; this path had not.
+            error!("emerge-mapper: {e}");
             state.status.problem(e);
             return;
         }
@@ -6568,6 +6574,7 @@ fn generate_from(
         ) {
             Ok(e) => scratch.placements.extend(e.placements),
             Err(e) => {
+                error!("emerge-mapper: cannot generate around the stamps: {e}");
                 state.status.problem(format!("cannot generate around the stamps: {e}"));
                 return;
             }
@@ -6602,6 +6609,7 @@ fn generate_from(
     let solved = match outcome {
         Ok(s) => s,
         Err(e) => {
+            error!("emerge-mapper: {e}");
             state.status.problem(e);
             return;
         }
