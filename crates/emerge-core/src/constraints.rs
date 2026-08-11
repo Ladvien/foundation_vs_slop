@@ -393,6 +393,73 @@ impl Problem {
     pub fn soft_count(&self) -> usize {
         self.soft.len()
     }
+
+    /// **Solve.** `conflicts` bounds the search; 0 is unbounded.
+    ///
+    /// The back-end is [`deterministic_solver`], and this is the facade over it — the same shape
+    /// `Stig` and `LightField` use, so swapping the solver is one function rather than every call
+    /// site. Nothing above this line knows a solver exists, and the back-end knows nothing about
+    /// grids: it is handed clause literals as plain integers.
+    ///
+    /// # There is no seed, and that is the design
+    ///
+    /// The plan's sketch wrote `solve(&mut self, seed: u64)`. A seed here would have nothing to do:
+    /// the solver is a deterministic function of the clauses, and the whole point of §6's rule is
+    /// that **variety comes from varying the problem, never from the solver**. The seed belongs
+    /// where the problem is built — drawing soft weights from [`crate::rng`] — and a parameter that
+    /// is accepted and ignored is worse than one that is absent, because it reads as a promise.
+    ///
+    /// # Every model is re-checked before it is returned
+    ///
+    /// Through [`Solution::from_assignment`], against the clauses this module built rather than
+    /// against the solver's own account of them. A back-end returning a wrong model is the failure
+    /// this cannot afford to absorb, and the check is linear in the clause count.
+    ///
+    /// # Soft constraints are refused rather than approximated
+    ///
+    /// [`Solution::unmet`] is a *minimisation* objective, and a plain satisfiability solver does not
+    /// minimise — reaching an optimum takes a search over relaxations that is not built yet. Solving
+    /// a problem that carries soft constraints therefore fails by name. It would be easy to return
+    /// the first model that satisfies the hard clauses and report whatever it happened to leave
+    /// unmet; that answer would be *valid* and not *optimal*, which is exactly the silent degradation
+    /// one path per feature exists to forbid — a wall that could have been left standing, quietly not.
+    pub fn solve(&self, conflicts: u64) -> Result<Solution, String> {
+        if !self.soft.is_empty() {
+            return Err(format!(
+                "constraints: this problem carries {} soft constraint(s), and solving one needs an \
+                 optimisation loop over relaxations that is not built yet. Returning a model that \
+                 merely satisfies the hard clauses would report a cost nobody minimised.",
+                self.soft.len()
+            ));
+        }
+        let mut solver = deterministic_solver::Solver::new(self.vars())?;
+        for clause in self.iter_clauses() {
+            let lits: Vec<deterministic_solver::Literal> = clause.iter().map(to_dimacs).collect();
+            solver.add_clause(&lits)?;
+        }
+        match solver.solve(&[], deterministic_solver::Budget::conflicts(conflicts))? {
+            deterministic_solver::Answer::Satisfied(m) => {
+                Solution::from_assignment(self, m.values().to_vec())
+            }
+            deterministic_solver::Answer::Unsatisfiable { .. } => Err(
+                "constraints: no arrangement satisfies these rules. The grammar cannot tile this \
+                 region under what has been asked of it — free some pinned cells, or extend the \
+                 example so there are more ways to join things up."
+                    .to_owned(),
+            ),
+            deterministic_solver::Answer::Exhausted => Err(format!(
+                "constraints: gave up after {conflicts} conflicts without settling the question. \
+                 That is not a statement that no arrangement exists — raise the budget to find out."
+            )),
+        }
+    }
+}
+
+/// One [`Lit`] as the DIMACS integer the back-end speaks: variable 0 becomes 1, and the sign carries
+/// the polarity.
+fn to_dimacs(l: &Lit) -> deterministic_solver::Literal {
+    let v = l.var().index() as deterministic_solver::Literal + 1;
+    if l.is_positive() { v } else { -v }
 }
 
 /// What a solve produced: a value per variable, and what it could not satisfy.
@@ -1170,6 +1237,92 @@ mod tests {
                 GridProblem::encode(&s, initial, w, h, protos).is_err(),
                 "{why} must be refused by name"
             );
+        }
+    }
+
+    // ── the back-end ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn solve_returns_one_of_the_arrangements_the_enumerator_finds() {
+        // The solver and the reference enumerator answer the same question two entirely different
+        // ways. Agreement is the check; the solver picking a particular one of the two checkerboards
+        // is not something this asserts, because which model a solver returns is its own business.
+        let gp = GridProblem::encode(&checkerboard_support(), &[0b11; 4], 2, 2, 2).expect("encodes");
+        let solution = gp.problem.solve(0).expect("a satisfiable problem must solve");
+        let grid = gp.read(&solution).expect("and read back");
+        let expected: Vec<Vec<usize>> = models(&gp.problem)
+            .iter()
+            .filter_map(|m| {
+                let s = Solution::from_assignment(&gp.problem, m.clone()).ok()?;
+                gp.read(&s).ok()
+            })
+            .collect();
+        assert!(expected.contains(&grid), "the solver returned {grid:?}, not among {expected:?}");
+    }
+
+    #[test]
+    fn solve_refuses_an_unsatisfiable_problem_by_name() {
+        let gp = GridProblem::encode(&checkerboard_support(), &[0; 4], 2, 2, 2).expect("encodes");
+        let err = gp.problem.solve(0).expect_err("an empty domain admits nothing");
+        assert!(err.contains("no arrangement"), "the refusal must say what happened: {err}");
+    }
+
+    #[test]
+    fn solve_refuses_a_soft_problem_rather_than_reporting_a_cost_nobody_minimised() {
+        let mut p = Problem::new();
+        let a = Lit::pos(p.var());
+        p.implies_any(p.always_true(), &[a], Some(3));
+        let err = p.solve(0).expect_err("a soft problem has no optimiser yet");
+        assert!(err.contains("soft constraint"), "the refusal must name the reason: {err}");
+    }
+
+    #[test]
+    fn solve_is_deterministic() {
+        // The property the whole back-end was chosen for, asserted where this project consumes it.
+        let support: [Vec<u32>; 4] = [
+            vec![0b011, 0b110, 0b101],
+            vec![0b111, 0b011, 0b110],
+            vec![0b110, 0b101, 0b011],
+            vec![0b101, 0b111, 0b110],
+        ];
+        let gp = GridProblem::encode(&support, &[0b111; 36], 6, 6, 3).expect("encodes");
+        let first = gp.read(&gp.problem.solve(0).expect("solves")).expect("reads");
+        for round in 1..6 {
+            let again = gp.read(&gp.problem.solve(0).expect("solves")).expect("reads");
+            assert_eq!(again, first, "round {round} produced a different arrangement");
+        }
+    }
+
+    #[test]
+    fn a_solved_grid_is_legal_under_the_support_table_it_was_built_from() {
+        // The faithful-port claim in miniature: what the solver returns must satisfy the same
+        // adjacency relation `wfc::propagate` enforces, checked directly against the table rather
+        // than through the clauses that were derived from it.
+        let support: [Vec<u32>; 4] = [
+            vec![0b011, 0b110, 0b101],
+            vec![0b111, 0b011, 0b110],
+            vec![0b110, 0b101, 0b011],
+            vec![0b101, 0b111, 0b110],
+        ];
+        let (w, h) = (6usize, 6usize);
+        let gp = GridProblem::encode(&support, &[0b111; 36], w, h, 3).expect("encodes");
+        let grid = gp.read(&gp.problem.solve(0).expect("solves")).expect("reads");
+        const STEPS: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
+        for z in 0..h {
+            for x in 0..w {
+                for (dir, (dx, dz)) in STEPS.iter().enumerate() {
+                    let (nx, nz) = (x as i32 + dx, z as i32 + dz);
+                    if nx < 0 || nz < 0 || nx as usize >= w || nz as usize >= h {
+                        continue;
+                    }
+                    let a = grid[z * w + x];
+                    let b = grid[nz as usize * w + nx as usize];
+                    assert!(
+                        support[dir][a] & (1 << b) != 0,
+                        "({x},{z}) = {a} may not have {b} on side {dir}"
+                    );
+                }
+            }
         }
     }
 

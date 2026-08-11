@@ -1,79 +1,33 @@
 //! **The crate boundary, enforced.**
 //!
-//! `emerge-core` exists so that the constraint IR, the solvers, WFC and the seeded RNG can be consumed
-//! by the game, by the offline search, and by a standalone editor without any of them agreeing on a
-//! renderer. That property was a *comment* for months — `ir.rs` has said "Nothing here imports
-//! `bevy::`" since long before there was a crate — and a comment cannot fail a build.
+//! `deterministic_solver` is a decision procedure: clauses in, bits out. It takes `batsat`, and
+//! nothing else — no engine, no I/O, no threads, no time source.
 //!
-//! Adding `bevy` here would compile fine and nobody would notice until the editor tried to link it.
-//! These two tests are the ratchet, in the spirit of `tests/determinism_lint.rs` and
-//! `tests/panic_budget.rs`: cheap, GPU-free, and they fail at the door.
+//! That matters for a specific reason. This crate exists to be the one part of a constraint stack
+//! that can be REPLACED without disturbing anything above it, and to answer identically on every
+//! machine and every run. A dependency here is inherited by every caller, and each one is another
+//! thing that could consult a clock, seed a hash from the environment, or schedule a thread — the
+//! three ways a solver quietly stops being a function of its input.
 //!
-//! Widening the dependency list is a design decision (see `docs/2026-08-03-emerge-mapper-plan.md`), so it
-//! should cost an argument and a deliberate edit here — not a passing `cargo build`.
-//!
-//! # Which test actually catches what
-//!
-//! Both were verified by introducing a violation and watching them fail, and the experiment was
-//! informative: writing `bevy::math::Vec2` in a source file **does not reach these tests at all** —
-//! the crate simply fails to compile, because `bevy` is not a dependency. The compiler is the first
-//! line of defence and it is a good one.
-//!
-//! So the real pairing is: [`the_dependency_list_stays_closed`] is the one that bites, because adding
-//! the dependency is the only way to make an engine reference compile. [`no_source_file_reaches_for_an_engine`]
-//! is the backstop for the case where someone adds the dep *and* edits `ALLOWED_DEPS` to match —
-//! it names the file and line that motivated it, which a manifest diff cannot.
+//! These two tests are the ratchet: cheap, and they fail at the door rather than at link time.
+//! Widening the list is a design decision, so it should cost a deliberate edit here.
 
 use std::path::{Path, PathBuf};
 
-/// Everything `emerge-core` is allowed to depend on. Data and arithmetic, nothing that draws.
+/// Everything `deterministic_solver` is allowed to depend on.
 ///
-/// # `det_rng`, and why it widened nothing
-///
-/// The seeded RNG used to be `emerge-core/src/rng.rs`; it was lifted into a sibling crate so a
-/// permissively-licensed consumer could depend on the generator without taking this crate, and
-/// `emerge-core` re-exports it (`pub use det_rng as rng`) so no call site moved.
-///
-/// It is on this list because **the dependency surface did not actually grow**: `det_rng`'s own
-/// manifest declares `rand` and `rand_chacha` and nothing else, both of which are already here. The
-/// same code is reachable at a different address. It also carries its own `tests/leaf.rs`, so the
-/// boundary is policed on that side rather than taken on trust from here.
-///
-/// That is the argument this list is supposed to cost. A dependency that pulled in anything not
-/// already on this line would need a different one.
-///
-/// # `deterministic_solver`, and the different argument it needs
-///
-/// It is the one entry here that genuinely GROWS the surface — by two crates, itself and `batsat`
-/// (which brings only `bit-vec`). So the `det_rng` argument above does not cover it, and this is the
-/// one it needs instead.
-///
-/// **What this list defends is not dependency count.** The test's own purpose, stated at the top, is
-/// that the crate stays consumable *"by the game, by the offline search, and by a standalone editor
-/// without any of them agreeing on a renderer"* — which is why `FORBIDDEN_DEP_MARKERS` names engines
-/// and nothing else. A decision procedure with no I/O, no threads, no allocator of its own and no
-/// engine does not touch that property.
-///
-/// **What it buys is a thing this crate cannot do without.** `constraints.rs` encodes a world as
-/// clauses; something has to turn clauses into bits, and writing a CDCL solver here would be a
-/// far larger and less-tested piece of code than taking one.
-///
-/// **Why a sibling crate rather than `batsat` directly.** The back-end is the part of the constraint
-/// stack most likely to be replaced — see `docs/research/2026-08-10-solver-choice.md` §6, which
-/// argues its own recommendation might not survive a hard instance. Naming a workspace sibling means
-/// the swap is one file in one crate, and that sibling carries its OWN `tests/leaf.rs` pinned to
-/// `["batsat"]` — precisely the arrangement the `det_rng` note above blesses, where the boundary is
-/// policed on that side rather than taken on trust from here.
-///
-/// The alternative considered was `varisat`, which would have grown the surface by **thirty-two**
-/// crates including two `syn` majors, `regex` and a proc-macro toolchain. That is the comparison that
-/// makes this a paragraph rather than an argument.
-const ALLOWED_DEPS: &[&str] =
-    &["serde", "serde_json", "ron", "rand", "rand_chacha", "det_rng", "deterministic_solver"];
+/// One entry, and it should stay one. This crate is a back-end that other crates delegate to, so a
+/// dependency here is inherited by every one of them — and the thing being delegated is a decision
+/// procedure, which needs no I/O, no threads, no allocator and no time source. `batsat` brings
+/// exactly one transitive crate (`bit-vec`); the alternative considered brought thirty-two.
+const ALLOWED_DEPS: &[&str] = &["batsat"];
 
 /// Crate names that would mean the boundary has been crossed, checked as substrings so
 /// `bevy_math`/`bevy_ecs` are caught as readily as `bevy`.
-const FORBIDDEN_DEP_MARKERS: &[&str] = &["bevy", "avian", "wgpu", "winit"];
+/// Crate names that would mean the boundary has been crossed. `bevy_math` is glam types and is
+/// allowed above; anything that draws, schedules, or knows what a game is, is not.
+const FORBIDDEN_DEP_MARKERS: &[&str] =
+    &["bevy", "avian", "wgpu", "winit", "emerge", "foundation_vs_slop", "rayon"];
 
 fn crate_root() -> PathBuf {
     // Cargo runs a test binary with the cwd set to its own package root.
@@ -146,7 +100,7 @@ fn no_source_file_reaches_for_an_engine() {
     let mut files = Vec::new();
     rust_sources(&src, &mut files);
     assert!(
-        files.len() >= 10,
+        files.len() >= 1,
         "expected to scan the whole crate, found only {} file(s) — has the layout moved?",
         files.len()
     );
@@ -173,7 +127,7 @@ fn no_source_file_reaches_for_an_engine() {
 
     assert!(
         offenders.is_empty(),
-        "emerge-core must stay engine-free, but {} line(s) reference an engine crate.\n  {}\n\n\
+        "deterministic_solver must stay at the bottom of the dependency graph, but {} line(s) reference something above it.\n  {}\n\n\
          This crate is what lets the game, the headless search and the standalone editor share the \
          placement stack without agreeing on a renderer. If a type genuinely needs to cross the \
          boundary, the answer is a plain-data type here and a conversion on the far side — not a \
@@ -186,14 +140,14 @@ fn no_source_file_reaches_for_an_engine() {
 #[test]
 fn the_dependency_list_stays_closed() {
     let manifest = std::fs::read_to_string(crate_root().join("Cargo.toml"))
-        .expect("emerge-core must have a Cargo.toml");
+        .expect("deterministic_solver must have a Cargo.toml");
 
     // Only the `[dependencies]` table — a dev-dependency on something heavier would be a different
     // (and much less alarming) conversation.
     let deps = manifest
         .split("[dependencies]")
         .nth(1)
-        .expect("emerge-core must declare a [dependencies] table");
+        .expect("deterministic_solver must declare a [dependencies] table");
     let deps = deps.split("\n[").next().unwrap_or(deps);
 
     for line in deps.lines() {
@@ -215,7 +169,7 @@ fn the_dependency_list_stays_closed() {
         }
         assert!(
             ALLOWED_DEPS.contains(&name),
-            "emerge-core declares `{name}`, which is not in its allowed set {ALLOWED_DEPS:?}.\n\
+            "deterministic_solver declares `{name}`, which is not in its allowed set {ALLOWED_DEPS:?}.\n\
              Widening this is a design decision, not a convenience — see \
              docs/2026-08-03-emerge-mapper-plan.md. If it is genuinely warranted, add it to ALLOWED_DEPS in \
              this test in the same commit, so the change is visible in review."
@@ -223,7 +177,7 @@ fn the_dependency_list_stays_closed() {
         for marker in FORBIDDEN_DEP_MARKERS {
             assert!(
                 !name.contains(marker),
-                "emerge-core declares `{name}` — the crate exists precisely so it does not depend on \
+                "deterministic_solver declares `{name}` — the crate exists precisely so it does not depend on \
                  an engine."
             );
         }
