@@ -327,3 +327,62 @@ Stated plainly, so nothing here is mistaken for measurement.
 - **Behaviour on hard instances.** Every measurement here is on satisfiable, under-constrained instances solved with little search — which the corpus says is the expected regime, but which is precisely *not* the regime where solver quality separates. Cooper's `repair` case is the shape that would test it and it was not reproduced.
 - **`batsat` under incremental use with assumptions.** The API is present and the README claims it; the probe solved one-shot. The MaxSAT loop that `unmet()` requires is the thing that will exercise it, and it should be exercised at the §3 checkpoint rather than assumed.
 - **Sturgeon's exact MaxSAT machinery.** Cooper names PySAT's `kmtotalizer` and `RC2` in the corpus doc's Table 1 transcription; I did not read the paper myself for this document and defer to `-pcg-solver-corpus.md` §1.1, which quotes it verbatim.
+
+---
+
+## 9. Addendum — two corrections from implementing it, same day
+
+Appended rather than edited into place, so the document stays a record of what was known when the
+recommendation was made. Both were found by reading `batsat`'s source while wiring it up, and one of
+them is a correction to this document's own reasoning.
+
+### 9.1 §5's reason 2 is wrong: `batsat`'s conflict budget is unreachable
+
+This document recommended `batsat` partly because *"it is the only candidate whose 'give up' mechanism
+is deterministic"* — a conflict or propagation count rather than a clock. The counters exist. **Nothing
+can set them.**
+
+`core.rs:166-167` declares `conflict_budget: i64` and `propagation_budget: i64` on a private inner
+struct; `core.rs:2100-2101` initialises both to `-1`; `core.rs:981-983` reads them in `within_budget`.
+Those are the only three occurrences in the crate. There is no setter, no `SolverOpts` field, and no
+public path to either. At 0.6.0 the documented budget is dead code, so `solve_limited` can never
+return `Undef` from budget exhaustion.
+
+The *conclusion* survives, by a different mechanism than the one argued. `within_budget` ends with
+`&& !self.cb.stop()`, and `Callbacks` is a public trait a caller implements. So a deterministic budget
+is reachable after all — count conflicts in `on_new_clause` (which takes `&mut self`) and answer from
+`stop` (which takes `&self`). That is what `deterministic_solver::Budget` does. The unit is "learnt
+clauses" rather than "conflicts", which tracks closely but is not promised to be equal; irrelevant to
+the property that matters, since it is a deterministic function of the search either way.
+
+**What this changes about the recommendation:** nothing, but for a worse reason than stated. `varisat`
+was rejected partly for having no resource limit; the honest comparison is that `batsat` has none
+*either*, at its public API, and merely provides the hook to build one. Reasons 1, 3, 4 and 6 stand
+unaltered and are sufficient.
+
+### 9.2 §8's first bullet is closed: cross-platform determinism is now measured
+
+§8 listed *"cross-platform determinism, for every candidate"* as the largest unverified claim here —
+everything in §2.5 was aarch64 macOS, and §2.4's argument that pure Rust has no divergence mechanism
+was reasoning from the language specification rather than an observation.
+
+It is an observation now. `crates/deterministic_solver/tests/frozen_model.rs` solves two fixed
+instances and asserts an exact FNV-1a hash of the model:
+
+| Instance | Hash |
+|---|---|
+| 12-queens (14,200 solutions) | `0x3988f9fa171fe585` |
+| random 3-SAT, 220 vars at ratio 4.0 | `0x37749da40b33c695` |
+
+Measured on aarch64 macOS 26.4.1, then run unchanged by the mirror's CI on **x86_64 Linux**
+(`ubuntu-latest`, run 31449425967): both pass. The second fixture is the load-bearing one — it sits
+just under the ~4.27 satisfiability threshold and needs real search, so the model it returns is a
+function of restart policy, clause deletion and activity decay rather than of unit propagation alone.
+
+Also checked the way this repo requires rather than on an idle box: both hashes were identical across
+eight fresh processes idle and eight more with the machine saturated by twelve spinners at load
+average 25.
+
+The remaining §8 bullets are untouched. In particular **behaviour on hard instances is still
+unmeasured**, and §6's argument — that a `repair`-shaped instance could land on a solver with none of
+CaDiCaL's inprocessing and simply not finish — is unaffected by anything above.
