@@ -65,15 +65,27 @@ const CONSTRAINED_BUDGET: u64 = 200_000;
 enum Generator {
     /// `wfc::collapse_grid` through `grammar::solve` — greedy, non-backtracking, weighted collapse.
     Wfc,
-    /// `constraints::GridProblem` plus one seeded wish per cell, solved to a proven optimum.
+    /// `constraints::GridProblem` plus one seeded wish per cell — the faithful port, carrying
+    /// nothing WFC could not express.
     Constraint,
+    /// The above plus an enclosure wish: the constraint over distance local adjacency has no term
+    /// for, and the reason any of this was built.
+    Rooms,
 }
+
+/// How much of the region the `rooms` arm asks to close, and what the wish is worth.
+///
+/// The same numbers `emerge-mapper` ships (`editor.rs`), so this measures the generator an author
+/// actually drives rather than a tuned variant of it.
+const ROOMS_WISH: f32 = 0.25;
+const ROOMS_WEIGHT: u32 = 200;
 
 impl Generator {
     fn name(self) -> &'static str {
         match self {
             Generator::Wfc => "wfc",
             Generator::Constraint => "constraint",
+            Generator::Rooms => "rooms",
         }
     }
 }
@@ -94,6 +106,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (source, rest): (Generator, &[String]) = match args.first().map(String::as_str) {
         Some("constraint") => (Generator::Constraint, &args[1..]),
+        Some("rooms") => (Generator::Rooms, &args[1..]),
         Some("wfc") => (Generator::Wfc, &args[1..]),
         _ => (Generator::Wfc, &args[..]),
     };
@@ -379,7 +392,7 @@ fn solve_and_score(
     seed: u64,
     source: Generator,
 ) -> Option<(Measured, Vec<u32>)> {
-    let grid = arrange(g, seed, source)?;
+    let grid = arrange(g, faces, seed, source)?;
 
     let mut cells = vec![0u32; g.len()];
     for &p in &grid {
@@ -404,7 +417,7 @@ fn solve_and_score(
 ///
 /// `None` is a solve that did not converge — row 3's countable event. For the constraint path that
 /// covers both a proven refusal and a budget exhaustion; see [`CONSTRAINED_BUDGET`].
-fn arrange(g: &Grammar, seed: u64, source: Generator) -> Option<Vec<usize>> {
+fn arrange(g: &Grammar, faces: &[Option<Interface>], seed: u64, source: Generator) -> Option<Vec<usize>> {
     match source {
         Generator::Wfc => {
             let map = Map {
@@ -420,15 +433,22 @@ fn arrange(g: &Grammar, seed: u64, source: Generator) -> Option<Vec<usize>> {
             .ok()
             .map(|s| s.grid)
         }
-        Generator::Constraint => {
+        Generator::Constraint | Generator::Rooms => {
             let full: u32 = if g.len() == 32 { u32::MAX } else { (1u32 << g.len()) - 1 };
             let mut gp =
                 GridProblem::encode(&g.support, &vec![full; REGION * REGION], REGION, REGION, g.len())
                     .ok()?;
             // One wish per cell, drawn from the author's own weights — the whole of the variety, and
-            // the only thing the seed touches. Weight 1, so the objective is the number of cells the
-            // rules forced away from what the seed asked for.
+            // the only thing the seed touches. A preference rather than a constraint: see
+            // `preference_rules` for the 9,171 ms it would otherwise cost to prove an optimum.
             constraints::preference_rules(&mut gp.problem, &gp.place, &g.weights, seed).ok()?;
+            if matches!(source, Generator::Rooms) {
+                let read = Faces::new(faces, WALL, WALKABLE);
+                constraints::enclosure_rules(
+                    &mut gp.problem, &gp.place, &read, REGION, REGION, ROOMS_WISH, Some(ROOMS_WEIGHT),
+                )
+                .ok()?;
+            }
             gp.problem.solve(CONSTRAINED_BUDGET).ok().and_then(|s| gp.read(&s).ok())
         }
     }
@@ -439,7 +459,7 @@ fn arrange(g: &Grammar, seed: u64, source: Generator) -> Option<Vec<usize>> {
 /// The glyph is a box-drawing character whose strokes point at the faces that present a wall, so a
 /// closed room reads as a closed rectangle and a stray wall reads as a stub.
 fn draw(g: &Grammar, faces: &[Option<Interface>], seed: u64, source: Generator) {
-    let Some(grid) = arrange(g, seed, source) else {
+    let Some(grid) = arrange(g, faces, seed, source) else {
         return println!("\nseed {seed} did not converge under {}", source.name());
     };
     let (w, h) = (REGION, REGION);
@@ -474,6 +494,30 @@ fn draw(g: &Grammar, faces: &[Option<Interface>], seed: u64, source: Generator) 
         |p| Faces::new(faces, WALL, WALKABLE).floor(p),
         |p| Faces::new(faces, WALL, WALKABLE).doorway(p),
     );
+    // **Is that enclosure a room, or a clump of wall?**
+    //
+    // `Faces::floor(p)` is `p != 0` — every prototype but `Empty` is floor, *including a solid wall
+    // tile*. So a knot of wall pieces the border fill cannot reach scores as enclosed floor. The
+    // criterion's own metric cannot tell that from a room, and §4.1 flagged the risk in advance:
+    // enclosure is *"highly correlated to an input parameter"* and so *"can only ever provide
+    // confirmatory results"*.
+    //
+    // Measuring a second time with `floor` meaning **the actual floor tile** separates them. This is
+    // a diagnostic beside a drawn grid, never a second criterion — the sweep reads the committed
+    // metric and only that.
+    let deck = g.prototypes.iter().position(|p| {
+        matches!(p, Prototype::Composed { composition, .. } if composition.ends_with("tile_floor"))
+    });
+    if let Some(deck) = deck {
+        let f = || Faces::new(faces, WALL, WALKABLE);
+        if let Ok(d) = range::measure(w, h, &grid, |p, dir| f().wall(p, dir), |p| p == deck, |p| f().doorway(p)) {
+            println!(
+                "  counting only real floor as floor: enclosure {:.3}   regions {}",
+                d.enclosure, d.regions
+            );
+        }
+    }
+
     match scored {
         Ok(m) => println!(
             "\n  enclosure {:.3}   regions {}   opening density {}",
@@ -546,6 +590,7 @@ fn dump(run: &Run, source: Generator) {
     let name = match source {
         Generator::Wfc => "2026-08-10-expressive-range.bins.ron".to_owned(),
         Generator::Constraint => "2026-08-10-expressive-range.constraint.bins.ron".to_owned(),
+        Generator::Rooms => "2026-08-11-expressive-range.rooms.bins.ron".to_owned(),
     };
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/research")

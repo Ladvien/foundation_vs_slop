@@ -2,16 +2,16 @@
 // Rows are enclosure ranges (index 0 = [0, 1/6)), columns opening-density ranges.
 (
     region: 12,
-    solves_in_histogram: 1,
+    solves_in_histogram: 2048,
     did_not_converge: 0,
-    no_enclosed_region: 2047,
-    clamped_above_opening_max: 0,
+    no_enclosed_region: 0,
+    clamped_above_opening_max: 966,
     bins: [
-        [1, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 7],
+        [8, 83, 120, 182, 157, 800],
+        [1, 23, 37, 87, 89, 419],
+        [0, 0, 3, 4, 2, 26],
         [0, 0, 0, 0, 0, 0],
     ],
 )

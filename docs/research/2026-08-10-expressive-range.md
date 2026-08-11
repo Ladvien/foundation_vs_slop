@@ -248,3 +248,71 @@ again.
 **The pre-registered criterion is unchanged and was not re-read to suit this.** Row 1 fires for the
 constraint solver exactly as it fired for the collapse, and that remains the honest verdict on the
 approach *as currently configured*.
+
+
+---
+
+## 9. Addendum — the constraint over distance, run against the same rows
+
+**FVS-R-17's condition is met.** *"Done when: a change that adds a constraint over distance is
+re-measured against §4's same committed rows and the histogram is no longer empty."*
+
+`cargo run --release -p emerge-core --example expressive_range -- rooms`, 2,048 solves. The rows are
+the ones committed 2026-08-09, unedited; §4.6's amendment was pre-registered the day before this ran.
+Raw counts: `2026-08-11-expressive-range.rooms.bins.ron`.
+
+### The result
+
+| Row | no wish (`constraint`) | with the wish (`rooms`) |
+|---|---|---|
+| 3 — the gate, > 20% non-convergence | 0.0% — pass | **0.0% — pass** |
+| 1 — median enclosure < 0.15 | 0.000 — **FIRES** | **0.462 — pass** |
+| 2 — enclosure > 0.95, opening < 0.5 | pass | pass |
+| 4a — `H / ln 36 < 0.25` | 0.000 — FIRES | **0.536 — pass** |
+| 4b — max bin share > 50% | 100.0% — FIRES | **39.1% — pass** |
+| solves reaching the plane | **1 / 2048** | **2048 / 2048** |
+| bins occupied | 1 of 36 | **17 of 36** |
+| **verdict** | the approach fails | **no committed row fires** |
+
+**The control is the strongest thing here.** The same solver, the same kit, the same region, the same
+seeds — differing only in whether the enclosure wish is added — encloses nothing in 2,047 of 2,048
+solves without it and something in all 2,048 with it. The mechanism is attributable, which no amount
+of arguing about wall confetti ever was.
+
+### Four caveats, none of which the verdict line carries
+
+**1. Row 1 passing is confirmatory, and §4.1 said so in advance.** The generator was asked for
+enclosure ≥ 0.25 and the median came out 0.462. That is a constraint being enforced, not a discovery.
+*"Choosing a metric that is highly correlated to one that is used as an input parameter… can only ever
+provide confirmatory results."* **Rows 2, 4a and 4b are the ones that carry information here**, since
+nothing optimised them.
+
+**2. Forty-seven per cent of solves clamped above the opening-density ceiling** — 966 of 2,048 — and
+the largest bin (800 solves, 39.1%) sits in the clamped column. §4.5 wrote the rule this endangers:
+*"an unbounded tail folded into the top bin inflates max-bin share by construction; row 4b must not
+fire on this."* It did not fire. But its margin is 39.1% against a 50% ceiling with nearly half the
+mass artificially concentrated, so **row 4b passing should be read as "not measured" rather than as
+"passed"**. The domain grid's `[0, 4]` ceiling is too low for this generator.
+
+**3. It never stabilised.** Total variation across doubling blocks ran 0.2500, 0.1406, 0.0898, 0.0723,
+0.0742 — falling, then rising, never reaching the 0.05 the rule requires. The run is reported at the
+cap, as §4.4 demands. **The histogram's shape is not established**, only that it is populated.
+
+**4. The metric counts a wall as floor, so "enclosure" overstates the rooms.** `Faces::floor(p)` is
+`p != 0` — every prototype but `Empty` is floor, a solid wall tile included — so a knot of wall pieces
+the border fill cannot reach scores as enclosed floor. Measured a second way, with `floor` meaning the
+actual floor tile, four drawn seeds give enclosure **0.308, 0.500, 0.727, 0.750** over **3, 3, 8 and 3**
+enclosed regions. So real rooms with real floor in them are being made — the headline 0.462 is not
+hollow — but it is not the number it appears to be, and a reader should take the diagnostic line
+`expressive_range -- rooms <seed>` prints beside each drawn grid rather than the sweep's median.
+
+### One thing to pre-register before the next run, recorded rather than fixed
+
+**A one-sample histogram has the same disease §4.6 fixed for zero.** The no-wish arm put exactly one
+solve on the plane, and rows 4a and 4b duly reported entropy 0.000 (fires) and max-bin share 100.0%
+(fires) — two confident statements about the distribution of a single point. §4.6 special-cased
+*empty* because that was the failure in hand; the general fault is a concentration statistic read off
+a sample too small to have a distribution.
+
+Fixing it here would be amending a criterion after seeing its output, which is what §4 forbids and
+what FVS-R-18 existed to stop happening twice. So it is written down and left alone.
