@@ -42,7 +42,13 @@ Three ways a SAT solver quietly stops being a function of its input, all of whic
 
 It decides satisfiability. It does not optimise: there is no MaxSAT loop here, and `Answer` has no notion of a cost.
 
-That is on purpose — optimisation belongs to whoever knows what the weights *mean*. What this crate provides is the two things such a loop is built from: **assumptions** (literals forced true for one question only) and an **unsatisfiable core** (the subset of those assumptions that suffices for the refusal). Guard each soft constraint with an indicator variable, assume the indicators, and relax whatever the core names.
+That is on purpose — optimisation belongs to whoever knows what the weights *mean*. What this crate provides is the three things such a loop is built from:
+
+- **assumptions** — literals forced true for one question only;
+- an **unsatisfiable core** — the subset of those assumptions that suffices for the refusal;
+- **`add_var`** — so the loop can introduce counter variables mid-search, which it could not have known to ask for up front.
+
+Guard each soft constraint with an indicator variable, assume the indicators, and price whatever the core names. That is enough to build core-guided MaxSAT (OLL/RC2) on top without this crate learning what a weight is.
 
 ## Budgets bound a question, not a lifetime
 

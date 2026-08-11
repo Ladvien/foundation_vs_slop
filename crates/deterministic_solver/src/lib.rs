@@ -182,6 +182,23 @@ impl Solver {
         self.vars.len()
     }
 
+    /// Declare one more variable, returning its positive literal.
+    ///
+    /// **Growing is what makes an optimisation loop possible.** A core-guided MaxSAT search learns
+    /// what the clauses cannot satisfy and then encodes a counter over that — variables it could not
+    /// have known to ask for when the problem was built. The alternative is guessing an upper bound at
+    /// construction and hoping, which is a worse contract than this one.
+    ///
+    /// Existing clauses, learnt clauses and the assignment trail are untouched, so this is cheap and
+    /// may be interleaved freely with [`Solver::solve`].
+    pub fn add_var(&mut self) -> Result<Literal, String> {
+        let idx = u32::try_from(self.vars.len())
+            .map_err(|_| "deterministic_solver: too many variables to name another".to_owned())?;
+        let v = self.inner.var_of_int(idx);
+        self.vars.push(v);
+        Ok((idx + 1) as Literal)
+    }
+
     /// Add a clause — a disjunction of literals.
     ///
     /// The empty clause is admitted and makes the problem unsatisfiable, which is its meaning. `Err`
@@ -469,6 +486,30 @@ mod tests {
                 assert!(!m.get(1), "variable 1 was forced false");
                 assert!(m.get(2), "variable 2 was forced true");
                 assert!(m.holds(-1) && m.holds(2), "and `holds` must agree with `get`");
+            }
+            other => panic!("expected a model, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_variable_added_after_solving_joins_the_problem_properly() {
+        let mut s = Solver::new(2).expect("solver");
+        s.add_clause(&[1, 2]).expect("clause");
+        assert!(matches!(s.solve(&[], Budget::UNLIMITED).expect("solve"), Answer::Satisfied(_)));
+
+        // Grow, then constrain the new variable against the old ones — the shape a core-guided loop
+        // needs, where the counter is built from what the first solve refused.
+        let three = s.add_var().expect("grows");
+        assert_eq!(three, 3);
+        assert_eq!(s.variables(), 3);
+        s.add_clause(&[-1, three]).expect("clause");
+        s.add_clause(&[-three]).expect("clause"); // so variable 1 must now be false
+        match s.solve(&[], Budget::UNLIMITED).expect("solve") {
+            Answer::Satisfied(m) => {
+                assert_eq!(m.values().len(), 3, "the model must cover the new variable");
+                assert!(!m.get(3), "variable 3 was forced false");
+                assert!(!m.get(1), "and that forces variable 1 false through the new clause");
+                assert!(m.get(2), "leaving variable 2 to satisfy the original clause");
             }
             other => panic!("expected a model, got {other:?}"),
         }

@@ -415,42 +415,186 @@ impl Problem {
     /// against the solver's own account of them. A back-end returning a wrong model is the failure
     /// this cannot afford to absorb, and the check is linear in the clause count.
     ///
-    /// # Soft constraints are refused rather than approximated
+    /// # Soft constraints are minimised, not merely satisfied
     ///
-    /// [`Solution::unmet`] is a *minimisation* objective, and a plain satisfiability solver does not
-    /// minimise — reaching an optimum takes a search over relaxations that is not built yet. Solving
-    /// a problem that carries soft constraints therefore fails by name. It would be easy to return
-    /// the first model that satisfies the hard clauses and report whatever it happened to leave
-    /// unmet; that answer would be *valid* and not *optimal*, which is exactly the silent degradation
-    /// one path per feature exists to forbid — a wall that could have been left standing, quietly not.
+    /// [`Solution::unmet`] is an objective, so a model that satisfies the hard clauses is not an
+    /// answer — the *cheapest* such model is. This runs implicit hitting set (Davies & Bacchus,
+    /// *Solving MAXSAT by Solving a Sequence of Simpler SAT Instances*, CP 2011,
+    /// `10.1007/978-3-642-23786-7_19`), described at [`Problem::solve`]'s implementation below. It
+    /// returns a proven optimum, which matters because the alternative — the first model that fits,
+    /// reporting whatever it happened to leave unmet — is *valid and not optimal*: a wall that could
+    /// have been left standing, quietly not, with a number beside it that looks like a measurement.
     pub fn solve(&self, conflicts: u64) -> Result<Solution, String> {
-        if !self.soft.is_empty() {
-            return Err(format!(
-                "constraints: this problem carries {} soft constraint(s), and solving one needs an \
-                 optimisation loop over relaxations that is not built yet. Returning a model that \
-                 merely satisfies the hard clauses would report a cost nobody minimised.",
-                self.soft.len()
-            ));
-        }
         let mut solver = deterministic_solver::Solver::new(self.vars())?;
         for clause in self.iter_clauses() {
             let lits: Vec<deterministic_solver::Literal> = clause.iter().map(to_dimacs).collect();
             solver.add_clause(&lits)?;
         }
-        match solver.solve(&[], deterministic_solver::Budget::conflicts(conflicts))? {
-            deterministic_solver::Answer::Satisfied(m) => {
-                Solution::from_assignment(self, m.values().to_vec())
+
+        // One literal per soft constraint: true means "this constraint is enforced".
+        let guards: Vec<deterministic_solver::Literal> =
+            self.soft.iter().map(|s| to_dimacs(&Lit::pos(s.guard))).collect();
+        let weights: Vec<u32> = self.soft.iter().map(|s| s.weight).collect();
+
+        // **Core-guided optimisation (OLL).** Assume every wish is granted. When that is refused, the
+        // solver names a *core* — a set of wishes it cannot honour together — so at least one of them
+        // must be given up, and the cheapest of them, `wmin`, is added to a lower bound on the total
+        // cost. Each wish in the core keeps the rest of its weight and stays in play; then a counter
+        // is built over that core, and "at least two of these are given up", "at least three", … each
+        // become new wishes of their own worth `wmin`. The bound rises every round, and the first
+        // answer that satisfies the surviving assumptions costs exactly it.
+        //
+        // **This replaces an implicit-hitting-set loop that did not scale**, and the reason is worth
+        // recording: on a region-sized problem every core came back with exactly TWO wishes in it, so
+        // the hitting set was a minimum weighted vertex cover over a grid — NP-hard, with the
+        // disjoint-core bound reducing to a matching, which is the classic factor-of-two-loose case.
+        // A core of size two costs OLL a counter with one output literal.
+        //
+        // Andres, Kaufmann, Matheis & Schaub, *Unsatisfiability-based optimization in clasp* (ICLP
+        // 2012); the weighted form follows Morgado, Dodaro & Marques-Silva, *Core-Guided MaxSAT with
+        // Soft Cardinality Constraints* (CP 2014, `10.1007/978-3-319-10428-7_41`).
+        //
+        // **With no soft constraints this is the plain solve**, unrolled: nothing to assume, so the
+        // first question carries no assumptions and the first answer is returned. That is why there is
+        // no separate branch for the hard-only case — a second path would be a second thing to keep
+        // correct.
+        //
+        // `items` are the literals currently assumed true; `residual` is what each is still worth. A
+        // wish drops out of the assumptions when its weight is spent, and counter outputs join as new
+        // items as they are created.
+        let mut items: Vec<deterministic_solver::Literal> = guards;
+        let mut residual: Vec<u64> = weights.iter().map(|&w| w as u64).collect();
+
+        for _ in 0..max_rounds(self.soft.len()) {
+            let assumed: Vec<deterministic_solver::Literal> = items
+                .iter()
+                .zip(&residual)
+                .filter(|&(_, &r)| r > 0)
+                .map(|(&l, _)| l)
+                .collect();
+
+            match solver.solve(&assumed, deterministic_solver::Budget::conflicts(conflicts))? {
+                deterministic_solver::Answer::Satisfied(m) => {
+                    // `from_assignment` re-checks every hard clause and recomputes the cost from the
+                    // model itself, so the number returned is what this assignment actually leaves
+                    // unmet rather than the bound the search proved along the way.
+                    return Solution::from_assignment(self, m.values().to_vec());
+                }
+                deterministic_solver::Answer::Unsatisfiable { core } => {
+                    let found: Vec<usize> = core
+                        .iter()
+                        .filter_map(|l| items.iter().position(|it| it == l))
+                        .filter(|&i| residual.get(i).copied().unwrap_or(0) > 0)
+                        .collect();
+                    // A core naming nothing we assumed means the hard clauses refuse on their own,
+                    // and no amount of giving up wishes will change that. Distinguishing this from
+                    // "the wishes conflict" is the difference between a fixable message and a
+                    // mysterious one.
+                    if found.is_empty() {
+                        return Err(
+                            "constraints: no arrangement satisfies these rules. The grammar cannot \
+                             tile this region under what has been asked of it — free some pinned \
+                             cells, or extend the example so there are more ways to join things up."
+                                .to_owned(),
+                        );
+                    }
+                    let Some(wmin) = found.iter().filter_map(|&i| residual.get(i)).min().copied()
+                    else {
+                        return Err("constraints: a core with no weight to spend".to_owned());
+                    };
+                    for &i in &found {
+                        if let Some(r) = residual.get_mut(i) {
+                            *r = r.saturating_sub(wmin);
+                        }
+                    }
+                    // A core of one is already fully paid for by the step above — there is no "at
+                    // least two of one thing", so no counter to build.
+                    if found.len() > 1 {
+                        // The counter runs over the NEGATIONS: `item` asserts the wish is granted, so
+                        // `!item` is "this wish was given up", and the outputs count those.
+                        let inputs: Vec<deterministic_solver::Literal> =
+                            found.iter().filter_map(|&i| items.get(i)).map(|&l| -l).collect();
+                        let outputs = totalizer(&mut solver, &inputs)?;
+                        // `outputs[0]` is "at least one given up", which this core has just proven.
+                        // Everything above it is a fresh wish: do not give up a second, a third, …
+                        for &o in outputs.iter().skip(1) {
+                            items.push(-o);
+                            residual.push(wmin);
+                        }
+                    }
+                }
+                deterministic_solver::Answer::Exhausted => {
+                    return Err(format!(
+                        "constraints: gave up after {conflicts} conflicts without settling the \
+                         question. That is not a statement that no arrangement exists — raise the \
+                         budget to find out."
+                    ))
+                }
             }
-            deterministic_solver::Answer::Unsatisfiable { .. } => Err(
-                "constraints: no arrangement satisfies these rules. The grammar cannot tile this \
-                 region under what has been asked of it — free some pinned cells, or extend the \
-                 example so there are more ways to join things up."
-                    .to_owned(),
-            ),
-            deterministic_solver::Answer::Exhausted => Err(format!(
-                "constraints: gave up after {conflicts} conflicts without settling the question. \
-                 That is not a statement that no arrangement exists — raise the budget to find out."
-            )),
+        }
+        Err(format!(
+            "constraints: the optimisation did not converge within {} rounds over {} soft \
+             constraint(s). Every round raises a proven lower bound on the cost, so this means the \
+             wishes conflict far more than the budget allows to price — ask for fewer at once.",
+            max_rounds(self.soft.len()),
+            self.soft.len()
+        ))
+    }
+}
+
+/// How many cores the optimisation may prove before it gives up.
+///
+/// Every round raises the proven lower bound by at least one, so the loop terminates on its own — the
+/// bound cannot exceed the total weight of the wishes. *Terminates* is not *quickly*, though, so this
+/// is the loud stop. It scales with the total weight rather than the count, because that is what
+/// actually bounds the round count.
+fn max_rounds(softs: usize) -> usize {
+    256 + softs * 64
+}
+
+/// **A counter over `inputs`**, returning literals where `out[k]` means *"at least `k + 1` of the
+/// inputs are true"*.
+///
+/// The totalizer of Bailleux & Boufkhad (*Efficient CNF Encoding of Boolean Cardinality Constraints*,
+/// CP 2003, `10.1007/978-3-540-45193-8_8`): a balanced merge tree, `O(n log n)` variables and
+/// `O(n^2)` clauses, and — the property that matters for a core-guided loop — its outputs are
+/// ordinary literals that can be assumed, so a bound can be tightened later without re-encoding.
+///
+/// **Only the "at least" direction is emitted.** The caller assumes `¬out[k]` to forbid giving up
+/// more than `k` wishes, which needs `count ≥ k+1 → out[k]` and nothing else. Adding the converse
+/// would double the clauses to constrain a direction no caller reads.
+fn totalizer(
+    solver: &mut deterministic_solver::Solver,
+    inputs: &[deterministic_solver::Literal],
+) -> Result<Vec<deterministic_solver::Literal>, String> {
+    match inputs {
+        [] => Ok(Vec::new()),
+        [only] => Ok(vec![*only]),
+        _ => {
+            let (left, right) = inputs.split_at(inputs.len() / 2);
+            let a = totalizer(solver, left)?;
+            let b = totalizer(solver, right)?;
+            let mut out = Vec::with_capacity(a.len() + b.len());
+            for _ in 0..a.len() + b.len() {
+                out.push(solver.add_var()?);
+            }
+            for i in 0..=a.len() {
+                for j in 0..=b.len() {
+                    if i + j == 0 {
+                        continue;
+                    }
+                    let mut clause = Vec::with_capacity(3);
+                    if i > 0 {
+                        clause.push(-a[i - 1]);
+                    }
+                    if j > 0 {
+                        clause.push(-b[j - 1]);
+                    }
+                    clause.push(out[i + j - 1]);
+                    solver.add_clause(&clause)?;
+                }
+            }
+            Ok(out)
         }
     }
 }
@@ -1267,13 +1411,235 @@ mod tests {
         assert!(err.contains("no arrangement"), "the refusal must say what happened: {err}");
     }
 
+    /// The cheapest cost any model achieves, by exhaustive enumeration.
+    ///
+    /// This is the oracle the optimiser is checked against, and it is worth more than any property
+    /// test: `solve` proves an optimum by an argument about hitting sets, and this finds one by
+    /// looking at every answer there is. If the argument is wrong, the two disagree.
+    fn optimal_cost(p: &Problem) -> Option<u64> {
+        models(p).iter().map(|m| p.unmet(m)).min()
+    }
+
     #[test]
-    fn solve_refuses_a_soft_problem_rather_than_reporting_a_cost_nobody_minimised() {
+    fn solve_returns_the_proven_optimum_and_not_merely_a_model() {
+        // Two soft constraints that cannot both hold, of different weights, plus one that can.
         let mut p = Problem::new();
         let a = Lit::pos(p.var());
+        let b = Lit::pos(p.var());
+        let c = Lit::pos(p.var());
+        p.count(&[a, b], 0, 1, None); // hard: not both a and b
+        p.implies_any(p.always_true(), &[a], Some(9)); // soft: a  (dear)
+        p.implies_any(p.always_true(), &[b], Some(2)); // soft: b  (cheap)
+        p.implies_any(p.always_true(), &[c], Some(4)); // soft: c  (free to keep)
+        let s = p.solve(0).expect("solves");
+        assert_eq!(optimal_cost(&p), Some(2), "the fixture's optimum, by enumeration");
+        assert_eq!(s.unmet(), 2, "give up the cheap wish, not the dear one");
+        assert!(s.get(a.var()) && !s.get(b.var()) && s.get(c.var()));
+    }
+
+    #[test]
+    fn solve_matches_exhaustive_enumeration_over_many_random_soft_problems() {
+        // The optimality claim, swept. Small enough to enumerate, varied enough that a bug in the
+        // hitting-set bound would land on one of them.
+        let mut state = 0x243F_6A88_85A3_08D3u64;
+        let mut next = move || {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            let x = state;
+            (x ^ (x >> 33)).wrapping_mul(0xff51_afd7_ed55_8ccd)
+        };
+        let mut checked = 0;
+        for case in 0..250 {
+            let n_vars = 3 + (next() % 4) as usize;
+            let mut p = Problem::new();
+            let vars: Vec<Lit> = (0..n_vars).map(|_| Lit::pos(p.var())).collect();
+            // Sometimes cap how many may hold at once. This is what produces cores LARGER than two,
+            // where the counter's outputs have to be paid for rather than merely existing.
+            if next() % 2 == 0 {
+                let cap = (next() % (n_vars as u64 - 1)) as u32;
+                p.count(&vars, 0, cap, None);
+            }
+            // A few hard clauses, so the soft ones have something to conflict with.
+            for _ in 0..3 {
+                let i = (next() % n_vars as u64) as usize;
+                let j = (next() % n_vars as u64) as usize;
+                let (li, lj) = (vars[i], vars[j]);
+                let (li, lj) = (
+                    if next() % 2 == 0 { li } else { !li },
+                    if next() % 2 == 0 { lj } else { !lj },
+                );
+                p.add_clause(&[li, lj]);
+            }
+            // Soft unit wishes with assorted weights — the shape the per-cell "dream" will have.
+            for v in &vars {
+                let want = if next() % 2 == 0 { *v } else { !*v };
+                let w = 1 + (next() % 9) as u32;
+                p.implies_any(p.always_true(), &[want], Some(w));
+            }
+            let want = optimal_cost(&p);
+            match (p.solve(0), want) {
+                (Ok(s), Some(best)) => {
+                    assert_eq!(s.unmet(), best, "case {case}: solve found {} not {best}", s.unmet());
+                    checked += 1;
+                }
+                (Err(_), None) => {} // the hard clauses alone are unsatisfiable; both agree
+                (Ok(s), None) => panic!("case {case}: solved to {} where nothing is satisfiable", s.unmet()),
+                (Err(e), Some(best)) => panic!("case {case}: refused ({e}) where {best} was reachable"),
+            }
+        }
+        assert!(checked > 150, "the sweep must actually exercise satisfiable cases: {checked}/250");
+    }
+
+    #[test]
+    fn giving_up_two_wishes_from_one_core_is_priced_correctly() {
+        // **The case that prices the counter.** A core of three where only ONE wish can be granted,
+        // so two must go — which is exactly when the "at least two of these were given up" literal
+        // the totalizer produces is the thing being paid for. Every other fixture here has cores of
+        // two, where that literal exists but never has to be bought, so a wrong price for it would
+        // go unnoticed: mutating `residual.push(wmin)` to charge double survived the whole suite
+        // until this existed.
+        let mut p = Problem::new();
+        let a = Lit::pos(p.var());
+        let b = Lit::pos(p.var());
+        let c = Lit::pos(p.var());
+        p.count(&[a, b, c], 0, 1, None); // hard: at most one of the three
+        p.implies_any(p.always_true(), &[a], Some(5));
+        p.implies_any(p.always_true(), &[b], Some(3));
+        p.implies_any(p.always_true(), &[c], Some(2));
+        let s = p.solve(0).expect("solves");
+        // Keep the dearest, give up the two cheapest: 3 + 2.
+        assert_eq!(optimal_cost(&p), Some(5), "the fixture's optimum, by enumeration");
+        assert_eq!(s.unmet(), 5, "two wishes from one core must cost their own weights, not a multiple");
+        assert!(s.get(a.var()) && !s.get(b.var()) && !s.get(c.var()));
+    }
+
+    #[test]
+    fn giving_up_three_wishes_from_one_core_is_priced_correctly() {
+        // The same again one level deeper, so the counter's THIRD output carries weight too.
+        let mut p = Problem::new();
+        let vars: Vec<Lit> = (0..5).map(|_| Lit::pos(p.var())).collect();
+        p.count(&vars, 0, 2, None); // hard: at most two of the five
+        for (i, v) in vars.iter().enumerate() {
+            p.implies_any(p.always_true(), &[*v], Some(1 + i as u32));
+        }
+        let s = p.solve(0).expect("solves");
+        // Keep the two dearest (4 + 5), give up 1 + 2 + 3.
+        assert_eq!(optimal_cost(&p), Some(6), "the fixture's optimum, by enumeration");
+        assert_eq!(s.unmet(), 6);
+    }
+
+    #[test]
+    fn a_soft_constraint_that_can_be_met_costs_nothing() {
+        let mut p = Problem::new();
+        let a = Lit::pos(p.var());
+        let b = Lit::pos(p.var());
+        p.count(&[a, b], 2, 2, Some(5));
+        let s = p.solve(0).expect("solves");
+        assert_eq!(s.unmet(), 0, "a satisfiable wish must be granted, not paid for");
+        assert!(s.get(a.var()) && s.get(b.var()));
+    }
+
+    #[test]
+    fn an_unmeetable_soft_constraint_costs_exactly_its_weight_and_no_more() {
+        let mut p = Problem::new();
+        let a = Lit::pos(p.var());
+        p.add_clause(&[!a]); // hard
+        p.implies_any(p.always_true(), &[a], Some(7)); // soft, impossible
+        let s = p.solve(0).expect("a soft conflict must still solve");
+        assert_eq!(s.unmet(), 7);
+        assert!(!s.get(a.var()));
+    }
+
+    #[test]
+    fn hard_unsatisfiability_is_named_differently_from_wishes_that_conflict() {
+        // A core naming no guard means no amount of giving up wishes helps, and the message has to
+        // say so — the two failures call for opposite responses from whoever reads them.
+        let mut p = Problem::new();
+        let a = Lit::pos(p.var());
+        p.add_clause(&[a]);
+        p.add_clause(&[!a]);
         p.implies_any(p.always_true(), &[a], Some(3));
-        let err = p.solve(0).expect_err("a soft problem has no optimiser yet");
-        assert!(err.contains("soft constraint"), "the refusal must name the reason: {err}");
+        let err = p.solve(0).expect_err("hard clauses that contradict cannot be bought off");
+        assert!(err.contains("no arrangement"), "must name the hard refusal: {err}");
+    }
+
+    #[test]
+    fn the_optimum_is_the_same_every_time() {
+        let mut p = Problem::new();
+        let vars: Vec<Lit> = (0..6).map(|_| Lit::pos(p.var())).collect();
+        p.count(&vars, 0, 2, None);
+        for (i, v) in vars.iter().enumerate() {
+            p.implies_any(p.always_true(), &[*v], Some(1 + i as u32));
+        }
+        let first = p.solve(0).expect("solves");
+        assert_eq!(optimal_cost(&p), Some(first.unmet()), "and it is the true optimum");
+        for round in 1..5 {
+            let again = p.solve(0).expect("solves");
+            assert_eq!(again.values(), first.values(), "round {round} chose differently");
+        }
+    }
+
+    #[test]
+    fn the_optimiser_carries_a_region_sized_problem_with_one_wish_per_cell() {
+        // Optimality proved on three variables is not the same as working. This is the shape the
+        // composition grammar will actually hand it: a 12 x 12 region, adjacency rules, and one soft
+        // preference per cell — the "dream" a seed would draw. Small enough to stay a unit test,
+        // large enough that a hitting-set search which did not prune would not finish.
+        let (w, h, protos) = (12usize, 12usize, 3usize);
+        let support: [Vec<u32>; 4] = [
+            vec![0b011, 0b110, 0b101],
+            vec![0b111, 0b011, 0b110],
+            vec![0b110, 0b101, 0b011],
+            vec![0b101, 0b111, 0b110],
+        ];
+        let full = (1u32 << protos) - 1;
+        let mut gp = GridProblem::encode(&support, &vec![full; w * h], w, h, protos).expect("encodes");
+        // A deterministic wish per cell, weighted — not every one can be granted, so the optimiser
+        // has to choose which to give up rather than simply granting all of them.
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            let x = state;
+            (x ^ (x >> 33)).wrapping_mul(0xff51_afd7_ed55_8ccd)
+        };
+        for c in 0..w * h {
+            let wanted = (next() % protos as u64) as usize;
+            let weight = 1 + (next() % 5) as u32;
+            let Some(v) = gp.place.get(c).and_then(|row| row.get(wanted)) else {
+                continue;
+            };
+            gp.problem.implies_any(gp.problem.always_true(), &[Lit::pos(*v)], Some(weight));
+        }
+        assert_eq!(gp.problem.soft_count(), w * h, "one wish per cell");
+
+        let s = gp.problem.solve(0).expect("a region-sized optimisation must complete");
+        let grid = gp.read(&s).expect("and read back as a grid");
+        assert_eq!(grid.len(), w * h);
+        // Whatever it gave up, the arrangement it returned is still legal — the hard rules are not
+        // negotiable, and an optimiser that bought its cost by breaking one would show up here.
+        const STEPS: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
+        for z in 0..h {
+            for x in 0..w {
+                for (dir, (dx, dz)) in STEPS.iter().enumerate() {
+                    let (nx, nz) = (x as i32 + dx, z as i32 + dz);
+                    if nx < 0 || nz < 0 || nx as usize >= w || nz as usize >= h {
+                        continue;
+                    }
+                    let (a, b) = (grid[z * w + x], grid[nz as usize * w + nx as usize]);
+                    assert!(support[dir][a] & (1 << b) != 0, "({x},{z}) {a} beside {b} on {dir}");
+                }
+            }
+        }
+        println!("region-sized optimum: unmet {} over {} wishes", s.unmet(), w * h);
+    }
+
+    #[test]
+    fn weights_of_zero_are_free_to_break() {
+        let mut p = Problem::new();
+        let a = Lit::pos(p.var());
+        p.add_clause(&[!a]);
+        p.implies_any(p.always_true(), &[a], Some(0));
+        let s = p.solve(0).expect("solves");
+        assert_eq!(s.unmet(), 0, "a wish worth nothing costs nothing to abandon");
     }
 
     #[test]

@@ -35,12 +35,14 @@ That is the entire reason the crate exists, so **anything that could make an ans
 - **`Lit::new`'s `sign` is `true` for the POSITIVE literal** — the opposite of MiniSat's convention, in a same-named parameter on a same-shaped API. Verified in `batsat-0.6.0/src/clause.rs`: `value_lit(v) = value_var(v.var()) ^ !v.sign()`. `the_model_reads_a_literal_the_same_way_the_solver_does` is the test that would catch getting it backwards.
 - **`batsat` 0.6.0's own conflict budget is unreachable.** `conflict_budget` and `propagation_budget` are private, initialised to `-1`, and nothing in the crate ever writes them. The budget here goes through `Callbacks::stop`, which `within_budget` consults on the same line. If a future `batsat` exposes a setter, moving to it is fine — but re-measure, because the unit would change from "learnt clauses" to "conflicts".
 - **The budget resets per `solve`.** A lifetime-cumulative count would make the tenth question in an optimisation loop answerable only if the first nine were cheap.
-- **Every variable is allocated at construction**, so a model is full-width even for a variable in no clause. A short model would read as `false` by accident rather than by decision.
+- **Every declared variable is allocated eagerly** — all of `Solver::new`'s at construction, and each `add_var`'s on the spot — so a model is always full-width even for a variable appearing in no clause. A short model would read as `false` by accident rather than by decision.
 
 ## What belongs here, and what does not
 
 This crate decides. It does not optimise, and it must not learn to: there is no MaxSAT loop here and `Answer` has no cost, because weights mean something only to the caller that chose them.
 
-What it owes such a loop is the two primitives one is built from — **assumptions** and an **unsatisfiable core** — and both are on `solve`. A caller guards each soft constraint with an indicator, assumes the indicators, and relaxes whatever the core names.
+What it owes such a loop is the three primitives one is built from: **assumptions** and an **unsatisfiable core**, both on `solve`, plus **`add_var`** so the loop can grow the counters it could not have known to ask for when the problem was built. A caller guards each soft constraint with an indicator, assumes the indicators, and prices whatever the core names.
+
+`emerge-core::constraints::Problem::solve` is the caller that does this, core-guided (OLL). It lives there and not here because the weights mean something only to whoever chose them.
 
 It also knows nothing about grids, tiles, prototypes or games. Literals are plain DIMACS `i32` precisely so that a caller can swap this crate out; a bespoke literal type would couple the caller to the thing it was supposed to be able to replace.
