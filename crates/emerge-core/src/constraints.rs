@@ -790,20 +790,17 @@ pub fn pattern_rules(
     w: usize,
     h: usize,
 ) {
-    // N, E, S, W as (dx, dz), matching `wfc::propagate`'s stencil: north is one row back.
-    const STEPS: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
     for z in 0..h {
         for x in 0..w {
             let c = z * w + x;
             let Some(row) = place.get(c) else {
                 continue;
             };
-            for (dir, (dx, dz)) in STEPS.iter().enumerate() {
-                let (nx, nz) = (x as i32 + dx, z as i32 + dz);
-                if nx < 0 || nz < 0 || nx as usize >= w || nz as usize >= h {
+            for dir in 0..4 {
+                let Some((nx, nz)) = step(w, h, x, z, dir) else {
                     continue;
-                }
-                let Some(neighbour) = place.get(nz as usize * w + nx as usize) else {
+                };
+                let Some(neighbour) = place.get(nz * w + nx) else {
                     continue;
                 };
                 for (a, &va) in row.iter().enumerate() {
@@ -821,6 +818,228 @@ pub fn pattern_rules(
             }
         }
     }
+}
+
+use crate::wfc::{E, N, S, W};
+
+/// The face on the other side of a seam. Mirrors `range::opposite`.
+#[inline]
+fn opposite(dir: usize) -> usize {
+    match dir {
+        N => S,
+        S => N,
+        E => W,
+        _ => E,
+    }
+}
+
+/// The neighbour in direction `dir`, or `None` off the grid. Mirrors `range::step` exactly.
+#[inline]
+fn step(w: usize, h: usize, x: usize, z: usize, dir: usize) -> Option<(usize, usize)> {
+    match dir {
+        N => z.checked_sub(1).map(|z| (x, z)),
+        E => (x + 1 < w).then_some((x + 1, z)),
+        S => (z + 1 < h).then_some((x, z + 1)),
+        W => x.checked_sub(1).map(|x| (x, z)),
+        _ => None,
+    }
+}
+
+/// **Ask for rooms: at least `want` of the region closed off from the outside.**
+///
+/// This is the constraint the whole exercise exists for. `docs/research/2026-08-10-expressive-range.md`
+/// measured 128 solves with zero enclosed regions and falsified both the vocabulary and the weight
+/// explanations; what is left is that a closed boundary is a property *over distance*, and local
+/// pairwise support has no term for it. This is that term.
+///
+/// # It is pinned to the metric, not to an idea of the metric
+///
+/// Every predicate comes from [`crate::range::Faces`] — the same object [`crate::range::measure`]
+/// reads — by calling `wall`/`floor` over `0..protos`. **Never re-derive them from `Interface`.** A
+/// drift between the constraint and the metric reproduces exactly the confusion FVS-R-9 spent a day
+/// separating: *the metric cannot see a room* versus *the solver cannot make one*. The test
+/// `a_solved_grid_really_measures_as_enclosed` closes the loop by solving and then measuring.
+///
+/// # Foundedness is deliberately not encoded
+///
+/// The rules below are the first two of `docs/research/2026-08-10-constraint-solver-plan.md` §L3.
+/// The third — *"`outside[c]` → border ∨ ⋁ₙ (outside[n] ∧ seam)"* — and the rank encoding that makes
+/// it founded are **omitted on purpose**, and that is sound rather than a shortcut:
+///
+/// R1 and R2 are Horn, so every model has `outside ⊇ flood_fill`. Therefore `¬outside[c]` implies `c`
+/// is genuinely unreachable from the border, so a *lower* bound on enclosure is sound; and setting
+/// `outside` to the true fill satisfies everything, so no arrangement is lost. That is the proof in
+/// `docs/research/2026-08-10-constraint-encodings.md` §5.2, and it saves 5,904 variables of rank
+/// machinery which the plan itself calls the single most likely place to get subtly wrong.
+///
+/// **The moment a caller wants a *ceiling* on enclosure, this stops being sound** — `outside ≡ ⊤`
+/// satisfies R1 and R2 for free — and the rank encoding becomes mandatory. That is why `want` is a
+/// floor and there is no `at_most` parameter to pass.
+///
+/// # `want` is converted conservatively, and the arithmetic is here
+///
+/// The metric is a ratio, `enclosed / total_floor`, and `total_floor` is not known until the grid is
+/// solved. [`Problem::count`] bounds an absolute count. So the bound emitted is
+/// `lo = ceil(want * cells)` over *all* cells, which is sound in the safe direction: `total_floor` can
+/// only be ≤ `cells`, so `enclosed / total_floor ≥ (want·cells) / cells = want`.
+///
+/// It **over-asks** whenever `Empty` wins cells — at the ~28% measured today it demands roughly 39%
+/// more enclosure than the metric needs. That buys simplicity and can only refuse arrangements, never
+/// accept a bad one. The exact form is a weighted pseudo-Boolean bound
+/// (`q·enclosed + p·empty ≥ p·cells`) and is a later change if the conservatism starts refusing.
+pub fn enclosure_rules(
+    p: &mut Problem,
+    place: &[Vec<Var>],
+    faces: &crate::range::Faces,
+    w: usize,
+    h: usize,
+    want: f32,
+    weight: Option<u32>,
+) -> Result<(), String> {
+    if w == 0 || h == 0 {
+        return Err(format!("constraints: a {w} x {h} region has no cells to enclose"));
+    }
+    let cells = w * h;
+    if place.len() != cells {
+        return Err(format!(
+            "constraints: {} cells of placement for a {w} x {h} region",
+            place.len()
+        ));
+    }
+    if !want.is_finite() || !(0.0..=1.0).contains(&want) {
+        return Err(format!(
+            "constraints: an enclosure of {want} is not a fraction — it must lie in [0, 1]"
+        ));
+    }
+    let Some(protos) = place.first().map(Vec::len) else {
+        return Err("constraints: no cells to enclose".to_owned());
+    };
+    if place.iter().any(|r| r.len() != protos) {
+        return Err("constraints: the cells do not agree on how many prototypes there are".to_owned());
+    }
+
+    // Per-prototype facts, read once from the same object the metric reads. `floor` needs no table:
+    // `Faces::floor(p)` is `p != 0`, so the floor literal is simply `¬place[c][0]`.
+    let walls: Vec<[bool; 4]> = (0..protos)
+        .map(|q| [faces.wall(q, N), faces.wall(q, E), faces.wall(q, S), faces.wall(q, W)])
+        .collect();
+
+    // ── face_open[c][d] ──────────────────────────────────────────────────────────────────────────
+    // **Only in-grid faces get a variable.** The fill seeds every border cell unconditionally and
+    // never consults an outward face, so a face pointing off the grid has nothing to say. Allocating
+    // all `4 * cells` would leave unconstrained variables that a solver may set arbitrarily and a
+    // golden may then be perturbed by.
+    let mut face_open: Vec<Option<Lit>> = vec![None; cells * 4];
+    for z in 0..h {
+        for x in 0..w {
+            let c = z * w + x;
+            for dir in 0..4 {
+                if step(w, h, x, z, dir).is_none() {
+                    continue;
+                }
+                let open = Lit::pos(p.var());
+                face_open[c * 4 + dir] = Some(open);
+                // Both families. The first makes the fill reach as far as it really does; the second
+                // stops the solver leaking the fill through a wall to inflate `outside`.
+                //
+                // **The second is deliberately untested, and that is not an oversight.** Deleting it
+                // passes the entire suite — measured. Under a one-sided *floor* the freedom it leaves
+                // can only ever hurt the solver (an unforced `face_open` on a walling tile opens a
+                // seam, spreads `outside`, and encloses fewer cells), so no test can distinguish its
+                // presence. It becomes load-bearing the moment a wish pushes `outside` true, where
+                // `outside ≡ ⊤` would otherwise be free. Keep it; do not "simplify" it away because
+                // nothing goes red.
+                for (q, wall) in walls.iter().enumerate() {
+                    let Some(&here) = place.get(c).and_then(|r| r.get(q)) else {
+                        continue;
+                    };
+                    let laid = Lit::pos(here);
+                    if wall[dir] {
+                        p.add_clause(&[!laid, !open]);
+                    } else {
+                        p.add_clause(&[!laid, open]);
+                    }
+                }
+            }
+        }
+    }
+
+    // ── seam ─────────────────────────────────────────────────────────────────────────────────────
+    // **One variable per undirected seam**, because `range::blocked` reads one: it ORs cell A's `dir`
+    // face with cell B's opposite face into a single verdict. Enumerated by taking only E and S per
+    // cell in row-major order, so each of the seams gets exactly one identity, deterministically.
+    let mut seam: Vec<Option<Lit>> = vec![None; cells * 4];
+    for z in 0..h {
+        for x in 0..w {
+            let c = z * w + x;
+            for dir in [E, S] {
+                let Some((nx, nz)) = step(w, h, x, z, dir) else {
+                    continue;
+                };
+                let n = nz * w + nx;
+                let (Some(near), Some(far)) =
+                    (face_open[c * 4 + dir], face_open[n * 4 + opposite(dir)])
+                else {
+                    continue;
+                };
+                // `conj` is exactly the biconditional wanted here, in both directions.
+                let open = p.conj(&[near, far]);
+                seam[c * 4 + dir] = Some(open);
+                seam[n * 4 + opposite(dir)] = Some(open);
+            }
+        }
+    }
+
+    // ── outside ──────────────────────────────────────────────────────────────────────────────────
+    let outside: Vec<Lit> = (0..cells).map(|_| Lit::pos(p.var())).collect();
+    for z in 0..h {
+        for x in 0..w {
+            // R1. Every border cell is outside, unconditionally and regardless of what sits there —
+            // `range::reached_from_border` seeds them all, because there is no cell beyond the region
+            // to start from.
+            if x == 0 || z == 0 || x + 1 == w || z + 1 == h {
+                if let Some(&o) = outside.get(z * w + x) {
+                    p.add_clause(&[o]);
+                }
+            }
+        }
+    }
+    for z in 0..h {
+        for x in 0..w {
+            let c = z * w + x;
+            for dir in 0..4 {
+                let Some((nx, nz)) = step(w, h, x, z, dir) else {
+                    continue;
+                };
+                let n = nz * w + nx;
+                let (Some(&here), Some(&there), Some(open)) =
+                    (outside.get(c), outside.get(n), seam[c * 4 + dir])
+                else {
+                    continue;
+                };
+                // R2. The fill crosses an open seam.
+                p.add_clause(&[!there, !open, here]);
+            }
+        }
+    }
+
+    // ── enclosed ─────────────────────────────────────────────────────────────────────────────────
+    // Only the two implications, not the equivalence: `enclosed` appears solely inside the `≥ lo`
+    // count below, so its converse constrains nothing anyone reads (Plaisted–Greenbaum polarity).
+    let enclosed: Vec<Lit> = (0..cells).map(|_| Lit::pos(p.var())).collect();
+    for c in 0..cells {
+        let (Some(&is_in), Some(&out)) = (enclosed.get(c), outside.get(c)) else {
+            continue;
+        };
+        if let Some(&empty) = place.get(c).and_then(|r| r.first()) {
+            p.add_clause(&[!is_in, !Lit::pos(empty)]); // enclosed cells are floor, and Empty is not
+        }
+        p.add_clause(&[!is_in, !out]); // enclosed cells are not outside
+    }
+
+    let lo = (want * cells as f32).ceil().max(0.0) as u32;
+    p.count(&enclosed, lo, cells as u32, weight);
+    Ok(())
 }
 
 /// **A tiled region encoded as Booleans, and the way back to a grid of prototype indices.**
@@ -1606,6 +1825,221 @@ mod tests {
         // Keep the two dearest (4 + 5), give up 1 + 2 + 3.
         assert_eq!(optimal_cost(&p), Some(6), "the fixture's optimum, by enumeration");
         assert_eq!(s.unmet(), 6);
+    }
+
+    // ── enclosure ────────────────────────────────────────────────────────────────────────────────
+
+    /// The kit these tests measure against: `Empty`, a floor that walls nothing, and a solid that
+    /// walls all four faces.
+    ///
+    /// Built as real [`crate::composition::Interface`] values rather than as a stub predicate,
+    /// because the whole point of `enclosure_rules` taking a [`crate::range::Faces`] is that the
+    /// constraint and the metric read the *same object*. A fake here would test the wrong seam.
+    fn room_kit() -> Vec<Option<crate::composition::Interface>> {
+        use crate::composition::{Band, Interface};
+        let wall = || Band {
+            y: (0.0, 2.0),
+            lat: (-0.5, 0.5),
+            token: Some("wall".to_owned()),
+        };
+        let solid = Interface {
+            faces: [vec![wall()], vec![wall()], vec![wall()], vec![wall()]],
+            faults: Vec::new(),
+        };
+        // 0 = Empty (presents nothing), 1 = floor (no walls), 2 = solid (walls everywhere).
+        vec![None, Some(Interface::default()), Some(solid)]
+    }
+
+    /// `range::measure` over a solved grid, read through the same `Faces` the constraint used.
+    fn measure_grid(faces: &[Option<crate::composition::Interface>], grid: &[usize], w: usize, h: usize) -> crate::range::Measured {
+        let f = || crate::range::Faces::new(faces, "wall", 0.5);
+        crate::range::measure(w, h, grid, |p, d| f().wall(p, d), |p| f().floor(p), |p| f().doorway(p))
+            .expect("the fixture is well formed")
+    }
+
+    /// **The oracle test, and the whole guarantee.** Ask the solver for enclosure, then measure what
+    /// it produced with the metric that defines the word. If the encoding and `range::measure`
+    /// disagree about what "enclosed" means, this is where it shows — which is the failure the
+    /// encodings doc calls the most expensive available, because it looks like a broken metric.
+    #[test]
+    fn a_solved_grid_really_measures_as_enclosed() {
+        let kit = room_kit();
+        let (w, h, protos) = (5usize, 5usize, 3usize);
+        let full = (1u32 << protos) - 1;
+        for want in [0.1f32, 0.2, 0.32] {
+            let mut gp = GridProblem::encode(&anything_goes(protos), &vec![full; w * h], w, h, protos)
+                .expect("encodes");
+            let faces = crate::range::Faces::new(&kit, "wall", 0.5);
+            enclosure_rules(&mut gp.problem, &gp.place, &faces, w, h, want, None)
+                .expect("the wish is well formed");
+            let grid = gp
+                .read(&gp.problem.solve(0).expect("a reachable target must solve"))
+                .expect("reads back");
+            let m = measure_grid(&kit, &grid, w, h);
+            assert!(
+                m.enclosure >= want,
+                "asked for {want}, the metric reports {:.3} on {grid:?}",
+                m.enclosure
+            );
+            assert!(m.regions > 0, "enclosure above zero must mean at least one region");
+        }
+    }
+
+    #[test]
+    fn the_wish_is_what_makes_the_rooms_and_the_dream_alone_does_not() {
+        // **The control, and it is the whole experiment in miniature.** A seeded dream scatters the
+        // kit; adding the enclosure wish closes it. Without this, every other test here would be
+        // consistent with a constraint that does nothing, because an unconstrained solve happens to
+        // return an all-solid grid whose interior is enclosed by accident (measured: 0.360 on 5x5,
+        // which is also the most a 5x5 can reach — so there is no headroom to demonstrate anything
+        // against THAT baseline).
+        let kit = room_kit();
+        let (w, h, protos) = (7usize, 7usize, 3usize);
+        let full = (1u32 << protos) - 1;
+        let want = 0.30f32;
+
+        let solve = |wish: bool| {
+            let mut gp = GridProblem::encode(&anything_goes(protos), &vec![full; w * h], w, h, protos)
+                .expect("encodes");
+            preference_rules(&mut gp.problem, &gp.place, &[1.0, 1.0, 1.0], 11, 1).expect("wishes");
+            if wish {
+                let faces = crate::range::Faces::new(&kit, "wall", 0.5);
+                enclosure_rules(&mut gp.problem, &gp.place, &faces, w, h, want, Some(200))
+                    .expect("well formed");
+            }
+            let grid = gp.read(&gp.problem.solve(0).expect("solves")).expect("reads");
+            measure_grid(&kit, &grid, w, h).enclosure
+        };
+
+        let dream_only = solve(false);
+        let with_wish = solve(true);
+        assert!(dream_only < want, "the fixture must start below the target: {dream_only:.3}");
+        assert!(with_wish >= want, "the wish must reach its target: {with_wish:.3}");
+    }
+
+    /// A grid pinned cell-for-cell, so the constraint is judged against an arrangement whose
+    /// enclosure is known independently.
+    fn sealed_room_grid() -> Vec<usize> {
+        // Empty border, a ring of solid, one floor cell in the middle — the shape `range.rs`'s own
+        // `sealed_room()` fixture uses.
+        let mut g = vec![0usize; 25];
+        for z in 1..4 {
+            for x in 1..4 {
+                g[z * 5 + x] = 2;
+            }
+        }
+        g[2 * 5 + 2] = 1;
+        g
+    }
+
+    #[test]
+    fn the_rules_accept_exactly_the_enclosure_a_pinned_grid_really_has() {
+        // Nine of twenty-five cells are unreachable from the border, and `range::measure` scores the
+        // arrangement 1.0 because only those nine are floor at all. The constraint counts CELLS, so
+        // it can be asked for at most 9/25 = 0.36 on this grid — and that gap is the documented
+        // conservatism, asserted here rather than left as prose.
+        let kit = room_kit();
+        let grid = sealed_room_grid();
+        let m = measure_grid(&kit, &grid, 5, 5);
+        assert_eq!(m.enclosure, 1.0, "the metric scores this room fully enclosed");
+
+        let pinned: Vec<u32> = grid.iter().map(|&p| 1u32 << p).collect();
+        let solvable = |want: f32| {
+            let mut gp = GridProblem::encode(&anything_goes(3), &pinned, 5, 5, 3).expect("encodes");
+            let faces = crate::range::Faces::new(&kit, "wall", 0.5);
+            enclosure_rules(&mut gp.problem, &gp.place, &faces, 5, 5, want, None).expect("well formed");
+            gp.problem.solve(0).is_ok()
+        };
+        assert!(solvable(0.36), "nine enclosed cells of twenty-five is 0.36 and must be reachable");
+        assert!(!solvable(0.40), "asking for ten enclosed cells where nine exist must refuse");
+        // **The rounding boundary, and it is load-bearing.** `0.37 * 25 = 9.25`: rounding up asks for
+        // ten and refuses, rounding down asks for nine and accepts. Only rounding up is sound, since
+        // the bound has to hold for a `total_floor` that could be as large as `cells`. Without this
+        // line, mutating `ceil` to `floor` passes the whole suite — measured, not supposed.
+        assert!(!solvable(0.37), "9.25 cells must round UP to ten, or the bound is not sound");
+    }
+
+    #[test]
+    fn a_leak_in_the_ring_is_seen_by_the_rules_as_it_is_by_the_metric() {
+        // Knock one wall out. The fill walks in, nothing is enclosed, and the constraint must agree —
+        // this is the direction that catches a transposed `opposite`, because the breach is only
+        // visible from one side of the seam.
+        let kit = room_kit();
+        let mut grid = sealed_room_grid();
+        grid[1 * 5 + 2] = 0; // the north wall of the ring becomes Empty
+        // **Not zero.** The seven remaining solid cells are still unreachable, and under the
+        // composition adapter a solid tile IS floor (`Faces::floor(p) == (p != 0)`), so the metric
+        // reports 7/8 = 0.875. What the breach actually costs is the CENTRE, which the fill now
+        // reaches — nine enclosed cells become seven.
+        assert_eq!(measure_grid(&kit, &grid, 5, 5).enclosure, 0.875, "the metric sees the leak");
+
+        let solvable = |g: &[usize], want: f32| {
+            let pinned: Vec<u32> = g.iter().map(|&p| 1u32 << p).collect();
+            let mut gp = GridProblem::encode(&anything_goes(3), &pinned, 5, 5, 3).expect("encodes");
+            let faces = crate::range::Faces::new(&kit, "wall", 0.5);
+            enclosure_rules(&mut gp.problem, &gp.place, &faces, 5, 5, want, None).expect("well formed");
+            gp.problem.solve(0).is_ok()
+        };
+        // Nine enclosed cells is `ceil(0.36 * 25)`. The sealed room clears it; the leaked one, at
+        // seven, cannot — and that is the constraint counting exactly what the metric counts.
+        assert!(solvable(&sealed_room_grid(), 0.36), "the sealed room has nine enclosed cells");
+        assert!(!solvable(&grid, 0.36), "the leaked room has only seven and must refuse");
+    }
+
+    #[test]
+    fn a_soft_enclosure_wish_is_paid_for_rather_than_refused() {
+        // The same impossible ask, softly. It must return an arrangement and charge for the wish —
+        // that is the difference between the editor showing a red banner and showing a room.
+        let kit = room_kit();
+        let mut grid = sealed_room_grid();
+        grid[1 * 5 + 2] = 0;
+        let pinned: Vec<u32> = grid.iter().map(|&p| 1u32 << p).collect();
+        let mut gp = GridProblem::encode(&anything_goes(3), &pinned, 5, 5, 3).expect("encodes");
+        let faces = crate::range::Faces::new(&kit, "wall", 0.5);
+        enclosure_rules(&mut gp.problem, &gp.place, &faces, 5, 5, 0.5, Some(200)).expect("well formed");
+        let s = gp.problem.solve(0).expect("a soft wish must not refuse");
+        assert_eq!(s.unmet(), 200, "the unmeetable wish costs exactly its weight");
+        assert_eq!(gp.read(&s).expect("reads"), grid, "and the pinned arrangement is unchanged");
+    }
+
+    #[test]
+    fn enclosure_is_deterministic() {
+        let kit = room_kit();
+        let (w, h, protos) = (6usize, 6usize, 3usize);
+        let full = (1u32 << protos) - 1;
+        let once = || {
+            let mut gp = GridProblem::encode(&anything_goes(protos), &vec![full; w * h], w, h, protos)
+                .expect("encodes");
+            let faces = crate::range::Faces::new(&kit, "wall", 0.5);
+            enclosure_rules(&mut gp.problem, &gp.place, &faces, w, h, 0.25, None).expect("well formed");
+            gp.read(&gp.problem.solve(0).expect("solves")).expect("reads")
+        };
+        let first = once();
+        for round in 1..4 {
+            assert_eq!(once(), first, "round {round} enclosed a different set of cells");
+        }
+    }
+
+    #[test]
+    fn enclosure_rules_refuse_a_malformed_wish() {
+        let kit = room_kit();
+        let mut gp = GridProblem::encode(&anything_goes(3), &[0b111; 9], 3, 3, 3).expect("encodes");
+        let place = gp.place.clone();
+        let faces = crate::range::Faces::new(&kit, "wall", 0.5);
+        for bad in [-0.1f32, 1.5, f32::NAN] {
+            assert!(
+                enclosure_rules(&mut gp.problem, &place, &faces, 3, 3, bad, None).is_err(),
+                "{bad} is not a fraction"
+            );
+        }
+        assert!(
+            enclosure_rules(&mut gp.problem, &place, &faces, 4, 4, 0.5, None).is_err(),
+            "a region whose size disagrees with the placement must be refused"
+        );
+        assert!(
+            enclosure_rules(&mut gp.problem, &place, &faces, 0, 3, 0.5, None).is_err(),
+            "an empty region must be refused"
+        );
     }
 
     // ── variety ──────────────────────────────────────────────────────────────────────────────────
