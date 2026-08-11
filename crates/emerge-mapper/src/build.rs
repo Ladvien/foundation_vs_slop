@@ -44,6 +44,7 @@ use bevy::prelude::*;
 
 use emerge_core::composition::{Body, Composition, Envelope, Member};
 use emerge_core::grid::SnapLevel;
+use emerge_core::stack;
 
 /// **The tile being assembled**, and where the cursor is in it.
 #[derive(Resource, Default)]
@@ -210,10 +211,88 @@ pub fn insert_sorted(members: &mut Vec<Member>, m: Member) -> usize {
     at
 }
 
+/// Two plan boxes touch — overlapping, or meeting within a hair.
+///
+/// A local epsilon because `adjacency::EDGE_EPSILON` is `pub(crate)` to `emerge-core`, and the same
+/// millimetre for the same reason: art is authored to look right, so a panel and the fixture on it
+/// meet at a number that came out of a DCC rather than out of arithmetic.
+fn touching(a: ((f32, f32), (f32, f32)), b: ((f32, f32), (f32, f32))) -> bool {
+    const SKIN: f32 = 1e-3;
+    let span1 = |c: f32, s: f32| (c - s * 0.5, c + s * 0.5);
+    let (ax0, ax1) = span1(a.0 .0, a.1 .0);
+    let (az0, az1) = span1(a.0 .1, a.1 .1);
+    let (bx0, bx1) = span1(b.0 .0, b.1 .0);
+    let (bz0, bz1) = span1(b.0 .1, b.1 .1);
+    ax0 <= bx1 + SKIN && bx0 <= ax1 + SKIN && az0 <= bz1 + SKIN && bz0 <= az1 + SKIN
+}
+
+/// **Which member a fixture is mounted on, decided by where it was dropped.**
+///
+/// `Body::Descriptor::on` names *"a sibling `Member::id` this rests on"*, and the assembler wrote
+/// `None` into it for every piece — which means "find a host outside this group". A piece with a
+/// `Mount::OnFace`/`OnSurface` and no host is refused by `stack::resolve_y`, and `emerge-bevy`
+/// propagates that, so **the map refuses to load**. The author's own description of this tab —
+/// *"a wall mesh over it, and wall mounted light fixture on the wall mesh"* — was the one clause of
+/// it that could not be authored (FVS-R-24).
+///
+/// Automatic rather than a verb, which was the author's call: the requirement for this loop is the
+/// keyboard, and a fixture dropped against a wall has already said which wall it means by being
+/// there. Where it has *not* said — two walls equally adjacent — this **refuses naming both** rather
+/// than picking the first in some order, which would be a silent decision that ECS query order or a
+/// sort could quietly change later.
+///
+/// Returns `Ok(None)` for a piece that needs no host, which is most of them.
+pub fn host_for(
+    members: &[Member],
+    library: &emerge_core::library::Library,
+    guest: &emerge_core::descriptor::Descriptor,
+    at: (f32, f32),
+    span: (f32, f32),
+) -> Result<Option<String>, String> {
+    let want = match (stack::needs_surface(guest), stack::needs_face(guest)) {
+        (Some(c), _) => c,
+        (None, Some((c, _))) => c,
+        (None, None) => return Ok(None),
+    };
+
+    let mut found: Vec<&str> = Vec::new();
+    for m in members {
+        let Body::Descriptor { id, .. } = &m.body else {
+            // A hole offers nothing — it has no mesh yet — and a nested group's faces belong to its
+            // own members. Neither is a host.
+            continue;
+        };
+        let Some(host_d) = library.get(id) else {
+            continue;
+        };
+        if !stack::offers_for(host_d, guest) {
+            continue;
+        }
+        let host_span = crate::editor::brush_span(host_d, m.yaw);
+        if touching((at, span), (m.at, host_span)) {
+            found.push(&m.id);
+        }
+    }
+
+    match found.as_slice() {
+        [] => Err(format!(
+            "`{}` mounts to a `{want}` and nothing here offers one. Drop the piece it mounts to              first, or press Shift+Enter for a hole the generator fills.",
+            guest.id
+        )),
+        [one] => Ok(Some((*one).to_owned())),
+        many => Err(format!(
+            "`{}` touches {} — move it against one of them, so the tile says which it is mounted on.",
+            guest.id,
+            many.iter().map(|i| format!("`{i}`")).collect::<Vec<_>>().join(" and ")
+        )),
+    }
+}
+
 /// Drop a descriptor into the cursor's cell, returning the index it landed at.
 pub fn place(
     build: &mut Build,
-    descriptor: &str,
+    guest: &emerge_core::descriptor::Descriptor,
+    library: &emerge_core::library::Library,
     span: (f32, f32),
     yaw: f32,
     pitch: f32,
@@ -225,12 +304,15 @@ pub fn place(
         return Err(format!("`{}` claims no tile, so it has no grid to drop into", comp.id));
     };
     let (at, lift) = drop_at(size, pitch, build.at, span);
+    // **Resolved before the member exists**, so a refusal leaves the tile exactly as it was rather
+    // than needing the drop undone.
+    let on = host_for(&comp.members, library, guest, at, span)?;
     let m = Member {
-        id: fresh_id(&comp.members, descriptor),
+        id: fresh_id(&comp.members, &guest.id),
         body: Body::Descriptor {
-            id: descriptor.to_owned(),
+            id: guest.id.clone(),
             tip: (0, 0),
-            on: None,
+            on,
             patch: None,
         },
         at,
@@ -444,7 +526,7 @@ pub fn build_keys(
             return;
         }
         let span = crate::editor::brush_span(&d, 0.0);
-        match place(&mut build, &d.id, span, 0.0, step) {
+        match place(&mut build, &d, &project.library, span, 0.0, step) {
             Ok(i) => {
                 // **Focus follows the drop.** `insert_sorted` answers where it landed, and the two
                 // verbs that act on "this member" — turn and remove — mean the one you just put
@@ -891,30 +973,18 @@ mod tests {
     /// group `composition::validate` accepts.
     #[test]
     fn a_built_tile_validates() {
-        use emerge_core::descriptor::{Descriptor, Extent};
         let mut b = Build { open: Some(blank("site/tile_wall_n", 2.4)), rung: DEFAULT_RUNG, ..Default::default() };
+        let lib = kit();
+        let floor = lib.get("site/floor").unwrap_or_else(|| panic!("the kit has a floor"));
+        let wall = lib.get("site/wall").unwrap_or_else(|| panic!("the kit has a wall"));
 
-        place(&mut b, "site/floor", (1.0, 1.0), 0.0, 1.0).expect("the floor drops");
+        place(&mut b, floor, &lib, (1.0, 1.0), 0.0, 1.0).expect("the floor drops");
         b.at = (0, 0, 0);
-        place(&mut b, "site/wall", (0.1, 1.0), 0.0, FINE).expect("the wall drops");
+        place(&mut b, wall, &lib, (0.1, 1.0), 0.0, FINE).expect("the wall drops");
 
         let comp = b.open.take().expect("still open");
         assert_eq!(comp.members.len(), 2);
-
-        let piece = |id: &str, w: f32, d: f32, h: f32| Descriptor {
-            id: id.to_owned(),
-            extent: Extent { footprint: Some((w, d)), height: Some(h) },
-            ..Default::default()
-        };
-        let lib = emerge_core::library::Library {
-            version: emerge_core::library::LIBRARY_VERSION,
-            note: None,
-            descriptors: vec![
-                piece("site/floor", 1.0, 1.0, 0.06),
-                piece("site/wall", 0.1, 1.0, 2.4),
-            ],
-        };
-        emerge_core::composition::validate(&[comp], &lib).expect("a built tile is a legal tile");
+        emerge_core::composition::validate(&[comp], &lib).expect("a built tile is a legal tile")
     }
 
     /// A hole drops on the same grid with the same gesture, and lands inside the envelope — which is
@@ -937,7 +1007,131 @@ mod tests {
     #[test]
     fn dropping_with_no_tile_open_says_so() {
         let mut b = Build::default();
-        let e = place(&mut b, "site/floor", (1.0, 1.0), 0.0, 1.0).expect_err("nothing to drop into");
+        let lib = kit();
+        let floor = lib.get("site/floor").unwrap_or_else(|| panic!("the kit has a floor"));
+        let e = place(&mut b, floor, &lib, (1.0, 1.0), 0.0, 1.0).expect_err("nothing to drop into");
         assert!(e.contains("no tile open"), "{e}");
+    }
+
+    /// **A fixture is mounted on the member it was dropped against** — the author's own sentence,
+    /// *"a wall mounted light fixture on the wall mesh"*, which was the one clause of it that could
+    /// not be authored. `on` was hardcoded `None`, meaning "find a host outside this group", and a
+    /// face-mounted piece with no host makes `stack::resolve_y` refuse — so the **map would not
+    /// load**. Automatic rather than a verb, by the author's call: a fixture dropped against a wall
+    /// has already said which wall it means.
+    #[test]
+    fn a_fixture_is_bound_to_the_wall_it_is_dropped_against() {
+        let lib = kit();
+        let wall = lib.get("site/wall").unwrap_or_else(|| panic!("the kit has a wall"));
+        let sconce = lib.get("site/sconce").unwrap_or_else(|| panic!("the kit has a sconce"));
+
+        let mut b = Build { open: Some(blank("kit/t", 2.4)), rung: DEFAULT_RUNG, ..Default::default() };
+        place(&mut b, wall, &lib, (0.1, 1.0), 0.0, FINE).expect("the wall drops");
+        // **Layer zero, so `lift` is zero and the height under test is the mount's alone.**
+        // `Member::lift` is *"a vertical nudge on top of whatever the mount resolves to"* — additive
+        // by schema — so dropping three layers up would resolve to 1.8 + 1.0 and prove nothing about
+        // the face. Binding itself is a plan-only question and does not care which layer this is:
+        // a face mount takes its height from the mount, not from the cursor.
+        b.at = (0, 0, 1);
+        place(&mut b, sconce, &lib, (0.2, 0.2), 0.0, FINE).expect("the sconce drops onto the wall");
+
+        let comp = b.open.take().expect("still open");
+        let m = comp
+            .members
+            .iter()
+            .find(|m| m.id == "sconce")
+            .unwrap_or_else(|| panic!("the sconce is a member: {:?}", comp.members.iter().map(|m| &m.id).collect::<Vec<_>>()));
+        let Body::Descriptor { on, .. } = &m.body else {
+            panic!("a dropped piece is a descriptor member");
+        };
+        assert_eq!(
+            on.as_deref(),
+            Some("wall"),
+            "the fixture must name the wall it is on, or the map refuses to load"
+        );
+
+        // **And the tile stands up**, which is the claim that actually matters: `resolve_y` is what
+        // refused before, `emerge-bevy` propagates it with `?`, so this failing is a map that will
+        // not load. Same two calls the 3-D preview makes, so what passes here is what the author
+        // sees on the stage.
+        let scratch = emerge_core::map::Map {
+            version: emerge_core::map::MAP_VERSION,
+            name: "t".to_owned(),
+            bounds: (1.0, 2.4, 1.0),
+            ..Default::default()
+        };
+        let stamp = emerge_core::composition::Stamped {
+            id: "s".to_owned(),
+            of: comp.id.clone(),
+            ..Default::default()
+        };
+        let expanded = emerge_core::composition::expand(&scratch, &[stamp], &[comp], &lib)
+            .unwrap_or_else(|e| panic!("the tile must expand: {e}"));
+        let mut with_rows = scratch.clone();
+        with_rows.placements.extend(expanded.placements.iter().cloned());
+        let ys = emerge_core::stack::resolve_y(&with_rows, &lib)
+            .unwrap_or_else(|e| panic!("a bound fixture must resolve, or the map will not load: {e}"));
+
+        // The sconce rides its wall's face at the height the mount declares, rather than sitting on
+        // the floor — which is the difference between "it loaded" and "it is where it belongs".
+        let k = expanded
+            .placements
+            .iter()
+            .position(|p| p.descriptor == "site/sconce")
+            .unwrap_or_else(|| panic!("the sconce is a row"));
+        let y = ys.get(k).copied().unwrap_or_default();
+        assert!((y - 1.8).abs() < 1e-4, "the sconce should ride the face at 1.8 m, got {y}");
+    }
+
+    /// **Nothing to mount to is a refusal at the door**, not a member written now and a map that
+    /// will not load later.
+    #[test]
+    fn a_fixture_with_no_wall_under_it_is_refused_when_it_is_dropped() {
+        let lib = kit();
+        let sconce = lib.get("site/sconce").unwrap_or_else(|| panic!("the kit has a sconce"));
+        let mut b = Build { open: Some(blank("kit/t", 2.4)), rung: DEFAULT_RUNG, ..Default::default() };
+        let e = place(&mut b, sconce, &lib, (0.2, 0.2), 0.0, FINE).expect_err("nothing offers a face");
+        assert!(e.contains("wall-inner"), "it must name the class it wanted: {e}");
+        assert!(
+            b.open.as_ref().is_some_and(|c| c.members.is_empty()),
+            "a refused drop leaves the tile exactly as it was"
+        );
+    }
+
+    /// **Ambiguity refuses naming both**, rather than picking whichever sorts first — a silent
+    /// choice a later sort could change is the shape this repo's determinism rules exist to forbid.
+    #[test]
+    fn a_fixture_touching_two_walls_is_refused_naming_them() {
+        let lib = kit();
+        let wall = lib.get("site/wall").unwrap_or_else(|| panic!("the kit has a wall"));
+        let sconce = lib.get("site/sconce").unwrap_or_else(|| panic!("the kit has a sconce"));
+
+        let mut b = Build { open: Some(blank("kit/t", 2.4)), rung: DEFAULT_RUNG, ..Default::default() };
+        // Two walls in the same cell, so the sconce cannot say which it means by where it is.
+        place(&mut b, wall, &lib, (0.1, 1.0), 0.0, FINE).expect("the first wall drops");
+        place(&mut b, wall, &lib, (0.1, 1.0), 0.0, FINE).expect("the second wall drops");
+        let e = place(&mut b, sconce, &lib, (0.2, 0.2), 0.0, FINE).expect_err("which wall?");
+        assert!(e.contains("wall") && e.contains("wall_2"), "it must name both: {e}");
+    }
+
+    /// A four-piece kit with a real face relationship: the wall offers `wall-inner`, the sconce
+    /// needs it. Built here rather than read from `assets/` — this crate's rule is that tests do not
+    /// bind to the shipped corpus.
+    fn kit() -> emerge_core::library::Library {
+        use emerge_core::descriptor::{Descriptor, Extent, Mount, Offers};
+        let piece = |id: &str, w: f32, d: f32, h: f32| Descriptor {
+            id: id.to_owned(),
+            extent: Extent { footprint: Some((w, d)), height: Some(h) },
+            ..Default::default()
+        };
+        let mut wall = piece("site/wall", 0.1, 1.0, 2.4);
+        wall.offers = Offers { faces: vec!["wall-inner".to_owned()], ..Default::default() };
+        let mut sconce = piece("site/sconce", 0.2, 0.2, 0.3);
+        sconce.mount = Some(Mount::OnFace { class: "wall-inner".to_owned(), height: 1.8 });
+        emerge_core::library::Library {
+            version: emerge_core::library::LIBRARY_VERSION,
+            note: None,
+            descriptors: vec![piece("site/floor", 1.0, 1.0, 0.06), wall, sconce],
+        }
     }
 }

@@ -2929,3 +2929,33 @@ inside its twelve-row Global budget.
 *Verified:* `a_refusal_on_the_tiles_tab_is_visible_and_stays_there` fails without either fix (checked
 by reverting each), and the tab test ran green six times consecutively where it had been a coin flip.
 103 test binaries green.
+
+## FVS-R-24 · A tile can say that one member rests on another — DONE 2026-08-11
+
+**FVS-R-24 · A tile cannot say that one member rests on another, and finds out late.** Found 2026-08-11 while verifying the authoring loop; **this is the author's own stated example** — *"a wall mesh over it, and wall mounted light fixture on the wall mesh"* — and it is the one part of that sentence that does not work. `Body::Descriptor` carries `on: Option<String>`, *"a sibling `Member::id` this rests on"*, and **the assembler always writes `None`** (`build.rs:233`, and again at `787`), which means *"find a host outside this group"*. A piece whose descriptor has `Mount::OnFace`/`OnSurface` and no host is refused by `stack::resolve_y` — `a_fixture_with_no_host_recorded_is_refused` (`stack.rs:981`) — and `emerge-bevy` propagates that with `?` (`lib.rs:125`), so **the map refuses to load**. Two gaps, and the second's fix depends on the first's: **(1) no verb sets `on`.** Two shapes, and this is a design call rather than a detail — *automatic*, binding a dropped fixture to the member it is dropped against (fastest, matches "keystrokes are faster", but guesses), or *a verb*, focus a member and name its host (explicit, one more key, and the focus already tracks the last drop). **(2) the refusal is late.** `build_keys` could refuse at drop time the way it now refuses a piece that is not in the library — but if (1) lands as automatic binding, that refusal would be refusing things that should work, so it is not independently safe to build. **The slot path is unaffected and already works**: a `wall-fixture` hole is how a fixture gets into a tile *today*, and the round-trip test covers it end to end. *Done when:* the author's sentence is authorable, and a fixture with nowhere to mount is refused when it is dropped rather than when the map loads.
+
+**Shipped as automatic binding, the author's call** (asked 2026-08-11): a fixture dropped against a
+wall has already said which wall it means by being there, and the requirement for this loop is the
+keyboard. `build::host_for` resolves the host **before the member exists**, so a refusal leaves the
+tile exactly as it was rather than needing the drop undone. Three outcomes, all named:
+
+- **One candidate** → bound. `on: Some("wall")`.
+- **None** → refused at the door naming the class it wanted, and pointing at the other path:
+  *"press Shift+Enter for a hole the generator fills."*
+- **Two or more** → refused naming both, rather than taking the first in some order. A silent pick
+  that a later sort could change is exactly the shape this repo's determinism rules forbid.
+
+**Binding is a plan-only question**, deliberately: a face mount takes its height from the mount, not
+from the cursor, so the layer the fixture is dropped on does not decide which wall it is on.
+
+Proved end to end rather than at the seam it was broken at: the test expands the tile and runs
+`stack::resolve_y` — the two calls the 3-D preview makes, and the exact pair that refused before —
+then asserts the sconce rides its wall's face at the declared 1.8 m. All three tests verified against
+a revert to `on: None`.
+
+**One observation this surfaced, not yet a decision.** `Member::lift` is additive on top of whatever
+the mount resolves to (schema: *"a vertical nudge on top of"*), so walking up three layers and
+dropping a sconce puts it at 1.8 + 1.0 = 2.8 m, not at the cursor. That is the documented behaviour
+and it is arguably right for a face mount — the mount owns the height. But it is the same *shape* as
+the original "walls don't line up with where I'm placing it" complaint, and worth a look once tiles
+are being authored for real.
