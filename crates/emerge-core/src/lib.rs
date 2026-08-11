@@ -33,6 +33,7 @@ pub mod adjacency;
 pub mod census;
 pub mod clips;
 pub mod composition;
+pub mod constraints;
 pub mod convert;
 pub mod descriptor;
 pub mod gait;
