@@ -184,3 +184,67 @@ Both were listed in §3 as candidates; the sweep separates them.
 kinds were not the blocker because the room is *legal* under the learned support. The sweep
 strengthens it: the blocker is not vocabulary and not weight, so it is not something an authoring pass
 can fix. It is the solver's expressiveness.
+
+---
+
+## 8. Addendum — the same rows, run through the constraint solver
+
+The greedy collapse has been replaced (`docs/2026-08-10-constraint-solver-plan.md` L1–L4, minus
+enclosure). **The rows below are the ones committed on 2026-08-09 and were not touched**; what
+changed is the generator underneath them.
+
+`cargo run -p emerge-core --example expressive_range -- constraint` — one instrument, two generators,
+sharing the bins, the stopping rule, the histogram and the census, so a difference in the report is a
+difference in the *generator* rather than in how it was measured. Raw counts:
+`2026-08-10-expressive-range.constraint.bins.ron`.
+
+### The result, against the same rows
+
+| Row | WFC | Constraint solver |
+|---|---|---|
+| 3 — the gate, > 20% non-convergence | 0.0% — pass | **0.0% — pass** |
+| 1 — median enclosure < 0.15 | 0.000 — FIRES | **0.000 — FIRES** |
+| 2 — enclosure > 0.95, opening < 0.5 | pass | pass |
+| 4a — `H / ln 36 < 0.25` | fires vacuously | fires vacuously |
+| solves with any enclosed region | 0 / 128 | **0 / 128** |
+
+**Nothing reached the plane, again.** That is the expected result and not a disappointment: the run
+above carries tile rules, pattern rules and one seeded wish per cell, and **no enclosure constraint** —
+that is L3, and it is not built. What this measures is the faithful port, not the fix.
+
+### What did move: the distribution
+
+| Prototype group | asked | WFC | Constraint |
+|---|---|---|---|
+| **`Empty`** | 20.00% | **37.58%** | **28.43%** |
+| `site/tile_floor` | 20.00% | 17.86% | 16.74% |
+| `site/tile_wall_n` (4 turns) | 20.00% | 16.28% | 24.77% |
+| `site/tile_corner_nw` (4 turns) | 20.00% | 14.38% | 13.62% |
+| `site/tile_doorway_n` (4 turns) | 20.00% | 13.90% | 16.45% |
+
+`Empty`'s excess falls by nearly half, and walls go from under-represented to over-represented. The
+mechanism is worth naming because it is *not* a better sampler: the wishes are drawn from the same
+weights the collapse used, but a wish is only overruled when the rules force it, whereas propagation
+eliminated authored tiles *before* they were ever drawn. §2 explained `Empty`'s excess as "the one
+prototype that survives everywhere, so it wins everywhere" — this is that explanation confirmed from
+the other side, by removing the elimination step and watching the excess shrink.
+
+### What this settles, and what it does not
+
+**It confirms §7's conclusion by a second, independent route.** The addendum above falsified the
+weight hypothesis by driving `Empty` to 0% and getting two enclosed regions in 128. This drives it to
+28% by an entirely different mechanism and gets zero. Two different ways of fixing the distribution,
+neither of which produces a room — so the distribution was never the term that mattered.
+
+**It does not test the plan's central claim.** *"A closed boundary is a property over distance that
+local pairwise support cannot express"* predicts exactly this reading, and the reading is consistent
+with it, but consistency is not evidence: an encoding that merely reproduced WFC would look the same.
+What makes this run worth having is the **checkpoint**, not the histogram —
+`cargo run -p emerge-core --example faithful_port` shows 64 of 64 WFC arrangements accepted by the
+clauses and 0 of 576 adjacent pairs violating the support table, which is what says the two denote the
+same set of grids. The claim gets tested when `enclosure_rules` exists and this same table is read
+again.
+
+**The pre-registered criterion is unchanged and was not re-read to suit this.** Row 1 fires for the
+constraint solver exactly as it fired for the collapse, and that remains the honest verdict on the
+approach *as currently configured*.

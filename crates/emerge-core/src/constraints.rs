@@ -688,6 +688,87 @@ pub fn domain_rules(p: &mut Problem, place: &[Vec<Var>], initial: &[u32]) {
     }
 }
 
+/// **One seeded wish per cell — where variety comes from.**
+///
+/// Draws a prototype per cell from `weights` and asks, softly, for it. The solver then returns the
+/// legal arrangement *closest to that wish*, counted in cells it had to overrule.
+///
+/// # Why the seed enters here and nowhere else
+///
+/// A constraint solver is a function of its clauses. Handing it the same problem with 128 different
+/// seeds returns one arrangement 128 times, so variety cannot come from asking again — it has to come
+/// from **asking for something different**. That is the plan's §6 rule stated positively: vary the
+/// problem, never the solver. It also means the variety survives a solver upgrade, which variety
+/// drawn from a solver's own branching heuristics would not.
+///
+/// # This is Sturgeon's distribution rules, in the form the corpus recommends
+///
+/// Cooper's distribution rules bound how many of each tile the whole map may hold, which
+/// `docs/research/2026-08-10-constraint-encodings.md` measured at roughly 139,000 clauses encoded
+/// literally — the dominant cost of the entire problem, dwarfing reachability. It recommends this
+/// instead: one soft unit clause per cell, which costs one clause and one variable each, *and* is the
+/// per-seed variety mechanism at the same time. Two requirements, one encoding.
+///
+/// # What `weight` buys
+///
+/// The exchange rate between "look like what the seed asked for" and every other wish. One unit per
+/// cell means the objective is the number of cells overruled — a plain Hamming distance to the dream —
+/// so a global wish worth `w` may overrule exactly `w` cells to get its way and no more. Raising it
+/// makes the dream stubborn; lowering it makes the dream a suggestion.
+///
+/// `weights` is indexed by prototype and must be finite, non-negative, and sum to something positive —
+/// a grammar that wants nothing cannot be dreamt from, and that is an error rather than a uniform
+/// guess nobody asked for.
+pub fn preference_rules(
+    p: &mut Problem,
+    place: &[Vec<Var>],
+    weights: &[f64],
+    seed: u64,
+    weight: u32,
+) -> Result<(), String> {
+    if weights.is_empty() {
+        return Err("constraints: a grammar with no prototypes has nothing to wish for".to_owned());
+    }
+    if let Some(bad) = weights.iter().find(|w| !w.is_finite() || **w < 0.0) {
+        return Err(format!("constraints: {bad} is not a usable selection weight"));
+    }
+    let total: f64 = weights.iter().sum();
+    if !(total > 0.0) {
+        return Err(
+            "constraints: every prototype has weight zero, so there is nothing to draw from"
+                .to_owned(),
+        );
+    }
+
+    // One draw per cell, in row-major order. **The draw order is load-bearing**: it is what makes a
+    // seed reproduce an arrangement, so iterating `place` in any other order — or drawing lazily —
+    // would silently produce a different world from the same seed.
+    use crate::rng::DetRng;
+    let mut rng = crate::rng::seeded(seed);
+    for row in place {
+        let mut r = rng.unit() * total;
+        let mut wanted = weights.len() - 1;
+        for (k, w) in weights.iter().enumerate() {
+            r -= w;
+            if r <= 0.0 {
+                wanted = k;
+                break;
+            }
+        }
+        // Floating-point slack can leave `r` positive past the last prototype; `wanted` already holds
+        // the last index for that case, which is the same fall-through `wfc::collapse_one` uses.
+        let Some(&v) = row.get(wanted) else {
+            continue; // a cell narrower than the alphabet: nothing to wish for here
+        };
+        // A soft unit clause. `implies_any` from a true antecedent is exactly "assert this, softly",
+        // and it costs one clause where `count(&[lit], 1, 1, ..)` would build a counter to say the
+        // same thing.
+        let t = p.always_true();
+        p.implies_any(t, &[Lit::pos(v)], Some(weight));
+    }
+    Ok(())
+}
+
 /// **What may sit beside what**, over a row-major `w × h` grid.
 ///
 /// `support[dir][a]` is the bitmask of prototypes that may sit on `a`'s `dir` side, in `wfc`'s
@@ -1525,6 +1606,132 @@ mod tests {
         // Keep the two dearest (4 + 5), give up 1 + 2 + 3.
         assert_eq!(optimal_cost(&p), Some(6), "the fixture's optimum, by enumeration");
         assert_eq!(s.unmet(), 6);
+    }
+
+    // ── variety ──────────────────────────────────────────────────────────────────────────────────
+
+    /// A permissive support table over `protos` prototypes: anything may sit beside anything.
+    ///
+    /// Deliberately unconstrained, so a test about *variety* measures the wishes rather than the
+    /// adjacency relation refusing to let them differ.
+    fn anything_goes(protos: usize) -> [Vec<u32>; 4] {
+        let full = (1u32 << protos) - 1;
+        let row = vec![full; protos];
+        [row.clone(), row.clone(), row.clone(), row]
+    }
+
+    #[test]
+    fn different_seeds_give_different_arrangements() {
+        // The whole point. Without wishes the solver returns one arrangement however often it is
+        // asked; with them, the seed is what changes the answer.
+        let (w, h, protos) = (6usize, 6usize, 4usize);
+        let weights = vec![1.0; protos];
+        let full = (1u32 << protos) - 1;
+        let grids: Vec<Vec<usize>> = (1..=8u64)
+            .map(|seed| {
+                let mut gp = GridProblem::encode(&anything_goes(protos), &vec![full; w * h], w, h, protos)
+                    .expect("encodes");
+                preference_rules(&mut gp.problem, &gp.place, &weights, seed, 1).expect("wishes");
+                gp.read(&gp.problem.solve(0).expect("solves")).expect("reads")
+            })
+            .collect();
+        let distinct: std::collections::BTreeSet<&Vec<usize>> = grids.iter().collect();
+        assert!(distinct.len() >= 7, "8 seeds gave only {} distinct arrangements", distinct.len());
+    }
+
+    #[test]
+    fn the_same_seed_gives_the_same_arrangement() {
+        let (w, h, protos) = (6usize, 6usize, 4usize);
+        let weights = vec![1.0, 2.0, 0.5, 1.5];
+        let full = (1u32 << protos) - 1;
+        let once = |seed: u64| {
+            let mut gp = GridProblem::encode(&anything_goes(protos), &vec![full; w * h], w, h, protos)
+                .expect("encodes");
+            preference_rules(&mut gp.problem, &gp.place, &weights, seed, 1).expect("wishes");
+            gp.read(&gp.problem.solve(0).expect("solves")).expect("reads")
+        };
+        let first = once(99);
+        for round in 1..5 {
+            assert_eq!(once(99), first, "round {round} produced a different world from one seed");
+        }
+    }
+
+    #[test]
+    fn an_unconstrained_grid_gets_exactly_what_it_wished_for() {
+        // With nothing to forbid it, every wish is grantable, so the optimum costs nothing and the
+        // arrangement IS the dream. That pins the two halves together: if the draw and the clause it
+        // produces disagreed about which prototype was wanted, this is where it shows.
+        let (w, h, protos) = (5usize, 5usize, 3usize);
+        let weights = vec![1.0, 1.0, 1.0];
+        let full = (1u32 << protos) - 1;
+        let mut gp = GridProblem::encode(&anything_goes(protos), &vec![full; w * h], w, h, protos)
+            .expect("encodes");
+        preference_rules(&mut gp.problem, &gp.place, &weights, 4242, 1).expect("wishes");
+        let s = gp.problem.solve(0).expect("solves");
+        assert_eq!(s.unmet(), 0, "nothing forbids any wish, so none should be overruled");
+
+        // Re-draw the same dream independently and check the solved grid matches it cell for cell.
+        use crate::rng::DetRng;
+        let mut rng = crate::rng::seeded(4242);
+        let total: f64 = weights.iter().sum();
+        let dream: Vec<usize> = (0..w * h)
+            .map(|_| {
+                let mut r = rng.unit() * total;
+                let mut k = weights.len() - 1;
+                for (i, x) in weights.iter().enumerate() {
+                    r -= x;
+                    if r <= 0.0 {
+                        k = i;
+                        break;
+                    }
+                }
+                k
+            })
+            .collect();
+        assert_eq!(gp.read(&s).expect("reads"), dream, "the arrangement must be the dream itself");
+    }
+
+    #[test]
+    fn the_wishes_follow_the_authors_weights() {
+        // A prototype the author used ten times as often should be wished for about ten times as
+        // often. Checked on an unconstrained grid, where every wish is granted, so what lands in the
+        // cells IS the draw.
+        let (w, h) = (24usize, 24usize);
+        let weights = vec![10.0, 1.0];
+        let full = 0b11u32;
+        let mut gp = GridProblem::encode(&anything_goes(2), &vec![full; w * h], w, h, 2).expect("encodes");
+        preference_rules(&mut gp.problem, &gp.place, &weights, 7, 1).expect("wishes");
+        let grid = gp.read(&gp.problem.solve(0).expect("solves")).expect("reads");
+        let common = grid.iter().filter(|&&p| p == 0).count();
+        let share = common as f64 / grid.len() as f64;
+        assert!((0.83..=0.99).contains(&share), "the 10:1 prototype took {share:.3} of the cells");
+    }
+
+    #[test]
+    fn a_wish_the_rules_forbid_is_overruled_and_charged_for() {
+        // Two prototypes that may never touch, and a dream that asks for a mixture — so the solver
+        // has to overrule some cells, and the cost counts exactly how many.
+        let (w, h) = (4usize, 4usize);
+        let apart = vec![0b01u32, 0b10];
+        let support = [apart.clone(), apart.clone(), apart.clone(), apart];
+        let mut gp = GridProblem::encode(&support, &vec![0b11u32; w * h], w, h, 2).expect("encodes");
+        preference_rules(&mut gp.problem, &gp.place, &vec![1.0, 1.0], 3, 1).expect("wishes");
+        let s = gp.problem.solve(0).expect("solves");
+        let grid = gp.read(&s).expect("reads");
+        // The support permits only the two uniform grids, so every cell must agree.
+        assert!(grid.iter().all(|&p| p == grid[0]), "the rules admit only a uniform grid: {grid:?}");
+        // And the cost is the number of cells whose wish went unmet — which is the minority's size.
+        assert!(s.unmet() > 0 && s.unmet() < (w * h) as u64, "unmet {} is not a minority", s.unmet());
+    }
+
+    #[test]
+    fn preference_rules_refuse_a_grammar_that_cannot_be_drawn_from() {
+        let mut gp = GridProblem::encode(&anything_goes(2), &[0b11; 4], 2, 2, 2).expect("encodes");
+        let place = gp.place.clone();
+        assert!(preference_rules(&mut gp.problem, &place, &[], 1, 1).is_err(), "no prototypes");
+        assert!(preference_rules(&mut gp.problem, &place, &[0.0, 0.0], 1, 1).is_err(), "no weight");
+        assert!(preference_rules(&mut gp.problem, &place, &[1.0, -1.0], 1, 1).is_err(), "negative");
+        assert!(preference_rules(&mut gp.problem, &place, &[1.0, f64::NAN], 1, 1).is_err(), "not a number");
     }
 
     #[test]

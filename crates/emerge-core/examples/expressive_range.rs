@@ -24,6 +24,7 @@
 use std::collections::BTreeMap;
 
 use emerge_core::composition::{Compositions, Interface};
+use emerge_core::constraints::{self, GridProblem};
 use emerge_core::grammar::{self, Composed, Grammar, Prototype};
 use emerge_core::library::Library;
 use emerge_core::map::Map;
@@ -49,6 +50,34 @@ const MAX_BIN_CEILING: f32 = 0.50;
 /// Row 3's gate: above this share of failed solves, nothing else is interpretable.
 const NON_CONVERGENCE_GATE: f32 = 0.20;
 
+/// How much search one constrained solve may spend before it counts as a non-convergence.
+///
+/// A budget rather than no limit, so one pathological seed cannot stall a 1,024-solve sweep. It makes
+/// row 3 count two different events — "no arrangement exists" and "did not find one in time" — which
+/// is honest for a gate whose purpose is *"nothing below is interpretable"*, and would not be if the
+/// rows below distinguished them.
+const CONSTRAINED_BUDGET: u64 = 200_000;
+
+/// What produced an arrangement. **One instrument, two generators**: the rows, the bins, the stopping
+/// rule and the histogram are shared, because a second copy of the measurement could disagree with
+/// this one and then the comparison would be between instruments rather than between generators.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Generator {
+    /// `wfc::collapse_grid` through `grammar::solve` — greedy, non-backtracking, weighted collapse.
+    Wfc,
+    /// `constraints::GridProblem` plus one seeded wish per cell, solved to a proven optimum.
+    Constraint,
+}
+
+impl Generator {
+    fn name(self) -> &'static str {
+        match self {
+            Generator::Wfc => "wfc",
+            Generator::Constraint => "constraint",
+        }
+    }
+}
+
 /// The kit's edge token for a wall. Named here rather than in `emerge_core::range`, which never learns
 /// a kit's vocabulary — the same seam `agrees` is passed through.
 const WALL: &str = "wall";
@@ -60,7 +89,15 @@ fn main() {
     // **Reading the rows comes first** — ch12's whole argument is that looking at output before the
     // criterion is how a generator gets graded on its five best artefacts — so this is a second entry
     // point rather than something the report prints alongside the verdict.
-    let show: Option<u64> = std::env::args().nth(1).and_then(|a| a.parse().ok());
+    // `-- 7` still draws seed 7 from the default generator, as it always has. `-- constraint`
+    // sweeps the other one, and `-- constraint 7` draws from it.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let (source, rest): (Generator, &[String]) = match args.first().map(String::as_str) {
+        Some("constraint") => (Generator::Constraint, &args[1..]),
+        Some("wfc") => (Generator::Wfc, &args[1..]),
+        _ => (Generator::Wfc, &args[..]),
+    };
+    let show: Option<u64> = rest.first().and_then(|a| a.parse().ok());
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/emerge/site");
     let library: Library = match std::fs::read_to_string(root.join("library.ron"))
         .map_err(|e| e.to_string())
@@ -90,6 +127,7 @@ fn main() {
     let Composed { grammar: g, skipped, faces } = composed;
 
     println!("EXPRESSIVE RANGE — composition grammar over the shipped Site kit");
+    println!("generator: {}", source.name());
     println!("{}", "=".repeat(78));
     println!(
         "region {REGION} x {REGION} cells   grid {RANGES} x {RANGES} = {BINS} bins   \
@@ -102,7 +140,7 @@ fn main() {
     print_alphabet(&g, &faces);
 
     if let Some(seed) = show {
-        draw(&g, &faces, seed);
+        draw(&g, &faces, seed, source);
         return;
     }
 
@@ -111,8 +149,8 @@ fn main() {
     let mut chosen: Option<(usize, f32)> = None;
     println!("\nSTOPPING RULE — disjoint blocks, stop at TV <= {STABLE_TV}");
     for n in BLOCKS {
-        let a = histogram(&mut cache, &g, &faces, 1..=n as u64);
-        let b = histogram(&mut cache, &g, &faces, n as u64 + 1..=2 * n as u64);
+        let a = histogram(&mut cache, &g, &faces, 1..=n as u64, source);
+        let b = histogram(&mut cache, &g, &faces, n as u64 + 1..=2 * n as u64, source);
         let tv = range::total_variation(&a.bins, &b.bins);
         println!("  n = {n:>5} vs {n:>5}   TV = {tv:.4}{}", if tv <= STABLE_TV { "   <- stable" } else { "" });
         if tv <= STABLE_TV {
@@ -128,7 +166,7 @@ fn main() {
             (last, f32::NAN)
         }
     };
-    let run = histogram(&mut cache, &g, &faces, 1..=2 * n as u64);
+    let run = histogram(&mut cache, &g, &faces, 1..=2 * n as u64, source);
     let solves = 2 * n;
 
     // ---- the report -----------------------------------------------------------------------------
@@ -196,7 +234,7 @@ fn main() {
     println!("  not by constraint: this solver cannot be asked whether it can reach a bin (§4.3).");
 
     heatmap(&run.bins);
-    dump(&run);
+    dump(&run, source);
 
     println!("\n{}", "=".repeat(78));
     let any = med_enc.is_some_and(|m| m < 0.15)
@@ -259,6 +297,7 @@ fn histogram(
     g: &Grammar,
     faces: &[Option<Interface>],
     seeds: std::ops::RangeInclusive<u64>,
+    source: Generator,
 ) -> Run {
     let mut run = Run {
         bins: vec![0; BINS],
@@ -273,7 +312,7 @@ fn histogram(
         let scored = match cache.get(&seed) {
             Some(s) => s.clone(),
             None => {
-                let s = solve_and_score(g, faces, seed);
+                let s = solve_and_score(g, faces, seed, source);
                 cache.insert(seed, s.clone());
                 s
             }
@@ -307,29 +346,20 @@ fn solve_and_score(
     g: &Grammar,
     faces: &[Option<Interface>],
     seed: u64,
+    source: Generator,
 ) -> Option<(Measured, Vec<u32>)> {
-    let map = Map {
-        name: "expressive-range".into(),
-        bounds: (REGION as f32 * CELL, 3.0, REGION as f32 * CELL),
-        ..Map::default()
-    };
-    let mut n = 0u64;
-    let solved = grammar::solve(&map, g, CELL, seed, || {
-        n += 1;
-        format!("r@{n}")
-    })
-    .ok()?;
+    let grid = arrange(g, seed, source)?;
 
     let mut cells = vec![0u32; g.len()];
-    for &p in &solved.grid {
+    for &p in &grid {
         if let Some(slot) = cells.get_mut(p) {
             *slot += 1;
         }
     }
     let m = range::measure(
-        solved.width,
-        solved.height,
-        &solved.grid,
+        REGION,
+        REGION,
+        &grid,
         |p, d| Faces::new(faces, WALL, WALKABLE).wall(p, d),
         |p| Faces::new(faces, WALL, WALKABLE).floor(p),
         |p| Faces::new(faces, WALL, WALKABLE).doorway(p),
@@ -338,25 +368,50 @@ fn solve_and_score(
     Some((m, cells))
 }
 
+/// **The only place the two generators differ.** Everything above and below this function is shared,
+/// so a difference in the report is a difference in the generator rather than in how it was measured.
+///
+/// `None` is a solve that did not converge — row 3's countable event. For the constraint path that
+/// covers both a proven refusal and a budget exhaustion; see [`CONSTRAINED_BUDGET`].
+fn arrange(g: &Grammar, seed: u64, source: Generator) -> Option<Vec<usize>> {
+    match source {
+        Generator::Wfc => {
+            let map = Map {
+                name: "expressive-range".into(),
+                bounds: (REGION as f32 * CELL, 3.0, REGION as f32 * CELL),
+                ..Map::default()
+            };
+            let mut n = 0u64;
+            grammar::solve(&map, g, CELL, seed, || {
+                n += 1;
+                format!("r@{n}")
+            })
+            .ok()
+            .map(|s| s.grid)
+        }
+        Generator::Constraint => {
+            let full: u32 = if g.len() == 32 { u32::MAX } else { (1u32 << g.len()) - 1 };
+            let mut gp =
+                GridProblem::encode(&g.support, &vec![full; REGION * REGION], REGION, REGION, g.len())
+                    .ok()?;
+            // One wish per cell, drawn from the author's own weights — the whole of the variety, and
+            // the only thing the seed touches. Weight 1, so the objective is the number of cells the
+            // rules forced away from what the seed asked for.
+            constraints::preference_rules(&mut gp.problem, &gp.place, &g.weights, seed, 1).ok()?;
+            gp.problem.solve(CONSTRAINED_BUDGET).ok().and_then(|s| gp.read(&s).ok())
+        }
+    }
+}
+
 /// Draw one solve: a wall glyph per cell, then which cells the border fill could not reach.
 ///
 /// The glyph is a box-drawing character whose strokes point at the faces that present a wall, so a
 /// closed room reads as a closed rectangle and a stray wall reads as a stub.
-fn draw(g: &Grammar, faces: &[Option<Interface>], seed: u64) {
-    let map = Map {
-        name: "expressive-range".into(),
-        bounds: (REGION as f32 * CELL, 3.0, REGION as f32 * CELL),
-        ..Map::default()
+fn draw(g: &Grammar, faces: &[Option<Interface>], seed: u64, source: Generator) {
+    let Some(grid) = arrange(g, seed, source) else {
+        return println!("\nseed {seed} did not converge under {}", source.name());
     };
-    let mut n = 0u64;
-    let solved = match grammar::solve(&map, g, CELL, seed, || {
-        n += 1;
-        format!("r@{n}")
-    }) {
-        Ok(s) => s,
-        Err(e) => return println!("\nseed {seed} did not converge: {e}"),
-    };
-    let (w, h) = (solved.width, solved.height);
+    let (w, h) = (REGION, REGION);
 
     const GLYPH: [char; 16] = [
         '·', '\u{2575}', '\u{2576}', '\u{2514}', '\u{2577}', '\u{2502}', '\u{250c}', '\u{251c}',
@@ -366,7 +421,7 @@ fn draw(g: &Grammar, faces: &[Option<Interface>], seed: u64) {
     for z in 0..h {
         print!("  ");
         for x in 0..w {
-            let p = solved.grid[z * w + x];
+            let p = grid[z * w + x];
             if p == 0 {
                 print!("  ");
                 continue;
@@ -383,7 +438,7 @@ fn draw(g: &Grammar, faces: &[Option<Interface>], seed: u64) {
     let scored = range::measure(
         w,
         h,
-        &solved.grid,
+        &grid,
         |p, d| Faces::new(faces, WALL, WALKABLE).wall(p, d),
         |p| Faces::new(faces, WALL, WALKABLE).floor(p),
         |p| Faces::new(faces, WALL, WALKABLE).doorway(p),
@@ -453,9 +508,17 @@ fn heatmap(bins: &[u32]) {
     println!("   <- opening density, lower edge");
 }
 
-fn dump(run: &Run) {
+fn dump(run: &Run, source: Generator) {
+    // **A separate file per generator.** The WFC counts are committed evidence for a verdict that has
+    // already been written down; a constraint run overwriting them would quietly replace the thing
+    // the verdict was read from.
+    let name = match source {
+        Generator::Wfc => "2026-08-10-expressive-range.bins.ron".to_owned(),
+        Generator::Constraint => "2026-08-10-expressive-range.constraint.bins.ron".to_owned(),
+    };
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/research/2026-08-10-expressive-range.bins.ron");
+        .join("../../docs/research")
+        .join(name);
     let rows: Vec<String> = (0..RANGES)
         .map(|ex| {
             let cols: Vec<String> =
