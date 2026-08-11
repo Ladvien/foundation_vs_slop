@@ -386,6 +386,18 @@ pub fn build_keys(
             state.status.problem("nothing picked — choose a piece in the list first".to_owned());
             return;
         };
+        // **A member must name a library descriptor.** `ImportState::editing` falls back to the
+        // focused *candidate* when nothing in the library is selected, and a candidate is a mesh
+        // measured but not imported — so dropping one writes a tile naming an id `library.ron` does
+        // not carry, which expands to nothing at stamp time. Refused at the door rather than
+        // written and discovered later, which is this crate's rule for staged edits.
+        if project.library.get(&d.id).is_none() {
+            state.status.problem(format!(
+                "`{}` is not in the library yet — accept it on the Meshes tab first",
+                d.id
+            ));
+            return;
+        }
         let span = crate::editor::brush_span(&d, 0.0);
         match place(&mut build, &d.id, span, 0.0, step) {
             Ok(i) => {

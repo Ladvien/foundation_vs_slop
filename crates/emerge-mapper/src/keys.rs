@@ -189,6 +189,12 @@ pub enum Action {
     BuildUp,
     BuildDrop,
     BuildSlot,
+    /// Walk the library on the Tiles tab. Its own action rather than a second row for
+    /// [`Action::PrevCandidate`], because `binding` answers one row per action and the census holds
+    /// it to that — two rows would make which chord it reports arbitrary.
+    BuildPrevPiece,
+    /// The other direction. See [`Action::BuildPrevPiece`].
+    BuildNextPiece,
     BuildNew,
     BuildDropMember,
     BuildTurn,
@@ -566,6 +572,18 @@ pub const BINDINGS: &[Binding] = &[
     // second one in this context would collide with it, and the collision is the census pointing out
     // that they are the same verb. The handler asks which mode is live.
     b(Action::BuildNew, KeyCode::KeyN, false, Context::Tiles, "N", "new tile"),
+
+    // **The same two arrows the mesh tab walks its lists with**, because picking the piece is half of
+    // building a tile and it was the half that still cost a tab round-trip: `2`, arrow, `3`, Enter,
+    // once per member. The author's requirement for this loop was the keyboard — *"key strokes are
+    // faster"* — and a shared list nobody can reach from one of the two tabs sharing it is a shared
+    // list in name only. One row, in a context using five of its twelve.
+    //
+    // **They walk the library and not the candidates**, which is not a shortcut: a tile member must
+    // name a `library.ron` descriptor, so on this tab the second list is not a choice. See
+    // `move_selection`.
+    b(Action::BuildPrevPiece, KeyCode::ArrowUp, false, Context::Tiles, "up", "walk the library / Shift: x5"),
+    b(Action::BuildNextPiece, KeyCode::ArrowDown, false, Context::Tiles, "down", "walk the library / Shift: x5"),
     b(Action::ScanMesh, KeyCode::KeyB, false, Context::Meshes, "B", "from the mesh: rescan solid / turn x y z"),
     b(Action::RotateMeshX, KeyCode::KeyN, false, Context::Meshes, "N", "from the mesh: rescan solid / turn x y z"),
     b(Action::RotateMeshY, KeyCode::KeyO, false, Context::Meshes, "O", "from the mesh: rescan solid / turn x y z"),
@@ -1048,6 +1066,7 @@ mod tests {
             Action::BuildForward, Action::BuildLeft, Action::BuildBack, Action::BuildRight,
             Action::BuildDown, Action::BuildUp, Action::BuildRung,
             Action::BuildDrop, Action::BuildSlot,
+            Action::BuildPrevPiece, Action::BuildNextPiece,
             Action::BuildTurn, Action::BuildDropMember, Action::BuildNew,
         ];
         assert_eq!(

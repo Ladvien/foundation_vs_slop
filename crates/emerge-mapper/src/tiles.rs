@@ -3784,8 +3784,16 @@ fn move_selection(
     // Held arrows repeat at the shared [`crate::keys::REPEAT_SECS`] cadence, like the aim keys —
     // walking a 300-candidate scan one tap at a time is not a job.
     let dt = time.delta_secs();
-    let down = keys::repeating(&keyboard, live.0, Action::NextCandidate, &mut repeat, dt);
-    let up = keys::repeating(&keyboard, live.0, Action::PrevCandidate, &mut repeat, dt);
+    // **Which pair of arrows, chosen by tab.** One `repeating` call per direction, not two OR'd
+    // together: `Repeat` carries a single countdown, so asking it about two actions in one frame
+    // would have the second reset the first's cadence.
+    let (prev, next) = if live.0 == crate::keys::Context::Tiles {
+        (Action::BuildPrevPiece, Action::BuildNextPiece)
+    } else {
+        (Action::PrevCandidate, Action::NextCandidate)
+    };
+    let down = keys::repeating(&keyboard, live.0, next, &mut repeat, dt);
+    let up = keys::repeating(&keyboard, live.0, prev, &mut repeat, dt);
     let to_library = keys::just_pressed(&keyboard, live.0, Action::FocusLibrary);
     let to_candidates = keys::just_pressed(&keyboard, live.0, Action::FocusCandidates);
 
@@ -3808,6 +3816,23 @@ fn move_selection(
     }
     if !down && !up {
         return;
+    }
+
+    // **On the Tiles tab there is only one list.** A tile member must name a `library.ron`
+    // descriptor; a candidate is a mesh that has been measured and not imported, so it is not a
+    // legal source and walking it here would move a focus the tile author cannot spend. This is one
+    // path rather than two — the tab does not *prefer* the library, it is the only list it has.
+    if live.0 == crate::keys::Context::Tiles && state.selected_library_id.is_none() {
+        match library_ids(project.as_ref(), &filters).first() {
+            Some(first) => state.selected_library_id = Some(first.clone()),
+            None => {
+                state.status.problem(
+                    "the library is empty — import a mesh on the Meshes tab before building"
+                        .to_owned(),
+                );
+                return;
+            }
+        }
     }
     // Shift is the long stride: five rows per step, same key, same direction — a 300-candidate
     // scan at one row a step is a scroll wheel pretending to be a cursor.

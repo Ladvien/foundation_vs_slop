@@ -2410,6 +2410,155 @@ fn naming_a_composition_takes_the_keyboard_from_the_verbs() {
     );
 }
 
+/// **The library is walkable from the Tiles tab, by keyboard.**
+///
+/// Picking the piece is half of building a tile, and it was the half that still cost a tab
+/// round-trip — `2`, arrow, `3`, `Enter`, once per member — because the arrows were bound only in
+/// `Context::Meshes`. The author's requirement for this loop was the keyboard: *"key strokes are
+/// faster"*. A shared list that one of the two tabs sharing it cannot reach is shared in name only.
+#[test]
+fn the_arrows_walk_the_library_from_the_tiles_tab() {
+    use bevy::input::ButtonInput;
+    use bevy::prelude::{App, IntoScheduleConfigs, KeyCode, ResMut, Update};
+    use emerge_mapper::keys::{binding, Action};
+
+    let root = Fixture::new("tiles_arrows")
+        .descriptor("aaa_floor", "alpha")
+        .descriptor("zzz_wall", "alpha")
+        .build("test_map");
+    let mut app = harness::build_headless(&root, "test_map", None)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    app.update();
+
+    fn once(app: &mut App, chord: Vec<KeyCode>) {
+        app.add_systems(
+            Update,
+            IntoScheduleConfigs::before(
+                move |mut keys: ResMut<ButtonInput<KeyCode>>, mut done: bevy::prelude::Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        for k in &chord {
+                            keys.press(*k);
+                        }
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    }
+
+    once(&mut app, vec![binding(Action::TilesTab).key]);
+    let first = app
+        .world()
+        .resource::<emerge_mapper::tiles::ImportState>()
+        .selected_library_id
+        .clone();
+
+    once(&mut app, vec![binding(Action::BuildNextPiece).key]);
+    let after = app
+        .world()
+        .resource::<emerge_mapper::tiles::ImportState>()
+        .selected_library_id
+        .clone();
+
+    assert_ne!(
+        first, after,
+        "an arrow on the Tiles tab must move the piece in hand — it is the verb the loop repeats most"
+    );
+    assert!(
+        after.is_some(),
+        "and it must land on a library id, since that is the only legal source for a member"
+    );
+}
+
+/// **A tile cannot name a mesh the library does not carry.**
+///
+/// `ImportState::editing` falls back to the focused *candidate* when nothing in the library is
+/// selected — and a candidate is a mesh that has been measured and not imported. Dropping one wrote
+/// a member naming an id `library.ron` has never heard of, which expands to nothing at stamp time:
+/// a tile that looks authored and places nothing. Reachable by hand today — select a candidate on
+/// the Meshes tab, press the Tiles tab, press `Enter`. Refused at the door instead.
+#[test]
+fn a_piece_that_is_not_in_the_library_cannot_be_dropped_into_a_tile() {
+    use bevy::input::ButtonInput;
+    use bevy::prelude::{App, IntoScheduleConfigs, KeyCode, ResMut, Update};
+    use emerge_mapper::keys::{binding, Action};
+
+    let root = Fixture::new("tiles_unimported")
+        .descriptor("wall", "alpha")
+        .build("test_map");
+    let mut app = harness::build_headless(&root, "test_map", None)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    app.update();
+
+    // A measured-but-unimported mesh, focused — exactly what a scan leaves behind.
+    {
+        let mut state = app
+            .world_mut()
+            .resource_mut::<emerge_mapper::tiles::ImportState>();
+        state.candidates = vec![emerge_core::import::Candidate {
+            mesh: "meshes/ghost.glb".to_owned(),
+            proposed: emerge_core::descriptor::Descriptor {
+                id: "ghost".to_owned(),
+                ..Default::default()
+            },
+            measured: None,
+            front_detail: None,
+            triangles: 0,
+            findings: Vec::new(),
+        }];
+        state.selected = 0;
+        state.selected_library_id = None;
+    }
+
+    fn once(app: &mut App, chord: Vec<KeyCode>) {
+        app.add_systems(
+            Update,
+            IntoScheduleConfigs::before(
+                move |mut keys: ResMut<ButtonInput<KeyCode>>, mut done: bevy::prelude::Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        for k in &chord {
+                            keys.press(*k);
+                        }
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    }
+
+    once(&mut app, vec![binding(Action::TilesTab).key]);
+    // **Arriving must not quietly fix this for us**, or the test proves nothing about the drop. The
+    // tab only reaches for a library piece when *nothing* is in hand, and a candidate is something.
+    app.world_mut()
+        .resource_mut::<emerge_mapper::tiles::ImportState>()
+        .selected_library_id = None;
+    once(&mut app, vec![binding(Action::BuildDrop).key]);
+
+    let members = app
+        .world()
+        .resource::<emerge_mapper::build::Build>()
+        .open
+        .as_ref()
+        .map_or(0, |c| c.members.len());
+    assert_eq!(
+        members, 0,
+        "a candidate is not a library descriptor, so dropping one must write no member"
+    );
+    assert!(
+        app.world()
+            .resource::<emerge_mapper::tiles::ImportState>()
+            .status
+            .has_problem(),
+        "and the refusal must be said out loud, not swallowed"
+    );
+}
+
 /// **A refusal raised on the Tiles tab is on screen, and does not follow you off it.**
 ///
 /// The Meshes and Tiles tabs share one panel, and `ProblemBanner` carries the tab it speaks for —
