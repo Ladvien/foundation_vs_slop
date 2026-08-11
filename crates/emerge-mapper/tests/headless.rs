@@ -2528,6 +2528,55 @@ fn a_tile_survives_a_save_and_a_reopen() {
         panic!("a tile claims a tile");
     };
     assert_eq!((size.0, size.2), (emerge_core::grid::TILE, emerge_core::grid::TILE));
+
+    // **Then stamp it**, which is the other half §7 asked for: *"stamp it and assert the expanded
+    // rows match."* `composition::expand` is the one seam — the game reaches it from
+    // `emerge-bevy`, the editor from four sites — so this is the contract a third engine would
+    // implement, checked against a tile that came off the keyboard rather than out of a fixture.
+    let stamp = emerge_core::composition::Stamped {
+        id: "s1".to_owned(),
+        of: id.clone(),
+        at: (10.0, 4.0),
+        yaw: 0.0,
+        overrides: Vec::new(),
+        of_fingerprint: None,
+        note: None,
+        owned: false,
+        owned_because: None,
+    };
+    let out = emerge_core::composition::expand(
+        &project.map,
+        &[stamp],
+        &project.compositions.compositions,
+        &project.library,
+    )
+    .unwrap_or_else(|e| panic!("the tile an author just saved must expand: {e}"));
+
+    // **Two rows and one hole, not three rows.** A `Placed` names a descriptor and every consumer of
+    // one expects a mesh, so a slot arriving as a placement would have every reader reaching for a
+    // mesh that does not exist. The split is the whole reason `Expansion::slots` is its own field.
+    assert_eq!(
+        out.placements.len(),
+        2,
+        "the two pieces place; the hole is not a piece. Got {:?}",
+        out.placements.iter().map(|p| &p.id).collect::<Vec<_>>()
+    );
+    assert_eq!(out.slots.len(), 1, "and the hole comes out as a hole");
+    assert_eq!(
+        out.slots[0].accepts, "wall-fixture",
+        "carrying the token it was declared with, which is what a filler matches on"
+    );
+
+    // Provenance reads alike for both, so nothing has to parse an id back apart to learn what a row
+    // belongs to.
+    assert!(
+        out.slots[0].id.starts_with("s1/"),
+        "a hole is named `<stamp>/<member>` like a placement: {}",
+        out.slots[0].id
+    );
+    for p in &out.placements {
+        assert!(p.id.starts_with("s1/"), "and so is every row: {}", p.id);
+    }
 }
 
 /// **The library is walkable from the Tiles tab, by keyboard.**
