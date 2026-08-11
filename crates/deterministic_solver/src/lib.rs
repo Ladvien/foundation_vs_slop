@@ -161,18 +161,55 @@ pub struct Solver {
 }
 
 impl Solver {
-    /// A solver over `variables` variables, numbered 1..=`variables`.
+    /// A solver over `variables` variables, numbered 1..=`variables`, with no preferences.
     ///
-    /// `Err` past `u32::MAX` variables, which is the point at which the underlying representation
-    /// cannot name them.
+    /// A convenience over [`Solver::with_preferences`], not a second path — it is that function with
+    /// every preference absent.
     pub fn new(variables: usize) -> Result<Self, String> {
-        let n = u32::try_from(variables)
-            .map_err(|_| format!("deterministic_solver: {variables} variables is more than can be named"))?;
+        Self::with_preferences(&vec![None; variables])
+    }
+
+    /// A solver over `prefer.len()` variables, each with an optional value to try first.
+    ///
+    /// # A preference is a hint, never a constraint
+    ///
+    /// It changes which model comes back, never which models exist: the search tries the suggested
+    /// value first and backtracks out of it like any other decision, so an unsatisfiable problem is
+    /// still unsatisfiable and a satisfiable one still returns a real model.
+    ///
+    /// **This is how a caller gets variety without paying to prove an optimum.** Expressing "I would
+    /// like this cell to be that tile" as a soft constraint makes the solver prove it found the
+    /// arrangement *closest* to the whole wish-list, which is core-guided search over hundreds of
+    /// units — measured at 9 seconds where the same instance without it solves in 15 ms. As a
+    /// preference it costs nothing: the first descent follows the wish and propagation repairs it,
+    /// which is exactly what a greedy tile generator does, with backtracking added.
+    ///
+    /// Determinism is untouched. The preferences are part of the input, so the answer is still a
+    /// function of what it was given and nothing else.
+    ///
+    /// `Err` past `u32::MAX` variables, which is where the representation runs out of names.
+    pub fn with_preferences(prefer: &[Option<bool>]) -> Result<Self, String> {
+        let n = u32::try_from(prefer.len()).map_err(|_| {
+            format!("deterministic_solver: {} variables is more than can be named", prefer.len())
+        })?;
         let mut inner = BatSolver::new(pinned_opts(), Budgeted { learnt: 0, limit: 0 });
         // Allocate every variable up front so a model is always full-width, even for a variable that
         // appears in no clause. A caller reading a shorter model would silently get `false` for a
         // variable the solver was simply never told about.
-        let vars = (0..n).map(|v| inner.var_of_int(v)).collect();
+        let vars = (0..n)
+            .map(|v| {
+                let upol = match prefer.get(v as usize).copied().flatten() {
+                    Some(true) => lbool::TRUE,
+                    Some(false) => lbool::FALSE,
+                    None => lbool::UNDEF,
+                };
+                // `dvar: true` keeps the variable eligible for branching; `upol` is only consulted
+                // once the search has chosen to branch on it.
+                let var = inner.new_var(upol, true);
+                debug_assert_eq!(var.idx(), v, "batsat allocates variables in order");
+                var
+            })
+            .collect();
         Ok(Solver { inner, vars })
     }
 
@@ -489,6 +526,42 @@ mod tests {
             }
             other => panic!("expected a model, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_preference_steers_the_model_without_changing_which_models_exist() {
+        // Three free variables and one clause they all satisfy: every assignment with at least one
+        // of them true is legal, so the preference alone decides which comes back.
+        let clauses: &[&[Literal]] = &[&[1, 2, 3]];
+        let ask = |prefer: &[Option<bool>]| {
+            let mut s = Solver::with_preferences(prefer).expect("solver");
+            for c in clauses {
+                s.add_clause(c).expect("clause");
+            }
+            match s.solve(&[], Budget::UNLIMITED).expect("solve") {
+                Answer::Satisfied(m) => m.values().to_vec(),
+                other => panic!("expected a model, got {other:?}"),
+            }
+        };
+        assert_eq!(ask(&[Some(true), Some(false), Some(false)]), vec![true, false, false]);
+        assert_eq!(ask(&[Some(false), Some(true), Some(false)]), vec![false, true, false]);
+        assert_eq!(ask(&[Some(false), Some(false), Some(true)]), vec![false, false, true]);
+    }
+
+    #[test]
+    fn a_preference_cannot_make_an_unsatisfiable_problem_satisfiable() {
+        // The hint asks for `1` true; the clauses forbid it. A hint that could override them would
+        // be a constraint, and a wrong one.
+        let mut s = Solver::with_preferences(&[Some(true)]).expect("solver");
+        s.add_clause(&[-1]).expect("clause");
+        match s.solve(&[], Budget::UNLIMITED).expect("solve") {
+            Answer::Satisfied(m) => assert!(!m.get(1), "the clause wins over the hint"),
+            other => panic!("expected a model, got {other:?}"),
+        }
+        let mut t = Solver::with_preferences(&[Some(true)]).expect("solver");
+        t.add_clause(&[1]).expect("clause");
+        t.add_clause(&[-1]).expect("clause");
+        assert!(matches!(t.solve(&[], Budget::UNLIMITED).expect("solve"), Answer::Unsatisfiable { .. }));
     }
 
     #[test]

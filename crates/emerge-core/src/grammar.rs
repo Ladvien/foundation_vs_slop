@@ -207,6 +207,7 @@ pub fn learn(map: &Map, cell: f32) -> Result<Grammar, String> {
 }
 
 /// What a solve produced.
+#[derive(Debug)]
 pub struct Solved {
     /// New placements for the cells the solver filled. Owned and existing pieces are not repeated.
     ///
@@ -234,6 +235,33 @@ pub struct Solved {
     pub width: usize,
     /// The grid's height in cells.
     pub height: usize,
+    /// The total weight of the wishes this arrangement could not grant. Zero is everything asked for.
+    ///
+    /// Always zero from [`solve`], and accurately so — WFC carries no soft constraints, so there is
+    /// nothing it could have failed to meet. [`solve_constrained`] is where this becomes a number,
+    /// and it is what lets a caller say *"everything except the north corridor"* instead of refusing.
+    pub unmet: u64,
+}
+
+/// **What the author wants of a region, beyond the rules the kit already implies.**
+///
+/// Each field is a *wish*: the solver returns the arrangement that grants as much of it as the kit
+/// allows, and reports the rest as [`Solved::unmet`] rather than refusing outright.
+pub struct Wishes {
+    /// The fraction of the region that should be closed off from the outside, in `[0, 1]`.
+    ///
+    /// A **floor**, never a ceiling. [`crate::constraints::enclosure_rules`] explains why the
+    /// direction is load-bearing: a floor is sound without the foundedness machinery and a ceiling is
+    /// not, and the difference is 5,904 variables.
+    pub enclosure: f32,
+    /// What the enclosure wish is worth against the seeded texture, or `None` to make it a rule.
+    ///
+    /// **The exchange rate is arithmetic, not taste, so it is written down here.** The per-cell dream
+    /// is one wish of weight 1 per cell, so over a 12 x 12 region its total mass is 144. A weight
+    /// above that buys an enclosure that outranks the whole texture; below it, texture wins and rooms
+    /// appear only where they are cheap. `None` makes enclosure non-negotiable and brings back the
+    /// flat refusal for a region that cannot meet it.
+    pub enclosure_weight: Option<u32>,
 }
 
 /// **Fill the map's free cells with more of the author's arrangement.**
@@ -261,9 +289,165 @@ pub fn solve(
     } else {
         (1u32 << grammar.len()) - 1
     };
+    let (initial, owned_cells) = pinned_domains(map, grammar, cell, w, h, full)?;
+
+    let chosen = wfc::collapse_grid(w, h, &grammar.weights, &grammar.support, &initial, seed)
+        .ok_or_else(|| {
+            "grammar: no arrangement satisfies what you have pinned. The learned rules cannot tile \
+             this region around those cells — free some of them, or extend the example so the solver \
+             has more ways to join things up."
+                .to_owned()
+        })?;
+
+    let (placements, stamps, free_cells) =
+        harvest(map, grammar, cell, &chosen, &initial, w, h, &mut next_id);
+
+    Ok(Solved {
+        placements,
+        stamps,
+        free_cells,
+        owned_cells,
+        grid: chosen,
+        width: w,
+        height: h,
+        unmet: 0,
+    })
+}
+
+/// How much search one constrained solve may spend before it reports a refusal.
+///
+/// Counted in conflicts rather than seconds, so a busy machine and an idle one answer identically —
+/// see `deterministic_solver::Budget`. Generous: the shapes this sees settle in a fraction of it, and
+/// its job is to turn a pathological region into a named refusal rather than a hung editor.
+const SOLVE_BUDGET: u64 = 200_000;
+
+/// **Fill the map's free cells, and close some rooms while doing it.**
+///
+/// The same job as [`solve`] — same `Map`, same pinning, same [`Solved`] back, so `generate_from`,
+/// the stamp write-back, `Undo::Stamped` and `redraw_stamps` are all untouched — but through the
+/// constraint solver, which can express things WFC's local adjacency cannot.
+///
+/// # What it can do that [`solve`] cannot
+///
+/// **Close a boundary.** `docs/research/2026-08-10-expressive-range.md` measured 128 WFC solves with
+/// zero enclosed regions and falsified both the vocabulary and the weight explanations for it; a
+/// closed boundary is a property *over distance*, and no reweighting of local choices produces one.
+/// [`Wishes::enclosure`] is that term.
+///
+/// **Give a partial answer.** WFC either tiles the region or refuses it. Here a wish that cannot be
+/// granted is *charged for* — [`Solved::unmet`] — so the caller can say which corridor it could not
+/// give you rather than showing an empty screen and a paragraph.
+///
+/// # Where the variety comes from
+///
+/// `seed` draws one wish per cell from the author's own weights, and the solver returns the legal
+/// arrangement closest to them. It cannot come from anywhere else: a constraint solver is a function
+/// of its clauses, so asking again with a different seed and the same problem returns the same
+/// answer. Varying the *problem* is the mechanism, and it survives a solver upgrade in a way that
+/// variety drawn from branching heuristics would not.
+///
+/// `faces` is [`Composed::faces`], indexed alongside `grammar.prototypes`. It is what makes enclosure
+/// expressible, which is why this is the composition path's solver and [`solve`] still serves the
+/// grammars learned from placements — those derive no interfaces, so they have no walls to close.
+pub fn solve_constrained(
+    map: &Map,
+    grammar: &Grammar,
+    faces: &[Option<Interface>],
+    wishes: &Wishes,
+    cell: f32,
+    seed: u64,
+    mut next_id: impl FnMut() -> String,
+) -> Result<Solved, String> {
+    if grammar.len() < 2 {
+        return Err(
+            "grammar: nothing has been placed yet, so there is no arrangement to continue. Place a \
+             few pieces the way you want them first."
+                .to_owned(),
+        );
+    }
+    if faces.len() != grammar.len() {
+        return Err(format!(
+            "grammar: {} interfaces for {} prototypes — they must be the pair `from_compositions` \
+             returned, or the constraint and the metric are reading different kits.",
+            faces.len(),
+            grammar.len()
+        ));
+    }
+    let (w, h) = dimensions(map, cell);
+    let full: u32 = if grammar.len() == 32 {
+        u32::MAX
+    } else {
+        (1u32 << grammar.len()) - 1
+    };
+    let (initial, owned_cells) = pinned_domains(map, grammar, cell, w, h, full)?;
+
+    let mut gp = crate::constraints::GridProblem::encode(
+        &grammar.support,
+        &initial,
+        w,
+        h,
+        grammar.len(),
+    )?;
+    // The author's pinned cells, as unary constraints — the same masks WFC takes as `initial`.
+    crate::constraints::domain_rules(&mut gp.problem, &gp.place, &initial);
+    // One wish per cell, drawn from the weights the author's own arrangement taught.
+    crate::constraints::preference_rules(&mut gp.problem, &gp.place, &grammar.weights, seed)?;
+    if wishes.enclosure > 0.0 {
+        let read = crate::range::Faces::new(faces, WALL_TOKEN, WALKABLE_GAP);
+        crate::constraints::enclosure_rules(
+            &mut gp.problem,
+            &gp.place,
+            &read,
+            w,
+            h,
+            wishes.enclosure,
+            wishes.enclosure_weight,
+        )?;
+    }
+
+    let solution = gp.problem.solve(SOLVE_BUDGET)?;
+    let chosen = gp.read(&solution)?;
+    let (placements, stamps, free_cells) =
+        harvest(map, grammar, cell, &chosen, &initial, w, h, &mut next_id);
+
+    Ok(Solved {
+        placements,
+        stamps,
+        free_cells,
+        owned_cells,
+        grid: chosen,
+        width: w,
+        height: h,
+        unmet: solution.unmet(),
+    })
+}
+
+/// The edge token that means "a wall stands here", and the gap under a lintel that counts as a
+/// doorway.
+///
+/// **The kit's vocabulary, named once.** `range::Faces` takes both as parameters precisely so nothing
+/// is pinned to one kit's spelling; these are the shipped Site kit's, and they match what
+/// `examples/expressive_range.rs` measures with — so the constraint and the criterion read the same
+/// words. A kit that spells it differently needs these threaded through `Wishes`, not changed here.
+const WALL_TOKEN: &str = "wall";
+const WALKABLE_GAP: f32 = 0.5;
+
+/// The author's pinned cells as a per-cell domain mask, and how many there were.
+///
+/// **One definition, two solvers.** An owned placement narrows its cell to a single prototype — the
+/// unary constraint `wfc::boundary_initial` uses, and the one `constraints::domain_rules` takes. A
+/// second copy of this loop would eventually disagree with the first about exactly the cells the
+/// author cared enough about to pin, which is the worst possible place for two answers.
+fn pinned_domains(
+    map: &Map,
+    grammar: &Grammar,
+    cell: f32,
+    w: usize,
+    h: usize,
+    full: u32,
+) -> Result<(Vec<u32>, usize), String> {
     let mut initial = vec![full; w * h];
     let mut owned_cells = 0usize;
-
     for p in map.placements.iter().filter(|p| p.owned) {
         let c = to_cell(map, cell, p.at);
         if c.0 < 0 || c.1 < 0 || c.0 as usize >= w || c.1 as usize >= h {
@@ -283,37 +467,47 @@ pub fn solve(
         initial[c.1 as usize * w + c.0 as usize] = 1 << ix;
         owned_cells += 1;
     }
+    Ok((initial, owned_cells))
+}
 
-    let chosen = wfc::collapse_grid(w, h, &grammar.weights, &grammar.support, &initial, seed)
-        .ok_or_else(|| {
-            "grammar: no arrangement satisfies what you have pinned. The learned rules cannot tile \
-             this region around those cells — free some of them, or extend the example so the solver \
-             has more ways to join things up."
-                .to_owned()
-        })?;
-
+/// A solved grid as the rows a caller can write back, skipping the cells the author pinned.
+///
+/// Shared for the same reason as [`pinned_domains`]: which cells are new is a function of `initial`,
+/// and a caller re-deriving it would differ on the pinned ones.
+#[allow(clippy::too_many_arguments)]
+fn harvest(
+    map: &Map,
+    grammar: &Grammar,
+    cell: f32,
+    chosen: &[usize],
+    initial: &[u32],
+    w: usize,
+    h: usize,
+    next_id: &mut impl FnMut() -> String,
+) -> (Vec<Placed>, Vec<Stamped>, usize) {
     let mut placements = Vec::new();
     let mut stamps = Vec::new();
     let mut free_cells = 0usize;
     for y in 0..h {
         for x in 0..w {
             let c = (x as i64, y as i64);
-            let ix = chosen[y * w + x];
-            let pinned = initial[y * w + x].count_ones() == 1;
-            if pinned {
+            let (Some(&ix), Some(&mask)) = (chosen.get(y * w + x), initial.get(y * w + x)) else {
                 continue;
+            };
+            if mask.count_ones() == 1 {
+                continue; // the author pinned this one
             }
             free_cells += 1;
-            match &grammar.prototypes[ix] {
-                Prototype::Empty => {}
-                Prototype::Piece { descriptor, yaw } => placements.push(Placed {
+            match grammar.prototypes.get(ix) {
+                None | Some(Prototype::Empty) => {}
+                Some(Prototype::Piece { descriptor, yaw }) => placements.push(Placed {
                     id: next_id(),
                     descriptor: descriptor.clone(),
                     at: cell_centre(map, cell, c),
                     yaw: *yaw,
                     ..Placed::default()
                 }),
-                Prototype::Composed { composition, yaw } => stamps.push(Stamped {
+                Some(Prototype::Composed { composition, yaw }) => stamps.push(Stamped {
                     id: next_id(),
                     of: composition.clone(),
                     at: cell_centre(map, cell, c),
@@ -325,16 +519,7 @@ pub fn solve(
             }
         }
     }
-
-    Ok(Solved {
-        placements,
-        stamps,
-        free_cells,
-        owned_cells,
-        grid: chosen,
-        width: w,
-        height: h,
-    })
+    (placements, stamps, free_cells)
 }
 
 
@@ -771,6 +956,136 @@ mod tests {
     }
 
     /// **Swapping the rule changes the grammar** — driven through the learner, not just asserted of
+    // ── solve_constrained, against the shipped kit ───────────────────────────────────────────────
+
+    /// The shipped Site kit, learned — the same fixture the two tests above use.
+    fn site_kit() -> Composed {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/emerge/site");
+        let library: Library =
+            ron::from_str(&std::fs::read_to_string(root.join("library.ron")).expect("library"))
+                .expect("the site library parses");
+        let comps: crate::composition::Compositions =
+            ron::from_str(&std::fs::read_to_string(root.join("compositions.ron")).expect("groups"))
+                .expect("the site compositions parse");
+        from_compositions(&comps.compositions, &library, 1, 1.0, crate::composition::agrees)
+            .expect("the shipped kit learns")
+    }
+
+    /// A square region of `n` cells a side, with nothing pinned.
+    fn region(n: usize) -> Map {
+        Map {
+            name: "constrained".into(),
+            bounds: (n as f32, 3.0, n as f32),
+            ..Map::default()
+        }
+    }
+
+    fn measured(faces: &[Option<Interface>], solved: &Solved) -> crate::range::Measured {
+        let f = || crate::range::Faces::new(faces, WALL_TOKEN, WALKABLE_GAP);
+        crate::range::measure(
+            solved.width,
+            solved.height,
+            &solved.grid,
+            |p, d| f().wall(p, d),
+            |p| f().floor(p),
+            |p| f().doorway(p),
+        )
+        .expect("a solved grid measures")
+    }
+
+    /// **The thing this whole layer exists for**, end to end and against the shipped kit: ask for
+    /// enclosure through the editor's own entry point, and check the metric agrees a room is there.
+    #[test]
+    fn a_hard_wish_makes_rooms_the_metric_agrees_are_rooms() {
+        let Composed { grammar: g, faces, .. } = site_kit();
+        let want = 0.25;
+        let wishes = Wishes { enclosure: want, enclosure_weight: None };
+        let solved = solve_constrained(&region(12), &g, &faces, &wishes, 1.0, 7, ids())
+            .expect("a hard, reachable wish must be granted");
+        let m = measured(&faces, &solved);
+        assert!(m.enclosure >= want, "asked {want}, the metric reports {:.3}", m.enclosure);
+        assert!(m.regions > 0, "enclosure above zero means at least one enclosed region");
+        assert_eq!(solved.unmet, 0, "a hard wish is met or refused, never charged for");
+        assert_eq!(solved.grid.len(), 144, "the grid comes back whole");
+        assert!(!solved.stamps.is_empty(), "a composition grammar writes stamps");
+        assert!(solved.placements.is_empty(), "and no loose placements");
+    }
+
+    /// The same region with no wish. Separated so the difference is attributable: WFC's own arm of
+    /// this comparison is the 128-solve run in `docs/research/2026-08-10-expressive-range.md`.
+    #[test]
+    fn without_a_wish_the_same_region_stays_open() {
+        let Composed { grammar: g, faces, .. } = site_kit();
+        let wishes = Wishes { enclosure: 0.0, enclosure_weight: None };
+        let solved = solve_constrained(&region(12), &g, &faces, &wishes, 1.0, 7, ids())
+            .expect("solves");
+        assert_eq!(measured(&faces, &solved).regions, 0, "nothing asked for, nothing closed");
+    }
+
+    #[test]
+    fn an_impossible_wish_is_charged_for_rather_than_refused_when_soft() {
+        // Total enclosure is not reachable — the region's border is always outside — so this is the
+        // partial-satisfaction case the editor needs: an arrangement comes back anyway, priced.
+        let Composed { grammar: g, faces, .. } = site_kit();
+        let wishes = Wishes { enclosure: 1.0, enclosure_weight: Some(200) };
+        let solved = solve_constrained(&region(12), &g, &faces, &wishes, 1.0, 3, ids())
+            .expect("a soft wish must not refuse");
+        assert_eq!(solved.unmet, 200, "the wish it could not grant costs exactly its weight");
+        assert_eq!(solved.grid.len(), 144);
+    }
+
+    #[test]
+    fn an_impossible_wish_refuses_by_name_when_hard() {
+        let Composed { grammar: g, faces, .. } = site_kit();
+        let wishes = Wishes { enclosure: 1.0, enclosure_weight: None };
+        let err = solve_constrained(&region(12), &g, &faces, &wishes, 1.0, 3, ids())
+            .expect_err("total enclosure is unreachable");
+        assert!(err.contains("no arrangement"), "the refusal must say what happened: {err}");
+    }
+
+    #[test]
+    fn a_constrained_solve_is_reproducible_for_a_seed() {
+        let Composed { grammar: g, faces, .. } = site_kit();
+        let wishes = Wishes { enclosure: 0.2, enclosure_weight: Some(200) };
+        let once = || {
+            solve_constrained(&region(10), &g, &faces, &wishes, 1.0, 4242, ids())
+                .expect("solves")
+                .grid
+        };
+        let first = once();
+        for round in 1..4 {
+            assert_eq!(once(), first, "round {round} produced a different world from one seed");
+        }
+    }
+
+    #[test]
+    fn different_seeds_give_different_worlds() {
+        let Composed { grammar: g, faces, .. } = site_kit();
+        let wishes = Wishes { enclosure: 0.2, enclosure_weight: Some(200) };
+        let grids: Vec<Vec<usize>> = (1..=5u64)
+            .map(|s| {
+                solve_constrained(&region(10), &g, &faces, &wishes, 1.0, s, ids())
+                    .expect("solves")
+                    .grid
+            })
+            .collect();
+        let distinct: std::collections::BTreeSet<&Vec<usize>> = grids.iter().collect();
+        assert_eq!(distinct.len(), 5, "five seeds must give five arrangements");
+    }
+
+    #[test]
+    fn interfaces_that_do_not_match_the_grammar_are_refused() {
+        // The two come back together from `from_compositions` for a reason: a mismatched pair means
+        // the constraint and the metric are indexing different kits, which is the drift that costs a
+        // day of blaming the metric.
+        let Composed { grammar: g, mut faces, .. } = site_kit();
+        faces.pop();
+        let wishes = Wishes { enclosure: 0.2, enclosure_weight: None };
+        let err = solve_constrained(&region(8), &g, &faces, &wishes, 1.0, 1, ids())
+            .expect_err("a short interface list must be refused");
+        assert!(err.contains("interfaces"), "the refusal must name the mismatch: {err}");
+    }
+
     /// the default rule.
     ///
     /// If the face comparison were inline, as it is in `declared`, both calls below would produce
@@ -1417,3 +1732,4 @@ pub fn declared(library: &Library, per_tile: u32, cell: f32) -> Result<Grammar, 
         support,
     })
 }
+

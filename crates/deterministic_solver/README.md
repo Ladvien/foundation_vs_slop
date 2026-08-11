@@ -50,6 +50,14 @@ That is on purpose — optimisation belongs to whoever knows what the weights *m
 
 Guard each soft constraint with an indicator variable, assume the indicators, and price whatever the core names. That is enough to build core-guided MaxSAT (OLL/RC2) on top without this crate learning what a weight is.
 
+## Preferences: steering the answer without constraining it
+
+`Solver::with_preferences` gives each variable an optional value to try first. It changes *which* model comes back, never which models exist — the search backtracks out of a preference like any other decision.
+
+This is the cheap way to get variety. Expressing "I'd like this cell to be that tile" as a soft constraint makes the solver prove it found the arrangement *closest* to the whole wish-list, which is core-guided search over hundreds of units. Measured on a 12×12 tile problem: **9,171 ms as soft constraints, 15 ms as preferences**, for a guarantee about proximity to a random draw that nobody needed.
+
+Determinism is untouched: the preferences are part of the input, so the answer is still a function of what the solver was given.
+
 ## Budgets bound a question, not a lifetime
 
 The conflict count resets on every `solve`, so a budget means "this question may cost this much". The alternative — counting from construction — would make the tenth question in a loop answerable only if the first nine happened to be cheap, which is not a bound anyone could predict.

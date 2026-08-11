@@ -45,4 +45,6 @@ What it owes such a loop is the three primitives one is built from: **assumption
 
 `emerge-core::constraints::Problem::solve` is the caller that does this, core-guided (OLL). It lives there and not here because the weights mean something only to whoever chose them.
 
+**`with_preferences` is the fourth primitive, and it is not part of that loop.** A per-variable first guess steers which model comes back without changing which models exist. It exists because the alternative — expressing a preference as a soft constraint — makes the optimiser prove the result is *closest* to the wish-list, and that measured 9,171 ms against 15 ms on a real 12×12 tile problem. If a caller wants variety rather than optimality, this is the mechanism; `unmet` then reports only the wishes someone actually asked to have minimised.
+
 It also knows nothing about grids, tiles, prototypes or games. Literals are plain DIMACS `i32` precisely so that a caller can swap this crate out; a bespoke literal type would couple the caller to the thing it was supposed to be able to replace.

@@ -397,7 +397,7 @@ fn arrange(g: &Grammar, seed: u64, source: Generator) -> Option<Vec<usize>> {
             // One wish per cell, drawn from the author's own weights — the whole of the variety, and
             // the only thing the seed touches. Weight 1, so the objective is the number of cells the
             // rules forced away from what the seed asked for.
-            constraints::preference_rules(&mut gp.problem, &gp.place, &g.weights, seed, 1).ok()?;
+            constraints::preference_rules(&mut gp.problem, &gp.place, &g.weights, seed).ok()?;
             gp.problem.solve(CONSTRAINED_BUDGET).ok().and_then(|s| gp.read(&s).ok())
         }
     }

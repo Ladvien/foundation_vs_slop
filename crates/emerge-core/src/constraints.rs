@@ -120,6 +120,18 @@ struct Soft {
     weight: u32,
 }
 
+/// The largest at-most-one this encodes pairwise rather than with a counter.
+///
+/// Set to the alphabet ceiling `crate::grammar::MAX_PROTOTYPES`, so **every exactly-one-per-cell in a
+/// tiled region takes the pairwise path** — which is the point, for the reason [`Problem::count`]
+/// gives: a counter puts unnamed variables in the placement block and the search branches on them.
+/// At 14 prototypes that trades 28 variables for 91 binary clauses, which is the right way round when
+/// the variables are the thing being steered.
+///
+/// A larger alphabet would want measuring rather than assuming; the quadratic clause count is only
+/// 496 at the ceiling, so there is no crossover inside the range this solver can address at all.
+const AMO_PAIRWISE_MAX: usize = crate::grammar::MAX_PROTOTYPES;
+
 /// A set of Boolean variables, clauses over them, and soft constraints with weights.
 ///
 /// Clauses are stored flat — `lits[starts[i]..starts[i + 1]]` is clause `i` — because a back-end
@@ -132,6 +144,11 @@ pub struct Problem {
     /// One more entry than there are clauses; `starts[0]` is 0 and the last entry is `lits.len()`.
     starts: Vec<u32>,
     soft: Vec<Soft>,
+    /// A value to try first, per variable. Sparse — most variables never get one.
+    ///
+    /// **A hint, not a constraint.** It changes which model comes back and never which models exist,
+    /// which is exactly what makes it the right home for a seeded wish: see [`preference_rules`].
+    prefer: Vec<Option<bool>>,
 }
 
 impl Default for Problem {
@@ -152,6 +169,7 @@ impl Problem {
             lits: Vec::new(),
             starts: vec![0],
             soft: Vec::new(),
+            prefer: Vec::new(),
         };
         let t = p.var();
         // Pushed raw: `clause` recognises this very literal as already-true and would drop the unit
@@ -166,6 +184,19 @@ impl Problem {
         let v = Var(self.n_vars);
         self.n_vars += 1;
         v
+    }
+
+    /// Suggest a value for `v`, to be tried before its opposite.
+    ///
+    /// Costs nothing and forbids nothing — see [`preference_rules`] for why the difference between a
+    /// hint and a soft constraint is nine seconds here.
+    pub fn prefer(&mut self, v: Var, value: bool) {
+        if self.prefer.len() <= v.index() {
+            self.prefer.resize(v.index() + 1, None);
+        }
+        if let Some(slot) = self.prefer.get_mut(v.index()) {
+            *slot = Some(value);
+        }
     }
 
     /// How many variables exist, including the auxiliaries the encodings allocate.
@@ -297,6 +328,34 @@ impl Problem {
             return; // nothing to say
         }
 
+        // **At most one, over a small set: pairwise, and no auxiliaries at all.**
+        //
+        // The counter below is asymptotically better and wrong here for a reason that is not about
+        // size. Its `s[i][j]` variables live in the middle of the placement block and mean nothing a
+        // caller can name, and **the search branches on them**. That destroys a seeded preference:
+        // hints are attached to placement variables, so a decision made on a counter variable
+        // instead forces cells to values nobody wished for. Measured — with the counter, a 5 x 5
+        // unconstrained grid under a full set of hints followed the dream in ONE cell and collapsed
+        // to a single prototype in the other twenty-four.
+        //
+        // Pairwise costs `n(n-1)/2` binary clauses and zero variables, propagates in one step, and
+        // leaves every variable in the block meaning "this cell holds this prototype".
+        if hi == 1 && (n as usize) <= AMO_PAIRWISE_MAX {
+            let g = self.guard(weight);
+            if lo == 1 {
+                let mut any = Vec::with_capacity(vs.len() + 1);
+                any.push(g);
+                any.extend_from_slice(vs);
+                self.add_clause(&any);
+            }
+            for (i, &a) in vs.iter().enumerate() {
+                for &b in &vs[i + 1..] {
+                    self.add_clause(&[g, !a, !b]);
+                }
+            }
+            return;
+        }
+
         // Levels the assertions need: `lo` for the floor, `hi + 1` for the ceiling.
         let ceiling = if hi < n { hi + 1 } else { 0 };
         let k = lo.max(ceiling);
@@ -425,7 +484,9 @@ impl Problem {
     /// reporting whatever it happened to leave unmet — is *valid and not optimal*: a wall that could
     /// have been left standing, quietly not, with a number beside it that looks like a measurement.
     pub fn solve(&self, conflicts: u64) -> Result<Solution, String> {
-        let mut solver = deterministic_solver::Solver::new(self.vars())?;
+        let mut hints = self.prefer.clone();
+        hints.resize(self.vars(), None);
+        let mut solver = deterministic_solver::Solver::with_preferences(&hints)?;
         for clause in self.iter_clauses() {
             let lits: Vec<deterministic_solver::Literal> = clause.iter().map(to_dimacs).collect();
             solver.add_clause(&lits)?;
@@ -709,12 +770,29 @@ pub fn domain_rules(p: &mut Problem, place: &[Vec<Var>], initial: &[u32]) {
 /// instead: one soft unit clause per cell, which costs one clause and one variable each, *and* is the
 /// per-seed variety mechanism at the same time. Two requirements, one encoding.
 ///
-/// # What `weight` buys
+/// # Why a hint and not a soft constraint, measured
 ///
-/// The exchange rate between "look like what the seed asked for" and every other wish. One unit per
-/// cell means the objective is the number of cells overruled — a plain Hamming distance to the dream —
-/// so a global wish worth `w` may overrule exactly `w` cells to get its way and no more. Raising it
-/// makes the dream stubborn; lowering it makes the dream a suggestion.
+/// The obvious encoding is one soft unit clause per cell, making the objective a Hamming distance to
+/// the dream — and it is what `docs/research/2026-08-10-constraint-encodings.md` recommends. **It is
+/// unaffordable, and the numbers are not close.** Core-guided MaxSAT needs at least one SAT call per
+/// unit of optimum cost, and over 144 cells the optimum runs to ~46 overruled wishes:
+///
+/// | 12 x 12, shipped Site kit | enclosure only | plus a soft dream |
+/// |---|---|---|
+/// | `want = 0.15` | 15 ms | 9,171 ms |
+/// | `want = 0.25` | 20 ms | budget exhausted |
+///
+/// So the satisfiability is trivial and the *optimisation* is the whole cost — exactly what that
+/// document predicted, one section before recommending the thing that triggers it.
+///
+/// A preference costs nothing: the search tries the wished-for tile first and propagation repairs
+/// what the rules forbid. That is **the same shape as the greedy collapse this replaces** — sample,
+/// propagate, repair — with backtracking added and the global constraint still enforced.
+///
+/// **It is still "vary the problem, not the solver"** (plan §6). The preference vector is an input,
+/// so the answer stays a function of what the solver was given; a different seed is a different
+/// problem. What is given up is the *proof* that no legal arrangement sits closer to the dream — a
+/// guarantee about proximity to a random draw, which was never worth nine seconds.
 ///
 /// `weights` is indexed by prototype and must be finite, non-negative, and sum to something positive —
 /// a grammar that wants nothing cannot be dreamt from, and that is an error rather than a uniform
@@ -724,7 +802,6 @@ pub fn preference_rules(
     place: &[Vec<Var>],
     weights: &[f64],
     seed: u64,
-    weight: u32,
 ) -> Result<(), String> {
     if weights.is_empty() {
         return Err("constraints: a grammar with no prototypes has nothing to wish for".to_owned());
@@ -757,14 +834,18 @@ pub fn preference_rules(
         }
         // Floating-point slack can leave `r` positive past the last prototype; `wanted` already holds
         // the last index for that case, which is the same fall-through `wfc::collapse_one` uses.
-        let Some(&v) = row.get(wanted) else {
+        if row.get(wanted).is_none() {
             continue; // a cell narrower than the alphabet: nothing to wish for here
-        };
-        // A soft unit clause. `implies_any` from a true antecedent is exactly "assert this, softly",
-        // and it costs one clause where `count(&[lit], 1, 1, ..)` would build a counter to say the
-        // same thing.
-        let t = p.always_true();
-        p.implies_any(t, &[Lit::pos(v)], Some(weight));
+        }
+        // **Hint every prototype in the cell, not just the wanted one.** Hinting only the winner
+        // leaves its rivals at the solver's default of `false`, and whichever of them the search
+        // happens to branch on first goes false — after which exactly-one forces whatever is left,
+        // which is not what was wished for. Measured: with only the winner hinted, a 5 x 5
+        // unconstrained grid followed the dream in its first cell and then collapsed to a single
+        // prototype for all twenty-four others.
+        for (q, &v) in row.iter().enumerate() {
+            p.prefer(v, q == wanted);
+        }
     }
     Ok(())
 }
@@ -1901,7 +1982,7 @@ mod tests {
         let solve = |wish: bool| {
             let mut gp = GridProblem::encode(&anything_goes(protos), &vec![full; w * h], w, h, protos)
                 .expect("encodes");
-            preference_rules(&mut gp.problem, &gp.place, &[1.0, 1.0, 1.0], 11, 1).expect("wishes");
+            preference_rules(&mut gp.problem, &gp.place, &[1.0, 1.0, 1.0], 11).expect("wishes");
             if wish {
                 let faces = crate::range::Faces::new(&kit, "wall", 0.5);
                 enclosure_rules(&mut gp.problem, &gp.place, &faces, w, h, want, Some(200))
@@ -2065,7 +2146,7 @@ mod tests {
             .map(|seed| {
                 let mut gp = GridProblem::encode(&anything_goes(protos), &vec![full; w * h], w, h, protos)
                     .expect("encodes");
-                preference_rules(&mut gp.problem, &gp.place, &weights, seed, 1).expect("wishes");
+                preference_rules(&mut gp.problem, &gp.place, &weights, seed).expect("wishes");
                 gp.read(&gp.problem.solve(0).expect("solves")).expect("reads")
             })
             .collect();
@@ -2081,7 +2162,7 @@ mod tests {
         let once = |seed: u64| {
             let mut gp = GridProblem::encode(&anything_goes(protos), &vec![full; w * h], w, h, protos)
                 .expect("encodes");
-            preference_rules(&mut gp.problem, &gp.place, &weights, seed, 1).expect("wishes");
+            preference_rules(&mut gp.problem, &gp.place, &weights, seed).expect("wishes");
             gp.read(&gp.problem.solve(0).expect("solves")).expect("reads")
         };
         let first = once(99);
@@ -2100,7 +2181,7 @@ mod tests {
         let full = (1u32 << protos) - 1;
         let mut gp = GridProblem::encode(&anything_goes(protos), &vec![full; w * h], w, h, protos)
             .expect("encodes");
-        preference_rules(&mut gp.problem, &gp.place, &weights, 4242, 1).expect("wishes");
+        preference_rules(&mut gp.problem, &gp.place, &weights, 4242).expect("wishes");
         let s = gp.problem.solve(0).expect("solves");
         assert_eq!(s.unmet(), 0, "nothing forbids any wish, so none should be overruled");
 
@@ -2134,7 +2215,7 @@ mod tests {
         let weights = vec![10.0, 1.0];
         let full = 0b11u32;
         let mut gp = GridProblem::encode(&anything_goes(2), &vec![full; w * h], w, h, 2).expect("encodes");
-        preference_rules(&mut gp.problem, &gp.place, &weights, 7, 1).expect("wishes");
+        preference_rules(&mut gp.problem, &gp.place, &weights, 7).expect("wishes");
         let grid = gp.read(&gp.problem.solve(0).expect("solves")).expect("reads");
         let common = grid.iter().filter(|&&p| p == 0).count();
         let share = common as f64 / grid.len() as f64;
@@ -2142,30 +2223,33 @@ mod tests {
     }
 
     #[test]
-    fn a_wish_the_rules_forbid_is_overruled_and_charged_for() {
-        // Two prototypes that may never touch, and a dream that asks for a mixture — so the solver
-        // has to overrule some cells, and the cost counts exactly how many.
+    fn a_wish_the_rules_forbid_is_overruled_without_being_charged_for() {
+        // Two prototypes that may never touch, and a dream that asks for a mixture. The rules win —
+        // and, since the dream is a hint rather than a constraint, **they win for free**. That is
+        // the whole reason the mechanism changed: a wish nobody has to prove is a wish nobody has to
+        // pay a core-guided search for.
         let (w, h) = (4usize, 4usize);
         let apart = vec![0b01u32, 0b10];
         let support = [apart.clone(), apart.clone(), apart.clone(), apart];
         let mut gp = GridProblem::encode(&support, &vec![0b11u32; w * h], w, h, 2).expect("encodes");
-        preference_rules(&mut gp.problem, &gp.place, &vec![1.0, 1.0], 3, 1).expect("wishes");
+        preference_rules(&mut gp.problem, &gp.place, &vec![1.0, 1.0], 3).expect("wishes");
         let s = gp.problem.solve(0).expect("solves");
         let grid = gp.read(&s).expect("reads");
         // The support permits only the two uniform grids, so every cell must agree.
         assert!(grid.iter().all(|&p| p == grid[0]), "the rules admit only a uniform grid: {grid:?}");
-        // And the cost is the number of cells whose wish went unmet — which is the minority's size.
-        assert!(s.unmet() > 0 && s.unmet() < (w * h) as u64, "unmet {} is not a minority", s.unmet());
+        // Nothing was charged, because nothing was promised: `unmet` reports the wishes a caller
+        // asked the solver to *optimise*, and the texture is not one of them.
+        assert_eq!(s.unmet(), 0, "a hint that the rules overrule costs nothing");
     }
 
     #[test]
     fn preference_rules_refuse_a_grammar_that_cannot_be_drawn_from() {
         let mut gp = GridProblem::encode(&anything_goes(2), &[0b11; 4], 2, 2, 2).expect("encodes");
         let place = gp.place.clone();
-        assert!(preference_rules(&mut gp.problem, &place, &[], 1, 1).is_err(), "no prototypes");
-        assert!(preference_rules(&mut gp.problem, &place, &[0.0, 0.0], 1, 1).is_err(), "no weight");
-        assert!(preference_rules(&mut gp.problem, &place, &[1.0, -1.0], 1, 1).is_err(), "negative");
-        assert!(preference_rules(&mut gp.problem, &place, &[1.0, f64::NAN], 1, 1).is_err(), "not a number");
+        assert!(preference_rules(&mut gp.problem, &place, &[], 1).is_err(), "no prototypes");
+        assert!(preference_rules(&mut gp.problem, &place, &[0.0, 0.0], 1).is_err(), "no weight");
+        assert!(preference_rules(&mut gp.problem, &place, &[1.0, -1.0], 1).is_err(), "negative");
+        assert!(preference_rules(&mut gp.problem, &place, &[1.0, f64::NAN], 1).is_err(), "not a number");
     }
 
     #[test]
