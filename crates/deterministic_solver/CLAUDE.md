@@ -22,6 +22,8 @@ That is the entire reason the crate exists, so **anything that could make an ans
 
 `tests/leaf.rs` is the dependency ratchet: `ALLOWED_DEPS` is `["batsat"]`. Widening it should cost an argument, because a dependency here is inherited by every caller and each one is another chance to consult a clock.
 
+`tests/frozen_model.rs` is the other half, and it is the one to read before bumping `batsat`. It solves two fixed instances and asserts an **exact hash of the model**, which is a stricter claim than the solve-it-twice test in `src/lib.rs`: that one passes independently on two machines that disagree with each other, and this one cannot. **A red there is not a bug in `batsat`** — a solver may return any model it likes and change which one between releases — but it *is* a goldens-moving event for anything generating content from these bits, so find out whether the version, the toolchain or the platform moved before re-pinning. Never re-pin as a reflex.
+
 ## Rules
 
 - **No `unwrap()`**, no `expect` on caller-supplied data. A malformed literal is an error to name, not a panic — `0` and an out-of-range variable are both a caller bug, and absorbing them into a wrong answer is worse than refusing.
