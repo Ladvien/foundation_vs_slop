@@ -1065,13 +1065,6 @@ mod compose {
     use emerge_mapper::project::Project;
     use emerge_mapper::tiles::Mode;
 
-    fn root() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .unwrap_or_else(|e| panic!("workspace root: {e}"))
-    }
-
     /// Arming and stamping put a **reference** in the map, not the rows — which is the whole reason
     /// the reference model was chosen, and the thing a flattening implementation would pass every
     /// other test while getting wrong.
