@@ -47,6 +47,7 @@ pub mod anim_stage;
 pub mod anim_tab;
 pub mod anim_watch;
 pub mod harness;
+pub mod build;
 pub mod chrome;
 #[cfg(feature = "debugger")]
 pub mod debug_capture;

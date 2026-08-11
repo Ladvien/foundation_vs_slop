@@ -178,7 +178,7 @@ pub struct Policy {
     /// tab seats a member. They belong to different objects. **Edge tokens belong to the face** — a
     /// 2-D component, where a token should be one word per face however finely the interior is cut;
     /// `summarise_face`'s ten-cells-saying-the-same-word complaint was what it looked like when they
-    /// were the same number. **Seating belongs to the volume**, and is [`Policy::seating_divisions`].
+    /// were the same number. **Space belongs to the volume**, and is [`Policy::snap_divisor`].
     ///
     /// Splitting them also keeps a deferred migration deferred: edge-token indexing is still blocked
     /// on the edge-versus-corner question, so raising this to seat a sconce would re-author every
@@ -196,38 +196,43 @@ pub struct Policy {
     /// already authored on, on which a 3 m wall is 6 bands and a 2.4 m one is 5 layers.
     #[serde(default = "one")]
     pub face_bands: u32,
-    /// **How finely a tile subdivides for SEATING** — the step the Compose tab moves a member by.
-    ///
-    /// A seat step is `grid::SNAP / seating_divisions` metres, and seats are the multiples of it
-    /// measured from the envelope's **centre** in X/Z and its **floor** in Y. Multiples of a unit
-    /// from the centre always include the centre, so nudging a piece out and back returns it exactly
-    /// where it started — which dividing the tile into cells and seating at cell centres would not
-    /// (at 4 those are 0.125 / 0.375 / 0.625 / 0.875, with no seat in the middle).
-    ///
-    /// **Seating precision does not become token precision.** Two members at different seats can
-    /// project onto the same face band, because bands are indexed by [`Policy::face_bands`]. That is
-    /// the two axes being independent, working as intended — it is not a rounding bug.
-    ///
-    /// **4 by default**: 125 mm, fine enough to place a sconce and coarse enough to be a lattice
-    /// rather than free movement. It does not make the flush verb redundant — `site/wall` is 0.1 m
-    /// thick and sits flush at −0.45, which is not a multiple of 0.125 either, because art is
-    /// authored to look right rather than to tile.
-    #[serde(default = "four")]
-    pub seating_divisions: u32,
-    /// **How finely the placement ladder divides a TILE**, once per rung.
+    /// **How finely a tile divides, once per rung — the project's one spatial lattice.**
     ///
     /// `grid::SnapLevel::Fine` is `grid::TILE / snap_divisor` and `Finer` is `TILE / snap_divisor²`,
     /// so at the default 3 the rungs are 1 m, 333 mm and 111 mm.
     ///
-    /// **Its own number, not [`Policy::face_bands`].** Tying the placement lattice to an edge-token
-    /// count would re-merge two things `face_bands` and [`Policy::seating_divisions`] were split
-    /// apart to keep separate, and worse: a kit author editing an unrelated token count would
-    /// silently move every existing placement off-lattice.
+    /// # One number, because a tile and the map it sits on are the same grid
     ///
-    /// **3 by default.** Note this is NOT a superset of the old half-metre snap — 0.5 is not a
-    /// multiple of a third — so a piece an author deliberately re-snaps may shift by up to half a
-    /// rung. Nothing moves on its own; existing maps are untouched. A kit that wants the old
-    /// behaviour sets 2, which makes the middle rung exactly `grid::SNAP`.
+    /// This used to be two. `seating_divisions` divided `grid::SNAP` and governed how far a *member*
+    /// moved inside a tile; this divided `grid::TILE` and governed where a *piece* landed on the map.
+    /// Two spatial lattices for one act of placing something, and they did not even agree on what
+    /// they divided — so "divide a tile into four" gave eight squares, because the thing being
+    /// quartered was the half-metre.
+    ///
+    /// They are now the same ladder at two scales, which is what makes a tile authored today fit
+    /// beside a tile authored last month. Códices et al. (`10.1109/access.2022.3168832`) state the
+    /// property this buys: a designer can *"define a passage as n pins wide or tall, **keeping
+    /// consistency in the design of the layout of the individual pieces being made separately**"* —
+    /// pieces agree by construction rather than by discipline.
+    ///
+    /// **Still not [`Policy::face_bands`].** Tying the spatial lattice to an edge-token count would
+    /// merge two things that were split apart deliberately, and worse: a kit author editing an
+    /// unrelated token count would silently move every existing placement off-lattice. Space and
+    /// tokens stay independent; two members at different seats may still project onto one face band,
+    /// and that is the axes working as intended rather than a rounding bug.
+    ///
+    /// # The centre is a legal position
+    ///
+    /// Rungs are multiples of the pitch measured from the piece's minimum corner
+    /// (`grid::snap_corner`), so nudging out and back returns exactly where it started. Dividing a
+    /// tile into cells and seating at cell *centres* would not: at 4 those are 0.125 / 0.375 / 0.625
+    /// / 0.875, with nothing in the middle.
+    ///
+    /// **3 by default**, and note it is not a superset of the old half-metre snap — 0.5 is not a
+    /// multiple of a third. A kit authored on halves sets 2, which makes the middle rung exactly
+    /// `grid::SNAP`. It does not make a flush verb redundant either: `site/wall` is 0.1 m thick and
+    /// sits flush at −0.45, which is a multiple of no rung, because art is authored to look right
+    /// rather than to tile.
     #[serde(default = "three")]
     pub snap_divisor: u32,
     #[serde(default)]
@@ -239,20 +244,20 @@ fn one() -> u32 {
     1
 }
 
-/// The default for [`Policy::seating_divisions`].
-fn four() -> u32 {
-    4
-}
-
+/// The default for [`Policy::snap_divisor`].
 fn three() -> u32 {
     3
 }
 
 /// The most a project may divide one tile.
 ///
-/// Not a number anyone should need: at 8 a subunit is 62 mm, finer than the meshes it describes, and
+/// Not a number anyone should need: at 8 a face band is 62 mm, finer than the meshes it describes, and
 /// a 3 m wall carries 48 x 40 x 8 cells. The ceiling exists because divisions are derived and
 /// multiplied by a piece's span, so a typo here is not one absurd tile but every tile at once.
+///
+/// It bounds [`Policy::snap_divisor`] for a different reason with the same shape: the ladder squares
+/// the divisor, so 8 puts the finest rung at 15.6 mm — below the precision any of this art was
+/// authored to.
 pub const MAX_DIVISIONS: u32 = 8;
 
 impl Default for Policy {
@@ -261,7 +266,6 @@ impl Default for Policy {
             version: POLICY_VERSION,
             note: None,
             face_bands: one(),
-            seating_divisions: four(),
             snap_divisor: three(),
             patches: Vec::new(),
         }
@@ -289,11 +293,19 @@ impl Policy {
             ));
         }
         // Refused at the project boundary rather than per lattice: every piece derives from this one
-        // number, so a zero here would make every tile in the project cell-less at once.
-        if self.seating_divisions == 0 || self.seating_divisions > MAX_DIVISIONS {
+        // number, so a bad value here would make every tile in the project wrong at once.
+        //
+        // **Two, not one.** A divisor of 1 makes `TILE / 1` and `TILE / 1²` both the tile, which is a
+        // three-rung ladder whose rungs are all the same height — an author pressing Shift and
+        // watching nothing move. `SnapLevel::pitch` clamps it as a guard for callers holding no
+        // policy, but a policy that says 1 is stating something it cannot mean, so it is refused here
+        // rather than quietly repaired.
+        if self.snap_divisor < 2 || self.snap_divisor > MAX_DIVISIONS {
             return Err(format!(
-                "policy: `seating_divisions` is {}; a tile seats between 1 and {MAX_DIVISIONS} ways.",
-                self.seating_divisions
+                "policy: `snap_divisor` is {}; a tile divides between 2 and {MAX_DIVISIONS} ways. \
+                 One makes every rung the tile, which is a ladder with no rungs; past \
+                 {MAX_DIVISIONS} the finest rung is smaller than the meshes it positions.",
+                self.snap_divisor
             ));
         }
         if self.face_bands == 0 || self.face_bands > MAX_DIVISIONS {
@@ -528,7 +540,6 @@ mod tests {
     fn a_policy_round_trips() {
         let policy = Policy {
             version: POLICY_VERSION,
-            seating_divisions: 4,
             snap_divisor: 3,
             note: Some("this facility has 2.4 m ceilings".into()),
             face_bands: 2,
@@ -548,9 +559,11 @@ mod tests {
 
     /// Refused at the project boundary, because every piece in the project derives from these.
     ///
-    /// **Both numbers, separately.** They were one field until the Compose tab needed a seating step
-    /// finer than the face lattice, and a range check that only policed one of them would let the
-    /// other be zero — which is every piece with no cells, or every member unable to move.
+    /// **Both numbers, separately.** A range check policing only one would let the other be wrong —
+    /// which is every piece with no cells, or a three-rung ladder whose rungs are all the tile.
+    ///
+    /// The two floors differ, and the difference is the point: a face may read **one** way (a token
+    /// per face is the shipped default), but a tile dividing **one** way is not a ladder at all.
     #[test]
     fn a_division_count_outside_the_range_is_refused() {
         for bad in [0, MAX_DIVISIONS + 1] {
@@ -558,27 +571,31 @@ mod tests {
                 .err()
                 .unwrap_or_default();
             assert!(err.contains("a face reads between 1 and"), "face_bands {bad}: {err}");
-            let err = Policy::parse(&format!("(version: 1, seating_divisions: {bad})"))
+            let err = Policy::parse(&format!("(version: 1, snap_divisor: {bad})"))
                 .err()
                 .unwrap_or_default();
-            assert!(err.contains("a tile seats between 1 and"), "seating {bad}: {err}");
+            assert!(err.contains("a tile divides between 2 and"), "snap_divisor {bad}: {err}");
         }
+        // One is legal for a face and refused for the ladder.
         assert!(Policy::parse("(version: 1, face_bands: 1)").is_ok());
+        let err = Policy::parse("(version: 1, snap_divisor: 1)").err().unwrap_or_default();
+        assert!(err.contains("ladder with no rungs"), "{err}");
+
         assert!(Policy::parse(&format!("(version: 1, face_bands: {MAX_DIVISIONS})")).is_ok());
-        assert!(Policy::parse(&format!("(version: 1, seating_divisions: {MAX_DIVISIONS})")).is_ok());
+        assert!(Policy::parse(&format!("(version: 1, snap_divisor: {MAX_DIVISIONS})")).is_ok());
     }
 
     /// **The two numbers are independent**, and a project that sets only one gets the default for the
-    /// other. The whole reason they were split is that a face lattice and a seating lattice answer
+    /// other. The whole reason they are separate is that a face lattice and a spatial lattice answer
     /// different questions; a project raising one must not silently raise the other.
     #[test]
     fn the_two_lattices_default_independently() {
         let p = Policy::parse("(version: 1, face_bands: 2)").unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(p.face_bands, 2);
-        assert_eq!(p.seating_divisions, 4, "seating keeps its own default");
-        let p = Policy::parse("(version: 1, seating_divisions: 8)").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(p.snap_divisor, 3, "the ladder keeps its own default");
+        let p = Policy::parse("(version: 1, snap_divisor: 8)").unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(p.face_bands, 1, "faces keep the half-metre grid the kits are authored on");
-        assert_eq!(p.seating_divisions, 8);
+        assert_eq!(p.snap_divisor, 8);
     }
 
     /// Version mismatch is refused rather than migrated, the same rule the map and library hold.

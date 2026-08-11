@@ -545,7 +545,6 @@ mod declared_tests {
                         at: (x, y, z),
                         solid: true,
                         edge: Some(token.to_owned()),
-                        anchor: None,
                     });
                 }
             }
@@ -953,6 +952,65 @@ mod tests {
             locations: Vec::new(),
             note: None,
         }
+    }
+
+    /// **Holes do not inflate the alphabet, and they cannot be allowed to.**
+    ///
+    /// A tile declaring "a wall fixture goes here" must cost the solver exactly what the same tile
+    /// without the hole costs. The alternative — a prototype per candidate filler — is unaffordable
+    /// rather than merely untidy: [`MAX_PROTOTYPES`] is 32 because `collapse_grid` packs a domain into
+    /// a `u32`, and `constraints::AMO_PAIRWISE_MAX` encodes exactly-one *pairwise*, so the clause
+    /// count is quadratic in it. One tile with a four-way slot would take sixteen of the thirty-two
+    /// once turned, and two such tiles would refuse the grammar outright.
+    ///
+    /// This holds by construction — `composition::interface` drops slots, so the faces the learner
+    /// dedupes turns by are identical — and this is the test that says so out loud.
+    #[test]
+    fn a_slot_costs_the_solver_nothing() {
+        use crate::composition::{Body, Member};
+        let library = Library {
+            version: crate::library::LIBRARY_VERSION,
+            note: None,
+            descriptors: Vec::new(),
+        };
+        let plain = empty_tile("tile_a");
+        let mut holed = empty_tile("tile_a");
+        // Four holes, each accepting something different: the arity that would have cost sixteen.
+        holed.members = ["a", "b", "c", "d"]
+            .iter()
+            .enumerate()
+            .map(|(i, id)| Member {
+                id: (*id).to_owned(),
+                body: Body::Slot { accepts: format!("thing-{i}") },
+                at: (0.0, 0.0),
+                yaw: 0.0,
+                lift: 0.1 * i as f32,
+                paint: 0,
+                of_fingerprint: None,
+                note: None,
+            })
+            .collect();
+
+        let learn = |c: &Composition| {
+            from_compositions(
+                std::slice::from_ref(c),
+                &library,
+                1,
+                1.0,
+                crate::composition::agrees,
+            )
+            .expect("learns")
+        };
+        let (a, b) = (learn(&plain), learn(&holed));
+        assert!(b.skipped.is_empty(), "a holed tile is still a tile: {:?}", b.skipped);
+        assert_eq!(
+            a.grammar.len(),
+            b.grammar.len(),
+            "four holes changed the alphabet from {} to {} prototypes",
+            a.grammar.len(),
+            b.grammar.len()
+        );
+        assert_eq!(a.grammar.support, b.grammar.support, "four holes moved the adjacency table");
     }
 
     /// **Swapping the rule changes the grammar** — driven through the learner, not just asserted of

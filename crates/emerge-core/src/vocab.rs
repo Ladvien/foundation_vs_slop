@@ -197,13 +197,19 @@ pub struct Vocabularies {
     /// decided what its tiles present".
     #[serde(default)]
     pub edge: Vocabulary,
-    /// A role an **item** may occupy on a piece — `"shelf-item"`, `"plate"`.
+    /// **What may fill a hole in a tile** — `"wall-fixture"`, `"floor-decal"`.
     ///
-    /// Distinct from `capabilities`, which is about people, and from `surfaces`, which is about what
-    /// holds what up. Nothing in the shipped corpus authors one yet; the axis exists so that the first
-    /// one has to be declared rather than invented at a keyboard.
+    /// The token a `composition::Body::Slot` accepts. Distinct from `capabilities`, which is about
+    /// people, and from `surfaces`, which is about what holds what up. The axis exists so that the
+    /// first one has to be declared rather than invented at a keyboard.
+    ///
+    /// **It was `anchor`**, a role an item could occupy on a *mesh's* lattice — authored, validated,
+    /// drawn, saved and read by nothing, with an empty axis and 289 `None`s in the shipped kits. A
+    /// hole belongs to a tile rather than to a mesh: it can sit in open air, and two tiles sharing a
+    /// wall can differ about whether one has a socket in it. The axis is inherited rather than
+    /// replaced, because it is the same question asked of the right object.
     #[serde(default)]
-    pub anchor: Vocabulary,
+    pub slot: Vocabulary,
 }
 
 /// A descriptor's tokens, resolved to masks. Cheap to compare, which is the point.
@@ -214,12 +220,12 @@ pub struct Masks {
     pub look: u64,
     /// Surface classes this piece **offers** a top for.
     pub provides: u64,
+    /// Classes this piece **presents as a vertical face** — the standing half of [`Self::provides`].
+    pub presents: u64,
     /// The surface class this piece **needs** to rest on, if it rests on one at all.
     pub requires: u64,
     /// Every distinct `edge` token anywhere in this piece's lattice, OR'd together.
     pub edges: u64,
-    /// Every distinct `anchor` token anywhere in this piece's lattice, OR'd together.
-    pub anchors: u64,
 }
 
 /// What one actor can do, as a bitmask over the `capabilities` axis.
@@ -291,38 +297,46 @@ impl Vocabularies {
             })
         };
 
+        // **Both mounts that name a class, against the one axis.** A top and a face are read
+        // differently — `OnSurface` takes the host's height, `OnFace` a distance up it — but the
+        // token means the same thing either way, so a second axis would be a second place for
+        // `worktop` to be spelled.
         let requires = match &d.mount {
-            Some(Mount::OnSurface { class }) => self.surfaces.bit(class).ok_or_else(|| {
-                let hint = nearest(&self.surfaces, class)
-                    .map(|n| format!(" Did you mean `{n}`?"))
-                    .unwrap_or_default();
-                format!(
-                    "descriptor `{}`: mounts on surface class `{class}`, which is not a `surfaces` \
-                     token.{hint} The axis holds: {}.",
-                    d.id,
-                    self.surfaces.names().collect::<Vec<_>>().join(", ")
-                )
-            })?,
+            Some(Mount::OnSurface { class }) | Some(Mount::OnFace { class, .. }) => {
+                let how = if matches!(d.mount, Some(Mount::OnFace { .. })) {
+                    "is fixed to face class"
+                } else {
+                    "mounts on surface class"
+                };
+                self.surfaces.bit(class).ok_or_else(|| {
+                    let hint = nearest(&self.surfaces, class)
+                        .map(|n| format!(" Did you mean `{n}`?"))
+                        .unwrap_or_default();
+                    format!(
+                        "descriptor `{}`: {how} `{class}`, which is not a `surfaces` token.{hint} \
+                         The axis holds: {}.",
+                        d.id,
+                        self.surfaces.names().collect::<Vec<_>>().join(", ")
+                    )
+                })?
+            }
             _ => 0,
         };
 
-        // **The lattice's own two axes.** Gathered from the cells rather than a list on the
-        // descriptor, because that is where they are authored — one token per cell, many cells. The
-        // mask is the OR of them, which is the useful question ("does this piece say anything about
-        // `door`") and the only one that fits a `u64`.
+        // **The lattice's own axis.** Gathered from the cells rather than a list on the descriptor,
+        // because that is where they are authored — one token per cell, many cells. The mask is the
+        // OR of them, which is the useful question ("does this piece say anything about `door`") and
+        // the only one that fits a `u64`.
+        //
+        // One axis, not two, since `SubCell::anchor` retired: a hole belongs to a tile and is checked
+        // by `Vocabularies::check_slots`, which asks the compositions rather than the library.
         let mut cell_tokens: Vec<String> = Vec::new();
-        let mut anchor_tokens: Vec<String> = Vec::new();
         if let Some(g) = &d.subgrid {
             for c in &g.cells {
                 if let Some(e) = &c.edge
                     && !cell_tokens.contains(e)
                 {
                     cell_tokens.push(e.clone());
-                }
-                if let Some(a) = &c.anchor
-                    && !anchor_tokens.contains(a)
-                {
-                    anchor_tokens.push(a.clone());
                 }
             }
         }
@@ -332,10 +346,52 @@ impl Vocabularies {
             effects: axis(&self.effects, "effects", &d.effects)?,
             look: axis(&self.look, "look", &d.look)?,
             provides: axis(&self.surfaces, "surfaces", &d.offers.surfaces)?,
+            // Faces share the axis for the reason `requires` gives above.
+            presents: axis(&self.surfaces, "surfaces", &d.offers.faces)?,
             requires,
             edges: axis(&self.edge, "edge", &cell_tokens)?,
-            anchors: axis(&self.anchor, "anchor", &anchor_tokens)?,
         })
+    }
+
+    /// **Every hole in every tile accepts something this project has declared.**
+    ///
+    /// Asked of the compositions rather than of the library, because a hole belongs to a *tile*: the
+    /// same wall mesh appears in a tile that has a socket in it and one that does not, so there is
+    /// nothing on the descriptor to check. That is the whole difference from the `anchor` axis this one
+    /// inherited — see [`Vocabularies::slot`].
+    ///
+    /// Not folded into `composition::validate`: that runs in the project loader, which reads the
+    /// library and the policy and never opens the vocabulary. Each check stays where its data already
+    /// is rather than threading a file through a function that does not otherwise want it.
+    ///
+    /// Names the composition **and** the member **and** the axis, for the reason the module docs give:
+    /// a bare *"`wall-fixtre` is not a slot"* in a kit with forty tiles is a search rather than an
+    /// answer.
+    pub fn check_slots(&self, compositions: &[crate::composition::Composition]) -> Result<(), String> {
+        for c in compositions {
+            for m in &c.members {
+                let crate::composition::Body::Slot { accepts } = &m.body else {
+                    continue;
+                };
+                if self.slot.contains(accepts) {
+                    continue;
+                }
+                let axis: Vec<&str> = self.slot.names().collect();
+                let holds = if axis.is_empty() {
+                    "the axis is empty — declare the first one in `vocab.ron` rather than at a \
+                     keyboard"
+                        .to_owned()
+                } else {
+                    format!("the axis holds: {}", axis.join(", "))
+                };
+                return Err(format!(
+                    "composition `{}` slot `{}` accepts `{accepts}`, which is not a `slot` token. \
+                     {holds}.",
+                    c.id, m.id
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// The capability mask one role demands, or the reason its tokens are not in the axis.
@@ -450,7 +506,7 @@ mod tests {
                 ("wall", "a solid run-face"),
                 ("door", "an opening that must stay clear"),
             ]),
-            anchor: Vocabulary::of(&[("shelf-item", "something small standing on a shelf")]),
+            slot: Vocabulary::of(&[("shelf-item", "something small standing on a shelf")]),
             surfaces: Vocabulary::of(&[
                 ("support", "any support top"),
                 ("worktop", "a desk or table top"),
@@ -625,5 +681,66 @@ mod tests {
         .err()
         .unwrap_or_default();
         assert!(err.contains("does not parse"), "{err}");
+    }
+
+    /// **A hole accepts something the project declared**, refused at open and naming all three of
+    /// the composition, the member and the axis — because a bare *"`wall-fixtre` is not a slot"* in a
+    /// kit of forty tiles is a search rather than an answer.
+    #[test]
+    fn a_slot_accepting_an_undeclared_token_is_refused_by_name() {
+        use crate::composition::{Body, Composition, Envelope, Member};
+        let tile = |accepts: &str| Composition {
+            id: "site/tile_wall_n".to_owned(),
+            envelope: Envelope::Bounded { size: (1.0, 1.0, 1.0) },
+            members: vec![Member {
+                id: "fixture".to_owned(),
+                body: Body::Slot { accepts: accepts.to_owned() },
+                at: (0.0, 0.0),
+                yaw: 0.0,
+                lift: 0.0,
+                paint: 0,
+                of_fingerprint: None,
+                note: None,
+            }],
+            locations: Vec::new(),
+            note: None,
+        };
+        let mut v = vocabs();
+        v.slot = Vocabulary::of(&[("wall-fixture", "something bolted to a wall")]);
+
+        v.check_slots(&[tile("wall-fixture")]).expect("a declared token passes");
+
+        let err = v.check_slots(&[tile("wall-fixtre")]).err().unwrap_or_default();
+        assert!(err.contains("site/tile_wall_n"), "{err}");
+        assert!(err.contains("fixture"), "{err}");
+        assert!(err.contains("wall-fixture"), "the message must list the axis: {err}");
+    }
+
+    /// An empty axis refuses everything and says how to fix it — the same stance the module takes on
+    /// free text generally. Silence here would let the first hole invent its own vocabulary.
+    #[test]
+    fn an_empty_slot_axis_refuses_and_says_where_to_declare_one() {
+        use crate::composition::{Body, Composition, Envelope, Member};
+        let comp = Composition {
+            id: "t".to_owned(),
+            envelope: Envelope::Bounded { size: (1.0, 1.0, 1.0) },
+            members: vec![Member {
+                id: "hole".to_owned(),
+                body: Body::Slot { accepts: "anything".to_owned() },
+                at: (0.0, 0.0),
+                yaw: 0.0,
+                lift: 0.0,
+                paint: 0,
+                of_fingerprint: None,
+                note: None,
+            }],
+            locations: Vec::new(),
+            note: None,
+        };
+        let mut v = vocabs();
+        v.slot = Vocabulary::default();
+        let err = v.check_slots(&[comp]).err().unwrap_or_default();
+        assert!(err.contains("the axis is empty"), "{err}");
+        assert!(err.contains("vocab.ron"), "{err}");
     }
 }

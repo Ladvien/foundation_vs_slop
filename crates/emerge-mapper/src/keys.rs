@@ -43,6 +43,14 @@ pub enum Context {
     Anim,
     /// The composition tab — reusable groups, their derived interface, and what is stale.
     Compose,
+    /// **The Tiles tab's BUILD mode** — assembling a tile out of meshes.
+    ///
+    /// A context rather than a tab, because it is the same tab doing its other half. It never runs
+    /// alongside `Tiles`, which is what gives each mode its own twelve rows: Tiles was at eleven and
+    /// the assembler needs six verbs, and `no_context_carries_more_than_a_learnable_vocabulary` is
+    /// not a limit to route around — Liapis names *"too many options"* as a cause of the user fatigue
+    /// this whole tab is being reshaped to avoid.
+    Build,
     /// A text field is taking raw keys. Overlaps everything, and suppresses everything.
     Typing,
 }
@@ -56,6 +64,12 @@ impl Context {
             (Typing, _) | (_, Typing) => true,
             (Global, _) | (_, Global) => true,
             (Map, Map) | (Tiles, Tiles) | (Anim, Anim) | (Compose, Compose) => true,
+            (Build, Build) => true,
+            // **Build is the Tiles tab's other half**, so it is never live beside Tiles — and never
+            // beside anything else either, for the same reason the tabs are not. That is what lets it
+            // reuse `T`/`F`/`G`/`H` for walking a lattice, which is what those keys already mean one
+            // mode over.
+            (Build, _) | (_, Build) => false,
             // The three tabs are never live together — which is what lets them reuse each other's
             // letters freely. `the_key_space_has_no_collisions` polices that they only do so here.
             (Map, Tiles) | (Tiles, Map) => false,
@@ -167,8 +181,22 @@ pub enum Action {
     LayerDown,
     LayerUp,
     CellSolid,
+    // ── Build (the Tiles tab's other half) ───────────────────────────────────
+    EnterBuild,
+    LeaveBuild,
+    BuildForward,
+    BuildLeft,
+    BuildBack,
+    BuildRight,
+    BuildDown,
+    BuildUp,
+    BuildDrop,
+    BuildSlot,
+    BuildNew,
+    BuildDropMember,
+    BuildTurn,
+    BuildRung,
     CellEdge,
-    CellAnchor,
     CellClear,
     /// Mark every cell the mesh's geometry reaches. See `tiles::scan_mesh`.
     ScanMesh,
@@ -498,10 +526,48 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::CellRight, KeyCode::KeyH, false, Context::Tiles, "H", "cell cursor / layer"),
     b(Action::LayerDown, KeyCode::BracketLeft, false, Context::Tiles, "[", "cell cursor / layer"),
     b(Action::LayerUp, KeyCode::BracketRight, false, Context::Tiles, "]", "cell cursor / layer"),
-    b(Action::CellSolid, KeyCode::KeyZ, false, Context::Tiles, "Z", "solid / edge / anchor / clear"),
-    b(Action::CellEdge, KeyCode::KeyX, false, Context::Tiles, "X", "solid / edge / anchor / clear"),
-    b(Action::CellAnchor, KeyCode::KeyC, false, Context::Tiles, "C", "solid / edge / anchor / clear"),
-    b(Action::CellClear, KeyCode::KeyV, false, Context::Tiles, "V", "solid / edge / anchor / clear"),
+    b(Action::CellSolid, KeyCode::KeyZ, false, Context::Tiles, "Z", "solid / edge / clear"),
+    b(Action::CellEdge, KeyCode::KeyX, false, Context::Tiles, "X", "solid / edge / clear"),
+    b(Action::CellClear, KeyCode::KeyV, false, Context::Tiles, "V", "solid / edge / clear"),
+
+    // ── BUILD: assembling a tile ─────────────────────────────────────────────────────────────
+    //
+    // **`B` flips, and it is `Context::Tiles` on the way in and `Context::Build` on the way out**, so
+    // one key is the door in both directions and neither mode can strand you.
+    //
+    // The cursor keeps `T F G H` and `[ ]` — the same inverted T walking the same kind of lattice one
+    // mode over, so the hand does not relearn a shape it already has. It is legal because Build and
+    // Tiles are never live together, which is the case `Context` exists to model.
+    // **`C`, and it is the same key both ways** so neither mode can strand you. `B` would have read
+    // better and is taken — it rescans a mesh's occupancy one mode over. `C` is free because the
+    // anchor verb retired with `SubCell::anchor`, which is the tidier half of that deletion.
+    b(Action::EnterBuild, KeyCode::KeyC, false, Context::Tiles, "C", "build a tile"),
+    b(Action::LeaveBuild, KeyCode::KeyC, false, Context::Build, "C", "back to describe"),
+
+    b(Action::BuildForward, KeyCode::KeyT, false, Context::Build, "T", "cursor / layer"),
+    b(Action::BuildLeft, KeyCode::KeyF, false, Context::Build, "F", "cursor / layer"),
+    b(Action::BuildBack, KeyCode::KeyG, false, Context::Build, "G", "cursor / layer"),
+    b(Action::BuildRight, KeyCode::KeyH, false, Context::Build, "H", "cursor / layer"),
+    b(Action::BuildDown, KeyCode::BracketLeft, false, Context::Build, "[", "cursor / layer"),
+    b(Action::BuildUp, KeyCode::BracketRight, false, Context::Build, "]", "cursor / layer"),
+
+    // **`J` cycles the rung, latched.** The same key the Map cycles its drawn grid with, and the same
+    // argument: Bier's snap-dragging latches every one of its modal commands, and StickyLines'
+    // designers avoid held modifiers because menus and modifiers *"make them lose focus"*. Safe to
+    // latch because the drawn grid shows which rung is live.
+    b(Action::BuildRung, KeyCode::KeyJ, false, Context::Build, "J", "rung: unit / subunit"),
+
+    // **Both stated with `bs`.** A bare `b` is *indifferent* to Shift by design, so it would swallow
+    // the shifted chord rather than sit beside it — the same pair `RemoveTile`/`DemoteTile` makes.
+    // A hole rather than a piece is the rarer of the two, so it takes the modifier.
+    bs(Action::BuildDrop, KeyCode::Enter, false, false, Context::Build, "Enter", "drop the piece / Shift: a slot"),
+    bs(Action::BuildSlot, KeyCode::Enter, false, true, Context::Build, "Enter", "drop the piece / Shift: a slot"),
+    b(Action::BuildTurn, KeyCode::KeyR, false, Context::Build, "R", "turn / remove this member"),
+    b(Action::BuildDropMember, REMOVE_KEY, false, Context::Build, REMOVE_NAME, "turn / remove this member"),
+    // **No save key here, on purpose.** `Cmd+S` is Global and already means *save what is open*; a
+    // second one in this context would collide with it, and the collision is the census pointing out
+    // that they are the same verb. The handler asks which mode is live.
+    b(Action::BuildNew, KeyCode::KeyN, false, Context::Build, "N", "new tile"),
     b(Action::ScanMesh, KeyCode::KeyB, false, Context::Tiles, "B", "from the mesh: rescan solid / turn x y z"),
     b(Action::RotateMeshX, KeyCode::KeyN, false, Context::Tiles, "N", "from the mesh: rescan solid / turn x y z"),
     b(Action::RotateMeshY, KeyCode::KeyO, false, Context::Tiles, "O", "from the mesh: rescan solid / turn x y z"),
@@ -967,7 +1033,7 @@ mod tests {
             Action::UndoTile, Action::RedoTile,
             Action::CellLeft, Action::CellRight, Action::CellForward, Action::CellBack,
             Action::LayerDown, Action::LayerUp,
-            Action::CellSolid, Action::CellEdge, Action::CellAnchor, Action::CellClear,
+            Action::CellSolid, Action::CellEdge, Action::CellClear,
             Action::ScanMesh,
             Action::RotateMeshX, Action::RotateMeshY, Action::RotateMeshZ,
             Action::FocusCandidates, Action::FocusLibrary, Action::CopyInfo,
@@ -979,6 +1045,14 @@ mod tests {
             Action::ToggleGhost, Action::CycleCamPreset,
             Action::TurnPieceLeft, Action::TurnPieceRight,
             Action::TipX, Action::TipZ, Action::LiftUp, Action::LiftDown, Action::CycleTarget,
+            // BUILD — the Tiles tab's other half. `EnterBuild` and `LeaveBuild` are two actions
+            // rather than one toggle because this list holds every action to **exactly one**
+            // binding, and the door is a different key row on each side of it.
+            Action::EnterBuild, Action::LeaveBuild,
+            Action::BuildForward, Action::BuildLeft, Action::BuildBack, Action::BuildRight,
+            Action::BuildDown, Action::BuildUp, Action::BuildRung,
+            Action::BuildDrop, Action::BuildSlot,
+            Action::BuildTurn, Action::BuildDropMember, Action::BuildNew,
         ];
         assert_eq!(
             actions.len(),

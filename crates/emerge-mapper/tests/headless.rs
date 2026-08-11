@@ -2443,3 +2443,205 @@ fn naming_a_composition_takes_the_keyboard_from_the_verbs() {
         emerge_mapper::keys::Context::Map
     );
 }
+
+/// **BUILD mode is reachable and it builds.**
+///
+/// The arithmetic is unit-tested in `build.rs`; what no unit test can see is the wiring — that `C`
+/// reaches a system at all, that `Context::Build` takes the keyboard from `Context::Tiles` without
+/// the two firing into each other, and that the resources every one of those systems takes exist
+/// before the first frame. In Bevy 0.19 a missing `Res<T>` **panics its system** rather than skipping
+/// it, and no unit test can answer "does this app survive its first frame".
+#[test]
+fn the_build_mode_opens_a_tile_and_walks_its_grid() {
+    use emerge_mapper::build::{Build, TileMode};
+
+    let root = Fixture::new("build_mode")
+        .descriptor("wall", "alpha")
+        .descriptor("floor", "beta")
+        .build("test_map");
+    let mut app = harness::build_headless(&root, "test_map", None)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    app.update();
+
+    // Onto the Tiles tab, then into BUILD.
+    fn to_tiles(mut keys: bevy::prelude::ResMut<bevy::input::ButtonInput<bevy::prelude::KeyCode>>) {
+        keys.press(emerge_mapper::keys::binding(emerge_mapper::keys::Action::TilesTab).key);
+    }
+    fn enter_build(
+        mut keys: bevy::prelude::ResMut<bevy::input::ButtonInput<bevy::prelude::KeyCode>>,
+    ) {
+        keys.press(emerge_mapper::keys::binding(emerge_mapper::keys::Action::EnterBuild).key);
+    }
+    fn walk(mut keys: bevy::prelude::ResMut<bevy::input::ButtonInput<bevy::prelude::KeyCode>>) {
+        keys.press(emerge_mapper::keys::binding(emerge_mapper::keys::Action::BuildRight).key);
+    }
+    let before = |app: &mut bevy::prelude::App, sys: fn(bevy::prelude::ResMut<bevy::input::ButtonInput<bevy::prelude::KeyCode>>)| {
+        app.add_systems(
+            bevy::prelude::Update,
+            bevy::prelude::IntoScheduleConfigs::before(sys, emerge_mapper::keys::Phase::Act),
+        );
+        app.update();
+    };
+
+    before(&mut app, to_tiles);
+    before(&mut app, enter_build);
+
+    assert_eq!(
+        *app.world().resource::<TileMode>(),
+        TileMode::Build,
+        "`C` on the Tiles tab must reach BUILD"
+    );
+    let build = app.world().resource::<Build>();
+    let comp = build
+        .open
+        .as_ref()
+        .unwrap_or_else(|| panic!("entering BUILD with nothing in hand must open a blank tile"));
+    // Cell-sized in plan, or the solver can never place it — `from_compositions` refuses any other
+    // width by name.
+    let emerge_core::composition::Envelope::Bounded { size } = comp.envelope else {
+        panic!("a tile claims a tile");
+    };
+    assert_eq!((size.0, size.2), (emerge_core::grid::TILE, emerge_core::grid::TILE));
+    assert_eq!(build.at, (0, 0, 0), "the cursor starts in the corner cell");
+
+    // And the cursor walks the tile's own grid rather than the map's.
+    before(&mut app, walk);
+    assert_eq!(
+        app.world().resource::<Build>().at,
+        (1, 0, 0),
+        "`H` must walk the tile's grid in BUILD, not the map's"
+    );
+
+    // **And the panel shows it.** This is the half that shipped broken: the mode flipped, the status
+    // line said so, and the detail pane went on showing the mesh inspector — which reads as the key
+    // having done nothing. `rebuild_detail` watches `ImportState`, so without `TileMode` and `Build`
+    // in its run condition nothing ever rebuilt the pane.
+    app.update();
+    let mut texts = app.world_mut().query::<&bevy::prelude::Text>();
+    let shown: Vec<String> = texts.iter(app.world()).map(|t| t.0.clone()).collect();
+    assert!(
+        shown.iter().any(|t| t.contains("BUILD")),
+        "the pane must say which mode it is in — a mode you cannot see is one you can forget. Saw: {shown:?}"
+    );
+    let id = app
+        .world()
+        .resource::<Build>()
+        .open
+        .as_ref()
+        .map(|c| c.id.clone())
+        .unwrap_or_default();
+    assert!(
+        shown.iter().any(|t| t.contains(&id)),
+        "the pane must name the tile being built (`{id}`). Saw: {shown:?}"
+    );
+    assert!(
+        shown.iter().any(|t| t.contains("cursor 1,0,0")),
+        "the pane must show where the cursor is, or walking it is invisible. Saw: {shown:?}"
+    );
+}
+
+/// **A dropped piece stands up on the stage, and the focus lands on it.**
+///
+/// Two things no unit test can see. `build::place` is pure and tested; what it cannot answer is
+/// whether the member reaches `composition::expand` and comes back out as an entity — the seam where
+/// a tile that looks right in a panel and wrong on the stage would show. And `focus` is what the two
+/// verbs that act on "this member" read, so a drop that does not move it silently aims them at
+/// whichever member sorted first.
+#[test]
+fn a_dropped_piece_is_staged_and_takes_the_focus() {
+    use emerge_mapper::build::{Build, StagedTile, TileMode};
+
+    let root = Fixture::new("build_stage")
+        // `wall` sorts after `floor`, so a focus that does not follow the drop lands on the wrong one
+        // — which is exactly what this asserts against.
+        .descriptor("wall", "alpha")
+        .descriptor("floor", "beta")
+        .build("test_map");
+    let mut app = harness::build_headless(&root, "test_map", None)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    app.update();
+
+    // **One-shot, and it releases first.** The idiom elsewhere in this file adds a system that
+    // presses every frame, which fires exactly once — *"pressing an already-pressed key does not
+    // re-arm `just_pressed`"*. That is enough for one keystroke and wrong for two: the second added
+    // system's press is swallowed by the first one still holding the key. Releasing everything and
+    // pressing once, guarded by a `Local`, makes each step a genuine keystroke.
+    type Keys<'w> = bevy::prelude::ResMut<'w, bevy::input::ButtonInput<bevy::prelude::KeyCode>>;
+    fn once(done: &mut bool, k: &mut Keys, action: emerge_mapper::keys::Action) {
+        if *done {
+            return;
+        }
+        *done = true;
+        k.release_all();
+        k.press(emerge_mapper::keys::binding(action).key);
+    }
+    fn to_tiles(mut done: bevy::prelude::Local<bool>, mut k: Keys) {
+        once(&mut done, &mut k, emerge_mapper::keys::Action::TilesTab);
+    }
+    fn enter(mut done: bevy::prelude::Local<bool>, mut k: Keys) {
+        once(&mut done, &mut k, emerge_mapper::keys::Action::EnterBuild);
+    }
+    fn drop_a(mut done: bevy::prelude::Local<bool>, mut k: Keys) {
+        once(&mut done, &mut k, emerge_mapper::keys::Action::BuildDrop);
+    }
+    fn drop_b(mut done: bevy::prelude::Local<bool>, mut k: Keys) {
+        once(&mut done, &mut k, emerge_mapper::keys::Action::BuildDrop);
+    }
+    let step = |app: &mut bevy::prelude::App, sys: fn(bevy::prelude::Local<bool>, Keys)| {
+        app.add_systems(
+            bevy::prelude::Update,
+            bevy::prelude::IntoScheduleConfigs::before(sys, emerge_mapper::keys::Phase::Act),
+        );
+        app.update();
+    };
+
+    step(&mut app, to_tiles);
+    step(&mut app, enter);
+    // Pick a piece, which is what the right-hand list's arrow keys write. Set directly rather than
+    // driven, because the walking is `move_selection`'s own tested job and what is under test here is
+    // what happens to the piece *after* it is picked.
+    let pick = |app: &mut bevy::prelude::App, id: &str| {
+        app.world_mut()
+            .resource_mut::<emerge_mapper::tiles::ImportState>()
+            .selected_library_id = Some(id.to_owned());
+    };
+
+    // **Entering BUILD leaves something picked**, so the first `Enter` is a drop rather than a
+    // refusal. Asserted before the explicit picks below override it.
+    assert!(
+        app.world()
+            .resource::<emerge_mapper::tiles::ImportState>()
+            .selected_library_id
+            .is_some(),
+        "entering BUILD with nothing ever picked must arm a piece, or the first keystroke refuses"
+    );
+
+    // **Two, and the order is the whole point.** Members are stored sorted by id, so dropping `floor`
+    // then `wall` puts the one just dropped at index 1 — and a focus that never moves stays on
+    // `floor`. With one member the assertion would pass on the default and prove nothing.
+    pick(&mut app, "floor");
+    step(&mut app, drop_a);
+    pick(&mut app, "wall");
+    step(&mut app, drop_b);
+    // One more frame: the drop writes `Build`, and the stage is rebuilt by a system reading it.
+    app.update();
+
+    let build = app.world().resource::<Build>();
+    let comp = build.open.as_ref().unwrap_or_else(|| panic!("a tile is open"));
+    let ids: Vec<&str> = comp.members.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, vec!["floor", "wall"], "both drop, and the list stays sorted");
+    assert_eq!(
+        build.focus, 1,
+        "the focus must be the member just dropped — `R` and Delete act on it, and here that is \
+         `wall`, not the `floor` that happens to sort first"
+    );
+    assert_eq!(*app.world().resource::<TileMode>(), TileMode::Build);
+
+    let mut staged = app.world_mut().query::<&StagedTile>();
+    assert_eq!(
+        staged.iter(app.world()).count(),
+        2,
+        "both members must stand up on the stage — a tile that is only a list in a panel is the \
+         feedback half of the loop missing"
+    );
+}

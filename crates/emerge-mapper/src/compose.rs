@@ -622,6 +622,9 @@ fn member_height(
                 )),
             }
         }
+        // **A hole is not tall.** Nothing stands here yet, so there is no height to report and
+        // inventing one would put a number on empty air. Zero is the honest answer for a position.
+        composition::Body::Slot { .. } => Ok(0.0),
     }
 }
 
@@ -1488,6 +1491,10 @@ pub fn member_footprint(
                 )),
             }
         }
+        // **A hole takes no floor**, so seating it is bounded by the envelope alone. Refusing here
+        // instead would make a slot unseatable, and the author positions it with the same keys as
+        // everything else; answering a real zero is what lets those keys work on it.
+        composition::Body::Slot { .. } => Ok((0.0, 0.0)),
     }
 }
 
@@ -1621,17 +1628,23 @@ pub fn flushed(
     }
 }
 
-/// **One seat step, metres** — `grid::SNAP / seating_divisions`, 125 mm at the default 4.
+/// **One seat step, metres** — a rung of the project's ladder, 333 mm at the default divisor of 3.
 ///
-/// The **seating** number, never the face one. They were a single `policy.divisions` until the split:
-/// edge tokens belong to a face and seating belongs to a volume, and one number serving both meant a
-/// finer seat cost a re-index of every authored token. [`emerge_core::policy::Policy`] carries the
-/// argument.
+/// The **spatial** number, never the face one. Edge tokens belong to a face and space belongs to a
+/// volume; one number serving both meant a finer seat cost a re-index of every authored token.
+/// [`emerge_core::policy::Policy::face_bands`] carries that argument.
 ///
-/// Seats are the multiples of this measured from the envelope's centre in X/Z and its floor in Y, so
-/// the centre is always a seat and nudging out and back returns exactly.
-pub fn seat_step(project: &Project) -> f32 {
-    emerge_core::grid::SNAP / project.policy.seating_divisions.max(1) as f32
+/// # It is the same ladder the Map places on, and that is the change
+///
+/// This used to be `grid::SNAP / seating_divisions` — a second spatial lattice, dividing the
+/// half-metre while the Map's divided the tile. So "divide a tile into four" produced eight seats,
+/// and a member seated inside a tile sat on a grid no click on the Map could reach. One ladder at two
+/// scales is what lets a tile authored today abut a tile authored last month.
+///
+/// Seats are multiples of this from the envelope's centre in X/Z and its floor in Y, so the centre is
+/// always a seat and nudging out and back returns exactly.
+pub fn seat_step(project: &Project, level: emerge_core::grid::SnapLevel) -> f32 {
+    level.pitch(project.policy.snap_divisor)
 }
 
 /// The authoring grid, rounded the way [`crate::editor`] rounds it. One rule, two callers.
@@ -1670,6 +1683,9 @@ fn describe_member(m: &composition::Member) -> String {
             (id.clone(), notes.join(", "))
         }
         composition::Body::Composition { id } => (format!("[{id}]"), "nested".to_owned()),
+        // Angle brackets rather than square, so a hole never reads as a thing that is there — the
+        // list is scanned, and the one property an author needs at a glance is which rows are real.
+        composition::Body::Slot { accepts } => (format!("<{accepts}>"), "open".to_owned()),
     };
     let where_ = format!("({:.1}, {:.1})", m.at.0, m.at.1);
     let yaw = if m.yaw == 0.0 { String::new() } else { format!(" yaw {:.0}", m.yaw) };

@@ -865,10 +865,10 @@ mod tests {
             look: emerge_core::vocab::Vocabulary::of(&[("metal", "bare metal")]),
             surfaces: emerge_core::vocab::Vocabulary::of(&[("support", "a top")]),
             capabilities: emerge_core::vocab::Vocabulary::of(&[]),
-            // The lattice axes. A labeller proposes nothing on either, so both are empty here — and
-            // empty is not permissive: an invented token is refused, naming the axis.
+            // The edge axis and the slot axis. A labeller proposes nothing on either, so both are
+            // empty here — and empty is not permissive: an invented token is refused, naming the axis.
             edge: emerge_core::vocab::Vocabulary::default(),
-            anchor: emerge_core::vocab::Vocabulary::default(),
+            slot: emerge_core::vocab::Vocabulary::default(),
         }
     }
 

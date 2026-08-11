@@ -122,7 +122,7 @@ impl Fixture {
     surfaces: (tokens: [( name: "worktop", note: "a top" )]),
     capabilities: (tokens: []),
     edge: (tokens: [( name: "wall", note: "a solid run-face" )]),
-    anchor: (tokens: []),
+    slot: (tokens: []),
 )"#,
         )
         .unwrap_or_else(|e| panic!("{e}"));

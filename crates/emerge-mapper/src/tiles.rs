@@ -363,13 +363,6 @@ pub struct Rename {
     pub raw: String,
 }
 
-/// Which facet of a cell a token is being typed into.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum CellField {
-    Edge,
-    Anchor,
-}
-
 /// A verb that acts on the selected cell.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CellVerb {
@@ -379,8 +372,6 @@ pub enum CellVerb {
     Solid,
     /// Type an edge token.
     Edge,
-    /// Type an anchor role.
-    Anchor,
     /// Forget the cell entirely.
     Clear,
 }
@@ -390,7 +381,6 @@ impl CellVerb {
         match self {
             CellVerb::Solid => "solid",
             CellVerb::Edge => "edge",
-            CellVerb::Anchor => "anchor",
             CellVerb::Clear => "clear",
         }
     }
@@ -460,7 +450,9 @@ pub struct CellEdit {
     /// y-slice at a time is nine, which is a shape you can read.
     pub layer: u32,
     /// The field taking keys, and what has been typed.
-    active: Option<(CellField, String)>,
+    /// The token being typed, if a field is open. One facet takes tokens, so there is nothing
+    /// to say about WHICH — `anchor` was the other, and it was read by nothing.
+    active: Option<String>,
     /// **The verb a header applies.** The chips still act on the selected cell as they always did;
     /// this remembers which one was used last, so clicking a row, column or layer header repeats it
     /// over that whole set. A header with no verb behind it would have to invent one.
@@ -1083,9 +1075,6 @@ fn describe_cell(c: &emerge_core::descriptor::SubCell) -> String {
     if let Some(e) = &c.edge {
         parts.push(format!("edge `{e}`"));
     }
-    if let Some(a) = &c.anchor {
-        parts.push(format!("anchor `{a}`"));
-    }
     if parts.is_empty() {
         "open".to_owned()
     } else {
@@ -1098,10 +1087,9 @@ fn describe_cell(c: &emerge_core::descriptor::SubCell) -> String {
 fn cell_glyph(c: Option<&emerge_core::descriptor::SubCell>) -> &'static str {
     match c {
         None => ".",
-        Some(c) if c.solid && (c.edge.is_some() || c.anchor.is_some()) => "%",
+        Some(c) if c.solid && c.edge.is_some() => "%",
         Some(c) if c.solid => "#",
         Some(c) if c.edge.is_some() => "E",
-        Some(c) if c.anchor.is_some() => "A",
         Some(_) => ".",
     }
 }
@@ -1506,15 +1494,10 @@ fn apply_verb_to(
     state.record(history_before);
     state.status.say(persist(project, where_to, said));
         }
-        CellVerb::Edge | CellVerb::Anchor => {
-            let field = if verb == CellVerb::Edge {
-                CellField::Edge
-            } else {
-                CellField::Anchor
-            };
+        CellVerb::Edge => {
             // Starts empty, and Enter on an empty field CLEARS the token — one keystroke path for
             // setting and unsetting, rather than a second control for "remove".
-            edit.active = Some((field, String::new()));
+            edit.active = Some(String::new());
             edit.target = state.target();
             // **The target is captured here, not read at commit.** One cell or a whole span, the
             // same way: the cells this field was opened against are the cells it writes to. Reading
@@ -1740,7 +1723,6 @@ fn lattice_keys(
     for (action, verb) in [
         (Action::CellSolid, CellVerb::Solid),
         (Action::CellEdge, CellVerb::Edge),
-        (Action::CellAnchor, CellVerb::Anchor),
         (Action::CellClear, CellVerb::Clear),
     ] {
         if pressed(action) {
@@ -1810,7 +1792,7 @@ fn cell_keys(
         }
         match &event.logical_key {
             Key::Enter => {
-                let Some((field, raw)) = edit.active.take() else {
+                let Some(raw) = edit.active.take() else {
                     return;
                 };
                 // The cells this field was opened against — see `apply_verb_to`. A field with no
@@ -1849,10 +1831,7 @@ fn cell_keys(
                 };
                 let mut wrote = 0usize;
                 for &at in &targets {
-                    let ok = match field {
-                        CellField::Edge => d.lattice_mut().set_edge(at, div, &token),
-                        CellField::Anchor => d.lattice_mut().set_anchor(at, div, &token),
-                    };
+                    let ok = d.lattice_mut().set_edge(at, div, &token);
                     if ok.is_some() {
                         wrote += 1;
                     }
@@ -1881,17 +1860,17 @@ fn cell_keys(
                 state.status.note("cell unchanged".to_owned());
             }
             Key::Backspace => {
-                if let Some((_, raw)) = edit.active.as_mut() {
+                if let Some(raw) = edit.active.as_mut() {
                     raw.pop();
                 }
             }
             Key::Space => {
-                if let Some((_, raw)) = edit.active.as_mut() {
+                if let Some(raw) = edit.active.as_mut() {
                     raw.push(' ');
                 }
             }
             Key::Character(ch) => {
-                if let Some((_, raw)) = edit.active.as_mut() {
+                if let Some(raw) = edit.active.as_mut() {
                     raw.push_str(ch);
                 }
             }
@@ -1984,13 +1963,7 @@ fn refresh_cells(
 
     let detail = match cell_edit.at {
         Some(at) => match &cell_edit.active {
-            Some((field, raw)) => format!(
-                "{},{},{}  {} `{raw}_`",
-                at.0,
-                at.1,
-                at.2,
-                if *field == CellField::Edge { "edge" } else { "anchor" }
-            ),
+            Some(raw) => format!("{},{},{}  edge `{raw}_`", at.0, at.1, at.2),
             None => format!(
                 "{},{},{}  {}",
                 at.0,
@@ -2538,6 +2511,11 @@ impl Plugin for TilesPlugin {
             .init_resource::<HeightEdit>()
             .init_resource::<StagedLift>()
             .init_resource::<DemoteArm>()
+            // **The tab's other half.** Registered here rather than in its own plugin because it is
+            // this tab in another mode, and a `Res<T>` a system takes must exist before the first
+            // frame — a missing one panics rather than skipping (`CLAUDE.md`).
+            .init_resource::<crate::build::TileMode>()
+            .init_resource::<crate::build::Build>()
             .add_systems(Startup, (spawn_tab_strip, spawn_tiles_panel))
             .add_systems(
                 Update,
@@ -2549,7 +2527,13 @@ impl Plugin for TilesPlugin {
                     // duplicated. `Phase::Act` puts them all ahead of the text fields below.
                     toggle_mode.in_set(crate::keys::Phase::Act),
                     move_selection.in_set(crate::keys::Phase::Act),
-                    lattice_keys.in_set(crate::keys::Phase::Act),
+                    // **The two lattice walkers, nested as one.** A system tuple caps at twenty and
+                    // this pair is one idea in two modes: DESCRIBE walks a mesh's own lattice,
+                    // BUILD walks the tile's. `Context` keeps them from firing into each other.
+                    (
+                        lattice_keys.in_set(crate::keys::Phase::Act),
+                        crate::build::build_keys.in_set(crate::keys::Phase::Act),
+                    ),
                     autoscan_candidate.run_if(in_tiles_mode),
                     // Nested: a system tuple caps out, and these three are one feature anyway —
                     // point at the piece, click a cell, see which one is under the cursor.
@@ -2587,12 +2571,24 @@ impl Plugin for TilesPlugin {
                     rebuild_candidates.run_if(resource_changed::<ImportState>.or_else(resource_changed::<crate::filter::Filters>)),
                     // **Structure only.** The selection and the carets are repainted in place by
                     // `refresh_cells`; rebuilding the pane for them is the bounce.
+                    // **And on the tile in hand.** `TileMode` and `Build` are here because the pane
+                    // shows them: without the two, `C` flipped the mode and left the mesh inspector
+                    // on screen, and walking the cursor moved nothing anybody could see.
                     rebuild_detail.run_if(
                         resource_changed::<ImportState>
-                            .or_else(resource_changed::<crate::labels::LabelGeneration>),
+                            .or_else(resource_changed::<crate::labels::LabelGeneration>)
+                            .or_else(resource_changed::<crate::build::TileMode>)
+                            .or_else(resource_changed::<crate::build::Build>),
                     ),
                     refresh_lines,
-                    drive_preview,
+                    // **Both stages, nested as one.** A system tuple caps at twenty in 0.19, and these
+                    // are one idea in two modes: DESCRIBE stands one mesh up, BUILD stands the tile
+                    // up with the grid you steer it by. They are mutually exclusive on the mode.
+                    (
+                        drive_preview,
+                        crate::build::drive_build_preview,
+                        crate::build::draw_build_grid,
+                    ),
                 ),
             )
             // A second `add_systems` rather than a nested tuple — `add_systems` caps a tuple at 20
@@ -4067,6 +4063,7 @@ fn in_tiles_mode(mode: Res<Mode>) -> bool {
 fn drive_preview(
     mut commands: Commands,
     mode: Res<Mode>,
+    tile_mode: Res<crate::build::TileMode>,
     assets: Res<AssetServer>,
     mut state: ResMut<ImportState>,
     project: Res<Project>,
@@ -4091,7 +4088,10 @@ fn drive_preview(
             commands.entity(e).despawn();
         }
     };
-    if *mode != Mode::Tiles {
+    // **BUILD stages the tile instead**, on the same stage — see `build::drive_build_preview`. Left
+    // running, this would stand the picked mesh up inside the tile being assembled: one piece at the
+    // origin, overlapping whatever is already there, which reads as a member nobody placed.
+    if *mode != Mode::Tiles || *tile_mode == crate::build::TileMode::Build {
         clear(&mut commands);
         return;
     }
@@ -4681,6 +4681,110 @@ fn rebuild_candidates(
     }
 }
 
+/// **The tile in hand** — what BUILD shows where DESCRIBE shows a mesh.
+///
+/// Everything here answers a question the author is about to act on: which mode am I in, what am I
+/// building, how big is a cell, where is the cursor, and what is already in the tile. That is the
+/// feedback half of Compton's grokloop, which Lai et al.'s second pillar asks to keep short — *"the
+/// speed of learning depends on how short the loop is."* A tile you cannot see is a loop with the
+/// feedback removed.
+fn build_detail(
+    p: &mut ChildSpawnerCommands,
+    build: &crate::build::Build,
+    project: &Project,
+) {
+    let line = |p: &mut ChildSpawnerCommands, text: String, colour: Color, size: f32| {
+        p.spawn((Text::new(text), TextColor(colour), TextFont::from_font_size(size)));
+    };
+
+    let Some(comp) = build.open.as_ref() else {
+        crate::chrome::section(p, "BUILD");
+        line(
+            p,
+            "no tile open — press N to start one".to_owned(),
+            ACCENT,
+            10.0,
+        );
+        return;
+    };
+    let emerge_core::composition::Envelope::Bounded { size } = comp.envelope else {
+        crate::chrome::section(p, "BUILD");
+        line(p, format!("`{}` claims no tile", comp.id), DANGER, 10.0);
+        return;
+    };
+
+    crate::chrome::section(p, "BUILD");
+    line(p, comp.id.clone(), TEXT, 12.0);
+    line(
+        p,
+        format!("{:.2} x {:.2} x {:.2} m", size.0, size.1, size.2),
+        DIM,
+        9.0,
+    );
+
+    // **The grid, and where you are on it.** The cell counts come from the rung rather than being
+    // stated, so the number an author reads is the number of squares they will walk.
+    let pitch = crate::build::pitch(build, project);
+    let (nx, ny, nz) = crate::build::cells(size, pitch);
+    crate::chrome::section(p, "GRID");
+    line(
+        p,
+        format!("{nx} x {ny} x {nz} cells of {:.0} mm", pitch * 1000.0),
+        TEXT,
+        10.0,
+    );
+    let (cx, cy, cz) = build.at;
+    line(p, format!("cursor {cx},{cy},{cz}"), ACCENT, 10.0);
+    // The corner the next drop will put a piece's minimum corner on — the number that explains where
+    // things land, and the one that makes "flush" legible rather than lucky.
+    let (lx, ly, lz) = crate::build::cell_corner(size, pitch, build.at);
+    line(
+        p,
+        format!("corner ({lx:+.3}, {lz:+.3}) at {ly:.3} m"),
+        DIM,
+        9.0,
+    );
+
+    crate::chrome::section(p, "MEMBERS");
+    if comp.members.is_empty() {
+        line(
+            p,
+            "nothing yet — pick a piece in the list and press Enter".to_owned(),
+            ACCENT,
+            10.0,
+        );
+        return;
+    }
+    for (i, m) in comp.members.iter().enumerate() {
+        let focused = i == build.focus;
+        // Angle brackets for a hole, so a row that is a *place for* something never reads as a thing
+        // that is there — the same shape `compose::describe_member` uses.
+        let what = match &m.body {
+            emerge_core::composition::Body::Descriptor { id, .. } => id.clone(),
+            emerge_core::composition::Body::Composition { id } => format!("[{id}]"),
+            emerge_core::composition::Body::Slot { accepts } => format!("<{accepts}>"),
+        };
+        let yaw = if m.yaw == 0.0 {
+            String::new()
+        } else {
+            format!(" yaw {:.0}", m.yaw)
+        };
+        line(
+            p,
+            format!(
+                "{} {}  ({:+.2}, {:+.2}) +{:.2}{yaw}",
+                if focused { ">" } else { " " },
+                what,
+                m.at.0,
+                m.at.1,
+                m.lift
+            ),
+            if focused { ACCENT } else { TEXT },
+            10.0,
+        );
+    }
+}
+
 /// Rebuild the detail for whichever candidate is selected.
 fn rebuild_detail(
     mut commands: Commands,
@@ -4691,11 +4795,22 @@ fn rebuild_detail(
     height_edit: Res<HeightEdit>,
     suggestions: Option<Res<crate::labels::Suggestions>>,
     project: Res<Project>,
+    tile_mode: Res<crate::build::TileMode>,
+    build: Res<crate::build::Build>,
     panes: Query<Entity, With<DetailPane>>,
 ) {
     for pane in &panes {
         commands.entity(pane).despawn_related::<Children>();
         commands.entity(pane).with_children(|p| {
+            // **BUILD draws the tile, not the mesh.** Without this the mode flipped, the status line
+            // said so, and the pane went on showing the mesh inspector — which reads as the key
+            // having done nothing, and is worse than an absent feature because it looks like a bug in
+            // whatever you press next. Raskin's argument for a visible mode is exactly this: a mode
+            // is safe to be in only when you can see you are in it.
+            if *tile_mode == crate::build::TileMode::Build {
+                build_detail(p, &build, &project);
+                return;
+            }
             // **The pane follows the focus, not the candidate list.** It used to return here unless a
             // candidate was selected, which is why an accepted tile's lattice could only be reached
             // by hand-editing `library.ron`.
@@ -5250,13 +5365,7 @@ fn rebuild_detail(
             // job — `docs/ui.md` §4.2's rule that a verb is clickable and named.
             let detail = match cell_edit.at {
                 Some(at) => match &cell_edit.active {
-                    Some((field, raw)) => format!(
-                        "{},{},{}  {} `{raw}_`",
-                        at.0,
-                        at.1,
-                        at.2,
-                        if *field == CellField::Edge { "edge" } else { "anchor" }
-                    ),
+                    Some(raw) => format!("{},{},{}  edge `{raw}_`", at.0, at.1, at.2),
                     None => format!(
                         "{},{},{}  {}",
                         at.0,
@@ -5286,7 +5395,7 @@ fn rebuild_detail(
                 ..default()
             })
             .with_children(|chips| {
-                for verb in [CellVerb::Solid, CellVerb::Edge, CellVerb::Anchor, CellVerb::Clear] {
+                for verb in [CellVerb::Solid, CellVerb::Edge, CellVerb::Clear] {
                     let on = matches!(
                         (verb, cell_edit.at.and_then(|a| grid.at(a))),
                         (CellVerb::Solid, Some(c)) if c.solid

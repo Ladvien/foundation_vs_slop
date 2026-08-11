@@ -149,7 +149,20 @@
     // A role an ITEM may occupy on a piece, as distinct from `capabilities` (about people) and
     // `surfaces` (about what holds what up). Nothing in the shipped corpus authors one; the axis is
     // here so the first one has to be written down rather than invented at a keyboard.
-    anchor: (
-        tokens: [],
+    // What may fill a hole in a tile -- the token a composition's `Body::Slot` accepts.
+    // Was `anchor`, a role an item could occupy on a MESH's lattice: authored, validated, drawn,
+    // saved, and read by nothing. A hole belongs to a tile, so it can sit in open air and two tiles
+    // sharing a wall can differ about whether one has a socket in it.
+    slot: (
+        tokens: [
+            (
+                name: "wall-fixture",
+                note: "Something bolted to a wall face -- a sconce, a vent, a socket. Read by `composition::Body::Slot`; a tile declares the position and the solver or game code decides what fills it.",
+            ),
+            (
+                name: "floor-decal",
+                note: "Something lying flat on a tile's floor -- a marking, a stain, a hatch cover. Same mechanism as `wall-fixture`, different plane.",
+            ),
+        ],
     ),
 )
