@@ -100,6 +100,36 @@ Rough order, and none of it is blocking:
 4. **`BEVY_GAME_INFO.md`** on the library share needs the tile-authoring model, for the 3-D artists.
 5. **`scripts/mirror_crates.sh`** has not run; the crate mirrors are behind.
 
+## Verified end to end, 2026-08-11 — and what it found
+
+§7 of the plan asked for a round-trip and it had never been written. Writing it
+(`a_tile_survives_a_save_and_a_reopen`) found **two bugs that made holes useless**, both invisible to
+a suite where every individual piece was green:
+
+- **A vocabulary token is not an id.** `place_slot` seeded the member id with its `accepts` token, and
+  `fresh_id` assumes a legal id segment — true of a descriptor id, false of a token. `vocab.rs`
+  documents `"uses-electricity"`; hyphens are correct there and illegal in an id. So `validate`
+  refused the member and **no tile carrying a hole could be saved**. Both tokens the project declares
+  are hyphenated, so this was every hole. `build::slot_id` converts and then checks its own output
+  against `naming::is_id`, so it cannot drift from the rule.
+- **Cell zero's corner is the tile edge.** A slot took a zero span, landing on its cell's corner,
+  under a comment reasoning that "the last cell's corner is inside by less than a rung" — true of the
+  last cell. `validate` wants a slot *strictly* inside, so a hole anywhere in row or column zero was
+  refused, **including the cell the cursor opens on**. A hole now takes its cell as its span and lands
+  at the centre. The test walks every cell, because "the first" and "the last" is exactly the pair the
+  original reasoning got half right.
+
+The loop now has a test from keystroke to stamp: author → save → reopen → `expand`, asserting two
+rows and one hole rather than three rows. §7's attachment item was already covered by
+`a_fixture_whose_host_is_gone_is_an_error_naming_both`. What is left of §7 needs a person: driving it
+over BRP, timing one tile end to end, and re-authoring the kit.
+
+**And one gap that is a design call, not a bug to fix quietly — FVS-R-24.** The author's own example,
+*"wall mounted light fixture on the wall mesh"*, is not authorable: `Body::Descriptor` carries `on`,
+the assembler always writes `None`, and a face-mounted piece with no host makes the **map refuse to
+load**. The slot path is unaffected and works. See the backlog item for the two shapes a fix could
+take and why the late-refusal half cannot be built independently.
+
 ## Traps paid for, so nobody pays twice
 
 - **A comment describing a fix nobody wrote.** I left one in `keys.rs` claiming the Save handler
