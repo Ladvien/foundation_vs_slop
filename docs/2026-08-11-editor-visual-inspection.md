@@ -119,6 +119,27 @@ missing.
   in the states I drove it from, or the output goes somewhere the log does not. Worth one look.
 
 ---
+## D3 — the whole stamped picture is rebuilt on keystrokes that change nothing
+
+**Evidence:** 23 `redrew` lines in one short session, **18 of them rebuilding the identical
+`152 rows from 145 stamps`**. They fire on `R`/`T`/`Y`/`U`/`[`/`]` with no piece under the cursor —
+verbs which `turn_under_cursor` provably abandons *before* `project.dirty = true` (`editor.rs:4651-4662`).
+
+**Mechanism.** `redraw_stamps` is gated on `project.is_changed()`, and Bevy's change detection flags a
+resource when a system takes `ResMut<T>` and dereferences it — not when it actually mutates. The key
+dispatcher takes `ResMut<Project>` for every one of these verbs, so a keypress that correctly decides
+to do nothing still reads as a change.
+
+**What it costs.** `redraw_stamps` despawns every `StampInstance` and re-derives the whole picture
+through `composition::expand` + `stack::resolve_y`. At rest that is 152 rows. **After a `Cmd+G` it is
+1,616** — so, post-generate, a keystroke that does nothing tears down and rebuilds sixteen hundred
+entities. Not a correctness bug; a real interactivity one, and it grows with the map.
+
+**Fix:** gate on `project.dirty` (which the code already maintains honestly) rather than on
+`is_changed()`, or take `Res<Project>` where the verb has not yet decided to write.
+
+---
+
 ## D1's fix, tested rather than proposed
 
 The candidate fix was run as an experiment and **fully reverted** (`git status` clean, 54 tests green).
