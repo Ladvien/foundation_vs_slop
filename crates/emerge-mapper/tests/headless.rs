@@ -1258,7 +1258,15 @@ mod compose {
             state.status.problem_text()
         );
         let said = state.status.note_text();
-        assert!(said.contains("could not close"), "the shortfall must be said out loud: {said}");
+        // **The wish, named — not a percentage the solver never reported.** `Solved::unmet` is a
+        // weight and the enclosure wish is charged all-or-nothing, so it cannot say *how much* was
+        // missed; the line used to print `ENCLOSURE_WISH` as the part that failed, which told an
+        // author who got 99 cells of 100 that a quarter of the region had not closed.
+        assert!(said.contains("enclosure"), "the shortfall must be said out loud: {said}");
+        assert!(
+            !said.contains("could not close"),
+            "and it must not claim a shortfall the solver never measured: {said}"
+        );
         assert!(
             !app.world().resource::<Project>().map.stamps.is_empty(),
             "and the arrangement must still be on the map"
@@ -3085,7 +3093,7 @@ fn a_refusal_on_the_tiles_tab_is_visible_and_stays_there() {
             .world_mut()
             .query::<(&bevy::prelude::Node, &emerge_mapper::chrome::ProblemBanner)>();
         q.iter(app.world())
-            .find(|(_, b)| b.0 == want)
+            .find(|(_, b)| b.0.contains(&want))
             .map(|(n, _)| n.display)
             .unwrap_or_else(|| panic!("the shared panel must carry a banner for {}", want.label()))
     };
@@ -3220,8 +3228,16 @@ fn the_tiles_tab_opens_a_tile_and_walks_its_grid() {
     // Read from the resource rather than hardcoded, so the assertion is "the pane agrees with the
     // member" rather than "it is at a number I typed" — the second breaks whenever the step or the
     // opening position changes, which is three times so far.
-    let at = app.world().resource::<Build>().at;
-    let want = format!("cursor {},{},{}", at.0, at.1, at.2);
+    //
+    // **The focused member, not a cursor.** There is no cursor in this tab: the arrows move the
+    // member, so the member is the position. The pane used to print a `Build::at` written only by
+    // the nudge — stale after every drop, removal and undo, and measured in a different frame from
+    // the one its readers used.
+    let build = app.world().resource::<Build>();
+    let want = match build.open.as_ref().and_then(|c| c.members.get(build.focus)) {
+        Some(m) => format!("focus ({:+.3}, {:+.3}) at {:.3} m", m.at.0, m.at.1, m.lift),
+        None => "empty — the next drop lands centred".to_owned(),
+    };
     assert!(
         shown.iter().any(|t| t.contains(&want)),
         "the pane must show where the focused member is ({want}). Saw: {shown:?}"

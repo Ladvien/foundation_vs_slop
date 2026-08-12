@@ -170,10 +170,15 @@ pub fn flood(
     // them saveable, none of them on screen: the file and the screen disagreeing, which is the exact
     // failure the one-path rule exists to prevent. Refused here, in the same shape as the other two
     // refusals, so there is one answer to "may this piece go here" rather than two.
-    if let Some(class) = emerge_core::stack::needs_surface(brush) {
+    //
+    // Through [`crate::editor::mount_class`], which asks about **every** mount that needs a host.
+    // This guard used to name `stack::needs_surface` directly and so knew about exactly one of them:
+    // the day `Mount::OnFace` arrived, a wall-mounted sconce became flood-fillable and the 4,089
+    // lamps were back under a different mount kind.
+    if let Some(class) = crate::editor::mount_class(brush) {
         return Err(format!(
-            "`{}` goes on a `{class}` surface, so it cannot be flood filled — a fill covers open \
-             floor and none of these cells offers one. Place it on a surface instead.",
+            "`{}` mounts to a `{class}`, so it cannot be flood filled — a fill covers open \
+             floor and none of these cells offers one. Place it on its host instead.",
             brush.id
         ));
     }
@@ -279,12 +284,13 @@ pub fn box_fill(
     pitch: f32,
     mut next_id: impl FnMut() -> String,
 ) -> Result<Filled, String> {
-    // The same refusal `flood` makes, and for the same measured reason: filling with a
-    // surface-mounted piece once wrote 4,089 invisible lamps into a map, all saveable, none drawable.
-    if let Some(class) = emerge_core::stack::needs_surface(brush) {
+    // The same refusal `flood` makes, through the same [`crate::editor::mount_class`], and for the
+    // same measured reason: filling with a hosted piece once wrote 4,089 invisible lamps into a map,
+    // all saveable, none drawable.
+    if let Some(class) = crate::editor::mount_class(brush) {
         return Err(format!(
-            "`{}` goes on a `{class}` surface, so it cannot be box filled — a fill covers open floor \
-             and none of these cells offers one. Place it on a surface instead.",
+            "`{}` mounts to a `{class}`, so it cannot be box filled — a fill covers open floor \
+             and none of these cells offers one. Place it on its host instead.",
             brush.id
         ));
     }

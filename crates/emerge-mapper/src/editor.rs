@@ -645,8 +645,13 @@ const ENCLOSURE_WISH: f32 = 0.25;
 const ENCLOSURE_WEIGHT: u32 = 200;
 
 /// The see-through preview of the armed brush.
+///
+/// **Public because a ghost is a ghost on every tab.** [`fade_ghost`] is the one thing that makes a
+/// preview translucent, and it is keyed on this marker alone — so a tab that draws its own preview
+/// (the tile assembler does) marks it with this rather than growing a second fading pass. Without the
+/// marker the "ghost" renders solid, at full alpha, indistinguishable from a committed piece.
 #[derive(Component)]
-struct Ghost;
+pub struct Ghost;
 
 /// Which descriptor the live ghost is showing, so it is rebuilt only when the brush changes —
 /// respawning a GLB every frame would thrash the asset server and never finish loading.
@@ -907,7 +912,7 @@ fn spawn_panel(mut commands: Commands) {
 
     commands.entity(root).with_children(|p| {
         crate::chrome::title(p, "EMERGE MAPPER");
-        crate::chrome::problem_banner(p, crate::tiles::Mode::Map);
+        crate::chrome::problem_banner(p, &[crate::tiles::Mode::Map]);
         crate::chrome::shortcut_hint(p);
 
         // The readout, in the same two columns as the keys so the whole panel shares one left edge.
@@ -919,7 +924,7 @@ fn spawn_panel(mut commands: Commands) {
                 ..default()
             },
             StatusBlock,
-            crate::notice::CopyPane(crate::tiles::Mode::Map),
+            crate::notice::CopyPane(&[crate::tiles::Mode::Map]),
         ))
         .with_children(|s| {
             for field in [
@@ -1022,7 +1027,7 @@ fn spawn_panel(mut commands: Commands) {
         // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
         // the panel, and an auto margin in a column absorbs the free space above it — so
         // placed any earlier it pushes every sibling after it down with it.
-        crate::chrome::problem_log(p, crate::tiles::Mode::Map);
+        crate::chrome::problem_log(p, &[crate::tiles::Mode::Map]);
     });
 }
 
@@ -2063,6 +2068,29 @@ pub fn brush_span(d: &emerge_core::descriptor::Descriptor, yaw: f32) -> (f32, f3
     match d.extent.footprint {
         Some(fp) => crate::compose::turned_footprint(fp, yaw),
         None => (0.0, 0.0),
+    }
+}
+
+/// **The class of host this piece has to be mounted on**, or `None` if it stands on its own.
+///
+/// One function rather than each caller asking `stack::needs_surface` and remembering to ask
+/// `stack::needs_face` too. That is not a hypothetical tidiness: `fill::flood` asked only about
+/// surfaces, so the day `Mount::OnFace` arrived a face-mounted brush became flood-fillable and wrote
+/// one unresolvable placement per cell — the same shape as the measured **4,089 invisible lamps**,
+/// resurrected by a second mount kind the guard had never heard of. A third one must not be able to
+/// do it again, so "does this need a host" has exactly one answer here.
+///
+/// [`emerge_core::stack`] keeps the two apart deliberately — they answer different questions and a
+/// caller that wants the datum needs to know which — so this composes them rather than replacing
+/// them.
+pub fn mount_class(d: &emerge_core::descriptor::Descriptor) -> Option<&str> {
+    match (
+        emerge_core::stack::needs_surface(d),
+        emerge_core::stack::needs_face(d),
+    ) {
+        (Some(class), _) => Some(class),
+        (None, Some((class, _))) => Some(class),
+        (None, None) => None,
     }
 }
 
@@ -4005,10 +4033,13 @@ fn keys(
         return;
     }
 
-    // **`Cmd+S` saves what is open, and on the Tiles tab that is the tile.** The key is `Global`
-    // because the verb is global; what it saves is not. Guarded here rather than bound twice —
-    // `the_key_space_has_no_collisions` refuses a second `S`, and it is right to: two bindings would
-    // be two names for one act. `build::build_keys` takes the other half of this branch.
+    // **`Cmd+S` saves what is open, and on the Tiles tab that is the tile *and* the map.** The key is
+    // `Global` because the verb is global; what it saves is not. Guarded here rather than bound twice
+    // — `the_key_space_has_no_collisions` refuses a second `S`, and it is right to: two bindings would
+    // be two names for one act. `build::build_keys` takes the other half of this branch, and it
+    // writes **both** files: this branch is the only call to `Project::save` in the crate, so a Tiles
+    // tab that only committed the composition answered "saved" to an author who had twenty unsaved
+    // Map edits behind them.
     if keys::just_pressed(&keyboard, live.0, Action::Save)
         && live.0 != keys::Context::Tiles
     {
@@ -6741,9 +6772,18 @@ fn generate_from(
     // what the solver could not do is a fact about the region, not a failure of the tool — so it
     // rides the same line rather than the red banner, which is reserved for "nothing happened".
     // Before this, a region that could not meet what was asked returned an error and an empty map.
+    //
+    // **What it says is the wish, not the shortfall**, because a shortfall is not a thing `unmet`
+    // knows. It is a *weight* — `Solved::unmet` is "the total weight of the wishes this arrangement
+    // could not grant", and `enclosure_rules` charges one ungranted wish exactly `ENCLOSURE_WEIGHT`
+    // — so a solve that closed 99 cells of the 100 it wished for reports the same 200 as one that
+    // closed none. Printing `ENCLOSURE_WISH` as the part that *failed* turned that into "could not
+    // close 25% of it", which is a number the solver never said and which reads as near-total
+    // failure on a region that very nearly got there.
     let shortfall = if solved.unmet > 0 {
         format!(
-            " — but could not close {}% of it into rooms; the kit's rules do not allow one here",
+            " — but did not reach the {}% enclosure it aims for; the kit's rules do not allow more \
+             here",
             (ENCLOSURE_WISH * 100.0).round() as u32
         )
     } else {

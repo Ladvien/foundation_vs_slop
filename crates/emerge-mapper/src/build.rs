@@ -65,12 +65,16 @@ pub struct Build {
     pub open: Option<Composition>,
     /// Which member has focus, as an index into `open`'s members. Out of range reads as "none", which
     /// is what happens when the focused member is dropped.
+    ///
+    /// **There is no cursor beside it, and that is deliberate.** A cell cursor lived here until it
+    /// became a second answer to "where are we": the arrows move the focused member, so the member
+    /// *is* the position, and the two disagreed the moment the envelope started fitting its contents.
+    /// It was kept on as a derived readout and went stale immediately — written only by the nudge,
+    /// while a drop, a removal and an undo all move the focus — and its readers measured it from the
+    /// tile's minimum corner while its one writer measured it in signed rungs from the centre. What
+    /// the panel shows now is the focused member itself.
     pub focus: usize,
-    /// The cell cursor, in whole cells from the envelope's **minimum** corner — `(0, 0, 0)` is the
-    /// bottom south-west cell. Signed so walking off an edge is representable and then clamped, rather
-    /// than wrapping through zero.
-    pub at: (i32, i32, i32),
-    /// The rung the cursor walks, **latched**.
+    /// The rung the arrows step, **latched**.
     ///
     /// Bier's snap-dragging changes gravity modes with keyboard commands and holds nothing; of its 44
     /// commands the modal ones are all latched. StickyLines says why holding costs: its designers
@@ -161,11 +165,21 @@ pub fn fit_envelope(
     for m in members {
         // A hole has no mesh and so no footprint; it is a point, and `validate` already refuses one
         // outside the envelope. Its position still counts toward the reach.
+        //
+        // **And it counts a hair further than it stands**, because `validate_shape` requires a slot
+        // to be *strictly* inside — *"a slot exactly on the seam is the ambiguous case"* — while a
+        // zero span makes the envelope come out at exactly `2·|at|`, putting the hole on the seam by
+        // construction. One nudge east of centre at a divisor of 2 was enough: the tile then refused
+        // to save at all, naming an envelope the author never chose and could only escape by
+        // guessing to nudge back. The margin has to exceed the slack below or the `ceil` swallows
+        // it; a millimetre is the same skin `touching` uses, for the same reason.
+        const OFF_THE_SEAM: f32 = 1e-3;
         let span = match &m.body {
             Body::Descriptor { id, .. } => library
                 .get(id)
                 .map(|d| crate::editor::brush_span(d, m.yaw))
                 .unwrap_or((0.0, 0.0)),
+            Body::Slot { .. } => (OFF_THE_SEAM * 2.0, OFF_THE_SEAM * 2.0),
             _ => (0.0, 0.0),
         };
         reach.0 = reach.0.max((m.at.0.abs() + span.0 * 0.5).abs());
@@ -227,44 +241,6 @@ pub fn step_in_view(wish: Vec2, yaw: f32) -> (i32, i32) {
     }
     let turns = (d.z.atan2(d.x) + OFF_THE_BOUNDARY) / std::f32::consts::FRAC_PI_2;
     AXES[(turns.round() as i32).rem_euclid(4) as usize]
-}
-
-/// The **minimum corner** of a cell, in envelope-local metres.
-///
-/// X and Z are measured from the envelope's centre — the reading `Member::at` has — and Y from its
-/// floor, which is the reading `Member::lift` has. Two origins because the envelope has two: a tile is
-/// centred in plan and stands on its base.
-pub fn cell_corner(size: (f32, f32, f32), pitch: f32, at: (i32, i32, i32)) -> (f32, f32, f32) {
-    (
-        -size.0 * 0.5 + at.0 as f32 * pitch,
-        at.1 as f32 * pitch,
-        -size.2 * 0.5 + at.2 as f32 * pitch,
-    )
-}
-
-/// Keep the cursor inside the tile. Walking off an edge stops at it rather than wrapping.
-pub fn clamp(size: (f32, f32, f32), pitch: f32, at: (i32, i32, i32)) -> (i32, i32, i32) {
-    let (nx, ny, nz) = cells(size, pitch);
-    let c = |v: i32, n: u32| v.clamp(0, n.saturating_sub(1) as i32);
-    (c(at.0, nx), c(at.1, ny), c(at.2, nz))
-}
-
-/// **Where a piece of this footprint lands when dropped in this cell** — `(at, lift)`.
-///
-/// The piece's minimum corner goes on the cell's, so its centre is half a span in. This is
-/// `grid::snap_corner`'s rule read forwards instead of backwards: there the centre is given and the
-/// corner is solved for; here the corner is chosen and the centre follows.
-///
-/// `span` is the piece's footprint **already turned by its yaw** — the caller has the yaw and this
-/// does not, the same split `editor::brush_at` makes.
-pub fn drop_at(
-    size: (f32, f32, f32),
-    pitch: f32,
-    at: (i32, i32, i32),
-    span: (f32, f32),
-) -> ((f32, f32), f32) {
-    let (x, y, z) = cell_corner(size, pitch, at);
-    ((x + span.0 * 0.5, z + span.1 * 0.5), y)
 }
 
 /// A member id that is not already taken, derived from the piece's own name.
@@ -364,21 +340,27 @@ fn touching(a: ((f32, f32), (f32, f32)), b: ((f32, f32), (f32, f32))) -> bool {
 /// sort could quietly change later.
 ///
 /// Returns `Ok(None)` for a piece that needs no host, which is most of them.
+///
+/// `self_id` is the guest's own member id when it is already in `members`, so a piece is never
+/// offered itself — `validate` refuses a member resting on itself, and a wall that offers the very
+/// face it is being asked about would otherwise host itself the moment [`rebind_hosts`] re-asked.
 pub fn host_for(
     members: &[Member],
     library: &emerge_core::library::Library,
     guest: &emerge_core::descriptor::Descriptor,
+    self_id: Option<&str>,
     at: (f32, f32),
     span: (f32, f32),
 ) -> Result<Option<String>, String> {
-    let want = match (stack::needs_surface(guest), stack::needs_face(guest)) {
-        (Some(c), _) => c,
-        (None, Some((c, _))) => c,
-        (None, None) => return Ok(None),
+    let Some(want) = crate::editor::mount_class(guest) else {
+        return Ok(None);
     };
 
     let mut found: Vec<&str> = Vec::new();
     for m in members {
+        if self_id == Some(m.id.as_str()) {
+            continue;
+        }
         let Body::Descriptor { id, .. } = &m.body else {
             // A hole offers nothing — it has no mesh yet — and a nested group's faces belong to its
             // own members. Neither is a host.
@@ -410,44 +392,115 @@ pub fn host_for(
     }
 }
 
-/// Drop a descriptor into the cursor's cell, returning the index it landed at.
+/// **Where a piece lands when it is brought in** — the author's *"bottom line in the center"*.
 ///
-/// The envelope is **not** adjusted here — `refit` owns that, so growing and shrinking happen in one
-/// place whatever changed the members.
-pub fn place(
-    build: &mut Build,
-    guest: &emerge_core::descriptor::Descriptor,
+/// A brought-in mesh is not positioned, it is *introduced*; where it goes is the next act, and the
+/// arrows do it. Corner-aligning to a cursor cell instead had a second cost that only showed up once
+/// the envelope started fitting its contents: a 1 m floor dropped in the middle cell reaches 0.833
+/// from the anchor, so the tile grew to 2 x 2 to hold a piece that is exactly one tile.
+///
+/// **A constant rather than a literal in each of the three places that need it**, because the ghost
+/// is one of them. `drive_build_preview` drew its preview through cell-corner arithmetic left over
+/// from the deleted cursor while the drop landed here, so the two were on different lattices: a
+/// 0.1 m wall previewed flush against the west edge and landed 450 mm away, dead centre, in a tile
+/// one metre across. This module's opening line is *"the ghost is the contract"*; one value is what
+/// makes that structural rather than a thing to keep in step.
+pub const BROUGHT_IN: ((f32, f32), f32) = ((0.0, 0.0), 0.0);
+
+/// **Which sibling each fixture is mounted on, re-read from where everything now stands.**
+///
+/// One owner, called after every verb — the shape [`refit`] has, and for the same reason. `on` was
+/// written once, at drop time, and never looked at again: nudging a wall, flushing it against an
+/// edge or turning it left the sconce still claiming to be mounted on it. `composition::validate`
+/// only checks that the named sibling *exists*, so that tile saved, and `stack::resolve_y` then put
+/// the fixture at its face height with nothing under it — floating in mid-air, in the editor and in
+/// the game alike. A binding written once about a relationship the positions decide is a second
+/// source of truth, and the two drift the moment anything moves.
+///
+/// Refusing is the point of the `Result`. A move that would leave a fixture with no host, or with
+/// two equally adjacent, is refused by the verb that made it rather than written and discovered at
+/// save — the same door `place` has always kept, now kept by every verb.
+pub fn rebind_hosts(
+    comp: &mut Composition,
     library: &emerge_core::library::Library,
-    span: (f32, f32),
-    yaw: f32,
-    pitch: f32,
-) -> Result<usize, String> {
-    let Some(comp) = build.open.as_mut() else {
+) -> Result<(), String> {
+    // Positions as they now stand, so each member resolves against the others' current places rather
+    // than against a list being rewritten under it.
+    let standing = comp.members.clone();
+    for m in comp.members.iter_mut() {
+        let Body::Descriptor { id, on, .. } = &mut m.body else {
+            continue;
+        };
+        // A member naming a descriptor the library does not carry cannot be measured, so there is
+        // nothing to resolve against and nothing to say — `expand` refuses it by name at stamp time.
+        let Some(guest) = library.get(id) else {
+            continue;
+        };
+        let span = crate::editor::brush_span(guest, m.yaw);
+        *on = host_for(&standing, library, guest, Some(&m.id), m.at, span)?;
+    }
+    Ok(())
+}
+
+/// **The one door every edit to the open tile goes through.**
+///
+/// Apply the change to a copy, re-resolve the hosts, and keep it only if the result still stands up.
+/// A refusal therefore leaves the tile exactly as it was rather than needing the edit undone — which
+/// is what `place` used to achieve for the drop alone by resolving before the member existed, and
+/// what the nudge, the flush, the turn and the removal each did not. Deleting a wall left the sconce
+/// on it naming a member that no longer existed, and `validate_shape` then refused the whole
+/// composition with no verb able to repair it.
+fn edit<T>(
+    build: &mut Build,
+    library: &emerge_core::library::Library,
+    act: impl FnOnce(&mut Composition) -> Result<T, String>,
+) -> Result<T, String> {
+    let Some(open) = build.open.as_ref() else {
         return Err("no tile open — press N to start one".to_owned());
     };
+    let mut next = open.clone();
+    let out = act(&mut next)?;
+    rebind_hosts(&mut next, library)?;
+    build.open = Some(next);
+    Ok(out)
+}
+
+/// Whether the arrows have anything to act on — a member under the focus.
+///
+/// Asked *before* [`edit`] by every verb that moves one, because "the tile is empty" is guidance and
+/// everything the door refuses is a refusal. A note is replaced by the next keystroke; a problem is
+/// sticky until `Esc`, and an author who pressed an arrow on a tile they have not put anything in
+/// yet has not done anything wrong.
+fn focused(build: &Build) -> bool {
+    build
+        .open
+        .as_ref()
+        .is_some_and(|c| build.focus < c.members.len())
+}
+
+/// Bring a descriptor into the tile, returning the index it landed at.
+///
+/// The envelope is **not** adjusted here — `refit` owns that, so growing and shrinking happen in one
+/// place whatever changed the members. Nor is `on`: [`rebind_hosts`] owns that, so a fixture's host
+/// is decided by where things stand rather than by which verb happened to touch it last.
+pub fn place(
+    comp: &mut Composition,
+    guest: &emerge_core::descriptor::Descriptor,
+) -> Result<usize, String> {
     let Envelope::Bounded { .. } = comp.envelope else {
         return Err(format!("`{}` claims no tile, so it has no grid to drop into", comp.id));
     };
-    // **Centred, bottom on the floor** — the author's *"bottom line in the center"*. A brought-in
-    // mesh is not positioned, it is *introduced*; where it goes is the next act, and the arrows do
-    // it. Corner-aligning to a cursor cell instead had a second cost that only showed up once the
-    // envelope started fitting its contents: a 1 m floor dropped in the middle cell reaches 0.833
-    // from the anchor, so the tile grew to 2 x 2 to hold a piece that is exactly one tile.
-    let _ = (pitch, build.at);
-    let (at, lift) = ((0.0, 0.0), 0.0);
-    // **Resolved before the member exists**, so a refusal leaves the tile exactly as it was rather
-    // than needing the drop undone.
-    let on = host_for(&comp.members, library, guest, at, span)?;
+    let (at, lift) = BROUGHT_IN;
     let m = Member {
         id: fresh_id(&comp.members, &guest.id),
         body: Body::Descriptor {
             id: guest.id.clone(),
             tip: (0, 0),
-            on,
+            on: None,
             patch: None,
         },
         at,
-        yaw,
+        yaw: 0.0,
         lift,
         paint: 0,
         of_fingerprint: None,
@@ -456,30 +509,25 @@ pub fn place(
     Ok(insert_sorted(&mut comp.members, m))
 }
 
-/// Drop a **hole** into the cursor's cell — a position that says what may go here without saying what
-/// does. Same gesture, same grid, same keys; see [`Body::Slot`].
-pub fn place_slot(build: &mut Build, accepts: &str, pitch: f32) -> Result<usize, String> {
-    let Some(comp) = build.open.as_mut() else {
-        return Err("no tile open — press N to start one".to_owned());
-    };
-    let Envelope::Bounded { size } = comp.envelope else {
+/// Bring a **hole** into the tile — a position that says what may go here without saying what does.
+/// Same gesture, same grid, same keys; see [`Body::Slot`].
+pub fn place_slot(comp: &mut Composition, accepts: &str) -> Result<usize, String> {
+    let Envelope::Bounded { .. } = comp.envelope else {
         return Err(format!("`{}` claims no tile, so it has no grid to drop into", comp.id));
     };
-    // **A hole sits at the centre of its cell**, which is why it is measured as occupying one.
+    // **A hole lands in the middle like anything else**, and is moved the same way afterwards.
     //
-    // It used to take a zero span, putting it on the cell's *corner*, under a comment reasoning that
-    // "the last cell's corner is inside by less than a rung". That was true of the last cell and
-    // false of the first: **cell zero's corner is the tile edge**, and `validate` requires a slot to
-    // be strictly inside the envelope — so a hole dropped anywhere in row or column zero was
-    // refused, including the cell the cursor starts in. The first thing an author would try.
+    // It used to take a cell corner, under a comment reasoning that "the last cell's corner is
+    // inside by less than a rung". That was true of the last cell and false of the first: **cell
+    // zero's corner is the tile edge**, and `validate` requires a slot to be strictly inside the
+    // envelope — so a hole dropped anywhere in row or column zero was refused, including the cell
+    // the cursor started in. The first thing an author would try.
     //
-    // The centre is interior for every cell by construction rather than by luck, and it is the
-    // honest position anyway: a slot marks *which cell* is a hole, and whatever fills it brings its
-    // own footprint and its own `Mount` to resolve against. The lift stays at the cell's floor,
-    // which is a legal datum (`0.0` is inside) and the one a fixture mounts from.
-    // Centred like a piece, and moved the same way afterwards.
-    let _ = (pitch, size, build.at);
-    let (at, lift) = ((0.0, 0.0), 0.0);
+    // The centre is interior by construction rather than by luck, and it is the honest position
+    // anyway: a slot marks *where* a hole is, and whatever fills it brings its own footprint and its
+    // own `Mount` to resolve against. The lift stays on the floor, which is a legal datum (`0.0` is
+    // inside) and the one a fixture mounts from.
+    let (at, lift) = BROUGHT_IN;
     let m = Member {
         id: slot_id(&comp.members, accepts)?,
         body: Body::Slot { accepts: accepts.to_owned() },
@@ -542,7 +590,6 @@ pub fn refit(
     build: &mut Build,
     library: &emerge_core::library::Library,
     height: f32,
-    divisor: u32,
 ) -> Option<String> {
     let Some(comp) = build.open.as_ref() else {
         return None;
@@ -552,14 +599,20 @@ pub fn refit(
         Envelope::Bounded { size } => size,
         Envelope::Anchored => return None,
     };
-    if (want.0 - now.0).abs() < 1e-4 && (want.2 - now.2).abs() < 1e-4 {
+    // **All three axes, because all three are written.** The guard compared X and Z only while the
+    // value it writes carries `want.1` as well, so a tile opened under a 2.4 m map and then asked to
+    // live under a 3.5 m one kept the old height for ever — and a ceiling fixture inside it came out
+    // 1.1 m below the ceiling once stamped. That is the very failure `blank`'s "as tall as the space
+    // it fills" and `stack::datum` are written against, reintroduced by an incomplete comparison.
+    if (want.0 - now.0).abs() < 1e-4
+        && (want.1 - now.1).abs() < 1e-4
+        && (want.2 - now.2).abs() < 1e-4
+    {
         return None;
     }
     if let Some(comp) = build.open.as_mut() {
         comp.envelope = Envelope::Bounded { size: want };
     }
-    // A shrink can leave the cursor outside the tile it is supposed to be in.
-    build.at = clamp(want, build.rung.pitch(divisor), build.at);
 
     // **What the size means, said when it changes.** `grammar::from_compositions` takes tiles of the
     // grid's size and *skips* anything else by name — "so it cannot be a tile" — because `solve`
@@ -680,12 +733,7 @@ pub fn refit_tile(
     if *mode != crate::tiles::Mode::Tiles || !(build.is_changed() || project.is_changed()) {
         return;
     }
-    if let Some(said) = refit(
-        &mut build,
-        &project.library,
-        project.map.bounds.1,
-        project.policy.snap_divisor,
-    ) {
+    if let Some(said) = refit(&mut build, &project.library, project.map.bounds.1) {
         state.status.problem(said);
     }
 }
@@ -708,6 +756,8 @@ pub fn build_keys(
     mode: Res<crate::tiles::Mode>,
     mut build: ResMut<Build>,
     mut state: ResMut<crate::tiles::ImportState>,
+    // The right-hand list's filter, so arriving on the tab arms a piece that is actually on screen.
+    filters: Res<crate::filter::Filters>,
     // **`ResMut`, dereferenced mutably only in the save branch.** Bevy flags a resource changed when
     // a system *dereferences* `ResMut`, not when it mutates — and `editor::redraw_stamps` is gated on
     // `Project::is_changed()`, so a keystroke that correctly does nothing would otherwise tear down
@@ -735,8 +785,13 @@ pub fn build_keys(
         // otherwise persists — and without it the first `Enter` is a refusal, which is the worst
         // possible first impression of a tab. Liapis names the failure: a tool that will not let the
         // designer converge is where user fatigue starts.
+        //
+        // **From the list as it is filtered**, which is what every other selection path walks
+        // (`tiles::library_ids`). Taking `descriptors.first()` armed a piece the filter was hiding:
+        // no row highlighted, `keep_library_selection_visible` unable to correct it, and the first
+        // Enter dropping something the author never saw and did not choose.
         if state.editing(&project.library).is_none()
-            && let Some(first) = project.library.descriptors.first().map(|d| d.id.clone())
+            && let Some(first) = crate::tiles::library_ids(&project, &filters).into_iter().next()
         {
             state.selected_library_id = Some(first);
         }
@@ -792,8 +847,20 @@ pub fn build_keys(
         }
     }
     if align != Vec2::ZERO {
+        // **An empty tile is guidance, not a refusal**, so it stays a note the next keystroke
+        // replaces rather than a line that sticks in the problem log until `Esc`. Asked before the
+        // door rather than inside it, because everything the door refuses *is* a refusal.
+        if !focused(&build) {
+            state
+                .status
+                .note("nothing to flush — Enter brings the picked mesh in".to_owned());
+            return;
+        }
         let dir = step_in_view(align, rig.yaw);
         let focus = build.focus;
+        // The span is read before the door, because "this is a hole" is the same kind of guidance:
+        // a hole has no width, so "flush" is its position *on* the boundary — which `validate`
+        // refuses. Nudging is how a hole is placed; there is nothing to align.
         let span = build
             .open
             .as_ref()
@@ -803,29 +870,26 @@ pub fn build_keys(
                     .library
                     .get(id)
                     .map(|d| crate::editor::brush_span(d, m.yaw)),
-                // A hole has no width, so "flush" is its position on the boundary — which `validate`
-                // refuses. Nudging is how a hole is placed; there is nothing to align.
                 _ => None,
             });
-        match span {
-            Some(span) => {
-                let to = build
-                    .open
-                    .as_ref()
-                    .and_then(|c| c.members.get(focus))
-                    .map(|m| aligned(m.at, span, size, dir));
-                if let (Some(to), Some(m)) =
-                    (to, build.open.as_mut().and_then(|c| c.members.get_mut(focus)))
-                {
-                    m.at = to;
-                    state
-                        .status
-                        .note(format!("flush — ({:+.3}, {:+.3})", to.0, to.1));
-                }
-            }
-            None => state
+        let Some(span) = span else {
+            state
                 .status
-                .note("nothing to flush — Enter brings the picked mesh in".to_owned()),
+                .note("a hole has no width to put flush — nudge it instead".to_owned());
+            return;
+        };
+        let moved = edit(&mut build, &project.library, |comp| {
+            let Some(m) = comp.members.get_mut(focus) else {
+                return Err("the focused member went away".to_owned());
+            };
+            m.at = aligned(m.at, span, size, dir);
+            Ok(m.at)
+        });
+        match moved {
+            Ok(to) => state
+                .status
+                .note(format!("flush — ({:+.3}, {:+.3})", to.0, to.1)),
+            Err(e) => state.status.problem(e),
         }
         return;
     }
@@ -836,10 +900,8 @@ pub fn build_keys(
     // arrows adjust *it*, so the thing the author is looking at is the thing the keys act on. A
     // separate cursor was a second answer to "where are we", and under an envelope that fits its
     // contents the two disagreed — the cursor said a cell, the tile said a size, and dropping in the
-    // middle cell grew a one-tile floor to 2 x 2.
-    //
-    // `build.at` survives as the **focused member's cell**, written here and read only for drawing:
-    // derived, never steered.
+    // middle cell grew a one-tile floor to 2 x 2. It survived one commit longer as a derived readout
+    // and went stale at once; the panel reads the member now. See [`Build::focus`].
     let mut wish = Vec2::ZERO;
     if build.placing {
         if pressed(Action::BuildLeft) {
@@ -858,30 +920,30 @@ pub fn build_keys(
     }
     let lift_by = i32::from(pressed(Action::BuildUp)) - i32::from(pressed(Action::BuildDown));
     if wish != Vec2::ZERO || lift_by != 0 {
+        // Nothing in the tile is not an error, it is an empty tile — say what to press, as a note.
+        if !focused(&build) {
+            state
+                .status
+                .note("nothing to move yet — Enter brings the picked mesh in".to_owned());
+            return;
+        }
         let (dx, dz) = if wish == Vec2::ZERO { (0, 0) } else { step_in_view(wish, rig.yaw) };
         let focus = build.focus;
-        let moved = build.open.as_mut().and_then(|c| c.members.get_mut(focus)).map(|m| {
+        let moved = edit(&mut build, &project.library, |comp| {
+            let Some(m) = comp.members.get_mut(focus) else {
+                return Err("the focused member went away".to_owned());
+            };
             m.at.0 += dx as f32 * step;
             m.at.1 += dz as f32 * step;
             // The floor is the floor: a member cannot be nudged under the tile it is in.
             m.lift = (m.lift + lift_by as f32 * step).max(0.0);
-            (m.at, m.lift)
+            Ok((m.at, m.lift))
         });
         match moved {
-            Some((at, lift)) => {
-                build.at = (
-                    (at.0 / step).round() as i32,
-                    (lift / step).round() as i32,
-                    (at.1 / step).round() as i32,
-                );
-                state
-                    .status
-                    .note(format!("({:+.3}, {:+.3}) at {:.3} m", at.0, at.1, lift));
-            }
-            // Nothing in the tile is not an error, it is an empty tile — say what to press.
-            None => state
+            Ok((at, lift)) => state
                 .status
-                .note("nothing to move yet — Enter brings the picked mesh in".to_owned()),
+                .note(format!("({:+.3}, {:+.3}) at {:.3} m", at.0, at.1, lift)),
+            Err(e) => state.status.problem(e),
         }
         return;
     }
@@ -894,8 +956,6 @@ pub fn build_keys(
             SnapLevel::Fine => SnapLevel::Finer,
         };
         let now = pitch(&build, &project);
-        // Re-clamped: a coarser rung has fewer cells, so the cursor can be left outside one.
-        build.at = clamp(size, now, build.at);
         let (nx, ny, nz) = cells(size, now);
         state
             .status
@@ -923,8 +983,7 @@ pub fn build_keys(
             ));
             return;
         }
-        let span = crate::editor::brush_span(&d, 0.0);
-        match place(&mut build, &d, &project.library, span, 0.0, step) {
+        match edit(&mut build, &project.library, |comp| place(comp, &d)) {
             Ok(i) => {
                 // **Focus follows the drop.** `insert_sorted` answers where it landed, and the two
                 // verbs that act on "this member" — turn and remove — mean the one you just put
@@ -948,7 +1007,7 @@ pub fn build_keys(
             );
             return;
         };
-        match place_slot(&mut build, &accepts, step) {
+        match edit(&mut build, &project.library, |comp| place_slot(comp, &accepts)) {
             Ok(i) => {
                 build.focus = i;
                 state.status.note(format!("hole for `{accepts}` dropped"));
@@ -962,41 +1021,80 @@ pub fn build_keys(
     // quarter, because a tile is a quarter-turn object: `from_compositions` learns one prototype per
     // quarter and anything between is a tile the solver cannot reproduce.
     if pressed(Action::BuildTurn) {
+        if !focused(&build) {
+            state
+                .status
+                .note("nothing to turn yet — Enter brings the picked mesh in".to_owned());
+            return;
+        }
         // `focus` read before the mutable borrow — the closure would otherwise hold `build` twice.
+        // Through the door like every other verb: a quarter turn changes `brush_span`, so it changes
+        // what a piece touches and therefore what is mounted on it.
         let focus = build.focus;
-        if let Some(m) = build.open.as_mut().and_then(|c| c.members.get_mut(focus)) {
+        let turned = edit(&mut build, &project.library, |comp| {
+            let Some(m) = comp.members.get_mut(focus) else {
+                return Err("the focused member went away".to_owned());
+            };
             m.yaw = (m.yaw + 90.0).rem_euclid(360.0);
-            let said = format!("`{}` turned to {:.0}", m.id, m.yaw);
-            state.status.note(said);
+            Ok(format!("`{}` turned to {:.0}", m.id, m.yaw))
+        });
+        match turned {
+            Ok(said) => state.status.note(said),
+            Err(e) => state.status.problem(e),
         }
         return;
     }
     if pressed(Action::BuildDropMember) {
+        if !focused(&build) {
+            state.status.note("nothing to remove".to_owned());
+            return;
+        }
         let focus = build.focus;
-        let removed = build
-            .open
-            .as_mut()
-            .and_then(|c| (focus < c.members.len()).then(|| c.members.remove(focus).id));
+        let removed = edit(&mut build, &project.library, |comp| {
+            if focus >= comp.members.len() {
+                return Err("the focused member went away".to_owned());
+            }
+            Ok(comp.members.remove(focus).id)
+        });
         match removed {
-            Some(id) => {
+            Ok(id) => {
                 // Clamped to what is left rather than stepped back: removing the first member should
                 // leave the focus on the new first, not underflow to the last.
                 let left = build.open.as_ref().map_or(0, |c| c.members.len());
                 build.focus = build.focus.min(left.saturating_sub(1));
                 state.status.note(format!("`{id}` removed"));
             }
-            None => state.status.note("nothing to remove".to_owned()),
+            // **A host cannot be removed out from under what rests on it.** `rebind_hosts` refuses
+            // inside the door, so the tile is untouched and the refusal names the fixture — where
+            // before, the removal went through and left the sibling pointing at a member that no
+            // longer existed. `validate_shape` then refused the whole composition, `expand` blanked
+            // the stage, and no verb in the tab could put it back.
+            Err(e) => state.status.problem(e),
         }
         return;
     }
 
-    // **`Cmd+S` saves the tile.** The other half of the branch `editor::keys` guards: the key is
-    // Global because the verb is, and what it saves is whatever the live context has open. Bound
-    // once, so the census still holds every action to exactly one key.
+    // **`Cmd+S` saves the tile *and* the map.** The other half of the branch `editor::keys` guards:
+    // the key is Global because the verb is, and what it saves is whatever the live context has open.
+    // Bound once, so the census still holds every action to exactly one key.
+    //
+    // Both files, because an author reaches this tab from the Map with unsaved work behind them and
+    // `editor::keys` — the only call to `Project::save` in the crate — steps aside for this branch.
+    // Saving only the composition answered *"`kit/tile_1` saved — 3 members"*, which reads as a
+    // successful save, while twenty Map edits stayed in memory and left with the process.
+    //
+    // **Independently, and both reported.** They are two files and neither one's refusal is a reason
+    // to withhold the other: a tile that will not validate must not also cost the map its save.
     if pressed(Action::Save) {
-        match save(&build, &mut project) {
-            Ok(said) => state.status.note(said),
-            Err(e) => state.status.problem(format!("NOT SAVED: {e}")),
+        let tile = save(&build, &mut project);
+        let map = project.save();
+        match (tile, map) {
+            (Ok(said), Ok(())) => state.status.note(format!("{said}. The map is saved too")),
+            (Ok(said), Err(e)) => state.status.problem(format!("{said}. MAP NOT SAVED: {e}")),
+            (Err(e), Ok(())) => state.status.problem(format!("the map is saved. TILE NOT SAVED: {e}")),
+            (Err(t), Err(m)) => {
+                state.status.problem(format!("NOTHING SAVED — tile: {t}; map: {m}"))
+            }
         }
         return;
     }
@@ -1009,17 +1107,13 @@ pub fn build_keys(
     }
 }
 
-/// **Open a blank tile with the cursor in the middle of it.**
+/// **Open a blank tile at the default rung.**
 ///
-/// Both places that open one go through here, so "where does a new tile put the cursor" has one
-/// answer. It was `(0, 0, 0)` at both — a corner — which the author flagged the first time they used
-/// it: *"the default square should be the center."*
+/// Both places that open one go through here, so "what state does a new tile start in" has one
+/// answer rather than two that drift.
 fn open_blank(build: &mut Build, project: &crate::project::Project) {
     let comp = blank(&next_tile_id(project), project.map.bounds.1);
     build.rung = DEFAULT_RUNG;
-    // `at` is the focused member's offset in rungs from the tile's centre, and a blank tile has no
-    // members — so it is zero, which is also where the first one lands.
-    build.at = (0, 0, 0);
     build.open = Some(comp);
     build.focus = 0;
 }
@@ -1105,15 +1199,23 @@ pub fn drive_build_preview(
     // a ghost since the beginning and this module's own opening line is *"the ghost is the
     // contract"* — it was the one surface that did not keep it.
     //
-    // Drawn through the same `place`-shaped arithmetic the drop uses (`drop_at` on the same rung and
-    // span), so what is on screen is where the piece goes rather than a second guess at it. `y` is
-    // the cell floor: the ghost is a where-not-a-what, and asking `resolve_y` about a piece that is
-    // not in the tile yet would need a scratch map holding a member that does not exist.
+    // Drawn at [`BROUGHT_IN`] — **the value `place` writes**, not arithmetic that agrees with it.
+    // The two were separate: the ghost stood on cell-corner arithmetic left over from the deleted
+    // cursor while the drop landed centred, so a 0.1 m wall previewed flush against the west edge
+    // and arrived 450 mm away in a tile a metre across. `y` is the tile floor: the ghost is a
+    // where-not-a-what, and asking `resolve_y` about a piece that is not in the tile yet would need
+    // a scratch map holding a member that does not exist.
+    //
+    // **And it previews only what `Enter` will accept.** `ImportState::editing` falls back to the
+    // focused *candidate*, which the drop branch refuses by name — so ghosting it stood a piece in
+    // the tile that the very next keystroke would not put there. A preview is a promise.
     if build.placing
-        && let Some(d) = state.editing(&project.library).cloned()
+        && let Some(d) = state
+            .editing(&project.library)
+            .filter(|d| project.library.get(&d.id).is_some())
+            .cloned()
     {
-        let span = crate::editor::brush_span(&d, 0.0);
-        let (at, lift) = drop_at(size, pitch(&build, &project), build.at, span);
+        let (at, lift) = BROUGHT_IN;
         let stage = crate::stages::TILE;
         if let Some(e) = crate::editor::spawn_piece(
             &mut commands,
@@ -1125,7 +1227,12 @@ pub fn drive_build_preview(
             (stage.x, stage.y, stage.z),
             lift,
         ) {
-            commands.entity(e).insert(StagedTile);
+            // **`Ghost` as well as `StagedTile`.** `editor::fade_ghost` is the one thing that makes
+            // a preview translucent and it queries that marker alone, so without it the "ghost"
+            // drew solid and shadow-casting — indistinguishable from a committed member, which
+            // makes `Enter` look like it did nothing and `Esc` look like it deleted something.
+            // `StagedTile` is what despawns it on the next rebuild.
+            commands.entity(e).insert((StagedTile, crate::editor::Ghost));
         }
     }
 
@@ -1291,41 +1398,18 @@ mod tests {
         assert_eq!(cells(TILE, 99.0), (1, 1, 1));
     }
 
-    /// **The flush position falls out of the corner rule.**
-    ///
-    /// `docs/2026-08-09-compose-authoring-plan.md` §4: *"A 0.5 m lattice cannot seat a 0.1 m wall.
-    /// Flush is at −0.45, off the lattice by construction."* That is what `compose::flushed` was
-    /// invented for, and what FVS-R-15 cut. Stating the rule on the piece's **minimum corner** rather
-    /// than its centre reaches −0.45 with no verb at all: cell zero's corner *is* the tile's edge.
-    #[test]
-    fn a_wall_dropped_in_the_edge_cell_sits_flush() {
-        let wall = (0.1, 1.0);
-        let (at, lift) = drop_at(TILE, FINE, (0, 0, 0), wall);
-        assert!((at.0 - -0.45).abs() < 1e-6, "{at:?} is not flush against the west edge");
-        assert_eq!(lift, 0.0, "it stands on the tile's floor");
-
-        // And the rung does not matter: the edge cell's corner is the edge at every rung, which is
-        // what makes flush reachable without anybody choosing a divisor for it.
-        for pitch in [1.0, FINE, FINE / 3.0, 0.25] {
-            let (at, _) = drop_at(TILE, pitch, (0, 0, 0), wall);
-            assert!((at.0 - -0.45).abs() < 1e-6, "pitch {pitch}: {at:?}");
-        }
+    /// A tile in hand, ready for the verbs below.
+    fn open(id: &str) -> Build {
+        Build { open: Some(blank(id, 2.4)), rung: DEFAULT_RUNG, ..Default::default() }
     }
 
-    /// A cell-sized floor fills the tile, which is the other half of the same rule.
-    #[test]
-    fn a_floor_dropped_at_the_origin_fills_the_tile() {
-        let (at, lift) = drop_at(TILE, 1.0, (0, 0, 0), (1.0, 1.0));
-        assert_eq!((at, lift), ((0.0, 0.0), 0.0), "a 1 m piece centred in a 1 m tile");
-    }
-
-    /// Walking off an edge stops at it. Wrapping would move a piece to the far side of the tile in
-    /// one keystroke, which is never what the key meant.
-    #[test]
-    fn the_cursor_clamps_to_the_tile_rather_than_wrapping() {
-        assert_eq!(clamp(TILE, FINE, (-5, -5, -5)), (0, 0, 0));
-        assert_eq!(clamp(TILE, FINE, (99, 99, 99)), (2, 6, 2));
-        assert_eq!(clamp(TILE, FINE, (1, 3, 2)), (1, 3, 2), "an interior cell is untouched");
+    /// The drop, through the same door `build_keys` presses `Enter` into.
+    fn drop_in(
+        b: &mut Build,
+        lib: &emerge_core::library::Library,
+        d: &emerge_core::descriptor::Descriptor,
+    ) -> Result<usize, String> {
+        edit(b, lib, |comp| place(comp, d))
     }
 
     fn desc(id: &str) -> Member {
@@ -1386,41 +1470,39 @@ mod tests {
         assert_eq!(slot_id(&taken, "wall-fixture").as_deref(), Ok("wall_fixture_2"));
     }
 
-    /// **A hole in the cell the cursor starts in is legal**, which it was not.
+    /// **A hole stays strictly inside its tile, wherever the arrows put it.**
     ///
-    /// A slot took a zero span and so landed on its cell's *corner*, under a comment reasoning that
-    /// the last cell's corner is inside the envelope by less than a rung. True of the last cell —
-    /// and **cell zero's corner is the tile edge**, which `composition::validate` refuses because a
-    /// slot on the seam is a filler reaching a face the tile never said it presented. So a hole
-    /// dropped anywhere in row or column zero was refused, starting with the cell the cursor opens
-    /// on. Every cell is checked here rather than only cell zero, because "the first one" and "the
-    /// last one" is exactly the pair of cases the original reasoning got half right.
+    /// `composition::validate` refuses a slot *on* the seam — *"a slot exactly on the seam is the
+    /// ambiguous case"* — and the envelope is read off the members, so the two have to agree at the
+    /// boundary or a hole can nudge itself into a tile that cannot be saved. It could: `fit_envelope`
+    /// gave a slot no footprint, so the envelope came out at exactly `2·|at|` and the hole landed on
+    /// the seam it had just defined. At the shipped divisor of 3 that took three presses of one
+    /// arrow; at 2 it took one.
+    ///
+    /// Walked out to several tiles in every direction rather than tested at one offset, because the
+    /// failure is periodic — it recurs at every cell boundary, not only the first.
     #[test]
-    fn a_hole_is_strictly_inside_the_tile_from_any_cell() {
-        let comp = blank("kit/t", 2.4);
-        let Envelope::Bounded { size } = comp.envelope else {
-            panic!("a tile claims a tile");
-        };
-        // The rung a tile opens on, as a number — `pitch` needs a `Project` and the arithmetic
-        // under test does not.
-        let step = FINE;
-        let (nx, ny, nz) = cells(size, step);
-        for x in 0..nx {
-            for y in 0..ny {
-                for z in 0..nz {
-                    let mut b = Build {
-                        open: Some(blank("kit/t", 2.4)),
-                        rung: DEFAULT_RUNG,
-                        at: (x as i32, y as i32, z as i32),
-                        ..Default::default()
-                    };
-                    place_slot(&mut b, "wall-fixture", step)
-                        .unwrap_or_else(|e| panic!("cell ({x},{y},{z}) refused the drop: {e}"));
-                    let open = b.open.take().unwrap_or_else(|| panic!("the tile is open"));
-                    open.validate_shape().unwrap_or_else(|e| {
-                        panic!("a hole in cell ({x},{y},{z}) must be legal: {e}")
-                    });
+    fn a_nudged_hole_never_lands_on_the_seam_it_creates() {
+        let lib = kit();
+        for divisor in [2u32, 3, 4, 9] {
+            let step = 1.0 / divisor as f32;
+            for nudges in 0..=(divisor as i32 * 3) {
+                let mut b = open("kit/t");
+                edit(&mut b, &lib, |comp| place_slot(comp, "wall-fixture"))
+                    .unwrap_or_else(|e| panic!("the hole drops: {e}"));
+                for _ in 0..nudges {
+                    edit(&mut b, &lib, |comp| {
+                        let m = comp.members.get_mut(0).ok_or("no member")?;
+                        m.at.0 += step;
+                        Ok(())
+                    })
+                    .unwrap_or_else(|e| panic!("a nudge moves the hole: {e}"));
+                    refit(&mut b, &lib, 2.4);
                 }
+                let open = b.open.take().unwrap_or_else(|| panic!("the tile is open"));
+                open.validate_shape().unwrap_or_else(|e| {
+                    panic!("divisor {divisor}, {nudges} nudges: the tile must still save: {e}")
+                });
             }
         }
     }
@@ -1441,31 +1523,29 @@ mod tests {
     /// group `composition::validate` accepts.
     #[test]
     fn a_built_tile_validates() {
-        let mut b = Build { open: Some(blank("site/tile_wall_n", 2.4)), rung: DEFAULT_RUNG, ..Default::default() };
+        let mut b = open("site/tile_wall_n");
         let lib = kit();
         let floor = lib.get("site/floor").unwrap_or_else(|| panic!("the kit has a floor"));
         let wall = lib.get("site/wall").unwrap_or_else(|| panic!("the kit has a wall"));
 
-        place(&mut b, floor, &lib, (1.0, 1.0), 0.0, 1.0).expect("the floor drops");
-        b.at = (0, 0, 0);
-        place(&mut b, wall, &lib, (0.1, 1.0), 0.0, FINE).expect("the wall drops");
+        drop_in(&mut b, &lib, floor).expect("the floor drops");
+        drop_in(&mut b, &lib, wall).expect("the wall drops");
 
         let comp = b.open.take().expect("still open");
         assert_eq!(comp.members.len(), 2);
         emerge_core::composition::validate(&[comp], &lib).expect("a built tile is a legal tile")
     }
 
-    /// A hole drops on the same grid with the same gesture, and lands inside the envelope — which is
-    /// what `composition::validate` requires of one.
+    /// A hole drops with the same gesture and lands inside the envelope — which is what
+    /// `composition::validate` requires of one.
     #[test]
     fn a_dropped_slot_lands_inside_the_envelope() {
-        let mut b = Build { open: Some(blank("t", 2.4)), rung: DEFAULT_RUNG, ..Default::default() };
-        // The far corner cell, which is the closest a slot can legally get to a seam.
-        b.at = clamp((1.0, 2.4, 1.0), FINE, (99, 99, 99));
-        place_slot(&mut b, "wall-fixture", FINE).expect("the hole drops");
+        let lib = kit();
+        let mut b = open("t");
+        edit(&mut b, &lib, |comp| place_slot(comp, "wall-fixture")).expect("the hole drops");
 
         let comp = b.open.take().expect("still open");
-        let m = &comp.members[0];
+        let m = comp.members.first().unwrap_or_else(|| panic!("the hole is a member"));
         assert!(m.at.0.abs() < 0.5 && m.at.1.abs() < 0.5, "{:?} is on or past a seam", m.at);
         assert!(m.lift >= 0.0 && m.lift < 2.4, "lift {} leaves the envelope", m.lift);
     }
@@ -1477,7 +1557,7 @@ mod tests {
         let mut b = Build::default();
         let lib = kit();
         let floor = lib.get("site/floor").unwrap_or_else(|| panic!("the kit has a floor"));
-        let e = place(&mut b, floor, &lib, (1.0, 1.0), 0.0, 1.0).expect_err("nothing to drop into");
+        let e = drop_in(&mut b, &lib, floor).expect_err("nothing to drop into");
         assert!(e.contains("no tile open"), "{e}");
     }
 
@@ -1493,15 +1573,12 @@ mod tests {
         let wall = lib.get("site/wall").unwrap_or_else(|| panic!("the kit has a wall"));
         let sconce = lib.get("site/sconce").unwrap_or_else(|| panic!("the kit has a sconce"));
 
-        let mut b = Build { open: Some(blank("kit/t", 2.4)), rung: DEFAULT_RUNG, ..Default::default() };
-        place(&mut b, wall, &lib, (0.1, 1.0), 0.0, FINE).expect("the wall drops");
-        // **Layer zero, so `lift` is zero and the height under test is the mount's alone.**
-        // `Member::lift` is *"a vertical nudge on top of whatever the mount resolves to"* — additive
-        // by schema — so dropping three layers up would resolve to 1.8 + 1.0 and prove nothing about
-        // the face. Binding itself is a plan-only question and does not care which layer this is:
-        // a face mount takes its height from the mount, not from the cursor.
-        b.at = (0, 0, 1);
-        place(&mut b, sconce, &lib, (0.2, 0.2), 0.0, FINE).expect("the sconce drops onto the wall");
+        let mut b = open("kit/t");
+        drop_in(&mut b, &lib, wall).expect("the wall drops");
+        // **`lift` is zero, so the height under test is the mount's alone.** `Member::lift` is *"a
+        // vertical nudge on top of whatever the mount resolves to"* — additive by schema — so
+        // nudging it up first would resolve to 1.8 plus that and prove nothing about the face.
+        drop_in(&mut b, &lib, sconce).expect("the sconce drops onto the wall");
 
         let comp = b.open.take().expect("still open");
         let m = comp
@@ -1727,16 +1804,40 @@ mod tests {
             descriptors: vec![pallet.clone()],
         };
 
-        let mut b = Build { open: Some(blank("kit/t", 2.4)), rung: DEFAULT_RUNG, ..Default::default() };
-        assert!(refit(&mut b, &lib, 2.4, 3).is_none(), "an empty tile is one cell and says nothing");
+        let mut b = open("kit/t");
+        assert!(refit(&mut b, &lib, 2.4).is_none(), "an empty tile is one cell and says nothing");
 
-        place(&mut b, &pallet, &lib, (0.81, 1.21), 0.0, FINE).expect("it drops");
-        let said = refit(&mut b, &lib, 2.4, 3).expect("growing past one cell is worth saying");
+        drop_in(&mut b, &lib, &pallet).expect("it drops");
+        let said = refit(&mut b, &lib, 2.4).expect("growing past one cell is worth saying");
         assert!(said.contains("1 x 2 tiles"), "it must say the size: {said}");
         assert!(said.contains("solver"), "and what that costs: {said}");
 
         // Silent when nothing moved, or `Build`'s change flag would rebuild the stage every frame.
-        assert!(refit(&mut b, &lib, 2.4, 3).is_none(), "a refit that changes nothing writes nothing");
+        assert!(refit(&mut b, &lib, 2.4).is_none(), "a refit that changes nothing writes nothing");
+    }
+
+    /// **A tile is as tall as the room it will sit in, and follows that number when it changes.**
+    ///
+    /// `blank` takes the height from `map.bounds.1` for the reason `stack::datum` records: a hardcoded
+    /// 2.4 m ceiling hung the lights of a 3.5 m room in mid-air. `refit` then wrote all three axes but
+    /// compared only two, so an author who resized the map on the Map tab and came back kept the old
+    /// height for ever — and every `OnCeiling` fixture in that tile was wrong by the difference, in
+    /// `compositions.ron` and in the game.
+    #[test]
+    fn the_envelope_follows_the_maps_height() {
+        let lib = kit();
+        let mut b = open("kit/t");
+        let floor = lib.get("site/floor").unwrap_or_else(|| panic!("the kit has a floor"));
+        drop_in(&mut b, &lib, floor).expect("the floor drops");
+
+        assert!(refit(&mut b, &lib, 3.5).is_none(), "a height change alone is not worth saying");
+        let Some(Envelope::Bounded { size }) = b.open.as_ref().map(|c| c.envelope) else {
+            panic!("a tile claims a tile");
+        };
+        assert!((size.1 - 3.5).abs() < 1e-4, "the envelope must follow the map, got {}", size.1);
+
+        // And still silent when nothing at all moved, which is what the guard is there for.
+        assert!(refit(&mut b, &lib, 3.5).is_none(), "a refit that changes nothing writes nothing");
     }
 
     /// **Nothing to mount to is a refusal at the door**, not a member written now and a map that
@@ -1745,8 +1846,8 @@ mod tests {
     fn a_fixture_with_no_wall_under_it_is_refused_when_it_is_dropped() {
         let lib = kit();
         let sconce = lib.get("site/sconce").unwrap_or_else(|| panic!("the kit has a sconce"));
-        let mut b = Build { open: Some(blank("kit/t", 2.4)), rung: DEFAULT_RUNG, ..Default::default() };
-        let e = place(&mut b, sconce, &lib, (0.2, 0.2), 0.0, FINE).expect_err("nothing offers a face");
+        let mut b = open("kit/t");
+        let e = drop_in(&mut b, &lib, sconce).expect_err("nothing offers a face");
         assert!(e.contains("wall-inner"), "it must name the class it wanted: {e}");
         assert!(
             b.open.as_ref().is_some_and(|c| c.members.is_empty()),
@@ -1762,12 +1863,148 @@ mod tests {
         let wall = lib.get("site/wall").unwrap_or_else(|| panic!("the kit has a wall"));
         let sconce = lib.get("site/sconce").unwrap_or_else(|| panic!("the kit has a sconce"));
 
-        let mut b = Build { open: Some(blank("kit/t", 2.4)), rung: DEFAULT_RUNG, ..Default::default() };
-        // Two walls in the same cell, so the sconce cannot say which it means by where it is.
-        place(&mut b, wall, &lib, (0.1, 1.0), 0.0, FINE).expect("the first wall drops");
-        place(&mut b, wall, &lib, (0.1, 1.0), 0.0, FINE).expect("the second wall drops");
-        let e = place(&mut b, sconce, &lib, (0.2, 0.2), 0.0, FINE).expect_err("which wall?");
+        let mut b = open("kit/t");
+        // Two walls in the same place, so the sconce cannot say which it means by where it is.
+        drop_in(&mut b, &lib, wall).expect("the first wall drops");
+        drop_in(&mut b, &lib, wall).expect("the second wall drops");
+        let e = drop_in(&mut b, &lib, sconce).expect_err("which wall?");
         assert!(e.contains("wall") && e.contains("wall_2"), "it must name both: {e}");
+    }
+
+    /// **A host cannot be taken out from under what rests on it.**
+    ///
+    /// `place` refuses the mirror image — a fixture with nothing to mount to — precisely so a tile
+    /// carrying a dangling `on` cannot exist. Delete let one in by the back door: the wall went, the
+    /// sconce went on naming it, and `validate_shape` then refused the whole composition
+    /// ("rests on `wall`, which is not a member of it") with no verb in the tab able to repair it.
+    /// The author's only route out was deleting the sconce as well.
+    #[test]
+    fn removing_a_wall_that_a_fixture_rests_on_is_refused() {
+        let lib = kit();
+        let wall = lib.get("site/wall").unwrap_or_else(|| panic!("the kit has a wall"));
+        let sconce = lib.get("site/sconce").unwrap_or_else(|| panic!("the kit has a sconce"));
+
+        let mut b = open("kit/t");
+        drop_in(&mut b, &lib, wall).expect("the wall drops");
+        drop_in(&mut b, &lib, sconce).expect("the sconce drops onto it");
+
+        // Members are sorted by id, so the wall is index 1 — read it rather than assume it.
+        let at = b
+            .open
+            .as_ref()
+            .and_then(|c| c.members.iter().position(|m| m.id == "wall"))
+            .unwrap_or_else(|| panic!("the wall is a member"));
+        let e = edit(&mut b, &lib, |comp| Ok(comp.members.remove(at).id))
+            .expect_err("the sconce is on it");
+        assert!(e.contains("wall-inner"), "it must say what the sconce needed: {e}");
+        let comp = b.open.take().unwrap_or_else(|| panic!("the tile is open"));
+        assert_eq!(comp.members.len(), 2, "a refused removal leaves the tile exactly as it was");
+        emerge_core::composition::validate(&[comp], &lib)
+            .expect("and the tile it leaves behind still saves");
+    }
+
+    /// **A move re-reads what everything is mounted on.**
+    ///
+    /// `on` was written once, at drop time, and no verb ever looked at it again — so flushing a wall
+    /// against an edge left the sconce claiming to be on a wall 400 mm away. `composition::validate`
+    /// only checks that the named sibling *exists*, so that tile **saved**, and `stack::resolve_y`
+    /// then put the fixture at the face height with nothing under it: floating in mid-air, in the
+    /// editor and in the game alike. `BuildTurn` had the same hole — a quarter turn changes
+    /// `brush_span`, so it changes what a piece touches.
+    #[test]
+    fn moving_a_wall_out_from_under_a_fixture_is_refused_rather_than_silently_written() {
+        let lib = kit();
+        let wall = lib.get("site/wall").unwrap_or_else(|| panic!("the kit has a wall"));
+        let sconce = lib.get("site/sconce").unwrap_or_else(|| panic!("the kit has a sconce"));
+
+        let mut b = open("kit/t");
+        drop_in(&mut b, &lib, wall).expect("the wall drops");
+        drop_in(&mut b, &lib, sconce).expect("the sconce drops onto it");
+
+        let at = b
+            .open
+            .as_ref()
+            .and_then(|c| c.members.iter().position(|m| m.id == "wall"))
+            .unwrap_or_else(|| panic!("the wall is a member"));
+        // Flush left: the wall goes to -0.45 and the sconce, still at the centre, is 400 mm away.
+        let e = edit(&mut b, &lib, |comp| {
+            let m = comp.members.get_mut(at).ok_or("no wall")?;
+            m.at = aligned(m.at, (0.1, 1.0), TILE, (-1, 0));
+            Ok(())
+        })
+        .expect_err("that leaves the sconce on nothing");
+        assert!(e.contains("wall-inner"), "it must name what the sconce lost: {e}");
+
+        let comp = b.open.take().unwrap_or_else(|| panic!("the tile is open"));
+        let m = comp
+            .members
+            .iter()
+            .find(|m| m.id == "sconce")
+            .unwrap_or_else(|| panic!("the sconce is a member"));
+        assert_eq!(m.at, (0.0, 0.0), "a refused move leaves every member where it was");
+        let Body::Descriptor { on, .. } = &m.body else {
+            panic!("a dropped piece is a descriptor member");
+        };
+        assert_eq!(on.as_deref(), Some("wall"), "and still bound to the wall it is on");
+    }
+
+    /// **A fixture follows its wall when the pair moves together**, which is the other half of the
+    /// same rule — re-resolving must not mean refusing every move.
+    #[test]
+    fn a_fixture_and_its_wall_move_together() {
+        let lib = kit();
+        let wall = lib.get("site/wall").unwrap_or_else(|| panic!("the kit has a wall"));
+        let sconce = lib.get("site/sconce").unwrap_or_else(|| panic!("the kit has a sconce"));
+
+        let mut b = open("kit/t");
+        drop_in(&mut b, &lib, wall).expect("the wall drops");
+        drop_in(&mut b, &lib, sconce).expect("the sconce drops onto it");
+
+        edit(&mut b, &lib, |comp| {
+            for m in comp.members.iter_mut() {
+                m.at.0 += FINE;
+            }
+            Ok(())
+        })
+        .expect("moving both keeps them together");
+
+        let comp = b.open.take().unwrap_or_else(|| panic!("the tile is open"));
+        let m = comp
+            .members
+            .iter()
+            .find(|m| m.id == "sconce")
+            .unwrap_or_else(|| panic!("the sconce is a member"));
+        let Body::Descriptor { on, .. } = &m.body else {
+            panic!("a dropped piece is a descriptor member");
+        };
+        assert_eq!(on.as_deref(), Some("wall"), "the binding survives a move of the pair");
+        emerge_core::composition::validate(&[comp], &lib).expect("and the tile still saves");
+    }
+
+    /// **Nothing hosts itself.** A wall offers the face it is asked about, so the moment `on` became
+    /// something re-resolved rather than written once, a member could be handed itself as a host —
+    /// which `composition::validate` refuses by name ("rests on itself").
+    #[test]
+    fn a_piece_is_never_offered_itself_as_a_host() {
+        use emerge_core::descriptor::{Descriptor, Extent, Mount, Offers};
+        // One piece that both offers `wall-inner` and mounts to it — the degenerate case.
+        let mut post = Descriptor {
+            id: "site/post".to_owned(),
+            extent: Extent { footprint: Some((0.2, 0.2)), height: Some(2.4) },
+            ..Default::default()
+        };
+        post.offers = Offers { faces: vec!["wall-inner".to_owned()], ..Default::default() };
+        post.mount = Some(Mount::OnFace { class: "wall-inner".to_owned(), height: 1.0 });
+        let lib = emerge_core::library::Library {
+            version: emerge_core::library::LIBRARY_VERSION,
+            note: None,
+            descriptors: vec![post.clone()],
+        };
+
+        let mut b = open("kit/t");
+        // Alone it has nothing to rest on and is refused, rather than resting on itself.
+        let e = drop_in(&mut b, &lib, &post).expect_err("there is nothing else here");
+        assert!(e.contains("wall-inner"), "{e}");
     }
 
     /// A four-piece kit with a real face relationship: the wall offers `wall-inner`, the sconce

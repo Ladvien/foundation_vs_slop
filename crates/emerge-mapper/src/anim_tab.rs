@@ -264,7 +264,7 @@ fn spawn_panels(mut commands: Commands) {
     .insert(AnimRoot)
     .with_children(|p| {
         crate::chrome::title(p, "ANIMATION");
-        crate::chrome::problem_banner(p, crate::tiles::Mode::Anim);
+        crate::chrome::problem_banner(p, &[crate::tiles::Mode::Anim]);
         crate::chrome::shortcut_hint(p);
         p.spawn((
             Text::new(""),
@@ -292,12 +292,12 @@ fn spawn_panels(mut commands: Commands) {
             SlotPane,
             // The declared-beside-measured table — the block an author asking about a gait is
             // looking at, and the one worth handing to somebody else verbatim.
-            crate::notice::CopyPane(crate::tiles::Mode::Anim),
+            crate::notice::CopyPane(&[crate::tiles::Mode::Anim]),
         ));
         // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
         // the panel, and an auto margin in a column absorbs the free space above it — so
         // placed any earlier it pushes every sibling after it down with it.
-        crate::chrome::problem_log(p, crate::tiles::Mode::Anim);
+        crate::chrome::problem_log(p, &[crate::tiles::Mode::Anim]);
     });
 
     crate::chrome::panel_root(

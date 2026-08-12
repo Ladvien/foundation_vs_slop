@@ -25,13 +25,18 @@ use bevy::prelude::*;
 use crate::keys::{self, Action};
 use crate::tiles::Mode;
 
-/// **A panel whose text is worth copying**, and which tab it belongs to.
+/// **A panel whose text is worth copying**, and which tabs it belongs to.
 ///
-/// The tab is on the marker rather than inferred from the panel's visibility, because a hidden
+/// The tabs are on the marker rather than inferred from the panel's visibility, because a hidden
 /// panel's `Text` still exists — `chrome::panel_root` hides with `Display::None`, which keeps the
-/// entities. Asking "is this node drawn" would mean walking ancestors; naming the tab is one field.
+/// entities. Asking "is this node drawn" would mean walking ancestors; naming the tabs is one field.
+///
+/// A list for [`crate::chrome::ProblemBanner`]'s reason: the Meshes and Tiles tabs share one detail
+/// pane, and tagging it `Meshes` made `Cmd+C` on Tiles harvest the status lines and none of the tile
+/// — no id, no envelope, no member list — in an editor where `bevy_ui` offers no other way to get
+/// that text out of the window.
 #[derive(Component, Clone, Copy)]
-pub struct CopyPane(pub Mode);
+pub struct CopyPane(pub &'static [Mode]);
 
 /// What the notice panels currently show, so they are rebuilt on a change and not on a frame.
 ///
@@ -98,7 +103,7 @@ fn paint_notices(
         // share one panel, so a refusal raised on one would go on showing after switching to the
         // other. Hiding costs a `Display` compare and stops the panel's own visibility being
         // load-bearing for whether a stale line is on screen.
-        let mine = banner.0 == tab;
+        let mine = banner.0.contains(&tab);
         let want_display =
             if mine && status.has_problem() { Display::Flex } else { Display::None };
         if !mine {
@@ -143,16 +148,20 @@ fn paint_notices(
         commands.entity(e).despawn();
     }
     for (entity, log) in &logs {
-        if log.0 != tab {
-            continue;
-        }
+        // **A log that is not the live tab's is hidden, not skipped** — the banner's rule above, for
+        // the same reason and with the same cost. The despawn just above takes every log line in the
+        // editor, so a log left `Display::Flex` by an earlier tab is an empty bordered box where the
+        // problem list used to be. Skipping made that unreachable only while each log sat in a panel
+        // of its own.
+        let mine = log.0.contains(&tab);
         if let Ok(mut node) = nodes.get_mut(entity) {
-            let display = if want.is_empty() { Display::None } else { Display::Flex };
+            let display =
+                if mine && !want.is_empty() { Display::Flex } else { Display::None };
             if node.display != display {
                 node.display = display;
             }
         }
-        if want.is_empty() {
+        if !mine || want.is_empty() {
             continue;
         }
         commands.entity(entity).with_children(|p| {
@@ -209,7 +218,7 @@ fn harvest(
         ));
     }
     for (entity, pane) in panes {
-        if pane.0 == tab {
+        if pane.0.contains(&tab) {
             collect_text(entity, children, texts, &mut lines);
         }
     }

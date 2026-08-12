@@ -2589,7 +2589,11 @@ impl Plugin for TilesPlugin {
                     // one rule: a selection the filter has hidden must not stay selected, in either
                     // list. Accept and Remove both act on a selection.
                     (
-                        keep_library_selection_visible.run_if(in_meshes_mode),
+                        // **Not `in_meshes_mode`.** The filter field and the library list are in
+                        // the panel the Meshes and Tiles tabs share, so a filter typed while Tiles is
+                        // live can hide the selected row there too — and on that tab the selection is
+                        // what `Enter` drops. Gated on the panel, not on one of the two tabs in it.
+                        keep_library_selection_visible.run_if(in_tiles_panel),
                         keep_selection_on_screen.run_if(in_meshes_mode),
                         keep_candidate_selection_visible.run_if(in_meshes_mode),
                     ),
@@ -2809,6 +2813,12 @@ fn tab_shortcuts(
     }
 }
 
+/// **The tabs this one panel serves.** Stated once, so the copy pane, the problem log and the run
+/// condition that keeps the shared library selection visible cannot disagree about who they are for —
+/// which is exactly how the Meshes/Tiles split left the log and the pane tagged `Meshes` while the
+/// tab strip grew a second entry above them.
+const TILES_PANEL_TABS: &[Mode] = &[Mode::Meshes, Mode::Tiles];
+
 /// **Two panels, the same two the map tab has.** Controls down the left, the list down the right.
 ///
 /// The list used to be a `max_height: 300` box a third of the way down this panel — the same shape
@@ -2830,11 +2840,14 @@ fn spawn_tiles_panel(mut commands: Commands) {
     .insert(TilesRoot)
     .with_children(|p| {
         crate::chrome::title(p, "MESHES AND TILES");
-        // **One banner per tab, both in the shared panel.** `ProblemBanner` carries the tab it speaks
-        // for and `notice.rs` shows only the matching one, so a panel serving two tabs needs two —
-        // without the second, every refusal the Tiles tab's verbs write would be invisible on it.
-        crate::chrome::problem_banner(p, Mode::Meshes);
-        crate::chrome::problem_banner(p, Mode::Tiles);
+        // **One banner per tab, both in the shared panel.** `ProblemBanner` carries the tabs it
+        // speaks for and `notice.rs` shows only a matching one, so a panel serving two tabs needs
+        // two — without the second, every refusal the Tiles tab's verbs write would be invisible on
+        // it. The detail pane and the problem log below take the other shape, `TILES_PANEL_TABS`:
+        // they are single nodes whose *contents* the live tab decides, so duplicating them would be
+        // two copies to keep in step rather than one node that says which tabs it is for.
+        crate::chrome::problem_banner(p, &[Mode::Meshes]);
+        crate::chrome::problem_banner(p, &[Mode::Tiles]);
         crate::chrome::shortcut_hint(p);
 
         p.spawn((
@@ -2864,7 +2877,7 @@ fn spawn_tiles_panel(mut commands: Commands) {
             },
             ScrollArea::default(),
             DetailPane,
-            crate::notice::CopyPane(Mode::Meshes),
+            crate::notice::CopyPane(TILES_PANEL_TABS),
         ));
 
         p.spawn((
@@ -2880,7 +2893,7 @@ fn spawn_tiles_panel(mut commands: Commands) {
         // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
         // the panel, and an auto margin in a column absorbs the free space above it — so
         // placed any earlier it pushes every sibling after it down with it.
-        crate::chrome::problem_log(p, Mode::Meshes);
+        crate::chrome::problem_log(p, TILES_PANEL_TABS);
     });
 
     // **The candidate list, in its own panel against the right edge** — the same shape, the same
@@ -4019,7 +4032,7 @@ fn keep_candidate_selection_visible(
 /// library meant the arrows stepped through rows that were not on screen — and `Delete` acts on the
 /// selection, so the key removed a tile the author never saw. The list and the keys have to agree
 /// about what "next" means or one of them is lying.
-fn library_ids(project: &Project, filters: &crate::filter::Filters) -> Vec<String> {
+pub(crate) fn library_ids(project: &Project, filters: &crate::filter::Filters) -> Vec<String> {
     let pane = crate::filter::Pane::Candidates;
     project
         .library
@@ -4131,6 +4144,11 @@ fn apply_mode(
 
 fn in_meshes_mode(mode: Res<Mode>) -> bool {
     *mode == Mode::Meshes
+}
+
+/// Either tab served by the shared MESHES AND TILES panel — see [`TILES_PANEL_TABS`].
+fn in_tiles_panel(mode: Res<Mode>) -> bool {
+    TILES_PANEL_TABS.contains(&mode)
 }
 
 /// Keep one preview alive, showing the selected candidate at the origin with its PROPOSED alignment
@@ -4812,17 +4830,23 @@ fn build_detail(
         TEXT,
         10.0,
     );
-    let (cx, cy, cz) = build.at;
-    line(p, format!("cursor {cx},{cy},{cz}"), ACCENT, 10.0);
-    // The corner the next drop will put a piece's minimum corner on — the number that explains where
-    // things land, and the one that makes "flush" legible rather than lucky.
-    let (lx, ly, lz) = crate::build::cell_corner(size, pitch, build.at);
-    line(
-        p,
-        format!("corner ({lx:+.3}, {lz:+.3}) at {ly:.3} m"),
-        DIM,
-        9.0,
-    );
+    // **Where the arrows are, which is where the focused member is** — there is no cursor beside it
+    // to report. This used to print `build.at`, a derived cell index written only by the nudge and so
+    // stale after every drop, removal and undo; and its writer measured signed rungs from the tile's
+    // centre while this read whole cells from the tile's minimum corner, so on a nudged tile it named
+    // a cell that does not exist and a corner half an envelope from the piece it claimed to describe.
+    match build.open.as_ref().and_then(|c| c.members.get(build.focus)) {
+        Some(m) => {
+            line(
+                p,
+                format!("focus ({:+.3}, {:+.3}) at {:.3} m", m.at.0, m.at.1, m.lift),
+                ACCENT,
+                10.0,
+            );
+        }
+        // The drop lands in the middle whatever the rung, so an empty tile can say exactly where.
+        None => line(p, "empty — the next drop lands centred".to_owned(), ACCENT, 10.0),
+    }
 
     crate::chrome::section(p, "MEMBERS");
     if comp.members.is_empty() {

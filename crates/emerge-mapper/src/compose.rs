@@ -218,7 +218,7 @@ fn spawn_compose_panel(mut commands: Commands) {
         crate::chrome::title(p, "COMPOSE");
         // Directly under the title, above everything a working author reads — a problem that has to
         // be scrolled to is a problem that gets missed.
-        crate::chrome::problem_banner(p, Mode::Compose);
+        crate::chrome::problem_banner(p, &[Mode::Compose]);
         crate::chrome::shortcut_hint(p);
         // **No inline key census here, and its absence is the fix.**
         //
@@ -242,12 +242,12 @@ fn spawn_compose_panel(mut commands: Commands) {
                 ..default()
             },
             ComposeBody,
-            crate::notice::CopyPane(Mode::Compose),
+            crate::notice::CopyPane(&[Mode::Compose]),
         ));
         // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
         // the panel, and an auto margin in a column absorbs the free space above it — so
         // placed any earlier it pushes every sibling after it down with it.
-        crate::chrome::problem_log(p, Mode::Compose);
+        crate::chrome::problem_log(p, &[Mode::Compose]);
     });
 
 }
