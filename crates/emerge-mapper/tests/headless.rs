@@ -2502,6 +2502,98 @@ fn dropping_an_oversized_mesh_grows_the_tile() {
     );
 }
 
+/// **Shift+arrow flushes the mesh to that side, and the plain arrow still nudges.**
+///
+/// The pair is the point. `bs` states both, because a bare `b` is indifferent to Shift and would
+/// swallow the chord — the collision the census exists to catch, and the one
+/// `RemoveTile`/`DemoteTile` already set the precedent for. So this checks that Shift+arrow reaches
+/// the align verb **and** that the unshifted arrow still reaches the nudge: either alone would pass
+/// against a binding that had eaten the other.
+#[test]
+fn shift_arrow_flushes_the_mesh_and_the_bare_arrow_still_nudges() {
+    use bevy::input::ButtonInput;
+    use bevy::prelude::{App, IntoScheduleConfigs, KeyCode, ResMut, Update};
+    use emerge_mapper::keys::{binding, Action};
+
+    let root = Fixture::new("tile_align")
+        // 0.2 m across in a 1 m tile: flush left is -0.4, which is not a multiple of either rung.
+        .sized_descriptor("panel", "alpha", 0.2, 1.0)
+        .build("test_map");
+    let mut app = harness::build_headless(&root, "test_map", None)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    app.update();
+
+    fn once(app: &mut App, chord: Vec<KeyCode>) {
+        app.add_systems(
+            Update,
+            IntoScheduleConfigs::before(
+                move |mut keys: ResMut<ButtonInput<KeyCode>>, mut done: bevy::prelude::Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        for k in &chord {
+                            keys.press(*k);
+                        }
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    }
+    let at = |app: &App| -> (f32, f32) {
+        app.world()
+            .resource::<emerge_mapper::build::Build>()
+            .open
+            .as_ref()
+            .and_then(|c| c.members.first())
+            .map(|m| m.at)
+            .unwrap_or_else(|| panic!("a member must be in the tile"))
+    };
+
+    once(&mut app, vec![binding(Action::TilesTab).key]);
+    once(&mut app, vec![binding(Action::BuildArm).key]);
+    once(&mut app, vec![binding(Action::BuildDrop).key]);
+    assert_eq!(at(&app), (0.0, 0.0), "brought in centred");
+
+    // Bare arrow: a nudge of one rung, not a flush.
+    once(&mut app, vec![binding(Action::BuildLeft).key]);
+    let nudged = at(&app);
+    assert_ne!(nudged, (0.0, 0.0), "the unshifted arrow must still nudge");
+    assert!(
+        nudged.0.abs() < 0.4,
+        "a nudge is one rung, not the edge — got {nudged:?}"
+    );
+
+    // Shifted: straight to the edge, wherever it was.
+    once(&mut app, vec![KeyCode::ShiftLeft, binding(Action::AlignLeft).key]);
+    let flush = at(&app);
+    assert!(
+        (flush.0 + 0.4).abs() < 1e-4,
+        "Shift+left must put a 0.2 m panel flush at -0.4 in a 1 m tile — got {flush:?}"
+    );
+    assert!(
+        (flush.1 - nudged.1).abs() < 1e-6,
+        "and it must not move the other axis: {flush:?} from {nudged:?}"
+    );
+
+    // **The tile did not grow to hold it.** Flush is the extreme position that still fits, so an
+    // envelope that fits its contents must stay exactly one cell — a grow here would mean the verb
+    // had overshot the edge it was aiming at.
+    let size = match app.world().resource::<emerge_mapper::build::Build>().open {
+        Some(ref c) => match c.envelope {
+            emerge_core::composition::Envelope::Bounded { size } => size,
+            _ => panic!("a tile claims a tile"),
+        },
+        None => panic!("still open"),
+    };
+    assert_eq!(
+        (size.0, size.2),
+        (emerge_core::grid::TILE, emerge_core::grid::TILE),
+        "flush is the extreme position that still fits, so the tile stays one cell"
+    );
+}
+
 /// **Undo steps back through the tile, one brought-in mesh at a time.**
 ///
 /// Reported from use: *"Undo is not working on the tiles tab when I bring in two meshes."* It was not

@@ -108,6 +108,33 @@ pub fn blank(id: &str, height: f32) -> Composition {
     }
 }
 
+/// **Where a member sits when it is flush against one side of the tile.**
+///
+/// The position is a function of the piece's **own width**, which is why it is a verb rather than a
+/// place the arrows can reach: `site/wall` is 0.1 m thick and sits flush at -0.45 in a 1 m tile, and
+/// no rung of any divisor lands on -0.45. `policy.rs` already wrote this down about seating —
+/// *"which is not a multiple of 0.125 either, because art is authored to look right rather than to
+/// tile"* — and the answer there was the same: ask for the edge, do not step to it.
+///
+/// Only the pressed axis moves. Shifting a piece to the left edge should not also recentre it front
+/// to back, and a second axis moving on its own is the kind of surprise that makes an author stop
+/// trusting a key.
+pub fn aligned(
+    at: (f32, f32),
+    span: (f32, f32),
+    size: (f32, f32, f32),
+    dir: (i32, i32),
+) -> (f32, f32) {
+    let mut out = at;
+    if dir.0 != 0 {
+        out.0 = (size.0 * 0.5 - span.0 * 0.5) * dir.0 as f32;
+    }
+    if dir.1 != 0 {
+        out.1 = (size.2 * 0.5 - span.1 * 0.5) * dir.1 as f32;
+    }
+    out
+}
+
 /// **The envelope that holds what is in the tile** — whole cells, centred, never smaller than one.
 ///
 /// The author's model: *"as many whole tiles as needed to capture the object… if the mesh is
@@ -743,6 +770,63 @@ pub fn build_keys(
     if build.placing && just_pressed(&keyboard, live.0, Action::Cancel) {
         build.placing = false;
         state.status.note("arrows walk the library".to_owned());
+        return;
+    }
+
+    // **Shift+arrow puts the focused mesh flush against that side.** Before the nudge below, and
+    // reached only when Shift is down — the two are stated as a `bs` pair so the plain arrow does
+    // not swallow the chord.
+    let mut align = Vec2::ZERO;
+    if build.placing {
+        if pressed(Action::AlignLeft) {
+            align.x -= 1.0;
+        }
+        if pressed(Action::AlignRight) {
+            align.x += 1.0;
+        }
+        if pressed(Action::AlignForward) {
+            align.y -= 1.0;
+        }
+        if pressed(Action::AlignBack) {
+            align.y += 1.0;
+        }
+    }
+    if align != Vec2::ZERO {
+        let dir = step_in_view(align, rig.yaw);
+        let focus = build.focus;
+        let span = build
+            .open
+            .as_ref()
+            .and_then(|c| c.members.get(focus))
+            .and_then(|m| match &m.body {
+                Body::Descriptor { id, .. } => project
+                    .library
+                    .get(id)
+                    .map(|d| crate::editor::brush_span(d, m.yaw)),
+                // A hole has no width, so "flush" is its position on the boundary — which `validate`
+                // refuses. Nudging is how a hole is placed; there is nothing to align.
+                _ => None,
+            });
+        match span {
+            Some(span) => {
+                let to = build
+                    .open
+                    .as_ref()
+                    .and_then(|c| c.members.get(focus))
+                    .map(|m| aligned(m.at, span, size, dir));
+                if let (Some(to), Some(m)) =
+                    (to, build.open.as_mut().and_then(|c| c.members.get_mut(focus)))
+                {
+                    m.at = to;
+                    state
+                        .status
+                        .note(format!("flush — ({:+.3}, {:+.3})", to.0, to.1));
+                }
+            }
+            None => state
+                .status
+                .note("nothing to flush — Enter brings the picked mesh in".to_owned()),
+        }
         return;
     }
 
@@ -1531,6 +1615,41 @@ mod tests {
         assert_eq!(step_in_view(Vec2::new(0.0, 1.0), 0.0), (0, 1), "down is +z");
         assert_eq!(step_in_view(Vec2::new(-1.0, 0.0), 0.0), (-1, 0), "left is -x");
         assert_eq!(step_in_view(Vec2::new(1.0, 0.0), 0.0), (1, 0), "right is +x");
+    }
+
+    /// **Flush is a function of the piece's own width, which is why it is a verb.**
+    ///
+    /// `site/wall` is 0.1 m thick and sits flush at -0.45 in a 1 m tile. No rung of any divisor
+    /// lands on -0.45 — 1/3 gives ±0.333, 1/9 gives ±0.444 — so it is not somewhere the arrows can
+    /// step to, however fine the ladder. That is the same fact `policy.rs` recorded about seating:
+    /// art is authored to look right rather than to tile.
+    #[test]
+    fn a_wall_reaches_the_tile_edge_that_no_rung_lands_on() {
+        let tile = (1.0, 2.4, 1.0);
+        // 0.1 m thick, standing across the cell.
+        let wall = (0.1, 1.0);
+        assert_eq!(aligned((0.0, 0.0), wall, tile, (-1, 0)), (-0.45, 0.0), "flush left");
+        assert_eq!(aligned((0.0, 0.0), wall, tile, (1, 0)), (0.45, 0.0), "flush right");
+
+        // **And no rung reaches it**, which is the reason this verb exists rather than a finer step.
+        for divisor in [2u32, 3, 4, 6, 8] {
+            let rung = 1.0 / divisor as f32;
+            let steps = (0.45f32 / rung).round();
+            assert!(
+                (steps * rung - 0.45).abs() > 1e-4,
+                "a divisor of {divisor} would make the align verb redundant"
+            );
+        }
+
+        // Only the pressed axis moves — flushing left must not also recentre front to back.
+        let off = (0.2, 0.31);
+        let out = aligned(off, wall, tile, (-1, 0));
+        assert_eq!(out.1, 0.31, "the other axis is left alone");
+
+        // A wide piece flushes by its own half-width, in a tile that has grown to hold it.
+        let two = (1.0, 2.4, 2.0);
+        let back = aligned((0.0, 0.0), (0.81, 1.21), two, (0, -1)).1;
+        assert!((back + 0.395).abs() < 1e-5, "flush back, got {back}");
     }
 
     /// **The tile is as many whole cells as its contents need — and no more.**

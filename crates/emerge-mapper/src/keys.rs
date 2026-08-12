@@ -195,6 +195,11 @@ pub enum Action {
     /// Step the tile assembler's own history back, and forward. See [`crate::build::TileHistory`].
     UndoBuild,
     RedoBuild,
+    /// Put the focused mesh flush against that side of the tile. See [`crate::build::aligned`].
+    AlignForward,
+    AlignBack,
+    AlignLeft,
+    AlignRight,
     BuildNew,
     BuildDropMember,
     BuildTurn,
@@ -553,10 +558,25 @@ pub const BINDINGS: &[Binding] = &[
     // context — `the_key_space_has_no_collisions` refuses it, rightly — so the key is single and the
     // state picks the job: not placing, the arrows walk the library list; placing, they walk the
     // tile. `Space` is the door between them and the ghost is what shows which side you are on.
-    b(Action::BuildForward, KeyCode::ArrowUp, false, Context::Tiles, "up", "walk the library / place: the tile"),
-    b(Action::BuildBack, KeyCode::ArrowDown, false, Context::Tiles, "down", "walk the library / place: the tile"),
-    b(Action::BuildLeft, KeyCode::ArrowLeft, false, Context::Tiles, "left", "walk the library / place: the tile"),
-    b(Action::BuildRight, KeyCode::ArrowRight, false, Context::Tiles, "right", "walk the library / place: the tile"),
+    // **Stated with `bs`, both of them.** A bare `b` is *indifferent* to Shift by design, so the
+    // plain arrows would swallow the shifted chord rather than sit beside it — the same pair
+    // `BuildDrop`/`BuildSlot` makes, and the collision the census exists to catch.
+    // **One row for eight bindings.** The census collapses by what a key *does*, and these are one
+    // idea with a modifier on it — the shape `Enter`/`Shift+Enter` already uses. A chord label is
+    // capped at eight characters for the key column, which is the other reason `shift+right` is not
+    // a label but a sentence.
+    //
+    // **Flush is its own verb, not a finer rung.** The author's word for it was *"left aligned"*,
+    // and it is what a wall needs: a 0.1 m panel sits flush at -0.45 in a 1 m tile, and no rung of
+    // any divisor lands on -0.45 — the position is a function of the piece's own width.
+    bs(Action::BuildForward, KeyCode::ArrowUp, false, false, Context::Tiles, "up", "list / nudge the mesh / Shift: flush it"),
+    bs(Action::BuildBack, KeyCode::ArrowDown, false, false, Context::Tiles, "down", "list / nudge the mesh / Shift: flush it"),
+    bs(Action::BuildLeft, KeyCode::ArrowLeft, false, false, Context::Tiles, "left", "list / nudge the mesh / Shift: flush it"),
+    bs(Action::BuildRight, KeyCode::ArrowRight, false, false, Context::Tiles, "right", "list / nudge the mesh / Shift: flush it"),
+    bs(Action::AlignForward, KeyCode::ArrowUp, false, true, Context::Tiles, "up", "list / nudge the mesh / Shift: flush it"),
+    bs(Action::AlignBack, KeyCode::ArrowDown, false, true, Context::Tiles, "down", "list / nudge the mesh / Shift: flush it"),
+    bs(Action::AlignLeft, KeyCode::ArrowLeft, false, true, Context::Tiles, "left", "list / nudge the mesh / Shift: flush it"),
+    bs(Action::AlignRight, KeyCode::ArrowRight, false, true, Context::Tiles, "right", "list / nudge the mesh / Shift: flush it"),
     b(Action::BuildArm, KeyCode::Space, false, Context::Tiles, "Space", "take the piece / Esc puts it back"),
     b(Action::BuildDown, KeyCode::BracketLeft, false, Context::Tiles, "[", "layer"),
     b(Action::BuildUp, KeyCode::BracketRight, false, Context::Tiles, "]", "layer"),
@@ -1070,6 +1090,7 @@ mod tests {
             Action::BuildDown, Action::BuildUp, Action::BuildRung,
             Action::BuildDrop, Action::BuildSlot, Action::BuildArm,
             Action::UndoBuild, Action::RedoBuild,
+            Action::AlignForward, Action::AlignBack, Action::AlignLeft, Action::AlignRight,
             Action::BuildTurn, Action::BuildDropMember, Action::BuildNew,
         ];
         assert_eq!(
