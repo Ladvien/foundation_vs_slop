@@ -349,7 +349,13 @@ pub fn host_for(
     }
 }
 
-/// Drop a descriptor into the cursor's cell, returning the index it landed at.
+/// A hair over the tile, so float noise in a measured footprint is not an overhang.
+const OVERHANG_EPSILON: f32 = 1e-3;
+
+/// Drop a descriptor into the cursor's cell.
+///
+/// Answers **where it landed and what is worth saying about it** — a member wider than the tile is
+/// placed and remarked on rather than refused, for the reason the body gives.
 pub fn place(
     build: &mut Build,
     guest: &emerge_core::descriptor::Descriptor,
@@ -357,7 +363,7 @@ pub fn place(
     span: (f32, f32),
     yaw: f32,
     pitch: f32,
-) -> Result<usize, String> {
+) -> Result<(usize, Option<String>), String> {
     let Some(comp) = build.open.as_mut() else {
         return Err("no tile open — press N to start one".to_owned());
     };
@@ -368,6 +374,22 @@ pub fn place(
     // **Resolved before the member exists**, so a refusal leaves the tile exactly as it was rather
     // than needing the drop undone.
     let on = host_for(&comp.members, library, guest, at, span)?;
+    // **Said, not refused.** A member wider than the tile overhangs into the neighbouring cell, and
+    // nothing checks a member's footprint against the envelope — only a slot has to sit inside. That
+    // is deliberate: a lintel or a buttress reaching past the seam is ordinary architecture. What is
+    // *not* ordinary is a 1.2 m pallet in a 1 m tile, and the author hit exactly that. So the drop
+    // stands and the tile says what it now is, because the alternative — refusing — would forbid the
+    // legitimate case to catch the confused one.
+    let over = (span.0 > size.0 + OVERHANG_EPSILON, span.1 > size.2 + OVERHANG_EPSILON);
+    let overhang = match over {
+        (false, false) => None,
+        _ => Some(format!(
+            "`{}` is {:.2} x {:.2} m in a {:.2} x {:.2} m tile, so it overhangs into the next cell. \
+             A prop the generator drops into a room is not tile content — give it `placement.rooms` \
+             instead.",
+            guest.id, span.0, span.1, size.0, size.2
+        )),
+    };
     let m = Member {
         id: fresh_id(&comp.members, &guest.id),
         body: Body::Descriptor {
@@ -383,7 +405,7 @@ pub fn place(
         of_fingerprint: None,
         note: None,
     };
-    Ok(insert_sorted(&mut comp.members, m))
+    Ok((insert_sorted(&mut comp.members, m), overhang))
 }
 
 /// Drop a **hole** into the cursor's cell — a position that says what may go here without saying what
@@ -621,14 +643,21 @@ pub fn build_keys(
         }
         let span = crate::editor::brush_span(&d, 0.0);
         match place(&mut build, &d, &project.library, span, 0.0, step) {
-            Ok(i) => {
+            Ok((i, overhang)) => {
                 // **Focus follows the drop.** `insert_sorted` answers where it landed, and the two
                 // verbs that act on "this member" — turn and remove — mean the one you just put
                 // down. Ignoring the index left them acting on whatever sorted first, which is a
                 // different piece as soon as a tile holds two.
                 build.focus = i;
                 let n = build.open.as_ref().map_or(0, |c| c.members.len());
-                state.status.note(format!("`{}` dropped — {n} in the tile", d.id));
+                // **The overhang goes to `problem`, not `note`.** It is not a refusal — the piece is
+                // down — but a note is the line that says what just happened and is gone by the next
+                // keystroke, and this is a thing the author needs to still be on screen while they
+                // decide what to do about it.
+                match overhang {
+                    Some(w) => state.status.problem(w),
+                    None => state.status.note(format!("`{}` dropped — {n} in the tile", d.id)),
+                }
             }
             Err(e) => state.status.problem(e),
         }
@@ -1226,6 +1255,50 @@ mod tests {
             .unwrap_or_else(|| panic!("the sconce is a row"));
         let y = ys.get(k).copied().unwrap_or_default();
         assert!((y - 1.8).abs() < 1e-4, "the sconce should ride the face at 1.8 m, got {y}");
+    }
+
+    /// **A mesh bigger than the tile is placed and remarked on, not refused.**
+    ///
+    /// The author hit this on their first session: *"some meshes are larger than one tile."* Sixteen
+    /// of the shipped library's forty-five are, and most of them are props — a 0.81 x 1.21 m pallet
+    /// is *"a thing the generator drops into a room"*, not tile content. Nothing checks a member's
+    /// footprint against the envelope and that stays true: a lintel reaching past the seam is
+    /// ordinary architecture, so refusing would forbid the legitimate case to catch the confused
+    /// one. The tile says what it now is instead, and points at the path that fits.
+    #[test]
+    fn a_mesh_wider_than_the_tile_is_placed_and_says_so() {
+        use emerge_core::descriptor::{Descriptor, Extent};
+        let pallet = Descriptor {
+            id: "site/pallet".to_owned(),
+            extent: Extent { footprint: Some((0.81, 1.21)), height: Some(0.14) },
+            ..Default::default()
+        };
+        let lib = emerge_core::library::Library {
+            version: emerge_core::library::LIBRARY_VERSION,
+            note: None,
+            descriptors: vec![pallet.clone()],
+        };
+        let mut b = Build { open: Some(blank("kit/t", 2.4)), rung: DEFAULT_RUNG, ..Default::default() };
+        let (_, said) = place(&mut b, &pallet, &lib, (0.81, 1.21), 0.0, FINE)
+            .expect("an oversized piece still places — it is not a refusal");
+        let said = said.expect("and it must say that it overhangs");
+        assert!(said.contains("overhangs"), "{said}");
+        assert!(said.contains("placement.rooms"), "it must point at the path that fits: {said}");
+        assert_eq!(
+            b.open.as_ref().map_or(0, |c| c.members.len()),
+            1,
+            "the piece is down; the line is information, not a refusal"
+        );
+
+        // A piece that fits says nothing, or the line stops meaning anything.
+        let mut b = Build { open: Some(blank("kit/t", 2.4)), rung: DEFAULT_RUNG, ..Default::default() };
+        let wall = Descriptor {
+            id: "site/wall".to_owned(),
+            extent: Extent { footprint: Some((0.1, 1.0)), height: Some(2.4) },
+            ..Default::default()
+        };
+        let (_, quiet) = place(&mut b, &wall, &lib, (0.1, 1.0), 0.0, FINE).expect("the wall drops");
+        assert!(quiet.is_none(), "a wall exactly one cell deep does not overhang: {quiet:?}");
     }
 
     /// **Nothing to mount to is a refusal at the door**, not a member written now and a map that
