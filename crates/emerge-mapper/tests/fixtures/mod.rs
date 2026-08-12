@@ -122,7 +122,7 @@ impl Fixture {
     surfaces: (tokens: [( name: "worktop", note: "a top" )]),
     capabilities: (tokens: []),
     edge: (tokens: [( name: "wall", note: "a solid run-face" )]),
-    anchor: (tokens: []),
+    slot: (tokens: []),
 )"#,
         )
         .unwrap_or_else(|e| panic!("{e}"));
@@ -134,6 +134,37 @@ impl Fixture {
         .unwrap_or_else(|e| panic!("{e}"));
 
         Fixture { dir, descriptors: Vec::new(), placements: Vec::new(), compositions: Vec::new() }
+    }
+
+    /// **A descriptor of a stated footprint**, for a test about what the footprint *does*.
+    ///
+    /// [`Self::descriptor`] writes a 1 x 1 m piece, which is the ordinary case and exactly the size
+    /// that cannot show an envelope growing. This states the number instead of measuring whatever
+    /// the generated mesh happens to be.
+    pub fn sized_descriptor(mut self, id: &str, pack: &str, w: f32, d: f32) -> Fixture {
+        self = self.descriptor(id, pack);
+        if let Some(last) = self.descriptors.last_mut() {
+            let was = "footprint: Some((1.0, 1.0))";
+            assert!(last.contains(was), "the fixture's descriptor shape changed under this helper");
+            *last = last.replace(was, &format!("footprint: Some(({w}, {d}))"));
+        }
+        self
+    }
+
+    /// **A `slot` token, so a tile can declare a hole.**
+    ///
+    /// `new` writes an empty slot axis, which is the honest default: a project that has not grown
+    /// one refuses `Shift+Enter` by name rather than inventing a token. A test about holes needs
+    /// one, and rewriting the file is how any other axis would be set too.
+    pub fn slot_token(self, name: &str) -> Fixture {
+        let at = self.dir.join("assets/emerge/vocab.ron");
+        let was = std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("cannot read {at:?}: {e}"));
+        let empty = "slot: (tokens: []),";
+        assert!(was.contains(empty), "the fixture's slot axis must start empty, or this is a no-op");
+        let full = format!("slot: (tokens: [( name: \"{name}\", note: \"a hole\" )]),");
+        std::fs::write(&at, was.replace(empty, &full))
+            .unwrap_or_else(|e| panic!("cannot write {at:?}: {e}"));
+        self
     }
 
     /// **A pack of meshes on disk**, none of them in the library — i.e. import candidates.

@@ -3,6 +3,11 @@
 [workspace]
 members = [
     "crates/det_rng",
+    # The Boolean satisfiability back-end `emerge-core::constraints` delegates to. Its own crate
+    # because it is the one part of the constraint stack likely to be REPLACED — clauses in, bits out,
+    # knowing nothing about grids or prototypes — and isolating a replaceable component behind a
+    # boundary is cheaper before it is written than after.
+    "crates/deterministic_solver",
     "crates/emerge-core", "crates/emerge-anim", "crates/emerge-bevy", "crates/emerge-mapper",
     "crates/fvs",
     "crates/bevy_orca", "crates/map_elites", "crates/bevy_devshot",

@@ -267,6 +267,7 @@ pub fn mount_token(m: &Mount) -> &'static str {
     match m {
         Mount::OnFloor => "floor",
         Mount::OnSurface { .. } => "surface",
+        Mount::OnFace { .. } => "face",
         Mount::OnWall { .. } => "wall",
         Mount::OnCeiling => "ceiling",
         Mount::Tiled => "tiled",
@@ -580,6 +581,19 @@ fn valid_mount(raw: &RawMount, surfaces: &Vocabulary) -> Result<Mount, String> {
             }
             Ok(Mount::OnSurface { class })
         }
+        // **The face mount needs both halves, and neither is inventable.** A class the project has
+        // not declared, or a height nobody stated, would be a guess written into a library entry —
+        // so both are demanded rather than defaulted, exactly as `surface` demands its class.
+        "face" => {
+            let class = raw.class.clone().ok_or("mount on `face` needs `class`")?;
+            if !surfaces.contains(&class) {
+                let hint = nearest(surfaces, &class)
+                    .map(|n| format!(" (did you mean `{n}`?)"))
+                    .unwrap_or_default();
+                return Err(format!("mount class `{class}` is not a `surfaces` token{hint}"));
+            }
+            Ok(Mount::OnFace { class, height: wall_height(raw.height_m)? })
+        }
         "wall" => Ok(Mount::OnWall { height: wall_height(raw.height_m)? }),
         "ceiling" => Ok(Mount::OnCeiling),
         "tiled" => Ok(Mount::Tiled),
@@ -846,10 +860,10 @@ mod tests {
                 ("worktop", "a desk or table top"),
             ]),
             capabilities: Vocabulary::of(&[("cook", "prepares food")]),
-            // The lattice axes. A labeller proposes nothing on either, so both are empty here — and
-            // empty is not permissive: an invented token is refused, naming the axis.
+            // The edge axis and the slot axis. A labeller proposes nothing on either, so both are
+            // empty here — and empty is not permissive: an invented token is refused, naming the axis.
             edge: Vocabulary::default(),
-            anchor: Vocabulary::default(),
+            slot: Vocabulary::default(),
         }
     }
 
@@ -1020,6 +1034,11 @@ mod tests {
             let json = match &m {
                 Mount::OnSurface { class } => {
                     format!(r#"{{"on": "{token}", "class": "{class}"}}"#)
+                }
+                // A face needs both halves — the class saying which face, the height saying how far
+                // up it — and the parser demands both rather than inventing either.
+                Mount::OnFace { class, .. } => {
+                    format!(r#"{{"on": "{token}", "class": "{class}", "height_m": 1.8}}"#)
                 }
                 Mount::OnWall { .. } | Mount::Decal { on: DecalHost::Wall { .. } } => {
                     format!(r#"{{"on": "{token}", "height_m": 1.8}}"#)

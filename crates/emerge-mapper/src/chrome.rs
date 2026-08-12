@@ -368,10 +368,21 @@ impl Status {
     }
 }
 
-/// The banner one tab shows its newest problem in. Carries which tab, so a shared painter cannot
-/// write another tab's block.
+/// The banner a panel shows its newest problem in. Carries **which tabs it speaks for**, so a shared
+/// painter cannot write another tab's block.
+///
+/// # A list, because one panel can serve two tabs
+///
+/// The TILES panel is the whole reason: Meshes and Tiles share it. A banner is one line and there is
+/// one per tab, so each of those names a single tab — but the **detail pane** and the **problem log**
+/// in that panel are single nodes whose contents the live tab decides, and tagging them with a lone
+/// `Mode::Meshes` silently made them belong to Meshes alone. Every refusal the Tiles tab's verbs
+/// wrote landed in a log `paint_notices` then skipped, and `Cmd+C` harvested a pane it could not see.
+///
+/// A node saying which tabs it serves is the true thing to say; duplicating a shared node once per
+/// tab would be two copies to keep in step. `tiles::TILES_PANEL_TABS` is the list.
 #[derive(Component, Clone, Copy)]
-pub struct ProblemBanner(pub crate::tiles::Mode);
+pub struct ProblemBanner(pub &'static [crate::tiles::Mode]);
 
 /// **The problem block: filled, not tinted, and directly under the title.**
 ///
@@ -381,7 +392,7 @@ pub struct ProblemBanner(pub crate::tiles::Mode);
 /// The glyph is `▲` and not `⚠`: the shipped face is `FiraMono-Regular.ttf`, which **has no U+26A0**
 /// (measured), and a missing codepoint draws as a tofu box — the same class of trap `CLAUDE.md`
 /// records for Bevy's own 95-codepoint default font, one font along.
-pub fn problem_banner(parent: &mut ChildSpawnerCommands, tab: crate::tiles::Mode) {
+pub fn problem_banner(parent: &mut ChildSpawnerCommands, tabs: &'static [crate::tiles::Mode]) {
     parent.spawn((
         Node {
             display: Display::None,
@@ -398,13 +409,13 @@ pub fn problem_banner(parent: &mut ChildSpawnerCommands, tab: crate::tiles::Mode
         // descriptors and compositions — the longest text this editor renders. `max_width` is what
         // stops a long word pushing the node wider than the panel it sits in.
         TextLayout::new(Justify::Left, LineBreak::WordOrCharacter),
-        ProblemBanner(tab),
+        ProblemBanner(tabs),
     ));
 }
 
-/// A tab's error log, and which tab it belongs to.
+/// A panel's error log, and which tabs it speaks for. See [`ProblemBanner`] for why that is a list.
 #[derive(Component, Clone, Copy)]
-pub struct ProblemLog(pub crate::tiles::Mode);
+pub struct ProblemLog(pub &'static [crate::tiles::Mode]);
 
 /// One line of it. Rebuilt wholesale, so it carries nothing — `compose::ComposeLine`'s argument.
 #[derive(Component)]
@@ -419,7 +430,7 @@ pub struct ProblemLogLine;
 /// `margin-top: auto` pushes it to the bottom of whatever panel holds it, which is the bottom-left
 /// of the screen for the panels pinned `full_height` and the end of the panel for the one that is
 /// not — without this needing to know which is which.
-pub fn problem_log(parent: &mut ChildSpawnerCommands, tab: crate::tiles::Mode) {
+pub fn problem_log(parent: &mut ChildSpawnerCommands, tabs: &'static [crate::tiles::Mode]) {
     parent.spawn((
         Node {
             flex_direction: FlexDirection::Column,
@@ -429,7 +440,7 @@ pub fn problem_log(parent: &mut ChildSpawnerCommands, tab: crate::tiles::Mode) {
             display: Display::None,
             ..default()
         },
-        ProblemLog(tab),
+        ProblemLog(tabs),
     ));
 }
 

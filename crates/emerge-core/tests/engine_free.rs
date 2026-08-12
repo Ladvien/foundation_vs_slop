@@ -41,7 +41,35 @@ use std::path::{Path, PathBuf};
 ///
 /// That is the argument this list is supposed to cost. A dependency that pulled in anything not
 /// already on this line would need a different one.
-const ALLOWED_DEPS: &[&str] = &["serde", "serde_json", "ron", "rand", "rand_chacha", "det_rng"];
+///
+/// # `deterministic_solver`, and the different argument it needs
+///
+/// It is the one entry here that genuinely GROWS the surface — by two crates, itself and `batsat`
+/// (which brings only `bit-vec`). So the `det_rng` argument above does not cover it, and this is the
+/// one it needs instead.
+///
+/// **What this list defends is not dependency count.** The test's own purpose, stated at the top, is
+/// that the crate stays consumable *"by the game, by the offline search, and by a standalone editor
+/// without any of them agreeing on a renderer"* — which is why `FORBIDDEN_DEP_MARKERS` names engines
+/// and nothing else. A decision procedure with no I/O, no threads, no allocator of its own and no
+/// engine does not touch that property.
+///
+/// **What it buys is a thing this crate cannot do without.** `constraints.rs` encodes a world as
+/// clauses; something has to turn clauses into bits, and writing a CDCL solver here would be a
+/// far larger and less-tested piece of code than taking one.
+///
+/// **Why a sibling crate rather than `batsat` directly.** The back-end is the part of the constraint
+/// stack most likely to be replaced — see `docs/research/2026-08-10-solver-choice.md` §6, which
+/// argues its own recommendation might not survive a hard instance. Naming a workspace sibling means
+/// the swap is one file in one crate, and that sibling carries its OWN `tests/leaf.rs` pinned to
+/// `["batsat"]` — precisely the arrangement the `det_rng` note above blesses, where the boundary is
+/// policed on that side rather than taken on trust from here.
+///
+/// The alternative considered was `varisat`, which would have grown the surface by **thirty-two**
+/// crates including two `syn` majors, `regex` and a proc-macro toolchain. That is the comparison that
+/// makes this a paragraph rather than an argument.
+const ALLOWED_DEPS: &[&str] =
+    &["serde", "serde_json", "ron", "rand", "rand_chacha", "det_rng", "deterministic_solver"];
 
 /// Crate names that would mean the boundary has been crossed, checked as substrings so
 /// `bevy_math`/`bevy_ecs` are caught as readily as `bevy`.

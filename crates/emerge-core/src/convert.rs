@@ -140,6 +140,7 @@ pub fn descriptor_from_manifest(item: &ManifestItem, policy: Policy) -> Result<D
         clearance: Vec::new(),
         offers: Offers {
             surfaces: item.surfaces.clone(),
+            faces: Vec::new(),
             sockets: Vec::new(),
         },
         placement: Placement {

@@ -1,44 +1,56 @@
-//! **The Compose tab opens `compositions.ron` nowhere.**
+//! **One module opens `compositions.ron`, and every author-facing verb comes through it.**
 //!
-//! Compositions are authored on the Map — arrange, box-select, name — and the Compose tab reads what
-//! that produced: the strip, the members, the derived interface, what has gone stale, and which group
-//! is armed. It used to author them too, with its own new/add/seat/flush/turn/drop/paint verbs and its
-//! own undo stack, which meant one file had two writers reachable by two different sets of keys.
+//! # What this used to say, and why it changed
 //!
-//! # Why a test and not a note
+//! FVS-R-15 made the Compose tab read-only and moved authoring to the Map, buying one invariant:
+//! **one writer**. This file held that line by naming tabs — `compose.rs` must not write,
+//! `editor.rs` must. Naming tabs was always a proxy for the real rule, and it worked for as long as
+//! exactly one tab authored.
 //!
-//! "Compose is read-only" is only worth saying if it can fail. The verb that made this a test rather
-//! than a comment is `R` — *record what these members present now*. It is derivation rather than
-//! authoring, which makes it feel like a view operation, and it **persists**, which makes it a writer.
-//! Keeping it would have left the property as "read-only except `R`", and that is a description of the
-//! code rather than a claim about it. So `R` moved with the rest, and this is what holds the line.
+//! It stopped working when tiles became assemblable. A tile is a `Composition`, so the Tiles tab now
+//! authors one too — and a per-tab rule facing that has two options, both bad: forbid the feature, or
+//! get widened one tab at a time until it forbids nothing. The second is how a ratchet becomes
+//! decoration.
 //!
-//! On the precedent of the ratchets this project already trusts: `emerge-core`'s `engine_free.rs`, the
-//! key census's collision test, the twelve-row display ceiling, and `census_is_the_one_counter.rs`
-//! beside this file. Each turns a rule that was a comment into a rule that can fail a build.
+//! So the rule moved to what it was always aiming at. **`project.rs` is the only module that names the
+//! file**, through `Project::commit_composition`, and every tab reaches it there. That is the same
+//! shape `tiles::commit_measured` has for `library.ron`, and it is checkable directly rather than by
+//! enumerating which tabs are allowed to be trusted this week.
 //!
 //! # What is forbidden, precisely
 //!
-//! Naming the compositions file, serialising a `Compositions`, or writing bytes — anywhere in
-//! `compose.rs` outside its `#[cfg(test)]` modules. A test may build a `Compositions` in memory and
+//! Naming the compositions file, serialising a `Compositions`, or writing bytes — anywhere outside
+//! `project.rs`, outside `#[cfg(test)]` modules. A test may build a `Compositions` in memory and
 //! round-trip it through `to_ron`; that touches no disk and is how the paint-order encoding is pinned.
 //!
-//! Reading is not forbidden and must not be: the tab's whole job is to show what the file says. It
-//! reads it through `Project`, which the loader filled.
+//! Reading is not forbidden and must not be: several tabs' whole job is to show what the file says.
+//! They read it through `Project`, which the loader filled.
 
 use std::path::Path;
 
-/// The ways a line reaches the compositions file.
+/// **Naming the compositions file.** The one token that means *this* file and no other.
 ///
-/// `to_ron` is on the list even though it only produces a `String`: it is the step that turns the
-/// in-memory set into the bytes on disk, and a tab that serialises the set has already decided it is
-/// going to write it. Catching it here names the intent rather than the syscall.
-const WRITES: &[&str] = &[
-    "Compositions::FILE",
-    "save_atomic",
-    "to_ron()",
-    "fs::write",
-    "File::create",
+/// `save_atomic` and `to_ron()` are deliberately not here: they are how every RON file in the project
+/// is written, so a rule built on them cannot tell a tab saving `library.ron` — which `tiles.rs`
+/// legitimately does — from a tab saving this one. The first draft of this rewrite did exactly that
+/// and failed on `tiles.rs:2251`, which is correct code. The file's *name* is the unambiguous thing.
+const NAMES_THE_FILE: &str = "Compositions::FILE";
+
+/// The ways a line writes bytes at all, for the one module that must write none.
+const ANY_WRITE: &[&str] = &["save_atomic", "to_ron()", "fs::write", "File::create"];
+
+/// **The one module allowed to do it.** Everything else asks it.
+const DOOR: &str = "src/project.rs";
+
+/// Every module that could plausibly reach for the file, and must not name it.
+///
+/// Named rather than globbed, so adding a tab is a deliberate line here rather than a silent
+/// exemption — and so a rename that empties this list fails loudly at the `read` below.
+const ASKS: &[&str] = &[
+    "src/compose.rs",
+    "src/editor.rs",
+    "src/build.rs",
+    "src/tiles.rs",
 ];
 
 /// Every line of `src` that is not inside a `#[cfg(test)]` module, as `(1-based line, text)`.
@@ -71,56 +83,105 @@ fn code_outside_tests(src: &str) -> Vec<(usize, &str)> {
     out
 }
 
-#[test]
-fn the_compose_tab_never_writes_the_compositions_file() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/compose.rs");
-    let src = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+fn read(rel: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
 
+#[test]
+fn only_the_project_module_opens_the_compositions_file() {
     let mut offences = Vec::new();
-    for (n, line) in code_outside_tests(&src) {
-        let code = line.split("//").next().unwrap_or(line);
-        for w in WRITES {
-            if code.contains(w) {
-                offences.push(format!("  src/compose.rs:{n}  {}", line.trim()));
+    for rel in ASKS {
+        let src = read(rel);
+        for (n, line) in code_outside_tests(&src) {
+            let code = line.split("//").next().unwrap_or(line);
+            if code.contains(NAMES_THE_FILE) {
+                offences.push(format!("  {rel}:{n}  {}", line.trim()));
             }
         }
     }
 
     assert!(
         offences.is_empty(),
-        "the Compose tab writes `compositions.ron`, and it is supposed to be the tab that only \
-         reads it. Authoring lives on the Map — arrange, box-select, name. If a genuinely new \
-         reason to write from here exists, it is a design change and this test is where to argue \
-         it, not a line to delete:\n{}",
+        "a tab writes `compositions.ron` itself instead of asking \
+         `Project::commit_composition`. One module opens that file — {DOOR} — because insert, sort, \
+         validate-the-whole-set and write-atomically have to happen together, and a second copy of \
+         that sequence is a second chance to skip the validation. If a genuinely new reason to write \
+         from a tab exists, it is a design change and this test is where to argue it, not a line to \
+         delete:\n{}",
         offences.join("\n")
     );
 }
 
-/// **And the Map is the one that does** — asserted through the same scan, which is what keeps the
-/// two halves honest.
+/// **And the door itself writes** — without this the test above is a guarantee about a scan that
+/// finds nothing.
 ///
-/// Two things at once. Asserting only that Compose is silent would also pass if nothing anywhere
-/// could author a composition, which is a working editor with the feature removed. And running the
-/// *identical* scan over a file that is known to write proves the scan can see a writer at all —
-/// without this, the test above is a guarantee about a function that returns nothing.
+/// The same argument the previous version made for scanning `editor.rs` after `compose.rs`: asserting
+/// only that the tabs are silent would also pass if the feature had been deleted, or if `WRITES` had
+/// gone stale against a renamed API.
 #[test]
-fn the_map_is_the_one_that_writes_it_and_the_scan_can_see_it() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/editor.rs");
-    let src = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let writes: Vec<usize> = code_outside_tests(&src)
+fn the_door_is_where_the_write_actually_is() {
+    let src = read(DOOR);
+    let found: Vec<usize> = code_outside_tests(&src)
         .into_iter()
         .filter(|(_, l)| {
             let code = l.split("//").next().unwrap_or(l);
-            WRITES.iter().any(|w| code.contains(w))
+            code.contains(NAMES_THE_FILE) || ANY_WRITE.iter().any(|w| code.contains(w))
         })
         .map(|(n, _)| n)
         .collect();
     assert!(
-        !writes.is_empty(),
-        "nothing on the Map writes `compositions.ron`, so either capture stopped reaching the file \
-         — and no tab can author a composition — or `WRITES` no longer names how one is written, \
-         which would make the test above vacuous"
+        !found.is_empty(),
+        "{DOOR} does not write `compositions.ron`, so the scan above is looking for something that \
+         never appears and would pass over any code at all"
+    );
+}
+
+/// **Every author-facing verb reaches the door**, so the check above cannot be satisfied by a tab
+/// that simply stopped saving.
+///
+/// Two tabs author compositions and they are named here: the Map captures a box selection, the Tiles
+/// tab assembles one member at a time. If a third appears it belongs in this list, which is the point
+/// — the cost of a new writer should be a line in a test rather than nothing at all.
+#[test]
+fn both_authoring_tabs_commit_through_the_door() {
+    for rel in ["src/editor.rs", "src/build.rs"] {
+        let src = read(rel);
+        assert!(
+            code_outside_tests(&src)
+                .iter()
+                .any(|(_, l)| l.contains("commit_composition")),
+            "{rel} authors compositions but never calls `Project::commit_composition`. Either it \
+             stopped saving, or it found another way to the file — and the second is what this file \
+             exists to catch."
+        );
+    }
+}
+
+/// **And the Compose tab still writes nothing at all** — the narrower property FVS-R-15 actually
+/// bought, kept because it is still true and still worth holding.
+///
+/// It reads the set, shows what each group presents, and arms one for the Map. It authors nothing, so
+/// unlike every other tab it may not write *any* file — which is checkable with the generic tokens
+/// that would be too blunt anywhere else.
+#[test]
+fn the_compose_tab_writes_no_file_at_all() {
+    let src = read("src/compose.rs");
+    let offences: Vec<String> = code_outside_tests(&src)
+        .into_iter()
+        .filter_map(|(n, l)| {
+            let code = l.split("//").next().unwrap_or(l);
+            ANY_WRITE
+                .iter()
+                .any(|w| code.contains(w))
+                .then(|| format!("  src/compose.rs:{n}  {}", l.trim()))
+        })
+        .collect();
+    assert!(
+        offences.is_empty(),
+        "the Compose tab writes a file. It reads the set and arms a group; authoring happens on the \
+         Map and on the Tiles tab. `R` — record what these members present now — is the verb that \
+         made this a test rather than a comment: it feels like a view operation and it persists:\n{}",
+        offences.join("\n")
     );
 }

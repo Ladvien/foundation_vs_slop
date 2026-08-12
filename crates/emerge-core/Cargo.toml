@@ -21,6 +21,11 @@ repository = "https://github.com/Ladvien/emerge-core"
 # generator rather than copy it. Re-exported as `emerge_core::rng`, so this crate's callers are
 # unchanged. See `crates/det_rng/CLAUDE.md` for why one definition is non-negotiable.
 det_rng = { path = "../det_rng" }
+# The Boolean satisfiability back-end `constraints::Problem::solve` delegates to. Its own crate
+# because it is the one part of the constraint stack likely to be REPLACED, and because the decision
+# procedure knows nothing about grids or prototypes. It carries its own `tests/leaf.rs`, so the
+# boundary is policed on that side rather than taken on trust here.
+deterministic_solver = { path = "../deterministic_solver" }
 serde.workspace = true
 ron.workspace = true
 # Reading a `.glb`'s JSON chunk (`glb.rs`). Data only — no engine, no renderer. The reader is

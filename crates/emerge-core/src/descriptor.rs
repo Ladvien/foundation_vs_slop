@@ -98,8 +98,6 @@ pub struct Descriptor {
 ///   bounding box.
 /// * [`SubCell::edge`] — what the cell presents to the neighbour. WFC matches a tile's face against
 ///   the facing cells of the tile beside it, which is what makes a corridor meet a corridor.
-/// * [`SubCell::anchor`] — a role an interacting item may occupy. The regular-grid sibling of
-///   [`Offers::sockets`]: a socket is a hand-placed point, an anchor is a lattice cell.
 ///
 /// # The divisions are not stored here
 ///
@@ -292,7 +290,7 @@ impl Subgrid {
     /// that mean exactly what absence means.
     fn prune(&mut self) {
         self.cells
-            .retain(|c| c.solid || c.edge.is_some() || c.anchor.is_some());
+            .retain(|c| c.solid || c.edge.is_some());
     }
 
     /// Toggle a cell's occupancy. Returns what it became, or `None` if `at` is outside.
@@ -321,14 +319,6 @@ impl Subgrid {
     pub fn set_edge(&mut self, at: (u32, u32, u32), div: (u32, u32, u32), token: &str) -> Option<()> {
         let cell = self.entry(at, div)?;
         cell.edge = (!token.trim().is_empty()).then(|| token.trim().to_owned());
-        self.prune();
-        Some(())
-    }
-
-    /// Set or clear a cell's anchor role.
-    pub fn set_anchor(&mut self, at: (u32, u32, u32), div: (u32, u32, u32), token: &str) -> Option<()> {
-        let cell = self.entry(at, div)?;
-        cell.anchor = (!token.trim().is_empty()).then(|| token.trim().to_owned());
         self.prune();
         Some(())
     }
@@ -434,9 +424,15 @@ pub struct SubCell {
     /// fill the wall. `Descriptor::clearance` is the field that decides anything about space.
     pub solid: bool,
     /// What this cell presents to whatever is placed beside it. Matched face-to-face.
+    ///
+    /// **The only facet that decides anything**, now that `anchor` is gone. A cell said which role an
+    /// interacting item could occupy here, and it was authored, validated against a vocabulary axis,
+    /// drawn in the editor, saved to disk — and **read by nothing**, across 289 `anchor: None` entries
+    /// and an empty axis in every shipped kit. `composition::Body::Slot` is the thing it was reaching
+    /// for and could not be: a hole belongs to a *tile*, at a position on the tile's grid, so it can
+    /// sit in open air and differ between two tiles that share a mesh. An anchor belonged to the mesh,
+    /// so every wall in the project carried the same one.
     pub edge: Option<String>,
-    /// A role an interacting item may occupy here — `"diner"`, `"shelf-item"`.
-    pub anchor: Option<String>,
 }
 
 /// Where a piece belongs, for whatever is placing it. **Not a semantic axis.**
@@ -477,6 +473,12 @@ pub fn mount_options(surfaces: &[String]) -> Vec<Mount> {
         Mount::OnSurface {
             class: String::new(),
         },
+        // The standing sibling, expanded from the same vocabulary just below and for the same reason:
+        // a project offering no classes should offer no face mount rather than one nothing can carry.
+        Mount::OnFace {
+            class: String::new(),
+            height: 1.8,
+        },
         Mount::OnWall { height: 1.8 },
         Mount::OnCeiling,
         Mount::Tiled,
@@ -499,6 +501,23 @@ pub fn mount_options(surfaces: &[String]) -> Vec<Mount> {
         out.remove(at);
         for (i, class) in surfaces.iter().enumerate() {
             out.insert(at + i, Mount::OnSurface { class: class.clone() });
+        }
+    }
+    // And the same for the face placeholder. Done second so the surface expansion above has already
+    // moved it, rather than both editing positions computed against the original list.
+    let at = out
+        .iter()
+        .position(|m| matches!(m, Mount::OnFace { class, .. } if class.is_empty()));
+    if let Some(at) = at {
+        out.remove(at);
+        for (i, class) in surfaces.iter().enumerate() {
+            out.insert(
+                at + i,
+                Mount::OnFace {
+                    class: class.clone(),
+                    height: 1.8,
+                },
+            );
         }
     }
     out
@@ -545,6 +564,7 @@ pub fn mount_label(mount: Option<&Mount>) -> String {
         None => "unset".to_owned(),
         Some(Mount::OnFloor) => "on floor".to_owned(),
         Some(Mount::OnSurface { class }) => format!("on {class}"),
+        Some(Mount::OnFace { class, height }) => format!("on {class} face at {height:.1} m"),
         Some(Mount::OnWall { height }) => format!("on wall at {height:.1} m"),
         Some(Mount::OnCeiling) => "on ceiling".to_owned(),
         Some(Mount::Tiled) => "tiled".to_owned(),
@@ -783,6 +803,25 @@ pub enum Mount {
     InOpening { clear: Option<(f32, f32)> },
     /// Rests on another piece that offers this surface class.
     OnSurface { class: String },
+    /// **Fixed to a named face of a named host**, `height` metres up it.
+    ///
+    /// The standing sibling of [`Self::OnSurface`], and the one that makes a fixture belong to a
+    /// wall rather than to a number. It resolves exactly as `OnSurface` does — the host named by
+    /// [`crate::map::Placed::on`] is resolved first, and its Y is the base this height is measured
+    /// from — so raising the host raises the fixture, and deleting the host is an error naming both
+    /// rather than a sconce left hanging in air.
+    ///
+    /// # Why not just [`Self::OnWall`]
+    ///
+    /// `OnWall` carries a height and *no host*. It answers `map.origin.1 + height`, a constant on the
+    /// descriptor shared by every wall light in the project — so it cannot say *which* wall, cannot
+    /// notice when that wall goes, and puts a fixture at the same height in a 2.4 m room and a 4 m
+    /// one. It is kept for the pieces that genuinely mean "at this height in this map", and this is
+    /// for the ones that mean "on that".
+    ///
+    /// `height` is measured up the face from the host's own base rather than from the map's floor,
+    /// because that is what makes it survive the host moving.
+    OnFace { class: String, height: f32 },
     /// **Lies flat on a host surface** — a decal, a floor marking, a wall poster, a ceiling stain.
     ///
     /// The case the old schemas could not express. `Decal` claims no volume and never participates
@@ -854,6 +893,24 @@ pub struct Offers {
     /// Surface classes this piece's top provides, from the closed vocabulary in
     /// [`crate::placement::surfaces`].
     pub surfaces: Vec<String>,
+    /// **Vertical face classes this piece presents** — `"wall-inner"`, `"wall-outer"`.
+    ///
+    /// The standing sibling of [`Self::surfaces`], validated against the *same* axis, because a class
+    /// is a class: what differs is not the token but how the height is read off it. A top answers
+    /// [`Mount::OnSurface`] with the host's own height; a face answers [`Mount::OnFace`] with a
+    /// distance measured **up** it. Two lists rather than one flag, so a piece offering a top and a
+    /// face says both and neither reading can be taken for the other.
+    ///
+    /// # The gap this closes
+    ///
+    /// [`Mount::OnWall`] carries a bare height and no host, so a sconce's Y was
+    /// `map.origin.1 + 1.8` — a constant on the descriptor, shared by every wall light in the
+    /// project and answering to no wall in particular. `docs/2026-08-09-unified-composition.md` §1
+    /// states the consequence: *"a sconce is not attached to its wall… Delete the wall and the sconce
+    /// hangs there, and nothing reports it."* A face gives the relationship somewhere to live, so the
+    /// host resolves first and its absence is an error naming both.
+    #[serde(default)]
+    pub faces: Vec<String>,
     /// Named attachment points — where a thing goes, or where an agent stands.
     pub sockets: Vec<Socket>,
 }
@@ -927,6 +984,7 @@ impl Descriptor {
             clearance: pick(&self.clearance, &patch.clearance),
             offers: Offers {
                 surfaces: pick(&self.offers.surfaces, &patch.offers.surfaces),
+                faces: Vec::new(),
                 sockets: pick(&self.offers.sockets, &patch.offers.sockets),
             },
             kind: pick(&self.kind, &patch.kind),
@@ -1362,6 +1420,7 @@ mod tests {
             }],
             offers: Offers {
                 surfaces: vec!["worktop".into()],
+                faces: Vec::new(),
                 sockets: vec![Socket {
                     id: "seat_n".into(),
                     role: Some("diner".into()),
@@ -1505,14 +1564,13 @@ mod subgrid_tests {
         assert!(g.validate("x", D3).is_ok());
     }
 
-    /// All three facets on one cell — the thing this schema exists to allow.
+    /// Both facets on one cell — the thing this schema exists to allow.
     #[test]
-    fn one_cell_can_be_solid_and_an_edge_and_an_anchor() {
+    fn one_cell_can_be_solid_and_an_edge() {
         let c = SubCell {
             at: (2, 0, 1),
             solid: true,
             edge: Some("wall".into()),
-            anchor: Some("diner".into()),
         };
         let g = grid(vec![c.clone()]);
         assert!(g.validate("table", D3).is_ok());
@@ -1557,7 +1615,6 @@ mod subgrid_tests {
                 at: (0, 0, 2),
                 solid: true,
                 edge: Some("wall".into()),
-                anchor: None,
             }])),
             ..Descriptor::default()
         };
@@ -1679,18 +1736,17 @@ mod subgrid_edit_tests {
         assert!(g.cells.is_empty(), "an out-of-range write must not append anything");
     }
 
+    /// A token set and then emptied takes its row with it — the sparse invariant, which is what stops
+    /// a tile anyone has poked at accreting rows that mean exactly what absence means.
     #[test]
-    fn tokens_set_and_clear_on_the_same_cell() {
+    fn a_token_set_and_cleared_leaves_no_row() {
         let mut g = Subgrid::default();
         g.set_edge((0, 0, 2), D3, "wall").unwrap_or_else(|| panic!("in range"));
-        g.set_anchor((0, 0, 2), D3, "diner").unwrap_or_else(|| panic!("in range"));
         let c = g.at((0, 0, 2)).unwrap_or_else(|| panic!("written"));
         assert_eq!(c.edge.as_deref(), Some("wall"));
-        assert_eq!(c.anchor.as_deref(), Some("diner"));
 
-        // Emptying both takes the row with it, since solid was never set.
-        g.set_edge((0, 0, 2), D3, "").unwrap_or_else(|| panic!("in range"));
-        g.set_anchor((0, 0, 2), D3, "  ").unwrap_or_else(|| panic!("in range"));
+        // Whitespace is empty: a token of spaces is not a token.
+        g.set_edge((0, 0, 2), D3, "  ").unwrap_or_else(|| panic!("in range"));
         assert!(g.cells.is_empty());
     }
 
@@ -1710,7 +1766,7 @@ mod subgrid_edit_tests {
     fn clear_forgets_the_whole_cell() {
         let mut g = Subgrid::default();
         g.toggle_solid((2, 2, 2), D3);
-        g.set_anchor((2, 2, 2), D3, "seat").unwrap_or_else(|| panic!("in range"));
+        g.set_edge((2, 2, 2), D3, "wall").unwrap_or_else(|| panic!("in range"));
         g.clear((2, 2, 2));
         assert!(g.at((2, 2, 2)).is_none());
         assert!(g.validate("x", D3).is_ok());

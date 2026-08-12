@@ -2835,6 +2835,17 @@ The original item, for the record:
 
 ### Push 12 — World-building tools: composition-as-tile
 
+**FVS-R-17 · Local adjacency cannot close a boundary — and a constraint over distance closes it.** ✅ *2026-08-11.* FVS-R-9 measured **zero enclosed regions in 128 solves**, and both explanations were falsified rather than argued: the metric can see a room and the room is legal under the learned support, so not vocabulary; and sweeping `Empty` to 0.0 leaves median enclosure at 0.000, so not weight. What was left was the solver's expressiveness.
+  *Shipped:* WFC's greedy collapse replaced on the composition path by a constraint solver — `emerge-core::constraints` (Cooper's Sturgeon API), the `deterministic_solver` back-end crate over `batsat`, core-guided MaxSAT, and `enclosure_rules`. **Re-measured against §4's same committed rows, unedited:** the histogram went from **1 of 2,048 solves reaching the plane to 2,048 of 2,048**, occupied bins from 1 to 17, and for the first time **no committed row fires**.
+  **The control is what makes it attributable:** same solver, kit, region and seeds, differing only in whether the enclosure wish is added. Nothing enclosed without it; something in every solve with it.
+  **Four caveats live in `docs/research/2026-08-10-expressive-range.md` §9 and are not in the verdict line** — row 1 is confirmatory by construction (§4.1 said so in advance), 47% of solves clamp above the opening-density ceiling so row 4b reads as "not measured" rather than "passed", the sweep never stabilised and is reported at the cap, and the metric counts a wall tile as floor so the headline 0.462 overstates the rooms (measured again with floor meaning floor: 0.31–0.75 over 3–8 regions).
+  **The §L3 foundedness machinery was declined, with a proof rather than a shrug:** R1+R2 are Horn, so `¬outside[c]` is sound evidence of genuine enclosure and a *floor* needs no rank encoding — 5,904 variables the plan called the likeliest place to get subtly wrong. It becomes mandatory the moment a wish wants a ceiling.
+  **And the recommended variety mechanism was measured and rejected.** 144 soft unit clauses cost 9,171 ms against 15 ms for the same instance without them, and failed outright at higher targets; the dream is a per-variable *preference* instead, which is the greedy collapse's own sample-propagate-repair with backtracking added. · *Reading:* `docs/research/2026-08-10-{constraint-encodings,solver-choice,pcg-solver-corpus}.md`
+
+**FVS-R-18 · An empty histogram wants to be its own outcome.** ✅ *2026-08-11, pre-registered before the run it governs — which was the whole item.* FVS-R-9 exposed two blind spots in §4 and they were recorded rather than fixed, because amending a criterion after seeing its output is what §4 forbids. Both had one root: an empty histogram was treated as a *value* rather than as a distinct outcome. The stopping rule mistook blankness for convergence (total variation between two empty histograms is 0 by definition, so the sweep stopped at its first block having measured nothing and printed "stable"), and rows 4a and 4b disagreed on an empty histogram while neither meant anything — entropy read 0 and **fired**, max-bin share read 0 and **passed**.
+  *Shipped:* `docs/research/2026-08-09-composition-grammar-decisions.md` §4.6, committed before the enclosure run and implemented in the instrument in the same commit so the pre-registration is real rather than prose. `histogram_empty` is a reportable outcome and, when it holds, *is* the finding; rows 4a and 4b report `n/a`, which is not a pass; and two blocks agreeing counts as convergence only when one holds a sample. The four numeric rows were not touched.
+  **A successor is already recorded and deliberately unfixed:** a *one*-sample histogram has the same disease, and the no-wish arm duly reported entropy 0.000 (fires) and max-bin share 100.0% (fires) about a single point. Fixing that now would be amending a criterion after seeing its output — the exact thing this item existed to stop happening twice — so it waits for the next pre-registration.
+
 - **FVS-R-1 — The composition gallery** · ✅ **LANDED 2026-08-09, as a carousel rather than a contact sheet**
   Scoped as a contact sheet — every composition stood up side by side, spacing a parameter. That was built, looked at, and **rejected by the author in favour of a carousel**: one composition full size and pinned to the stage origin, two miniatures either side at a geometric scale ramp (`1 → 0.55 → 0.30`), stepped by `O`/`P`. The wings deliberately do not wrap, so running out of miniatures is how the stage says which end of the list you are at. A click on a miniature brings it to the middle; `view::cursor_ground` makes that arithmetic rather than a raycast, since the strip lies on the ground plane.
   **`O`/`P` are their own row and not the arrows**, because the arrows belong to whichever of the three lists has focus — stepping while editing a member would otherwise cost `left left up right right`. That row was this context's twelfth: `Context::Compose` is now **at** the ceiling `no_context_carries_more_than_a_learnable_vocabulary` enforces, so the next Compose verb costs a merge or a removal.
@@ -2892,3 +2903,59 @@ The original item, for the record:
   **Two lists rather than one enum, forced not chosen:** `CloneHost::InSet` is an index into `pieces`, so interleaving a second kind would have silently repointed every host a captured set carries.
   **Three defects found on the way, all live.** `Undo::UnstampedMany` inverted to `Undo::Stamped`, which drains the **tail** — correct only because `stamp_here` appends, and wrong for any mid-list removal: undo put a stamp back at index 3 and redo took the last one off. It inverts to `UnstampAt { indices }` now, the stamp-side twin of `RemoveAt`. The capture anchor averaged over placements alone, so a box holding only stamps divided by zero. And `envelope_size` skipped `Body::Composition`, so a group holding only a nested one derived a height of zero and was refused for enclosing nothing — a true statement about a measurement that never looked; it measures through the reference now and refuses an **anchored** nested member by name rather than folding in a zero.
   *Every assertion mutation-tested.* The nesting test asserts the body KIND and then that the outer stamp puts the inner composition's pieces on the map through the reference — two rows drawn is what proves it resolved rather than parsed. · *Unblocks:* FVS-R-7's fixed tiles, and nesting.
+
+## FVS-R-21 · Split the Tiles tab: meshes get their own — DONE 2026-08-11
+
+**FVS-R-21 · Split the Tiles tab: meshes get their own.** Decided and shipped 2026-08-11; the full argument and the shape are in `docs/2026-08-11-tile-authoring-handoff.md`. `MESHES -> TILES -> COMPOSE -> MAP -> ANIM`. **The argument is the hierarchy, not crowding** — `docs/research/2026-08-08-kitbashing-guidance.md`: *"A good kit is hierarchical: parts -> sub-assemblies -> assemblies"*, and the editor already gives a tab per level while Tiles carries two. A mesh is a measurement written to `library.ron` and described once; a tile is an arrangement written to `compositions.ron` and built constantly. Crowding is already handled — `Context::Build` gave each half its own twelve rows. **`build::TileMode` and the `C` flip disappear**, which is the point: a tab strip is a mode you cannot forget, so the mode stops needing an indicator. **Known cost, weighed:** I10 of the editor-model guide argues for *fewer* contexts, and this adds one. **The corpus cannot settle it** — a search for information architecture returns Ousterhout and Bass; the HCI gap is recorded in `2026-08-10-snapping-corpus-vetting.md` and Raskin has never been ingested. *Done when:* describing a mesh and assembling a tile are two tabs, `TileMode` is gone, and the library list still serves both.
+
+**How it landed.** `Mode::ALL` is `[Map, Meshes, Tiles, Compose, Anim]` — Map stays first because it is
+the job, which is the argument the original ordering made and which a reorder to pipeline order threw
+away until the stepped tests caught it. `Context::Tiles` is the **Tiles** tab's context and
+`Context::Meshes` the mesh tab's; `build::TileMode`, `Action::EnterBuild` and `Action::LeaveBuild` are
+gone, and with them the `C` flip. All five tab digits share one `does` string so the census stays
+inside its twelve-row Global budget.
+
+**Two bugs the split introduced, both found and pinned rather than shipped:**
+
+- **The problem banner is keyed to a tab, and the two tabs share a panel.** `ProblemBanner(Mode)` and
+  `if banner.0 != tab { continue }` were safe only while every banner sat in a panel `apply_mode` hid
+  for it. The shared panel now carries **two** banners, and the visibility pass **hides** the one that
+  is not live instead of skipping it — otherwise a refusal raised on Tiles went on showing after
+  switching to Meshes. Measured: `Flex` where `None` belongs.
+- **`build_keys` was unordered against `toggle_mode` and `tab_shortcuts`.** All three sat in
+  `Phase::Act`, so whether arriving on the tab opened a tile that frame or the next was Bevy's choice.
+  The tab test passed alone and failed in the suite. `build_keys` is now `.after` both.
+
+*Verified:* `a_refusal_on_the_tiles_tab_is_visible_and_stays_there` fails without either fix (checked
+by reverting each), and the tab test ran green six times consecutively where it had been a coin flip.
+103 test binaries green.
+
+## FVS-R-24 · A tile can say that one member rests on another — DONE 2026-08-11
+
+**FVS-R-24 · A tile cannot say that one member rests on another, and finds out late.** Found 2026-08-11 while verifying the authoring loop; **this is the author's own stated example** — *"a wall mesh over it, and wall mounted light fixture on the wall mesh"* — and it is the one part of that sentence that does not work. `Body::Descriptor` carries `on: Option<String>`, *"a sibling `Member::id` this rests on"*, and **the assembler always writes `None`** (`build.rs:233`, and again at `787`), which means *"find a host outside this group"*. A piece whose descriptor has `Mount::OnFace`/`OnSurface` and no host is refused by `stack::resolve_y` — `a_fixture_with_no_host_recorded_is_refused` (`stack.rs:981`) — and `emerge-bevy` propagates that with `?` (`lib.rs:125`), so **the map refuses to load**. Two gaps, and the second's fix depends on the first's: **(1) no verb sets `on`.** Two shapes, and this is a design call rather than a detail — *automatic*, binding a dropped fixture to the member it is dropped against (fastest, matches "keystrokes are faster", but guesses), or *a verb*, focus a member and name its host (explicit, one more key, and the focus already tracks the last drop). **(2) the refusal is late.** `build_keys` could refuse at drop time the way it now refuses a piece that is not in the library — but if (1) lands as automatic binding, that refusal would be refusing things that should work, so it is not independently safe to build. **The slot path is unaffected and already works**: a `wall-fixture` hole is how a fixture gets into a tile *today*, and the round-trip test covers it end to end. *Done when:* the author's sentence is authorable, and a fixture with nowhere to mount is refused when it is dropped rather than when the map loads.
+
+**Shipped as automatic binding, the author's call** (asked 2026-08-11): a fixture dropped against a
+wall has already said which wall it means by being there, and the requirement for this loop is the
+keyboard. `build::host_for` resolves the host **before the member exists**, so a refusal leaves the
+tile exactly as it was rather than needing the drop undone. Three outcomes, all named:
+
+- **One candidate** → bound. `on: Some("wall")`.
+- **None** → refused at the door naming the class it wanted, and pointing at the other path:
+  *"press Shift+Enter for a hole the generator fills."*
+- **Two or more** → refused naming both, rather than taking the first in some order. A silent pick
+  that a later sort could change is exactly the shape this repo's determinism rules forbid.
+
+**Binding is a plan-only question**, deliberately: a face mount takes its height from the mount, not
+from the cursor, so the layer the fixture is dropped on does not decide which wall it is on.
+
+Proved end to end rather than at the seam it was broken at: the test expands the tile and runs
+`stack::resolve_y` — the two calls the 3-D preview makes, and the exact pair that refused before —
+then asserts the sconce rides its wall's face at the declared 1.8 m. All three tests verified against
+a revert to `on: None`.
+
+**One observation this surfaced, not yet a decision.** `Member::lift` is additive on top of whatever
+the mount resolves to (schema: *"a vertical nudge on top of"*), so walking up three layers and
+dropping a sconce puts it at 1.8 + 1.0 = 2.8 m, not at the cursor. That is the documented behaviour
+and it is arguably right for a face mount — the mount owns the height. But it is the same *shape* as
+the original "walls don't line up with where I'm placing it" complaint, and worth a look once tiles
+are being authored for real.

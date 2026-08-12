@@ -195,15 +195,75 @@ pub enum Body {
     },
     /// Another composition, in full. Its internals are immutable from here — see the module note.
     Composition { id: String },
+    /// **A declared hole: a position that says what may go here without saying what does.**
+    ///
+    /// The author walks the tile's grid and drops a slot exactly as they drop a piece, so it carries
+    /// the member's own [`Member::at`], [`Member::yaw`] and [`Member::lift`] and needs no positioning
+    /// of its own. What fills it is decided by whoever asks: the solver picks one when it solves, game
+    /// code queries it at runtime, and an author fills it by putting a concrete member there instead.
+    ///
+    /// # Why this and not one of the three things that already sound like it
+    ///
+    /// `Offers::sockets` means *where an actor stands* to use a thing; `map::Location` means *what can
+    /// happen here* over props that already exist. Neither places geometry. `SubCell::anchor` was the
+    /// third, and it was authored, validated, drawn, saved — and read by nothing; it is retired with
+    /// this, and this inherits its vocabulary axis rather than opening a fourth.
+    ///
+    /// # It does not touch the tile's interface, and that is enforced
+    ///
+    /// A tile's edge tokens are *"read off the members, never authored"* ([`Interface`]), and the
+    /// solver's whole adjacency rests on them. A hole whose filler could present a different token on
+    /// a face would make the interface a function of something not yet decided — and the alphabet
+    /// cannot absorb the alternative: `grammar::MAX_PROTOTYPES` is 32 because a domain packs into a
+    /// `u32`, and one tile with a four-way slot would cost sixteen of them once turned.
+    ///
+    /// So a slot contributes nothing to [`interface`], and [`validate`] refuses one that does not lie
+    /// **inside** its composition's envelope. The tile's declared interface is the interface of its
+    /// fixed members, which is a statement the solver can rely on before any fill exists.
+    Slot {
+        /// The vocabulary token naming what may fill this — `"wall-fixture"`, `"floor-decal"`.
+        /// Checked against the project's slot axis, the same way every other token is, because a
+        /// free-text hole is the soup the descriptor module's own history warns about.
+        accepts: String,
+    },
 }
 
 impl Body {
     /// The id of whatever this refers to, for messages and lookups.
+    ///
+    /// **A slot answers its `accepts` token, which is not an id**, and no caller may treat it as one:
+    /// there is no descriptor or composition by that name and a lookup would find nothing. Every site
+    /// that resolves this against a file matches on the variant first; this exists for messages.
     pub fn target(&self) -> &str {
         match self {
             Body::Descriptor { id, .. } | Body::Composition { id } => id,
+            Body::Slot { accepts } => accepts,
         }
     }
+}
+
+/// **A hole a stamp left behind**, in map space — what [`expand`] emits for a [`Body::Slot`].
+///
+/// Beside [`Expansion::placements`] rather than among them, because a `Placed` names a descriptor and
+/// every consumer of one expects a mesh to look up. A slot has no descriptor by construction, so
+/// putting it in that list would make every reader — the game's spawner, the editor's redraw, the
+/// offline search — branch on "is this row real". One list of things that are there, one list of
+/// places where something could be.
+///
+/// Carries no resolved height for the same reason [`crate::map::Placed`] does not: `stack::resolve_y`
+/// answers that for the whole map at once, and a second answer here would be a second definition of
+/// how high things sit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenSlot {
+    /// `<stamp>/<member path>` — the same naming a placement gets, so provenance reads alike.
+    pub id: String,
+    /// The token from [`Body::Slot::accepts`].
+    pub accepts: String,
+    /// Map space, floor plan only — the same reading [`crate::map::Placed::at`] has.
+    pub at: (f32, f32),
+    pub yaw: f32,
+    /// Authored nudge above whatever the fill resolves to, exactly as `Placed::lift` is.
+    pub lift: f32,
 }
 
 /// A composition placed in a map.
@@ -321,6 +381,12 @@ pub struct Expansion {
     /// In `(stamp id, member path)` order — a total order, so two runs and two `App` instances agree.
     pub placements: Vec<Placed>,
     pub locations: Vec<Location>,
+    /// **Holes the stamps left**, in the same order and by the same rule as [`Self::placements`].
+    ///
+    /// Separate from the placements because a `Placed` names a descriptor and every consumer of one
+    /// expects a mesh; see [`OpenSlot`]. A consumer that fills nothing may ignore this entirely, which
+    /// is why adding it moved no existing reader.
+    pub slots: Vec<OpenSlot>,
     /// Placement id → `(stamp id, member path)`.
     ///
     /// The editor reads this to answer "what is this row part of" for selection, break-link and the
@@ -469,7 +535,7 @@ fn flatten(
     overrides: &[Override],
     stack: &mut Vec<String>,
     depth: u32,
-) -> Result<(Vec<Flat>, Vec<Location>), String> {
+) -> Result<(Vec<Flat>, Vec<Location>, Vec<OpenSlot>), String> {
     if stack.contains(&comp.id) {
         stack.push(comp.id.clone());
         return Err(format!(
@@ -490,6 +556,7 @@ fn flatten(
 
     let mut flats: Vec<Flat> = Vec::new();
     let mut locs: Vec<Location> = Vec::new();
+    let mut slots: Vec<OpenSlot> = Vec::new();
 
     for m in &comp.members {
         match &m.body {
@@ -522,11 +589,21 @@ fn flatten(
                     note: m.note.clone(),
                 });
             }
+            // **A hole travels like anything else** — it is a position, and a position composes.
+            Body::Slot { accepts } => {
+                slots.push(OpenSlot {
+                    id: m.id.clone(),
+                    accepts: accepts.clone(),
+                    at: m.at,
+                    yaw: m.yaw,
+                    lift: m.lift,
+                });
+            }
             Body::Composition { id } => {
                 let inner = find(compositions, id, &comp.id)?;
                 // Nested members take no overrides: an override names a member of the composition
                 // being stamped, and reaching past that is the restructuring encapsulation forbids.
-                let (inner_flats, inner_locs) =
+                let (inner_flats, inner_locs, inner_slots) =
                     flatten(inner, compositions, &[], stack, depth + 1)?;
                 for f in inner_flats {
                     let at = rotate_xz(f.at, m.yaw);
@@ -555,6 +632,18 @@ fn flatten(
                         note: l.note,
                     });
                 }
+                // The same fold the flats above take — rotate about this member's yaw, offset by its
+                // position, add the lifts. A hole in a nested group ends up where the group put it.
+                for s in inner_slots {
+                    let at = rotate_xz(s.at, m.yaw);
+                    slots.push(OpenSlot {
+                        id: format!("{}/{}", m.id, s.id),
+                        accepts: s.accepts,
+                        at: (m.at.0 + at.0, m.at.1 + at.1),
+                        yaw: add_yaw(s.yaw, m.yaw),
+                        lift: m.lift + s.lift,
+                    });
+                }
             }
         }
     }
@@ -571,7 +660,7 @@ fn flatten(
             flats.len()
         ));
     }
-    Ok((flats, locs))
+    Ok((flats, locs, slots))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -650,6 +739,30 @@ impl Composition {
                     "composition: `{}` member `{}` has a position that is not a number",
                     self.id, m.id
                 ));
+            }
+            // **A hole belongs inside the tile it is a hole in.**
+            //
+            // A tile's edge tokens are read off its members and a slot contributes none, so the
+            // interface the solver adjoins on is the interface of the fixed pieces — see
+            // [`Body::Slot`]. That claim only holds while the hole is interior: a slot declared on or
+            // past the boundary is a filler reaching a face the tile never said it presented, and the
+            // disagreement would not surface until two tiles met in a solve.
+            //
+            // Strictly inside, not merely within: a slot exactly on the seam is the ambiguous case,
+            // and `Interface`'s own rule is to make an inconsistent answer unrepresentable rather
+            // than to report one. `Anchored` groups claim no tile, so they have no boundary to be
+            // inside of and this does not apply.
+            if let (Body::Slot { accepts }, Envelope::Bounded { size }) = (&m.body, &self.envelope) {
+                let (hx, hz) = (size.0 * 0.5, size.2 * 0.5);
+                if m.at.0.abs() >= hx || m.at.1.abs() >= hz || m.lift < 0.0 || m.lift >= size.1 {
+                    return Err(format!(
+                        "composition: `{}` slot `{}` accepts `{accepts}` at ({:.3}, {:.3}) lift \
+                         {:.3}, which is on or outside its {:.2} x {:.2} x {:.2} m envelope. A slot \
+                         adds nothing to what the tile presents on its faces, and that is only \
+                         honest while it sits inside them.",
+                        self.id, m.id, m.at.0, m.at.1, m.lift, size.0, size.1, size.2
+                    ));
+                }
             }
             if let Body::Descriptor { tip, .. } = &m.body
                 && (tip.0 > 3 || tip.1 > 3)
@@ -774,6 +887,11 @@ pub fn validate(compositions: &[Composition], library: &Library) -> Result<(), S
                 Body::Composition { id } => {
                     find(compositions, id, &c.id)?;
                 }
+                // **Nothing to resolve.** A slot names a vocabulary token, not a file entry, so there
+                // is no reference here to chase. The token is checked where the vocabulary lives
+                // (`Vocabularies::check_slots`) and the slot's *position* is checked by
+                // `Composition::validate`, which is the half that needs the envelope.
+                Body::Slot { .. } => {}
             }
         }
     }
@@ -907,6 +1025,11 @@ pub fn descriptor_fingerprint(d: &Descriptor) -> u64 {
         Some(Mount::Tiled) => {
             f.tag(7);
         }
+        // Tag 8, appended rather than inserted: these tags are a wire format, and renumbering one
+        // would silently repoint every fingerprint already recorded against a stamp.
+        Some(Mount::OnFace { class, height }) => {
+            f.tag(8).str(class).f32(*height);
+        }
     }
     f.u32(d.clearance.len() as u32);
     for c in &d.clearance {
@@ -921,6 +1044,12 @@ pub fn descriptor_fingerprint(d: &Descriptor) -> u64 {
     }
     f.u32(d.offers.surfaces.len() as u32);
     for s in &d.offers.surfaces {
+        f.str(s);
+    }
+    // Faces fold in too: a wall that stops presenting the face a sconce is fixed to has changed what
+    // the tile around it can hold, which is exactly what a stamp's fingerprint is asking about.
+    f.u32(d.offers.faces.len() as u32);
+    for s in &d.offers.faces {
         f.str(s);
     }
     f.u32(d.offers.sockets.len() as u32);
@@ -1034,8 +1163,22 @@ fn body_fingerprint(
             let inner = find(compositions, id, "a member")?;
             fingerprint_inner(inner, compositions, library, stack, depth + 1)
         }
+        // **A hole has a fingerprint of its own, and it must.** Retagging a slot from `wall-fixture`
+        // to `floor-decal` changes what the tile may become, so a stamp recorded against the old
+        // answer is stale — the same claim a swapped descriptor makes. There is nothing in the
+        // library to hash, so the token *is* the body.
+        Body::Slot { accepts } => {
+            let mut f = Fp::default();
+            f.tag(SLOT_TAG).str(accepts);
+            Ok(f.finish())
+        }
     }
 }
+
+/// Distinguishes a slot's fingerprint from a bare string hashed for some other reason. The other two
+/// bodies are already distinguished by what they hash — a descriptor folds in a whole `Descriptor`,
+/// a composition recurses — so this is the only one that needs saying out loud.
+const SLOT_TAG: u8 = b'S';
 
 /// What a member's recorded fingerprint says about it now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1157,7 +1300,7 @@ pub fn expand(
 
     for s in order {
         let comp = find(compositions, &s.of, &s.id)?;
-        let (flats, locs) = flatten(comp, compositions, &s.overrides, &mut Vec::new(), 0)?;
+        let (flats, locs, slots) = flatten(comp, compositions, &s.overrides, &mut Vec::new(), 0)?;
 
         // **Where the empty-composition refusal lives**, moved down from `validate_shape`. A group
         // with no members is a legitimate thing to be authoring and an illegitimate thing to have
@@ -1273,6 +1416,23 @@ pub fn expand(
                 note: l.note,
             });
         }
+
+        // **The stamp's own transform, exactly as the rows above take it** — written against that
+        // loop rather than re-derived, because a hole that landed somewhere its tile's pieces did not
+        // would be a slot in a wall that is no longer there.
+        //
+        // Not pushed into `working`: a hole holds nothing, so it can host nothing, and adding it
+        // would offer a later stamp a surface that does not exist.
+        for sl in slots {
+            let at = rotate_xz(sl.at, s.yaw);
+            out.slots.push(OpenSlot {
+                id: format!("{}/{}", s.id, sl.id),
+                accepts: sl.accepts,
+                at: (s.at.0 + at.0, s.at.1 + at.1),
+                yaw: add_yaw(sl.yaw, s.yaw),
+                lift: sl.lift,
+            });
+        }
     }
     Ok(out)
 }
@@ -1327,7 +1487,11 @@ pub fn interface(
             comp.id
         ));
     }
-    let (flats, _) = flatten(comp, compositions, &[], &mut Vec::new(), 0)?;
+    // **Slots are dropped here on purpose, and it is the load-bearing line of the whole feature.**
+    // A face is read off the members that are actually there; a hole contributes nothing, so a tile's
+    // declared interface is a statement the solver can rely on before any fill exists. See
+    // [`Body::Slot`] for why the alternative is unaffordable.
+    let (flats, _, _) = flatten(comp, compositions, &[], &mut Vec::new(), 0)?;
 
     // The members' own heights come from their mounts, and a mount is only answerable against a map.
     // So the envelope becomes one: a floor at zero, the declared bounds, and the members on it — which
@@ -1665,7 +1829,6 @@ mod tests {
                         at: (x, y, z),
                         solid: true,
                         edge: Some(token.to_owned()),
-                        anchor: None,
                     });
                 }
             }
@@ -1884,7 +2047,11 @@ mod tests {
     #[test]
     fn a_sibling_host_is_repointed_to_the_row_it_became() {
         let mut desk = piece("desk", 1.0, 1.0, 0.8);
-        desk.offers = Offers { surfaces: vec!["desk".to_owned()], sockets: Vec::new() };
+        desk.offers = Offers {
+            surfaces: vec!["desk".to_owned()],
+            faces: Vec::new(),
+            sockets: Vec::new(),
+        };
         let mut lamp = piece("lamp", 0.2, 0.2, 0.4);
         lamp.mount = Some(Mount::OnSurface { class: "desk".to_owned() });
         let lib = library(vec![desk, lamp]);
@@ -2245,10 +2412,16 @@ mod tests {
     /// ever changes. Both would silently re-fingerprint every composition in the corpus and turn a
     /// STALE badge designed to be truthful into noise, which is exactly the failure that is invisible
     /// without a test like this one.
+    ///
+    /// **Moved once, on purpose, 2026-08-11**, from `0xca04_5f8b_b62c_b44f`: `Offers::faces` joined
+    /// the encoding when a fixture gained a wall to be fixed to. A piece that stops presenting the
+    /// face something is mounted on has changed what the tile around it can hold, so the fingerprint
+    /// has to see it — and widening what it covers re-fingerprints the corpus exactly once, which is
+    /// the cost this test exists to make visible rather than to prevent.
     #[test]
     fn the_fingerprint_encoding_is_pinned() {
         let d = piece("desk", 1.5, 0.75, 0.8);
-        assert_eq!(descriptor_fingerprint(&d), 0xca04_5f8b_b62c_b44f);
+        assert_eq!(descriptor_fingerprint(&d), 0x3a75_2a36_e217_24bf);
     }
 
     /// **The hand-encoded half is pinned too.**
@@ -2262,7 +2435,8 @@ mod tests {
         d.mount = Some(Mount::OnSurface { class: "shelf".to_owned() });
         d.align.front = Some(crate::descriptor::Face::East);
         d.clearance = vec![crate::descriptor::Clearance { dir: ClearDir::Front, dist: 0.6 }];
-        assert_eq!(descriptor_fingerprint(&d), 0x803c_ba5d_56e8_fff0);
+        // Moved with the one above, and for the same reason.
+        assert_eq!(descriptor_fingerprint(&d), 0x6f64_9e68_f29d_36f0);
     }
 
     /// Two different mounts are two different fingerprints — the encoding distinguishes what it
@@ -2567,5 +2741,157 @@ mod tests {
         assert!(iface.is_clean(), "{:?}", iface.faults);
         assert_eq!(iface.faces[N].len(), 1, "north read {:?}", iface.faces[N]);
         assert_eq!(iface.faces[N][0].token.as_deref(), Some("wall"));
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Slots — a declared hole
+    // ------------------------------------------------------------------------------------------
+
+    fn slot(id: &str, accepts: &str, at: (f32, f32), lift: f32) -> Member {
+        Member {
+            body: Body::Slot { accepts: accepts.to_owned() },
+            lift,
+            ..member(id, "unused", at)
+        }
+    }
+
+    /// A tile with a wall and a hole for a fixture — the shape the whole feature is for.
+    fn tile_with_slot() -> (Library, Composition) {
+        let lib = library(vec![tiled("wall", 1.0, 1.0, 1.0, "wall")]);
+        let comp = Composition {
+            id: "site/tile_wall_n".to_owned(),
+            envelope: Envelope::Bounded { size: (1.0, 1.0, 1.0) },
+            // Sorted by member id — the canonical order `validate` holds every group to, so that one
+            // group has one encoding. `fixture` before `wall`.
+            members: vec![
+                slot("fixture", "wall-fixture", (0.0, -0.2), 0.5),
+                member("wall", "wall", (0.0, 0.0)),
+            ],
+            locations: Vec::new(),
+            note: None,
+        };
+        (lib, comp)
+    }
+
+    /// **The guarantee the solver rests on: a hole changes nothing about what the tile presents.**
+    ///
+    /// `Interface` is *"read off the members, never authored"*, and every adjacency decision — the
+    /// support table, the enclosure constraint, `agrees` — is computed from it before any fill
+    /// exists. If a slot could move a band, the interface would be a function of something not yet
+    /// decided, and `grammar::MAX_PROTOTYPES` (32, because a domain packs into a `u32`) cannot afford
+    /// the alternative of one prototype per filler per quarter turn.
+    #[test]
+    fn a_slot_contributes_nothing_to_the_interface() {
+        let (lib, with) = tile_with_slot();
+        let mut without = with.clone();
+        without.members.retain(|m| !matches!(m.body, Body::Slot { .. }));
+
+        let read = |c: &Composition| {
+            interface(c, &vec![c.clone()], &lib, 1).expect("derives").expect("bounded")
+        };
+        let (a, b) = (read(&with), read(&without));
+        assert!(a.is_clean(), "{:?}", a.faults);
+        assert_eq!(a.faces, b.faces, "the hole moved a band");
+    }
+
+    /// **A hole belongs inside the tile it is a hole in.** The interface claim above is only honest
+    /// while that holds, so it is refused at the door rather than left to surface when two tiles meet.
+    #[test]
+    fn a_slot_on_or_outside_the_envelope_is_refused_by_name() {
+        let (lib, base) = tile_with_slot();
+        // Exactly on the seam is the ambiguous case and goes with the outside ones: `Interface`'s own
+        // rule is to make an inconsistent answer unrepresentable rather than to report one.
+        for (at, lift, why) in [
+            ((0.5, 0.0), 0.5, "on the east seam"),
+            ((0.0, -0.5), 0.5, "on the north seam"),
+            ((0.9, 0.0), 0.5, "outside"),
+            ((0.0, 0.0), 1.0, "at the ceiling"),
+            ((0.0, 0.0), -0.1, "below the floor"),
+        ] {
+            let mut c = base.clone();
+            c.members[0] = slot("fixture", "wall-fixture", at, lift);
+            let err = validate(&vec![c], &lib).expect_err(&format!("{why} must be refused"));
+            assert!(err.contains("slot `fixture`"), "{why}: {err}");
+            assert!(err.contains("envelope"), "{why}: {err}");
+        }
+        // And the interior one this varies from is accepted.
+        validate(&vec![base], &lib).expect("an interior slot is fine");
+    }
+
+    /// A hole survives the stamp and lands under its transform, exactly as a row does.
+    #[test]
+    fn a_stamped_slot_lands_where_the_stamp_puts_it() {
+        let (lib, comp) = tile_with_slot();
+        let comps = vec![comp];
+        let mut map = Map { version: crate::map::MAP_VERSION, ..Default::default() };
+        map.stamps = vec![stamp("s1", "site/tile_wall_n", (4.0, 2.0), 90.0)];
+
+        let out = expand(&map, &map.stamps, &comps, &lib).expect("expands");
+        assert_eq!(out.slots.len(), 1, "{:?}", out.slots);
+        let s = &out.slots[0];
+        // Named like a placement, so provenance reads the same way.
+        assert_eq!(s.id, "s1/fixture");
+        assert_eq!(s.accepts, "wall-fixture");
+        assert_eq!(s.lift, 0.5);
+        // The member sat at (0, -0.2); a quarter turn about +Y sends −Z to −X.
+        let turned = rotate_xz((0.0, -0.2), 90.0);
+        assert!(
+            (s.at.0 - (4.0 + turned.0)).abs() < 1e-5 && (s.at.1 - (2.0 + turned.1)).abs() < 1e-5,
+            "{:?} is not the stamp's transform of the member",
+            s.at
+        );
+        // And it is not a placement: nothing downstream has to ask whether a row is real.
+        assert!(out.placements.iter().all(|p| p.id != "s1/fixture"));
+    }
+
+    /// **Retagging a hole is a change**, so a stamp recorded against the old answer is stale. What a
+    /// tile may *become* is part of what it is.
+    #[test]
+    fn changing_what_a_slot_accepts_makes_it_stale() {
+        let (lib, comp) = tile_with_slot();
+        let mut comps = vec![comp];
+        record_all(&mut comps, &lib);
+        assert!(stale_members(&comps[0], &comps, &lib).expect("reads").is_empty());
+
+        // Retag in place: replacing the member would also wipe its recorded fingerprint, and the
+        // answer would be `Unrecorded` — true, and not the thing under test.
+        comps[0].members[0].body = Body::Slot { accepts: "floor-decal".to_owned() };
+        let stale = stale_members(&comps[0], &comps, &lib).expect("reads");
+        assert_eq!(stale.len(), 1, "{stale:?}");
+        assert_eq!(stale[0].member, "fixture");
+        assert_eq!(stale[0].freshness, Freshness::Stale);
+    }
+
+    /// A hole in a nested group folds through with the same rotate-offset-add the rows take, so it
+    /// ends up where the group put it.
+    #[test]
+    fn a_nested_slot_folds_through_like_a_row() {
+        let (lib, inner) = tile_with_slot();
+        let outer = Composition {
+            id: "outer".to_owned(),
+            envelope: Envelope::Bounded { size: (2.0, 1.0, 2.0) },
+            members: vec![Member {
+                body: Body::Composition { id: "site/tile_wall_n".to_owned() },
+                yaw: 180.0,
+                ..member("half", "unused", (0.5, 0.0))
+            }],
+            locations: Vec::new(),
+            note: None,
+        };
+        let comps = vec![inner, outer];
+        let mut map = Map { version: crate::map::MAP_VERSION, ..Default::default() };
+        map.stamps = vec![stamp("s1", "outer", (0.0, 0.0), 0.0)];
+
+        let out = expand(&map, &map.stamps, &comps, &lib).expect("expands");
+        assert_eq!(out.slots.len(), 1, "{:?}", out.slots);
+        assert_eq!(out.slots[0].id, "s1/half/fixture", "the path must record every level");
+        // Half a metre east, then the child's own half turn sends −Z to +Z.
+        let turned = rotate_xz((0.0, -0.2), 180.0);
+        assert!(
+            (out.slots[0].at.0 - (0.5 + turned.0)).abs() < 1e-5
+                && (out.slots[0].at.1 - turned.1).abs() < 1e-5,
+            "{:?}",
+            out.slots[0].at
+        );
     }
 }

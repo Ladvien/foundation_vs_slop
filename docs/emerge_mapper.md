@@ -71,7 +71,8 @@ Other map verbs:
 - **`F` flood fill** — spreads from the cell under the cursor, stopping at anything already placed and at the map's edge. It *refuses* outside `Map::bounds` rather than clamping into them, because clamping would place a piece where the author did not point.
 - **`G` generate** — learns the grammar from what is already placed and fills free cells with more of *that* arrangement (`emerge_core::grammar`, WFC). Mixed-initiative: rules come from the author's own corner of the room, not from an adjacency schema they had to write first. The id counter advances every solve, so pressing `G` twice offers a *different* arrangement — a generator you cannot ask again is one you have to undo to disagree with.
 - **`O` pin** — marks a placement as deliberately kept. `Placed::owned_because` is **a reason, never a bool**: a bool lets "I could not be bothered" and "this is the cell block's only entrance" look identical in a diff, so pinning asks for the reason.
-- **`H`** targets the stack under the cursor; **`[`/`]`** lift and lower by one subgrid unit.
+- **`H`** targets the stack under the cursor; **`[`/`]`** lift and lower by one rung of the project's
+  ladder — the same rung a nudge across moves by, so "up one" and "over one" are the same distance.
 - **Undo/redo**, with redo cleared by any new edit (undo addresses rows by index, so replaying across an intervening edit would put pieces back where positions now mean something else). Not cleared by changing tabs — the Tiles tab keeps its own pair.
 
 `EditorState::brush` is `Option<usize>`, so **nothing armed** is a real state. It used to be a bare `usize`, meaning index 0 was always armed, there was nothing for `Esc` to clear, and you could not put the cursor over the map without a piece following it.

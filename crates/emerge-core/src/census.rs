@@ -114,7 +114,6 @@ mod tests {
                     at: (0, 0, 0),
                     solid: true,
                     edge: Some("wall".to_owned()),
-                    anchor: None,
                 }],
             }),
             ..Default::default()

@@ -341,7 +341,9 @@ pub fn normalised_entropy(counts: &[u32]) -> f32 {
             -p * p.ln()
         })
         .sum();
-    (h / (counts.len() as f64).ln()) as f32
+    // Clamped at zero: `-p·ln p` summed in f64 can land a hair below it for a single
+    // occupied bin, and an entropy of `-0.000` reads as a bug in the reader rather than in the sum.
+    ((h / (counts.len() as f64).ln()) as f32).max(0.0)
 }
 
 /// Total-variation distance between two histograms, in `[0, 1]`.

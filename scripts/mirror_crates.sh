@@ -34,6 +34,7 @@ ORG=Ladvien
 # Every crate that gets a mirror. Order is cosmetic; each split is independent.
 CRATES=(
     det_rng
+    deterministic_solver
     bevy_orca
     map_elites
     bevy_devshot
@@ -75,6 +76,7 @@ CRATES=(
 # existing mirror's visibility is `gh repo edit <name> --visibility public`, deliberately a hand action.
 PUBLIC_CRATES=(
     bevy_autogib
+    deterministic_solver
     bevy_light_grid
     bevy_speech_bubbles
     bevy_orca
