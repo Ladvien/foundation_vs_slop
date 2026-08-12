@@ -130,32 +130,35 @@ pub fn cells(size: (f32, f32, f32), pitch: f32) -> (u32, u32, u32) {
 /// the step follow the camera when the author turns it, instead of being right only at the default
 /// framing.
 ///
-/// **One axis per press — the neighbouring square, never the diagonal one.** The author's
-/// correction, and the second reading of the same sentence: *"we need straightlines, like the WASD
-/// keys."*
+/// **One axis per press, and four presses mean four different axes.**
 ///
-/// The first version stepped **both** axes whenever both projected components were significant,
-/// which at the iso yaw is always — so the cursor moved to the diagonally-adjacent square and
-/// skipped the one next to it. Straight on screen, and diagonal across the grid the author is
-/// looking at. The grid squares are what the eye tracks here, so that is the reading that counts.
+/// Two goes at this were wrong in instructive ways. The first stepped *both* axes whenever both
+/// projected components were significant, which at the iso yaw is always — so the cursor jumped to
+/// the diagonally-adjacent square and skipped the one beside it. The second took the dominant
+/// component, and at the iso yaw there is no dominant component: screen-up is world
+/// `(-0.707, -0.707)` and screen-left is `(-0.707, +0.707)`, equal magnitudes, so the tiebreak sent
+/// **both** to `-x` and two of the four arrows did nothing. That was invisible only because the
+/// camera had been turned square-on at the same time, which the author then quite reasonably
+/// objected to: *"I just wanted the keys to go a different direction, not rotate the whole visual."*
 ///
-/// **Dominant axis, not a fixed one.** A hardcoded "up is -z" would be wrong the moment the camera
-/// turns, and this tab lets it turn. Taking the larger projected component means a press moves along
-/// whichever world axis points most nearly the way the key does — one cell, one axis, and still the
-/// key meaning what it points at.
+/// So: take the **angle** of the world direction and snap it to the nearest quarter turn. Four
+/// screen directions ninety degrees apart land on four world axes ninety degrees apart, whatever the
+/// camera is doing — the mapping rotates with the view instead of the view rotating for it.
 ///
-/// At the iso yaw the two components are within a hair of each other (~0.707 apart is 0), so the tie
-/// is broken toward `x` — deterministic and stated rather than left to float noise.
+/// The bias is what makes that true at the iso yaw specifically, where every press lands exactly on
+/// a quadrant boundary. A hair of rotation before rounding sends the two neighbours of each boundary
+/// to different sides of it, which is the difference between four working arrows and two. It is
+/// stated rather than left to `f32` rounding because "which way does `round` break a tie" is not a
+/// thing this should depend on.
 pub fn step_in_view(wish: Vec2, yaw: f32) -> (i32, i32) {
+    const OFF_THE_BOUNDARY: f32 = 1e-3;
+    const AXES: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
     let d = crate::view::pan_direction(wish, yaw);
     if d.x == 0.0 && d.z == 0.0 {
         return (0, 0);
     }
-    if d.x.abs() >= d.z.abs() {
-        (if d.x > 0.0 { 1 } else { -1 }, 0)
-    } else {
-        (0, if d.z > 0.0 { 1 } else { -1 })
-    }
+    let turns = (d.z.atan2(d.x) + OFF_THE_BOUNDARY) / std::f32::consts::FRAC_PI_2;
+    AXES[(turns.round() as i32).rem_euclid(4) as usize]
 }
 
 /// **The cell a tile opens on: the middle one.**
@@ -1255,6 +1258,72 @@ mod tests {
             .unwrap_or_else(|| panic!("the sconce is a row"));
         let y = ys.get(k).copied().unwrap_or_default();
         assert!((y - 1.8).abs() < 1e-4, "the sconce should ride the face at 1.8 m, got {y}");
+    }
+
+    /// **Four arrows, four different squares — at every yaw the camera can sit at.**
+    ///
+    /// This is the test whose absence let two of the four arrows do nothing. The dominant-component
+    /// rule collapsed at exactly the iso yaw, where screen-up and screen-left have equal `x` and `z`
+    /// magnitude, so both resolved to `-x`. Nothing caught it: the unit test asserted "exactly one
+    /// axis moves", which was still true of a rule that sent half the keys to the same axis, and the
+    /// camera had been turned square-on in the same breath, which hid it on screen.
+    ///
+    /// So the property is **distinctness**, not single-axis-ness — and it is checked at the detents
+    /// *and* between them, because the failure lived exactly on a boundary and a test at the
+    /// cardinal yaws alone would have sailed past it.
+    #[test]
+    fn the_four_arrows_are_four_different_axes_at_every_yaw() {
+        use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+        let wishes = [
+            ("up", Vec2::new(0.0, -1.0)),
+            ("down", Vec2::new(0.0, 1.0)),
+            ("left", Vec2::new(-1.0, 0.0)),
+            ("right", Vec2::new(1.0, 0.0)),
+        ];
+        // Detents, half-detents, and a couple of arbitrary angles — the bug was ON a boundary, so
+        // "some angle in the middle of a quadrant" is the case that would have missed it.
+        let yaws = [
+            0.0,
+            FRAC_PI_4,
+            FRAC_PI_2,
+            3.0 * FRAC_PI_4,
+            PI,
+            -FRAC_PI_2,
+            -FRAC_PI_4,
+            0.3,
+            1.9,
+            -2.7,
+        ];
+        for yaw in yaws {
+            let steps: Vec<(i32, i32)> =
+                wishes.iter().map(|(_, w)| step_in_view(*w, yaw)).collect();
+            for (i, s) in steps.iter().enumerate() {
+                assert!(
+                    (s.0 == 0) ^ (s.1 == 0),
+                    "yaw {yaw}: `{}` must move exactly one axis, got {s:?}",
+                    wishes[i].0
+                );
+                for (j, other) in steps.iter().enumerate().skip(i + 1) {
+                    assert_ne!(
+                        s, other,
+                        "yaw {yaw}: `{}` and `{}` must not be the same square — {steps:?}",
+                        wishes[i].0, wishes[j].0
+                    );
+                }
+            }
+        }
+    }
+
+    /// **At the framing the author actually uses, the arrows read the way they are drawn.**
+    ///
+    /// The mapping is derived rather than typed, so this is the one place it is stated as a fact
+    /// anyone can check against the screen: at the default iso yaw, up is north.
+    #[test]
+    fn at_the_iso_yaw_up_is_minus_z() {
+        assert_eq!(step_in_view(Vec2::new(0.0, -1.0), 0.0), (0, -1), "up is -z");
+        assert_eq!(step_in_view(Vec2::new(0.0, 1.0), 0.0), (0, 1), "down is +z");
+        assert_eq!(step_in_view(Vec2::new(-1.0, 0.0), 0.0), (-1, 0), "left is -x");
+        assert_eq!(step_in_view(Vec2::new(1.0, 0.0), 0.0), (1, 0), "right is +x");
     }
 
     /// **A mesh bigger than the tile is placed and remarked on, not refused.**
