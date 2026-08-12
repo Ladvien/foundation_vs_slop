@@ -2410,6 +2410,98 @@ fn naming_a_composition_takes_the_keyboard_from_the_verbs() {
     );
 }
 
+/// **The tile resizes to hold what is dropped into it, through the real keys.**
+///
+/// `fit_envelope` and `refit` are unit-tested; what those cannot see is whether anything *calls*
+/// them — `refit_tile` is its own system, ordered after `build_keys`, and a system that is never
+/// registered is exactly the class of defect this file exists for. The author asked for this
+/// directly: *"as many whole tiles as needed to capture the object."*
+#[test]
+fn dropping_an_oversized_mesh_grows_the_tile() {
+    use bevy::input::ButtonInput;
+    use bevy::prelude::{App, IntoScheduleConfigs, KeyCode, ResMut, Update};
+    use emerge_mapper::keys::{binding, Action};
+
+    let root = Fixture::new("tile_grows")
+        // 1.21 m reaches 0.605 from a centred anchor and one cell only reaches 0.5, so this needs a
+        // second cell — and 0.81 across does not, which is what makes the assertion below specific.
+        .sized_descriptor("pallet", "alpha", 0.81, 1.21)
+        .build("test_map");
+    let mut app = harness::build_headless(&root, "test_map", None)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    app.update();
+
+    fn once(app: &mut App, key: KeyCode) {
+        app.add_systems(
+            Update,
+            IntoScheduleConfigs::before(
+                move |mut keys: ResMut<ButtonInput<KeyCode>>, mut done: bevy::prelude::Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        keys.press(key);
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    }
+
+    once(&mut app, binding(Action::TilesTab).key);
+    let before = match app.world().resource::<emerge_mapper::build::Build>().open {
+        Some(ref c) => match c.envelope {
+            emerge_core::composition::Envelope::Bounded { size } => size,
+            _ => panic!("a tile claims a tile"),
+        },
+        None => panic!("arriving opens a tile"),
+    };
+    assert_eq!(
+        (before.0, before.2),
+        (emerge_core::grid::TILE, emerge_core::grid::TILE),
+        "an empty tile is one cell"
+    );
+
+    once(&mut app, binding(Action::BuildArm).key);
+    once(&mut app, binding(Action::BuildDrop).key);
+    app.update();
+
+    let after = match app.world().resource::<emerge_mapper::build::Build>().open {
+        Some(ref c) => match c.envelope {
+            emerge_core::composition::Envelope::Bounded { size } => size,
+            _ => panic!("a tile claims a tile"),
+        },
+        None => panic!("still open"),
+    };
+    // **The property, not the numbers.** A piece this size cannot fit one cell, so the tile grew —
+    // that is what is being pinned. The exact count still depends on where the drop lands, and that
+    // is changing: a brought-in mesh is to be *centred* rather than corner-aligned to the cursor's
+    // cell (decided 2026-08-12), which makes this 1 x 2 instead of the 2 x 3 a corner-aligned drop
+    // from the middle cell produces. Asserting the count today would only have to be rewritten with
+    // it, and would say nothing extra in the meantime.
+    assert!(
+        after.0 > before.0 || after.2 > before.2,
+        "a mesh too big for one cell must grow the tile — was {before:?}, now {after:?}"
+    );
+    let whole = |v: f32| (v / emerge_core::grid::TILE - (v / emerge_core::grid::TILE).round()).abs();
+    assert!(
+        whole(after.0) < 1e-4 && whole(after.2) < 1e-4,
+        "and it grows in whole tiles, never a fraction of one: {after:?}"
+    );
+
+    // **And it says what that costs**, because `from_compositions` skips anything that is not one
+    // cell — a group this size is stamped by hand rather than generated, and finding that out from
+    // a generate that quietly never uses it is the bad version.
+    let status = &app
+        .world()
+        .resource::<emerge_mapper::tiles::ImportState>()
+        .status;
+    assert!(
+        status.has_problem(),
+        "growing past one cell must be said, not silent"
+    );
+}
+
 /// **A tile survives being saved and reopened — members, hole and all.**
 ///
 /// The round-trip §7 of the tile-authoring plan asked for and which did not exist: *"build floor +
@@ -2465,8 +2557,10 @@ fn a_tile_survives_a_save_and_a_reopen() {
     once(&mut app, vec![binding(Action::BuildArm).key]);
     once(&mut app, vec![binding(Action::BuildBack).key]);
     once(&mut app, vec![binding(Action::BuildArm).key]);
-    once(&mut app, vec![binding(Action::BuildRight).key]);
     once(&mut app, vec![binding(Action::BuildDrop).key]);
+    // The wall lands centred like everything else, then moves — which is the model: bring it in,
+    // then adjust it.
+    once(&mut app, vec![binding(Action::BuildRight).key]);
     once(&mut app, vec![binding(Action::BuildUp).key]);
     once(&mut app, vec![KeyCode::ShiftLeft, binding(Action::BuildSlot).key]);
 
@@ -2487,11 +2581,16 @@ fn a_tile_survives_a_save_and_a_reopen() {
 
     // `Cmd+S` — Global, and the handler asks which tab is live rather than there being a second key.
     once(&mut app, vec![KeyCode::SuperLeft, binding(Action::Save).key]);
+    // **Refusals only.** The status also carries the size notice — a tile bigger than one cell is
+    // not solver content and says so — which is information rather than a failure, so asserting "no
+    // problems at all" would make this test fail for the tile being large.
     assert!(
         !app.world()
             .resource::<emerge_mapper::tiles::ImportState>()
             .status
-            .has_problem(),
+            .problems()
+            .iter()
+            .any(|p| p.line().contains("NOT SAVED")),
         "the save must not refuse: {:?}",
         app.world()
             .resource::<emerge_mapper::tiles::ImportState>()
@@ -2533,7 +2632,15 @@ fn a_tile_survives_a_save_and_a_reopen() {
     let emerge_core::composition::Envelope::Bounded { size } = saved.envelope else {
         panic!("a tile claims a tile");
     };
-    assert_eq!((size.0, size.2), (emerge_core::grid::TILE, emerge_core::grid::TILE));
+    // **Whole cells, and as many as its contents need.** Not one cell: the fixture's pieces are 1 m
+    // cubes and one of them was moved a rung off centre, so two is the honest answer and the tile
+    // resized to say it. What must hold is that the envelope is a whole number of tiles — a
+    // fractional one is placeable at no grid spacing at all.
+    let whole = |v: f32| (v / emerge_core::grid::TILE - (v / emerge_core::grid::TILE).round()).abs();
+    assert!(
+        whole(size.0) < 1e-4 && whole(size.2) < 1e-4,
+        "a saved tile measures a whole number of cells, got {size:?}"
+    );
 
     // **Then stamp it**, which is the other half §7 asked for: *"stamp it and assert the expanded
     // rows match."* `composition::expand` is the one seam — the game reaches it from
@@ -2876,55 +2983,44 @@ fn the_tiles_tab_opens_a_tile_and_walks_its_grid() {
         panic!("a tile claims a tile");
     };
     assert_eq!((size.0, size.2), (emerge_core::grid::TILE, emerge_core::grid::TILE));
-    // **The middle cell, not a corner** — the author's first note on using this tab.
-    let start = build.at;
-    assert_eq!(start, (1, 0, 1), "a new tile opens with the cursor in the middle of it");
-
-    // **An arrow does nothing until a piece is in hand.** That is the door the author asked for:
-    // the same key walks the library list otherwise, so a press that moved both would be the
-    // "arrows get elsewhere" problem stated as a bug.
-    before(&mut app, key(emerge_mapper::keys::Action::BuildRight));
-    assert_eq!(
-        app.world().resource::<Build>().at,
-        start,
-        "an arrow must not move the tile while the arrows belong to the library list"
-    );
-
-    // Armed, the same key walks the tile — **diagonally**, because at the iso framing screen-up is
-    // the world diagonal and the author asked for the arrows to mean what they point at.
+    // **A brought-in mesh lands centred, and the arrows move *it*.** There is no cursor: the member
+    // is the selection, so the thing on screen and the thing the keys act on are the same object.
+    let key = |a| emerge_mapper::keys::binding(a).key;
     before(&mut app, key(emerge_mapper::keys::Action::BuildArm));
-    before(&mut app, key(emerge_mapper::keys::Action::BuildRight));
-    let now = app.world().resource::<Build>().at;
-    assert_ne!(now, start, "armed, an arrow must walk the tile's own grid");
-    // **The neighbouring square, never the diagonal one** — *"we need straightlines, like the WASD
-    // keys."* One axis moves and the other holds; the first version moved both, which reads as the
-    // cursor skipping the square next to it.
-    assert!(
-        (now.0 != start.0) ^ (now.2 != start.2),
-        "exactly one plan axis may move — {start:?} to {now:?}"
-    );
-    assert_eq!(now.1, start.1, "and an arrow is not a layer key");
+    before(&mut app, key(emerge_mapper::keys::Action::BuildDrop));
 
-    // **The tab does not turn the camera.** It was turned square-on for one commit to make the
-    // arrows read straight, and that traded a key mapping for the framing the author builds in —
-    // *"I just wanted the keys to go a different direction, not rotate the whole visual."* The
-    // arrows are fixed in `step_in_view` instead, which is where the problem actually was.
+    let placed = |app: &bevy::prelude::App| -> (f32, f32) {
+        app.world()
+            .resource::<Build>()
+            .open
+            .as_ref()
+            .and_then(|c| c.members.first())
+            .map(|m| m.at)
+            .unwrap_or_else(|| panic!("the drop must put a member in the tile"))
+    };
+    assert_eq!(placed(&app), (0.0, 0.0), "a brought-in mesh is centred, bottom on the floor");
+
+    // One rung, one axis — the neighbouring square, never the diagonal one.
+    before(&mut app, key(emerge_mapper::keys::Action::BuildRight));
+    let moved = placed(&app);
+    assert_ne!(moved, (0.0, 0.0), "an arrow must move the member it is focused on");
+    assert!(
+        (moved.0 != 0.0) ^ (moved.1 != 0.0),
+        "exactly one plan axis may move — got {moved:?}"
+    );
+
+    // **And the tab does not turn the camera.** It was turned square-on for one commit to make the
+    // arrows read straight, which traded the framing the author builds in for a key mapping.
     let rig = app.world().resource::<emerge_mapper::view::Rig>();
     assert_eq!(rig.yaw, 0.0, "arriving on the Tiles tab must not spin the view");
 
-    // **And the panel shows it.** This is the half that shipped broken: the tab changed, the status
-    // line said so, and the detail pane went on showing the mesh inspector — which reads as the key
-    // having done nothing. `rebuild_detail` watches `ImportState`, so without `Mode` and `Build` in
-    // its run condition nothing ever rebuilt the pane.
+    // **And the panel keeps up.** This is the half that shipped broken once: the tab changed, the
+    // status line said so, and the detail pane went on showing the mesh inspector — which reads as
+    // the key having done nothing.
     app.update();
     let mut texts = app.world_mut().query::<&bevy::prelude::Text>();
     let shown: Vec<String> = texts.iter(app.world()).map(|t| t.0.clone()).collect();
-    // **The strip names the tab and the pane names its subject.** Splitting the tab retired the
-    // mode indicator by retiring the mode: a strip is a thing you cannot forget you are looking at.
-    assert!(
-        shown.iter().any(|t| t == "TILES"),
-        "the strip must name the tab. Saw: {shown:?}"
-    );
+    assert!(shown.iter().any(|t| t == "TILES"), "the strip must name the tab. Saw: {shown:?}");
     assert!(
         shown.iter().any(|t| t == "TILE"),
         "the pane must say it is showing a tile rather than a mesh. Saw: {shown:?}"
@@ -2941,12 +3037,13 @@ fn the_tiles_tab_opens_a_tile_and_walks_its_grid() {
         "the pane must name the tile being built (`{id}`). Saw: {shown:?}"
     );
     // Read from the resource rather than hardcoded, so the assertion is "the pane agrees with the
-    // cursor" rather than "the cursor is at a number I typed" — the second breaks whenever the
-    // opening cell or the step changes, which is twice so far.
-    let want = format!("cursor {},{},{}", now.0, now.1, now.2);
+    // member" rather than "it is at a number I typed" — the second breaks whenever the step or the
+    // opening position changes, which is three times so far.
+    let at = app.world().resource::<Build>().at;
+    let want = format!("cursor {},{},{}", at.0, at.1, at.2);
     assert!(
         shown.iter().any(|t| t.contains(&want)),
-        "the pane must show where the cursor is ({want}), or walking it is invisible. Saw: {shown:?}"
+        "the pane must show where the focused member is ({want}). Saw: {shown:?}"
     );
 }
 

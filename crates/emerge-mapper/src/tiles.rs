@@ -2561,6 +2561,11 @@ impl Plugin for TilesPlugin {
                             .in_set(crate::keys::Phase::Act)
                             .after(toggle_mode)
                             .after(tab_shortcuts),
+                        // The tile resizes to its contents, and that has to be after whatever
+                        // changed them — see `build::refit_tile`.
+                        crate::build::refit_tile
+                            .in_set(crate::keys::Phase::Act)
+                            .after(crate::build::build_keys),
                     ),
                     autoscan_candidate.run_if(in_meshes_mode),
                     // Nested: a system tuple caps out, and these three are one feature anyway —

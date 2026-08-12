@@ -136,6 +136,21 @@ impl Fixture {
         Fixture { dir, descriptors: Vec::new(), placements: Vec::new(), compositions: Vec::new() }
     }
 
+    /// **A descriptor of a stated footprint**, for a test about what the footprint *does*.
+    ///
+    /// [`Self::descriptor`] writes a 1 x 1 m piece, which is the ordinary case and exactly the size
+    /// that cannot show an envelope growing. This states the number instead of measuring whatever
+    /// the generated mesh happens to be.
+    pub fn sized_descriptor(mut self, id: &str, pack: &str, w: f32, d: f32) -> Fixture {
+        self = self.descriptor(id, pack);
+        if let Some(last) = self.descriptors.last_mut() {
+            let was = "footprint: Some((1.0, 1.0))";
+            assert!(last.contains(was), "the fixture's descriptor shape changed under this helper");
+            *last = last.replace(was, &format!("footprint: Some(({w}, {d}))"));
+        }
+        self
+    }
+
     /// **A `slot` token, so a tile can declare a hole.**
     ///
     /// `new` writes an empty slot axis, which is the honest default: a project that has not grown
