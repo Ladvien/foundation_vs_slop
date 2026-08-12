@@ -2457,8 +2457,14 @@ fn a_tile_survives_a_save_and_a_reopen() {
     // A floor, a wall a cell away, and a hole above the wall — the shape the author described:
     // "floor mesh at the lowest, a wall mesh over it, a wall mounted light fixture on the wall mesh".
     once(&mut app, vec![binding(Action::TilesTab).key]);
+    // `Space` takes the piece in hand — the arrows steer the tile while it is held and the library
+    // list while it is not, which is the whole reason the door exists. Dropping does not put it
+    // back, so several pieces go down without re-arming.
+    once(&mut app, vec![binding(Action::BuildArm).key]);
     once(&mut app, vec![binding(Action::BuildDrop).key]);
-    once(&mut app, vec![binding(Action::BuildNextPiece).key]);
+    once(&mut app, vec![binding(Action::BuildArm).key]);
+    once(&mut app, vec![binding(Action::BuildBack).key]);
+    once(&mut app, vec![binding(Action::BuildArm).key]);
     once(&mut app, vec![binding(Action::BuildRight).key]);
     once(&mut app, vec![binding(Action::BuildDrop).key]);
     once(&mut app, vec![binding(Action::BuildUp).key]);
@@ -2625,7 +2631,7 @@ fn the_arrows_walk_the_library_from_the_tiles_tab() {
         .selected_library_id
         .clone();
 
-    once(&mut app, vec![binding(Action::BuildNextPiece).key]);
+    once(&mut app, vec![binding(Action::BuildBack).key]);
     let after = app
         .world()
         .resource::<emerge_mapper::tiles::ImportState>()
@@ -2833,21 +2839,31 @@ fn the_tiles_tab_opens_a_tile_and_walks_its_grid() {
     app.update();
 
     // Onto the Tiles tab, then into BUILD.
-    fn to_tiles(mut keys: bevy::prelude::ResMut<bevy::input::ButtonInput<bevy::prelude::KeyCode>>) {
-        keys.press(emerge_mapper::keys::binding(emerge_mapper::keys::Action::TilesTab).key);
-    }
-    fn walk(mut keys: bevy::prelude::ResMut<bevy::input::ButtonInput<bevy::prelude::KeyCode>>) {
-        keys.press(emerge_mapper::keys::binding(emerge_mapper::keys::Action::BuildRight).key);
-    }
-    let before = |app: &mut bevy::prelude::App, sys: fn(bevy::prelude::ResMut<bevy::input::ButtonInput<bevy::prelude::KeyCode>>)| {
+    // **One shot, and that matters more than it looks.** A system added here runs every frame
+    // forever, so a helper that merely presses would hold the key down — and `Space` re-toggling
+    // `placing` on every frame means the handler takes the arm branch and returns before it ever
+    // reaches the cursor. `release_all` first, so the press is a fresh edge rather than a key an
+    // earlier helper left down.
+    let before = |app: &mut bevy::prelude::App, key: bevy::prelude::KeyCode| {
         app.add_systems(
             bevy::prelude::Update,
-            bevy::prelude::IntoScheduleConfigs::before(sys, emerge_mapper::keys::Phase::Act),
+            bevy::prelude::IntoScheduleConfigs::before(
+                move |mut keys: bevy::prelude::ResMut<bevy::input::ButtonInput<bevy::prelude::KeyCode>>,
+                      mut done: bevy::prelude::Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        keys.press(key);
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
         );
         app.update();
     };
 
-    before(&mut app, to_tiles);
+    let key = |a| emerge_mapper::keys::binding(a).key;
+    before(&mut app, key(emerge_mapper::keys::Action::TilesTab));
 
     let build = app.world().resource::<Build>();
     let comp = build
@@ -2860,14 +2876,29 @@ fn the_tiles_tab_opens_a_tile_and_walks_its_grid() {
         panic!("a tile claims a tile");
     };
     assert_eq!((size.0, size.2), (emerge_core::grid::TILE, emerge_core::grid::TILE));
-    assert_eq!(build.at, (0, 0, 0), "the cursor starts in the corner cell");
+    // **The middle cell, not a corner** — the author's first note on using this tab.
+    let start = build.at;
+    assert_eq!(start, (1, 0, 1), "a new tile opens with the cursor in the middle of it");
 
-    // And the cursor walks the tile's own grid rather than the map's.
-    before(&mut app, walk);
+    // **An arrow does nothing until a piece is in hand.** That is the door the author asked for:
+    // the same key walks the library list otherwise, so a press that moved both would be the
+    // "arrows get elsewhere" problem stated as a bug.
+    before(&mut app, key(emerge_mapper::keys::Action::BuildRight));
     assert_eq!(
         app.world().resource::<Build>().at,
-        (1, 0, 0),
-        "`H` must walk the tile's grid on the Tiles tab, not the map's"
+        start,
+        "an arrow must not move the tile while the arrows belong to the library list"
+    );
+
+    // Armed, the same key walks the tile — **diagonally**, because at the iso framing screen-up is
+    // the world diagonal and the author asked for the arrows to mean what they point at.
+    before(&mut app, key(emerge_mapper::keys::Action::BuildArm));
+    before(&mut app, key(emerge_mapper::keys::Action::BuildRight));
+    let now = app.world().resource::<Build>().at;
+    assert_ne!(now, start, "armed, an arrow must walk the tile's own grid");
+    assert!(
+        now.0 != start.0 && now.2 != start.2,
+        "the step must be diagonal at the iso framing — {start:?} to {now:?}"
     );
 
     // **And the panel shows it.** This is the half that shipped broken: the tab changed, the status
@@ -2898,9 +2929,13 @@ fn the_tiles_tab_opens_a_tile_and_walks_its_grid() {
         shown.iter().any(|t| t.contains(&id)),
         "the pane must name the tile being built (`{id}`). Saw: {shown:?}"
     );
+    // Read from the resource rather than hardcoded, so the assertion is "the pane agrees with the
+    // cursor" rather than "the cursor is at a number I typed" — the second breaks whenever the
+    // opening cell or the step changes, which is twice so far.
+    let want = format!("cursor {},{},{}", now.0, now.1, now.2);
     assert!(
-        shown.iter().any(|t| t.contains("cursor 1,0,0")),
-        "the pane must show where the cursor is, or walking it is invisible. Saw: {shown:?}"
+        shown.iter().any(|t| t.contains(&want)),
+        "the pane must show where the cursor is ({want}), or walking it is invisible. Saw: {shown:?}"
     );
 }
 

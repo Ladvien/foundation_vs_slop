@@ -51,6 +51,17 @@ use emerge_core::stack;
 pub struct Build {
     /// The tile in hand, or `None` when nothing is being built. Absence is a real state — the tab
     /// opens in `Describe` and an author may never build anything.
+    /// **Whether the arrows are steering the tile or the library list.**
+    ///
+    /// The author asked for this by name — *"get a key to start the placement so the arrows don't
+    /// get elsewhere"* — after finding `T F G H` "gross". One set of arrows cannot walk two lists at
+    /// once, and the census forbids two actions on one key in one context, so the key is single and
+    /// the **state** decides which job it does.
+    ///
+    /// It is a mode, and I10 of the editor-model guide argues against those. Raskin's objection is
+    /// to a mode you can *forget*, and this one is drawn: while placing there is a ghost standing on
+    /// the grid under the cursor, and the status line says so. `Esc` leaves.
+    pub placing: bool,
     pub open: Option<Composition>,
     /// Which member has focus, as an index into `open`'s members. Out of range reads as "none", which
     /// is what happens when the focused member is dropped.
@@ -105,6 +116,46 @@ pub fn blank(id: &str, height: f32) -> Composition {
 pub fn cells(size: (f32, f32, f32), pitch: f32) -> (u32, u32, u32) {
     let n = |v: f32| ((v / pitch).round() as i64).clamp(1, i64::from(u32::MAX)) as u32;
     (n(size.0), n(size.1), n(size.2))
+}
+
+/// **A cell step in the frame the author is looking at it from**, which is why it is a diagonal.
+///
+/// The camera sits on `ISO_OFFSET = (12, 12, 12)`, so screen-up is the world direction
+/// `(-0.707, 0, -0.707)` — a diagonal in cell space. Stepping along a world axis therefore *looks*
+/// diagonal, which is what the author hit: *"the arrow keys should move in diagonals."* Read the
+/// other way round, they were asking for the arrows to mean what they point at.
+///
+/// `view::pan_direction` already turns a screen wish into a world direction and is tested at every
+/// rotation detent, so this borrows it rather than deriving a second answer — and that is what makes
+/// the step follow the camera when the author turns it, instead of being right only at the default
+/// framing.
+///
+/// The threshold picks how many axes a press moves: at the iso yaw both components are ~0.707, so a
+/// press moves both and the step is diagonal; square on to an axis one component is ~1 and the other
+/// ~0, so the same press moves one. Nothing switches modes — it is the same projection, read.
+pub fn step_in_view(wish: Vec2, yaw: f32) -> (i32, i32) {
+    const SIGNIFICANT: f32 = 0.3;
+    let d = crate::view::pan_direction(wish, yaw);
+    let axis = |v: f32| {
+        if v.abs() < SIGNIFICANT {
+            0
+        } else if v > 0.0 {
+            1
+        } else {
+            -1
+        }
+    };
+    (axis(d.x), axis(d.z))
+}
+
+/// **The cell a tile opens on: the middle one.**
+///
+/// It opened on `(0, 0, 0)` — a corner — which the author flagged: *"the default square should be
+/// the center."* The corner is where the arithmetic starts and the middle is where the eye does, and
+/// a tile is small enough that the middle is within a press or two of anywhere in it.
+pub fn centre_cell(size: (f32, f32, f32), pitch: f32) -> (i32, i32, i32) {
+    let (nx, _, nz) = cells(size, pitch);
+    ((nx / 2) as i32, 0, (nz / 2) as i32)
 }
 
 /// The **minimum corner** of a cell, in envelope-local metres.
@@ -408,6 +459,8 @@ pub fn pitch(build: &Build, project: &crate::project::Project) -> f32 {
 #[allow(clippy::too_many_arguments)]
 pub fn build_keys(
     keyboard: Res<ButtonInput<KeyCode>>,
+    // The camera, so an arrow means what it points at on screen rather than a world axis.
+    rig: Res<crate::view::Rig>,
     live: Res<crate::keys::Live>,
     mode: Res<crate::tiles::Mode>,
     mut build: ResMut<Build>,
@@ -434,10 +487,7 @@ pub fn build_keys(
         // `stack::datum` records fixing, where `OnCeiling` was hardcoded 2.4 m and hung the lights of
         // a 3.5 m room in mid-air. The map states its own height; that is the only number entitled to
         // answer this.
-        build.open = Some(blank(&next_tile_id(&project), project.map.bounds.1));
-        build.rung = DEFAULT_RUNG;
-        build.at = (0, 0, 0);
-        build.focus = 0;
+        open_blank(&mut build, &project);
         // **Arrive with something in hand.** Only fires when nothing was ever picked — the selection
         // otherwise persists — and without it the first `Enter` is a refusal, which is the worst
         // possible first impression of a tab. Liapis names the failure: a tool that will not let the
@@ -462,20 +512,54 @@ pub fn build_keys(
     };
     let step = pitch(&build, &project);
 
+    // **Take the piece, or put it back.** The door between the arrows walking the library list and
+    // the arrows walking the tile — the author's *"a key to start the placement so the arrows don't
+    // get elsewhere"*. `Esc` is the Global put-back verb and already means exactly this.
+    if pressed(Action::BuildArm) {
+        build.placing = !build.placing;
+        state.status.note(if build.placing {
+            "placing — arrows move the tile, Enter drops, Esc puts it back".to_owned()
+        } else {
+            "arrows walk the library".to_owned()
+        });
+        return;
+    }
+    if build.placing && just_pressed(&keyboard, live.0, Action::Cancel) {
+        build.placing = false;
+        state.status.note("arrows walk the library".to_owned());
+        return;
+    }
+
     // The cursor. Walked, then clamped once — so a key held at an edge stops there rather than
     // accumulating an offset the next key has to undo.
+    //
+    // **The plan arrows only steer while a piece is in hand**, or they would be moving the tile and
+    // the library list with one press. `[` and `]` are unconditional: a layer is not something the
+    // list has an opinion about.
     let mut at = build.at;
-    if pressed(Action::BuildLeft) {
-        at.0 -= 1;
-    }
-    if pressed(Action::BuildRight) {
-        at.0 += 1;
-    }
-    if pressed(Action::BuildForward) {
-        at.2 += 1;
-    }
-    if pressed(Action::BuildBack) {
-        at.2 -= 1;
+    if build.placing {
+        // **In the frame the author is looking at it from.** Screen-up at the iso yaw is the world
+        // diagonal `(-0.707, -0.707)`, so a press moves both axes and the cursor goes where the key
+        // points rather than along an axis that merely looks diagonal — see `step_in_view`.
+        let mut wish = Vec2::ZERO;
+        if pressed(Action::BuildLeft) {
+            wish.x -= 1.0;
+        }
+        if pressed(Action::BuildRight) {
+            wish.x += 1.0;
+        }
+        // Screen wishes are negative up, the convention `view::pan_direction` already reads.
+        if pressed(Action::BuildForward) {
+            wish.y -= 1.0;
+        }
+        if pressed(Action::BuildBack) {
+            wish.y += 1.0;
+        }
+        if wish != Vec2::ZERO {
+            let (dx, dz) = step_in_view(wish, rig.yaw);
+            at.0 += dx;
+            at.2 += dz;
+        }
     }
     if pressed(Action::BuildUp) {
         at.1 += 1;
@@ -605,15 +689,31 @@ pub fn build_keys(
 
     // A fresh tile, leaving whatever was saved on disk alone.
     if pressed(Action::BuildNew) {
-        build.open = Some(blank(&next_tile_id(&project), project.map.bounds.1));
-        build.at = (0, 0, 0);
-        build.focus = 0;
+        open_blank(&mut build, &project);
         let id = build.open.as_ref().map(|c| c.id.clone()).unwrap_or_default();
         state.status.note(format!("new tile `{id}`"));
     }
 }
 
-/// The next unused `<kit>/tile_n` id, so `C` opens something rather than asking for a name first.
+/// **Open a blank tile with the cursor in the middle of it.**
+///
+/// Both places that open one go through here, so "where does a new tile put the cursor" has one
+/// answer. It was `(0, 0, 0)` at both — a corner — which the author flagged the first time they used
+/// it: *"the default square should be the center."*
+fn open_blank(build: &mut Build, project: &crate::project::Project) {
+    let comp = blank(&next_tile_id(project), project.map.bounds.1);
+    build.rung = DEFAULT_RUNG;
+    build.at = match comp.envelope {
+        Envelope::Bounded { size } => centre_cell(size, pitch(build, project)),
+        // A blank tile is always `Bounded` — `blank` builds it — so this is unreachable rather than
+        // a fallback. The corner is the honest answer to a question with no envelope in it.
+        Envelope::Anchored => (0, 0, 0),
+    };
+    build.open = Some(comp);
+    build.focus = 0;
+}
+
+/// The next unused `<kit>/tile_n` id, so a new tile opens rather than asking for a name first.
 ///
 /// Named after the kit the project loaded, because a composition id shares a descriptor id's shape —
 /// namespace and all — and a tile that does not carry its kit's name is one nobody can find later.
@@ -666,7 +766,9 @@ pub fn drive_build_preview(
     mut state: ResMut<crate::tiles::ImportState>,
     staged: Query<Entity, With<StagedTile>>,
 ) {
-    if !(build.is_changed() || mode.is_changed() || project.is_changed()) {
+    // **`ImportState` is in here because the ghost reads the selection**, which lives there — without
+    // it, picking a different piece left the previous one standing under the cursor.
+    if !(build.is_changed() || mode.is_changed() || project.is_changed() || state.is_changed()) {
         return;
     }
     // A system that stops running cannot despawn what it drew, so leaving the mode clears here rather
@@ -680,12 +782,45 @@ pub fn drive_build_preview(
     let Some(comp) = build.open.as_ref() else {
         return;
     };
-    if comp.members.is_empty() {
-        return;
-    }
     let Envelope::Bounded { size } = comp.envelope else {
         return;
     };
+
+    // **The piece in hand, standing where it would land.**
+    //
+    // This tab had no ghost at all, which is what the author hit on first use: *"Selected a 'pallet'
+    // mesh: issue 1, no mesh appeared."* Nothing was drawn until `Enter`, so picking a piece and
+    // aiming it were both invisible and the tab looked broken before it looked slow. The Map has had
+    // a ghost since the beginning and this module's own opening line is *"the ghost is the
+    // contract"* — it was the one surface that did not keep it.
+    //
+    // Drawn through the same `place`-shaped arithmetic the drop uses (`drop_at` on the same rung and
+    // span), so what is on screen is where the piece goes rather than a second guess at it. `y` is
+    // the cell floor: the ghost is a where-not-a-what, and asking `resolve_y` about a piece that is
+    // not in the tile yet would need a scratch map holding a member that does not exist.
+    if build.placing
+        && let Some(d) = state.editing(&project.library).cloned()
+    {
+        let span = crate::editor::brush_span(&d, 0.0);
+        let (at, lift) = drop_at(size, pitch(&build, &project), build.at, span);
+        let stage = crate::stages::TILE;
+        if let Some(e) = crate::editor::spawn_piece(
+            &mut commands,
+            &assets,
+            &d,
+            at,
+            0.0,
+            (0, 0),
+            (stage.x, stage.y, stage.z),
+            lift,
+        ) {
+            commands.entity(e).insert(StagedTile);
+        }
+    }
+
+    if comp.members.is_empty() {
+        return;
+    }
 
     // **The envelope as a map**, floor at zero and the declared bounds — the same scratch
     // `composition::interface` builds, so `stack::resolve_y` answers here exactly as it will in the

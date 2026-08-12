@@ -189,12 +189,9 @@ pub enum Action {
     BuildUp,
     BuildDrop,
     BuildSlot,
-    /// Walk the library on the Tiles tab. Its own action rather than a second row for
-    /// [`Action::PrevCandidate`], because `binding` answers one row per action and the census holds
-    /// it to that — two rows would make which chord it reports arbitrary.
-    BuildPrevPiece,
-    /// The other direction. See [`Action::BuildPrevPiece`].
-    BuildNextPiece,
+    /// **Take the piece in hand**, so the arrows steer the tile instead of the library list.
+    /// `Esc` puts it back. See [`crate::build::Build::placing`].
+    BuildArm,
     BuildNew,
     BuildDropMember,
     BuildTurn,
@@ -548,12 +545,18 @@ pub const BINDINGS: &[Binding] = &[
     // **There is no door key.** It was `C`, flipping a mode on the mesh tab; the tab strip is the
     // door now, and a strip is a mode nobody can forget — Raskin's condition, met by construction
     // rather than by an indicator (FVS-R-21).
-    b(Action::BuildForward, KeyCode::KeyT, false, Context::Tiles, "T", "cursor / layer"),
-    b(Action::BuildLeft, KeyCode::KeyF, false, Context::Tiles, "F", "cursor / layer"),
-    b(Action::BuildBack, KeyCode::KeyG, false, Context::Tiles, "G", "cursor / layer"),
-    b(Action::BuildRight, KeyCode::KeyH, false, Context::Tiles, "H", "cursor / layer"),
-    b(Action::BuildDown, KeyCode::BracketLeft, false, Context::Tiles, "[", "cursor / layer"),
-    b(Action::BuildUp, KeyCode::BracketRight, false, Context::Tiles, "]", "cursor / layer"),
+    // **The arrows, and they do two jobs decided by `Build::placing`.** `T F G H` held these before
+    // and the author's verdict on them was "gross". One key cannot carry two *actions* in one
+    // context — `the_key_space_has_no_collisions` refuses it, rightly — so the key is single and the
+    // state picks the job: not placing, the arrows walk the library list; placing, they walk the
+    // tile. `Space` is the door between them and the ghost is what shows which side you are on.
+    b(Action::BuildForward, KeyCode::ArrowUp, false, Context::Tiles, "up", "walk the library / place: the tile"),
+    b(Action::BuildBack, KeyCode::ArrowDown, false, Context::Tiles, "down", "walk the library / place: the tile"),
+    b(Action::BuildLeft, KeyCode::ArrowLeft, false, Context::Tiles, "left", "walk the library / place: the tile"),
+    b(Action::BuildRight, KeyCode::ArrowRight, false, Context::Tiles, "right", "walk the library / place: the tile"),
+    b(Action::BuildArm, KeyCode::Space, false, Context::Tiles, "Space", "take the piece / Esc puts it back"),
+    b(Action::BuildDown, KeyCode::BracketLeft, false, Context::Tiles, "[", "layer"),
+    b(Action::BuildUp, KeyCode::BracketRight, false, Context::Tiles, "]", "layer"),
 
     // **`J` cycles the rung, latched.** The same key the Map cycles its drawn grid with, and the same
     // argument: Bier's snap-dragging latches every one of its modal commands, and StickyLines'
@@ -573,17 +576,7 @@ pub const BINDINGS: &[Binding] = &[
     // that they are the same verb. The handler asks which mode is live.
     b(Action::BuildNew, KeyCode::KeyN, false, Context::Tiles, "N", "new tile"),
 
-    // **The same two arrows the mesh tab walks its lists with**, because picking the piece is half of
-    // building a tile and it was the half that still cost a tab round-trip: `2`, arrow, `3`, Enter,
-    // once per member. The author's requirement for this loop was the keyboard — *"key strokes are
-    // faster"* — and a shared list nobody can reach from one of the two tabs sharing it is a shared
-    // list in name only. One row, in a context using five of its twelve.
-    //
-    // **They walk the library and not the candidates**, which is not a shortcut: a tile member must
-    // name a `library.ron` descriptor, so on this tab the second list is not a choice. See
-    // `move_selection`.
-    b(Action::BuildPrevPiece, KeyCode::ArrowUp, false, Context::Tiles, "up", "walk the library / Shift: x5"),
-    b(Action::BuildNextPiece, KeyCode::ArrowDown, false, Context::Tiles, "down", "walk the library / Shift: x5"),
+
     b(Action::ScanMesh, KeyCode::KeyB, false, Context::Meshes, "B", "from the mesh: rescan solid / turn x y z"),
     b(Action::RotateMeshX, KeyCode::KeyN, false, Context::Meshes, "N", "from the mesh: rescan solid / turn x y z"),
     b(Action::RotateMeshY, KeyCode::KeyO, false, Context::Meshes, "O", "from the mesh: rescan solid / turn x y z"),
@@ -1065,8 +1058,7 @@ mod tests {
             // tab — dropping and turning are building whatever the strip calls the place it happens.
             Action::BuildForward, Action::BuildLeft, Action::BuildBack, Action::BuildRight,
             Action::BuildDown, Action::BuildUp, Action::BuildRung,
-            Action::BuildDrop, Action::BuildSlot,
-            Action::BuildPrevPiece, Action::BuildNextPiece,
+            Action::BuildDrop, Action::BuildSlot, Action::BuildArm,
             Action::BuildTurn, Action::BuildDropMember, Action::BuildNew,
         ];
         assert_eq!(

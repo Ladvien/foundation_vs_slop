@@ -3771,6 +3771,7 @@ fn on_tag_chip(
 fn move_selection(
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<crate::keys::Live>,
+    build: Res<crate::build::Build>,
     time: Res<Time>,
     mut repeat: ResMut<crate::keys::Repeat>,
     project: Res<Project>,
@@ -3787,8 +3788,15 @@ fn move_selection(
     // **Which pair of arrows, chosen by tab.** One `repeating` call per direction, not two OR'd
     // together: `Repeat` carries a single countdown, so asking it about two actions in one frame
     // would have the second reset the first's cadence.
+    //
+    // **And on the Tiles tab only while nothing is in hand.** The same two keys walk the tile once
+    // the author has taken a piece (`Space`), so this steps aside rather than both moving at once —
+    // see `build::Build::placing`. One key, one job at a time, decided by a state the ghost draws.
+    if live.0 == crate::keys::Context::Tiles && build.placing {
+        return;
+    }
     let (prev, next) = if live.0 == crate::keys::Context::Tiles {
-        (Action::BuildPrevPiece, Action::BuildNextPiece)
+        (Action::BuildForward, Action::BuildBack)
     } else {
         (Action::PrevCandidate, Action::NextCandidate)
     };
