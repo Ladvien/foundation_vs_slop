@@ -55,6 +55,23 @@ const ZOOM_STEP: f32 = 2.0;
 /// Metres a second, matching the game's `src/camera.rs` so the two feel the same.
 const PAN_SPEED: f32 = 16.0;
 
+/// **The yaw at which the world's axes are the screen's axes.**
+///
+/// The camera sits at `RotY(yaw) * ISO_OFFSET` and `ISO_OFFSET` is `(12, 12, 12)`, so at yaw 0 it
+/// looks along the `(-1, 0, -1)` diagonal and a step along a world axis reads as a diagonal on
+/// screen. Rotating by `-45°` sends the horizontal offset to `(0, 16.97)` — the camera straight out
+/// along `+z`, looking down `-z` — so screen-up is `-z` and screen-right is `+x`.
+///
+/// It exists for the Tiles tab, where the author is looking at a grid a metre across and steering a
+/// cursor around it by arrow key. At the iso yaw those two readings of "straight" cannot both hold:
+/// the square visually above the cursor **is** the diagonal neighbour, so a key that moves to the
+/// adjacent square looks diagonal and a key that looks straight skips a square. Square on, they are
+/// the same square and the question stops being a trade.
+///
+/// `pan_direction_is_a_pure_axis_when_square_on` is the statement of that, checked rather than
+/// derived on paper.
+pub const SQUARE_ON_YAW: f32 = -std::f32::consts::FRAC_PI_4;
+
 /// Where the camera is looking and how far out.
 #[derive(Resource)]
 pub struct Rig {
@@ -380,6 +397,34 @@ mod tests {
         let iso = Quat::from_rotation_y(yaw) * ISO_OFFSET;
         let tf = Transform::from_translation(iso).looking_at(Vec3::ZERO, Vec3::Y);
         (*tf.right(), *tf.up())
+    }
+
+    /// **Square on, an arrow is a world axis** — the property the Tiles tab's camera exists to give.
+    ///
+    /// At the iso yaw every press mixes both world axes (~0.707 each), which is why walking a small
+    /// grid by arrow key there forces a choice between "the next square" and "straight up the
+    /// screen". At [`SQUARE_ON_YAW`] there is nothing to choose: each arrow is one axis, exactly.
+    #[test]
+    fn pan_direction_is_a_pure_axis_when_square_on() {
+        let cases = [
+            (Vec2::new(0.0, -1.0), Vec3::new(0.0, 0.0, -1.0), "up is -z"),
+            (Vec2::new(0.0, 1.0), Vec3::new(0.0, 0.0, 1.0), "down is +z"),
+            (Vec2::new(-1.0, 0.0), Vec3::new(-1.0, 0.0, 0.0), "left is -x"),
+            (Vec2::new(1.0, 0.0), Vec3::new(1.0, 0.0, 0.0), "right is +x"),
+        ];
+        for (wish, want, what) in cases {
+            let got = pan_direction(wish, SQUARE_ON_YAW);
+            assert!(
+                (got - want).length() < 1e-5,
+                "{what}: wanted {want:?}, got {got:?}"
+            );
+        }
+        // And the iso yaw is the case it is being contrasted with — both axes, near enough equal.
+        let iso = pan_direction(Vec2::new(0.0, -1.0), 0.0);
+        assert!(
+            iso.x.abs() > 0.5 && iso.z.abs() > 0.5,
+            "at the iso yaw a press should mix both axes, which is the whole problem: {iso:?}"
+        );
     }
 
     /// **The property the keys are supposed to have**, stated the way an author experiences it: a pan

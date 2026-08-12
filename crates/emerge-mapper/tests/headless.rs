@@ -2905,6 +2905,18 @@ fn the_tiles_tab_opens_a_tile_and_walks_its_grid() {
     );
     assert_eq!(now.1, start.1, "and an arrow is not a layer key");
 
+    // **And the camera is square on**, which is what makes the line above true by geometry rather
+    // than by a tiebreak: at this yaw each arrow is exactly one world axis, so "the next square" and
+    // "straight up the screen" stop being different squares.
+    let rig = app.world().resource::<emerge_mapper::view::Rig>();
+    assert!(
+        (rig.yaw - emerge_mapper::view::SQUARE_ON_YAW).abs() < 1e-5
+            && (rig.goal_yaw - emerge_mapper::view::SQUARE_ON_YAW).abs() < 1e-5,
+        "the Tiles tab frames its grid square on — yaw {} goal {}",
+        rig.yaw,
+        rig.goal_yaw
+    );
+
     // **And the panel shows it.** This is the half that shipped broken: the tab changed, the status
     // line said so, and the detail pane went on showing the mesh inspector — which reads as the key
     // having done nothing. `rebuild_detail` watches `ImportState`, so without `Mode` and `Build` in

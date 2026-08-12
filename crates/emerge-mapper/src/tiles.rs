@@ -263,6 +263,16 @@ fn stage_camera(
             rig.height = TILE_VIEW_HEIGHT;
             // Canonical iso framing — the author may arrive from a ground-level anim preset.
             rig.elevation = crate::view::ISO_ELEVATION;
+            // **Square on for the Tiles tab, so an arrow key is a world axis and a screen axis at
+            // once.** At the iso yaw those are different squares — the one visually above the cursor
+            // is the diagonal neighbour — and the author met that as two complaints in a row. The
+            // mesh tab keeps the iso yaw: nothing is steered around a grid there, and a single mesh
+            // reads better from a corner than face on. Set on both `yaw` and `goal_yaw` because the
+            // rig eases toward the goal, and leaving the goal behind would spin it straight back.
+            if *mode == Mode::Tiles {
+                rig.yaw = crate::view::SQUARE_ON_YAW;
+                rig.goal_yaw = crate::view::SQUARE_ON_YAW;
+            }
         }
         // The anim bench's stage. An arm of THIS system rather than a sibling, because two systems
         // saving/restoring one `MapView` on the same `mode.is_changed()` edge would race over it.
