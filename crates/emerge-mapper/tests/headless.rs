@@ -2896,10 +2896,14 @@ fn the_tiles_tab_opens_a_tile_and_walks_its_grid() {
     before(&mut app, key(emerge_mapper::keys::Action::BuildRight));
     let now = app.world().resource::<Build>().at;
     assert_ne!(now, start, "armed, an arrow must walk the tile's own grid");
+    // **The neighbouring square, never the diagonal one** — *"we need straightlines, like the WASD
+    // keys."* One axis moves and the other holds; the first version moved both, which reads as the
+    // cursor skipping the square next to it.
     assert!(
-        now.0 != start.0 && now.2 != start.2,
-        "the step must be diagonal at the iso framing — {start:?} to {now:?}"
+        (now.0 != start.0) ^ (now.2 != start.2),
+        "exactly one plan axis may move — {start:?} to {now:?}"
     );
+    assert_eq!(now.1, start.1, "and an arrow is not a layer key");
 
     // **And the panel shows it.** This is the half that shipped broken: the tab changed, the status
     // line said so, and the detail pane went on showing the mesh inspector — which reads as the key

@@ -130,22 +130,32 @@ pub fn cells(size: (f32, f32, f32), pitch: f32) -> (u32, u32, u32) {
 /// the step follow the camera when the author turns it, instead of being right only at the default
 /// framing.
 ///
-/// The threshold picks how many axes a press moves: at the iso yaw both components are ~0.707, so a
-/// press moves both and the step is diagonal; square on to an axis one component is ~1 and the other
-/// ~0, so the same press moves one. Nothing switches modes — it is the same projection, read.
+/// **One axis per press — the neighbouring square, never the diagonal one.** The author's
+/// correction, and the second reading of the same sentence: *"we need straightlines, like the WASD
+/// keys."*
+///
+/// The first version stepped **both** axes whenever both projected components were significant,
+/// which at the iso yaw is always — so the cursor moved to the diagonally-adjacent square and
+/// skipped the one next to it. Straight on screen, and diagonal across the grid the author is
+/// looking at. The grid squares are what the eye tracks here, so that is the reading that counts.
+///
+/// **Dominant axis, not a fixed one.** A hardcoded "up is -z" would be wrong the moment the camera
+/// turns, and this tab lets it turn. Taking the larger projected component means a press moves along
+/// whichever world axis points most nearly the way the key does — one cell, one axis, and still the
+/// key meaning what it points at.
+///
+/// At the iso yaw the two components are within a hair of each other (~0.707 apart is 0), so the tie
+/// is broken toward `x` — deterministic and stated rather than left to float noise.
 pub fn step_in_view(wish: Vec2, yaw: f32) -> (i32, i32) {
-    const SIGNIFICANT: f32 = 0.3;
     let d = crate::view::pan_direction(wish, yaw);
-    let axis = |v: f32| {
-        if v.abs() < SIGNIFICANT {
-            0
-        } else if v > 0.0 {
-            1
-        } else {
-            -1
-        }
-    };
-    (axis(d.x), axis(d.z))
+    if d.x == 0.0 && d.z == 0.0 {
+        return (0, 0);
+    }
+    if d.x.abs() >= d.z.abs() {
+        (if d.x > 0.0 { 1 } else { -1 }, 0)
+    } else {
+        (0, if d.z > 0.0 { 1 } else { -1 })
+    }
 }
 
 /// **The cell a tile opens on: the middle one.**
@@ -1269,4 +1279,5 @@ mod tests {
             descriptors: vec![piece("site/floor", 1.0, 1.0, 0.06), wall, sconce],
         }
     }
+
 }
