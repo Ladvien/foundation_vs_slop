@@ -551,6 +551,93 @@ pub fn refit(
     })
 }
 
+/// How many steps the tile assembler remembers.
+///
+/// The same 64 the mesh tab keeps, and bounded for the same reason: a snapshot is a whole
+/// composition, and an unbounded stack grows with nothing ever freeing it.
+pub const BUILD_HISTORY: usize = 64;
+
+/// **The tile assembler's undo stack.**
+///
+/// Its own resource rather than fields on [`Build`], because `Build` is change-detected and several
+/// systems key their redraws off it — pushing a snapshot would rebuild the 3-D stage every time the
+/// history moved, which is the one thing a history should never do.
+///
+/// Separate from the mesh tab's stack, which is over `library.ron` edits. Two tabs editing different
+/// files through one stack would make "undo" mean whichever thing was touched last.
+#[derive(Resource, Default)]
+pub struct TileHistory {
+    past: Vec<Option<Composition>>,
+    future: Vec<Option<Composition>>,
+    /// What the tile looked like when this system last ran — the thing a change is measured against.
+    seen: Option<Option<Composition>>,
+}
+
+/// **Record what changed, and step back and forth through it.**
+///
+/// One system owning both halves, because the alternative is a flag: a separate recorder would see
+/// undo's *own* write as a new edit and push it, so undo would undo itself. Handling the keys here
+/// means the recorder already knows which writes were its own.
+///
+/// It watches the tile rather than hooking each verb, so every mutation is covered by construction —
+/// a drop, a hole, a nudge, a turn, a removal, and whatever is added next. `refit` runs before this,
+/// so a resize is part of the same step as the edit that caused it rather than a second one to undo.
+pub fn tile_history(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<crate::keys::Live>,
+    mode: Res<crate::tiles::Mode>,
+    mut build: ResMut<Build>,
+    mut history: ResMut<TileHistory>,
+    mut state: ResMut<crate::tiles::ImportState>,
+) {
+    if *mode != crate::tiles::Mode::Tiles {
+        return;
+    }
+    // First run on this tab: adopt what is open without calling it an edit.
+    if history.seen.is_none() {
+        history.seen = Some(build.open.clone());
+    }
+
+    let back = crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::UndoBuild);
+    let forward = crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::RedoBuild);
+    if back || forward {
+        let step = if back { history.past.pop() } else { history.future.pop() };
+        match step {
+            Some(to) => {
+                let from = build.open.clone();
+                if back {
+                    history.future.push(from);
+                } else {
+                    history.past.push(from);
+                }
+                build.open = to.clone();
+                // The focus can outlive the members it indexed.
+                let n = build.open.as_ref().map_or(0, |c| c.members.len());
+                build.focus = build.focus.min(n.saturating_sub(1));
+                history.seen = Some(to);
+                let what = if back { "undo" } else { "redo" };
+                state.status.note(format!("{what} — {n} in the tile"));
+            }
+            None => state
+                .status
+                .note(if back { "nothing to undo" } else { "nothing to redo" }.to_owned()),
+        }
+        return;
+    }
+
+    // Not a history key, so anything different is an edit worth remembering.
+    if history.seen.as_ref() != Some(&build.open) {
+        let was = history.seen.take().flatten();
+        history.past.push(was);
+        if history.past.len() > BUILD_HISTORY {
+            history.past.remove(0);
+        }
+        // A new edit is a new branch: what was undone past is no longer reachable.
+        history.future.clear();
+        history.seen = Some(build.open.clone());
+    }
+}
+
 /// The system half of [`refit`], after the verbs.
 ///
 /// A system of its own rather than a call at the end of `build_keys`, because that function returns

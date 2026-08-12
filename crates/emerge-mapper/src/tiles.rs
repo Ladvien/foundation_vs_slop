@@ -2534,6 +2534,7 @@ impl Plugin for TilesPlugin {
             // tabs are this file's, and a `Res<T>` a system takes must exist before the first frame —
             // a missing one panics rather than skipping (`CLAUDE.md`).
             .init_resource::<crate::build::Build>()
+            .init_resource::<crate::build::TileHistory>()
             .add_systems(Startup, (spawn_tab_strip, spawn_tiles_panel))
             .add_systems(
                 Update,
@@ -2566,6 +2567,11 @@ impl Plugin for TilesPlugin {
                         crate::build::refit_tile
                             .in_set(crate::keys::Phase::Act)
                             .after(crate::build::build_keys),
+                        // **Last**, so a resize is part of the same step as the edit that caused it
+                        // rather than a second thing to undo.
+                        crate::build::tile_history
+                            .in_set(crate::keys::Phase::Act)
+                            .after(crate::build::refit_tile),
                     ),
                     autoscan_candidate.run_if(in_meshes_mode),
                     // Nested: a system tuple caps out, and these three are one feature anyway —

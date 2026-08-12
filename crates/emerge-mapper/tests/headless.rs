@@ -2502,6 +2502,95 @@ fn dropping_an_oversized_mesh_grows_the_tile() {
     );
 }
 
+/// **Undo steps back through the tile, one brought-in mesh at a time.**
+///
+/// Reported from use: *"Undo is not working on the tiles tab when I bring in two meshes."* It was not
+/// broken, it was **absent** — `UndoTile` is bound in `Context::Meshes` only, over `library.ron`
+/// edits, and nothing ever snapshotted the tile in hand. So `Cmd+Z` on this tab reached no handler
+/// at all.
+///
+/// Two meshes specifically, because one would pass against a history that only ever holds the empty
+/// tile: the second undo is the one that has to find the first mesh still there.
+#[test]
+fn undo_steps_back_through_the_meshes_brought_into_a_tile() {
+    use bevy::input::ButtonInput;
+    use bevy::prelude::{App, IntoScheduleConfigs, KeyCode, ResMut, Update};
+    use emerge_mapper::keys::{binding, Action};
+
+    let root = Fixture::new("tile_undo")
+        .descriptor("floor", "alpha")
+        .descriptor("wall", "alpha")
+        .build("test_map");
+    let mut app = harness::build_headless(&root, "test_map", None)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    app.update();
+
+    fn once(app: &mut App, chord: Vec<KeyCode>) {
+        app.add_systems(
+            Update,
+            IntoScheduleConfigs::before(
+                move |mut keys: ResMut<ButtonInput<KeyCode>>, mut done: bevy::prelude::Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        for k in &chord {
+                            keys.press(*k);
+                        }
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    }
+    let members = |app: &App| -> Vec<String> {
+        app.world()
+            .resource::<emerge_mapper::build::Build>()
+            .open
+            .as_ref()
+            .map(|c| c.members.iter().map(|m| m.id.clone()).collect())
+            .unwrap_or_default()
+    };
+
+    once(&mut app, vec![binding(Action::TilesTab).key]);
+    once(&mut app, vec![binding(Action::BuildArm).key]);
+    once(&mut app, vec![binding(Action::BuildDrop).key]);
+    // A different piece, so the two steps are distinguishable by name rather than by count alone.
+    once(&mut app, vec![binding(Action::BuildArm).key]);
+    once(&mut app, vec![binding(Action::BuildBack).key]);
+    once(&mut app, vec![binding(Action::BuildArm).key]);
+    once(&mut app, vec![binding(Action::BuildDrop).key]);
+    let two = members(&app);
+    assert_eq!(two.len(), 2, "two meshes are in the tile: {two:?}");
+
+    // `Cmd+Z` — the tab's own stack, not the mesh tab's.
+    once(&mut app, vec![KeyCode::SuperLeft, binding(Action::UndoBuild).key]);
+    let one = members(&app);
+    assert_eq!(one.len(), 1, "one undo takes the second mesh back out: {one:?}");
+    assert_eq!(one[0], two[0], "and it is the FIRST that survives, not whichever sorted first");
+
+    once(&mut app, vec![KeyCode::SuperLeft, binding(Action::UndoBuild).key]);
+    assert!(members(&app).is_empty(), "the second undo empties the tile");
+
+    // And forward again, because a history that only goes one way is half a history.
+    once(
+        &mut app,
+        vec![KeyCode::SuperLeft, KeyCode::ShiftLeft, binding(Action::RedoBuild).key],
+    );
+    assert_eq!(members(&app), one, "redo puts the first mesh back");
+    once(
+        &mut app,
+        vec![KeyCode::SuperLeft, KeyCode::ShiftLeft, binding(Action::RedoBuild).key],
+    );
+    assert_eq!(members(&app), two, "and the second");
+
+    // **The envelope travels with it.** `refit` runs before the recorder, so a resize is part of the
+    // step that caused it rather than a separate thing to undo — otherwise every drop would cost two
+    // presses to take back.
+    once(&mut app, vec![KeyCode::SuperLeft, binding(Action::UndoBuild).key]);
+    assert_eq!(members(&app).len(), 1, "one press, one step");
+}
+
 /// **A tile survives being saved and reopened — members, hole and all.**
 ///
 /// The round-trip §7 of the tile-authoring plan asked for and which did not exist: *"build floor +

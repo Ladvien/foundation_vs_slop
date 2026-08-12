@@ -192,6 +192,9 @@ pub enum Action {
     /// **Take the piece in hand**, so the arrows steer the tile instead of the library list.
     /// `Esc` puts it back. See [`crate::build::Build::placing`].
     BuildArm,
+    /// Step the tile assembler's own history back, and forward. See [`crate::build::TileHistory`].
+    UndoBuild,
+    RedoBuild,
     BuildNew,
     BuildDropMember,
     BuildTurn,
@@ -575,6 +578,13 @@ pub const BINDINGS: &[Binding] = &[
     // second one in this context would collide with it, and the collision is the census pointing out
     // that they are the same verb. The handler asks which mode is live.
     b(Action::BuildNew, KeyCode::KeyN, false, Context::Tiles, "N", "new tile"),
+
+    // **Its own stack, like every other tab's.** `UndoTile` is the *mesh* tab's, over library edits;
+    // this one is over the tile in hand. Two tabs editing different files through one stack would
+    // make "undo" mean whichever thing was touched last, which is the shape `Action::UndoTile`'s own
+    // note already argues against.
+    bs(Action::UndoBuild, KeyCode::KeyZ, true, false, Context::Tiles, "Z", "undo / redo"),
+    bs(Action::RedoBuild, KeyCode::KeyZ, true, true, Context::Tiles, "Z", "undo / redo"),
 
 
     b(Action::ScanMesh, KeyCode::KeyB, false, Context::Meshes, "B", "from the mesh: rescan solid / turn x y z"),
@@ -1059,6 +1069,7 @@ mod tests {
             Action::BuildForward, Action::BuildLeft, Action::BuildBack, Action::BuildRight,
             Action::BuildDown, Action::BuildUp, Action::BuildRung,
             Action::BuildDrop, Action::BuildSlot, Action::BuildArm,
+            Action::UndoBuild, Action::RedoBuild,
             Action::BuildTurn, Action::BuildDropMember, Action::BuildNew,
         ];
         assert_eq!(
