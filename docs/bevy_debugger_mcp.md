@@ -54,14 +54,18 @@ Then ask the agent to look at the running game. The observation tools ride Bevy'
 
 ## The companion plugin, and what it adds
 
-The debugger ships `bevy_debugger_bevy`, which registers two **custom** BRP methods on top of Bevy's built-in ones. It lives at `crates/bevy_debugger_mcp/crates/bevy_debugger_bevy` and is reached as a path dependency behind the same `debugger` feature, so it is absent from every default, release and determinism build. Confirm both halves of that with:
+The debugger ships `bevy_debugger_bevy`, which registers four **custom** BRP methods on top of Bevy's built-in ones. It lives at `crates/bevy_debugger_mcp/crates/bevy_debugger_bevy` and is reached as a path dependency behind the same `debugger` feature, so it is absent from every default, release and determinism build. Confirm both halves of that with:
 
 ```sh
 cargo tree -i bevy_debugger_bevy                      # error: did not match any packages
 cargo tree -i bevy_debugger_bevy --features debugger  # matches, and so does bevy_remote
 ```
 
-**`bevy_debugger/screenshot`** — captures the primary window, optionally crops to a region, optionally scales, and writes a PNG.
+They cover the three directions the loop needs: frames come **out** (`screenshot`), input goes **in** (`input`), and instructions go **to the person at the keyboard** (`guide`, `guide+watch`).
+
+**`bevy_debugger/screenshot`** — captures **offscreen**, from an `Image` a mirror camera renders to, optionally crops to a region, optionally scales, and writes a PNG. It never reads the window surface: that would need the window raised and focused, which is the whole thing this path exists to avoid. A host that has not inserted `DebugCaptureTarget` gets a loud refusal rather than a fallback.
+
+Two consequences worth knowing before you ask for a shot. **The mirror camera cannot see a UI tree** — Bevy draws UI to one camera, so panels, banners and the error log are absent from every capture. That is a `bevy_devshot` question. And a **second** `Camera3d` is exactly the thing that breaks `Single<.., With<Camera3d>>` queries, which is why the mirror camera carries no shared marker and hosts filter positively on their own.
 
 ```sh
 curl -s -X POST http://127.0.0.1:15702 -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"bevy_debugger/screenshot","params":{"path":"shot.png","region":{"x":760,"y":400,"width":900,"height":560},"zoom":0.5}}'
@@ -95,9 +99,84 @@ post '{"kind":"Cursor","clear":true}'
 
 **Ordering is load-bearing.** A move queued *after* a button, or a second move in one frame, is deferred to the next frame: applying `press, move` together makes the game read the press at the new position, so the click never happens where it was aimed, and two moves in one frame collapse a drag's path to its endpoint. The example `cargo run -p bevy_debugger_bevy --example cursor_drag_lands` demonstrates it, and earned its keep immediately — it caught a release overtaking two still-pending moves while every individual rule behaved as written.
 
+## `bevy_debugger/guide` — telling the author what to try
+
+The other three methods point at the *app*. This one points at the **person**, and it is the direction that did not exist: every instruction an agent gave went to a terminal the author had to look away from their work to read, and every answer came back as prose the agent then had to guess its way from. On 2026-08-12 that cost five bug reports in one afternoon, three of which were not reproduced first time.
+
+Post a script, and the app renders **one step** on its own window:
+
+```sh
+curl -s -X POST $B -H 'Content-Type: application/json' -d @- <<'JSON'
+{"jsonrpc":"2.0","id":1,"method":"bevy_debugger/guide","params":{"steps":[
+  {"label":"open the Tiles tab",
+   "goal":"everything below happens there, and the key list changes with the tab",
+   "do":["press 4"],
+   "checkpoint":"the Tiles tab is open",
+   "recovery":"if a text field has the keyboard the number types into it: press Escape first"}
+]}}
+JSON
+```
+
+A step is Carroll's guided-exploration card, field for field — brief hints, a **checkpoint**, and **recovery**. That third field is the differentiator: Chauvergne et al. 2023 reviewed twenty-one shipped tutorials and found *not one* that told the learner how to correct a wrong action.
+
+Then watch. `bevy_debugger/guide+watch` is a **watching method**, so `curl -N` holds the connection open and gets a frame each time something happens:
+
+```sh
+curl -N -s -X POST $B -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"bevy_debugger/guide+watch"}'
+```
+
+| answer | meaning |
+|---|---|
+| *(nothing)* | the checkpoint is unmet; the request is parked and costs nothing |
+| `{"passed": "...", "guide": {...}}` | the condition arrived; the app has moved to the next step |
+| `{"waiting_on_a_person": true, "step": "..."}` | this step has **no** checkpoint — only a person can judge it. Send `{"skip": true}` once they have |
+| `{"done": true, "guide": {...}}` | the script is finished |
+
+**Each non-advancing answer is sent once**, not every frame. Which also makes the stream **single-consumer**: there is no per-request identity to key on, so a second watcher attached later will miss an announcement. The stream is a notification channel; `{"read": true}` on the ordinary method is the state, and anything that needs to be sure asks for that.
+
+What comes back is **`k/n`, never a boolean** — Bryant, *Game Testing All in One* 4e: a tester who ran the steps twice and saw it twice will reasonably report 100%, and it is just as likely to be 50%. A step showing `0/1` is not noise: it is the one that needs a person's judgement, or the one whose instruction made no sense.
+
+### Checkpoints are the host's words, not the plugin's
+
+The plugin cannot know what a tile is and must not learn — five dependencies, no reach into any particular app. So a host registers one-shot systems answering `bool`:
+
+```rust
+let has_two = app.register_system(|tile: Res<Tile>| tile.members >= 2);
+app.world_mut().resource_mut::<Checkpoints>().register("tile has two members", has_two);
+```
+
+A script naming something nobody registered is **refused by name**, listing what would have worked — a watching handler that parked instead would wait for ever, and a script that never advances is indistinguishable from a person who has not got round to it. `emerge-mapper` registers ten names in `src/guided.rs`, and `every_checkpoint_a_shipped_guide_names_is_registered_and_runs` boots the editor headless to prove no shipped script can strand its author. That test catches the runtime refusal in CI, where it costs nothing, instead of at step four with the author at the keyboard.
+
+### What the overlay deliberately does not do
+
+- **It shows one step, never the script.** Andersen et al. 2012 (CHI, N = 45,318) crossed four tutorial variables across three games; in the complex, unconventional interface — which is what an editor is — instructions given *"as closely as possible to when they were needed, rather than out of context in an up-front manual"* were worth **+40% progress and +16% play time**.
+- **It never gates input.** Restricting freedom to force the step had **no effect in any of the three games**, and the app has to stay usable with a card on screen.
+- **There is no help button.** An on-demand one cost **12% of levels completed and 15% of play time** in the same study, and only 31% of players ever clicked it. The current step is pushed; a caller that wants it gone sends `{"visible": false}`, which keeps the script.
+- **It spawns no camera.** A `Camera2d` from a plugin would be a second camera in somebody else's app, and `Single<..>` *silently skips its system* on a non-unique match. It renders into the host's existing UI tree, so a host with no UI camera shows nothing — honest, and free.
+- **It is `Pickable::IGNORE`.** A UI node over the world swallows every pick underneath it (`docs/ui.md` §5, trap 7).
+
+Because it is a UI panel, **the mirror camera cannot see it** — confirming it renders is a `bevy_devshot` question or a headless assertion on the `Text` tree.
+
+Run `cargo run -p bevy_debugger_bevy --example guided_steps_land` to watch a script advance in a terminal: no window, no socket, no GPU.
+
+### Looking at a card: `scripts/guide_devshot.sh`
+
+```sh
+scripts/guide_devshot.sh crates/emerge-mapper/guides/author_a_tile.json shot:first beat:confirm skip shot:person
+```
+
+It builds the editor, launches it on port 15788, posts the script, and writes `debug_screenshots/guide_<name>.png` per `shot:` verb — `beat:` skips and shoots inside the two-second confirmation, to catch the `OK <step>` card.
+
+**It waits for you to click the editor window, and will not raise it.** That is a measurement, not politeness: on macOS 26.5 `osascript ... set frontmost of (first process whose unix id is $PID)` is accepted and does nothing — System Events resolves the pid and names the process correctly, the set returns success, and the frontmost app is unchanged. A freshly launched window does not come up in front either. Every frame captured that way is **exactly 55,654 bytes** of black, which is why the script checks the size and says so rather than handing you a file.
+
+The other trap it encodes: **never launch the editor with `cargo run` for this.** Cargo forks the binary as a child, so `$!` is cargo's pid and every process query answers about a command-line tool with no window.
+
+The first run of it earned its keep — the card was at 12 px, which in this editor is the tab bar, and the shot came back with ANIM reading through STEP 1 OF 8 at 0.92 alpha. `GuidePlacement` exists because of that frame.
+
 ### `DebuggerPlugin` owns `RemotePlugin` — do not add a second one
 
-`DebuggerPlugin::build` adds `RemotePlugin::default().with_method_main(..)` to register its two methods. Bevy rejects a duplicate plugin by name, so adding `RemotePlugin` alongside it panics the moment the feature is switched on. `src/lib.rs` therefore adds `DebuggerPlugin` plus **only** the HTTP transport.
+`DebuggerPlugin::build` adds `RemotePlugin::default().with_method_main(..)` to register its methods, plus `with_watching_method_main` for `guide+watch`. Bevy rejects a duplicate plugin by name, so adding `RemotePlugin` alongside it panics the moment the feature is switched on. `src/lib.rs` therefore adds `DebuggerPlugin` plus **only** the HTTP transport.
 
 ### Capture is offscreen, and never touches your desktop
 
