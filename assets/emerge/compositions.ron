@@ -1,0 +1,44 @@
+(
+    version: 1,
+    note: None,
+    compositions: [
+        (
+            id: "kit/tile_1",
+            envelope: Bounded(
+                size: (1.0, 4.0, 1.0),
+            ),
+            members: [
+                (
+                    id: "floor",
+                    body: Descriptor(
+                        id: "floor",
+                        tip: (0, 0),
+                        on: None,
+                        patch: None,
+                    ),
+                    at: (0.0, 0.0),
+                    yaw: 0.0,
+                    lift: 0.0,
+                    of_fingerprint: None,
+                    note: None,
+                ),
+                (
+                    id: "wall",
+                    body: Descriptor(
+                        id: "wall",
+                        tip: (0, 0),
+                        on: None,
+                        patch: None,
+                    ),
+                    at: (-0.44999966, 0.000000059604645),
+                    yaw: 0.0,
+                    lift: 0.0,
+                    of_fingerprint: None,
+                    note: None,
+                ),
+            ],
+            locations: [],
+            note: None,
+        ),
+    ],
+)

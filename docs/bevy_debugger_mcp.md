@@ -126,6 +126,14 @@ curl -N -s -X POST $B -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"bevy_debugger/guide+watch"}'
 ```
 
+**The stream is Server-Sent Events, not JSON lines**, and a client that misses this fails silently. `BrpStream::poll_frame` writes `format!("data: {serialized}\n\n")` (`bevy_remote-0.19.0/src/http.rs:451`), so every frame carries a `data: ` prefix. Hand that raw line to a JSON parser and nothing ever parses — the reader accumulates in silence, which looks exactly like a run where nothing is happening. That cost a whole guided run: four checkpoints passed and the watcher reported none of them. Strip the prefix:
+
+```sh
+curl -N -s -X POST $B -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"bevy_debugger/guide+watch"}' \
+| sed -u -n 's/^data: //p'
+```
+
 | answer | meaning |
 |---|---|
 | *(nothing)* | the checkpoint is unmet; the request is parked and costs nothing |
