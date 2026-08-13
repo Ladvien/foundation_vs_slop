@@ -5098,3 +5098,74 @@ fn the_tile_authoring_script_can_actually_be_followed() {
     }
     assert!(reached >= 6, "only {reached} checkpointed steps were driven");
 }
+
+/// **A tile that is too big says which member made it too big.**
+///
+/// The size line said `1 x 3 tiles — hand-stamped, too big to generate` and stopped there. Found
+/// during a guided run, from the keyboard: six members in the tile, one of them nudged 0.67 m off
+/// centre, and no way to learn which. The existing test asserted the *count*, which was right the
+/// whole time — the missing thing was never a number, it was a name.
+///
+/// The doubling is the part nobody guesses and so the part that has to be stated. `fit_envelope`
+/// measures `|offset| + span/2` and the envelope is centred on the anchor, so it reaches that far
+/// on *both* sides: 0.67 m off centre costs 1.34 m, which is what turns one cell into three.
+///
+/// Two negative cases are pinned beside it, because a message that fires when nothing is wrong is
+/// how a useful line becomes one people stop reading (`docs/ui.md` §3.4, the alert budget).
+#[test]
+fn a_tile_too_big_to_generate_names_the_member_that_did_it() {
+    use emerge_core::composition::{Body, Member};
+
+    let root = Fixture::new("too_big_why")
+        // A wall's shape, from the shipped kit: thin in X, a whole cell long in Z.
+        .sized_descriptor("wall", "alpha", 0.1, 1.0)
+        // Bigger than a cell all by itself, and centred. Nothing to nudge.
+        .sized_descriptor("sofa", "alpha", 0.8, 2.0)
+        .build("m");
+    let app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    let library = &app.world().resource::<emerge_mapper::project::Project>().library;
+
+    let at = |id: &str, x: f32, z: f32| Member {
+        id: id.to_owned(),
+        body: Body::Descriptor { id: id.to_owned(), tip: (0, 0), on: None, patch: None },
+        at: (x, z),
+        yaw: 0.0,
+        lift: 0.0,
+        paint: 0,
+        of_fingerprint: None,
+        note: None,
+    };
+
+    // The author's actual tile, reduced to what matters: several centred walls and one nudged.
+    let members = vec![at("wall", 0.0, 0.0), at("wall", 0.45, 0.0), at("wall", 0.0, 0.67)];
+    let size = emerge_mapper::build::fit_envelope(&members, library, 4.0);
+    assert_eq!(
+        emerge_mapper::build::tiles_across(size),
+        (1, 3),
+        "0.67 off centre plus half a metre of wall reaches 1.17, and the envelope has to reach that \
+         far both ways: {size:?}"
+    );
+
+    let Some(why) = emerge_mapper::build::what_made_it_big(&members, library, size) else {
+        panic!("a tile that cannot be generated must say which member did it");
+    };
+    assert!(why.contains("wall"), "names the piece: {why}");
+    assert!(why.contains("0.67"), "and how far off centre it is: {why}");
+    assert!(why.contains("1.34"), "and what that costs, since the doubling is the surprise: {why}");
+    assert!(why.contains('Z'), "and on which axis, since the other one was fine: {why}");
+
+    // A piece simply bigger than a cell is not somebody's mistake, and has no offset to correct.
+    let big = vec![at("sofa", 0.0, 0.0)];
+    let size = emerge_mapper::build::fit_envelope(&big, library, 4.0);
+    assert_eq!(emerge_mapper::build::tiles_across(size), (1, 2));
+    assert!(
+        emerge_mapper::build::what_made_it_big(&big, library, size).is_none(),
+        "naming an offset of zero would be worse than saying nothing"
+    );
+
+    // And a tile that fits says nothing at all.
+    let fits = vec![at("wall", 0.45, 0.0)];
+    let size = emerge_mapper::build::fit_envelope(&fits, library, 4.0);
+    assert!(emerge_mapper::build::is_one_cell(size));
+    assert!(emerge_mapper::build::what_made_it_big(&fits, library, size).is_none());
+}

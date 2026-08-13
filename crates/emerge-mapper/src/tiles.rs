@@ -5054,6 +5054,12 @@ fn build_detail(
             ACCENT,
             9.0,
         );
+        // **And which member did it.** The line above is a consequence; on a tile with six members
+        // it left the author to find the cause by opening each one. `docs/ui.md` §3.2 asks for the
+        // delta, and the delta here is a named piece and a distance.
+        if let Some(why) = crate::build::what_made_it_big(&comp.members, &project.library, size) {
+            line(p, why, DIM, 9.0);
+        }
     }
 
     // **The grid, and where you are on it.** The cell counts come from the rung rather than being

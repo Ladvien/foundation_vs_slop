@@ -52,12 +52,13 @@
     },
     {
       "label": "is the tile still one cell",
-      "goal": "only a one-cell tile can be a solver prototype, and the size is read off the contents rather than set",
+      "goal": "only a one-cell tile can be a solver prototype, and the size is read off the contents: a piece off centre costs DOUBLE its offset, because the tile is centred on its anchor and has to reach that far both ways",
       "do": [
-        "read the size line at the top of the panel"
+        "read the size line at the top of the panel",
+        "if it is bigger than 1 x 1, the line under it names the piece"
       ],
       "checkpoint": "the tile is one cell",
-      "recovery": "something is hanging over the edge: focus it with left and right, then shift-arrow it back in"
+      "recovery": "focus that piece with left and right, then use the PLAIN arrows to bring it back toward the middle -- not shift, which flushes it to the edge and makes the tile bigger"
     },
     {
       "label": "save it",

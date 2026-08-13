@@ -676,6 +676,71 @@ pub fn is_one_cell(size: (f32, f32, f32)) -> bool {
     tiles_across(size) == (1, 1)
 }
 
+/// **Which member made the tile too big, and what it cost.**
+///
+/// The size line said `1 x 3 tiles — hand-stamped, too big to generate`, which is a consequence with
+/// no cause: an author with six members in the tile had no way to learn which one did it, and the
+/// answer was one wall nudged 0.67 m off centre. Found by an author standing in front of it during a
+/// guided run, not by a test — every test asserted the *count*, which was right.
+///
+/// The doubling is the part nobody guesses. [`fit_envelope`] measures `|offset| + span/2` and the
+/// envelope is **centred on the anchor**, so it has to reach that far on *both* sides: two thirds of a
+/// metre off centre buys a metre and a third of tile. Stating the offset alone would still leave the
+/// arithmetic to be inferred, so this states what it costs.
+///
+/// Returns `None` when the tile is one cell, or when the reach is owned by a piece that is simply
+/// bigger than a cell — a 2 m sofa is not off centre and there is nothing to nudge, so naming an
+/// offset of zero would be worse than saying nothing.
+pub fn what_made_it_big(
+    members: &[Member],
+    library: &emerge_core::library::Library,
+    size: (f32, f32, f32),
+) -> Option<String> {
+    if is_one_cell(size) {
+        return None;
+    }
+    let tile = emerge_core::grid::TILE;
+    // The axis that is over, and by how far each member reaches along it. Both may be over; name the
+    // worse one, because fixing it is the step the author takes next and the other will still be
+    // stated by the count.
+    let (nx, nz) = tiles_across(size);
+    let axis_x = nx > 1 && nx >= nz;
+    let mut worst: Option<(f32, f32, &str)> = None;
+    for m in members {
+        let span = match &m.body {
+            Body::Descriptor { id, .. } => library
+                .get(id)
+                .map(|d| crate::editor::brush_span(d, m.yaw))
+                .unwrap_or((0.0, 0.0)),
+            _ => (0.0, 0.0),
+        };
+        let (at, half) = if axis_x {
+            (m.at.0.abs(), span.0 * 0.5)
+        } else {
+            (m.at.1.abs(), span.1 * 0.5)
+        };
+        let name = match &m.body {
+            Body::Descriptor { id, .. } => id.as_str(),
+            Body::Slot { .. } => "a hole",
+            _ => "a member",
+        };
+        if worst.is_none_or(|(r, _, _)| at + half > r) {
+            worst = Some((at + half, at, name));
+        }
+    }
+    let (_, off, name) = worst?;
+    // Centred pieces are not the author's mistake; a piece wider than a cell is a fact about the mesh.
+    if off * 2.0 < tile * 0.1 {
+        return None;
+    }
+    let axis = if axis_x { "X" } else { "Z" };
+    Some(format!(
+        "`{name}` sits {off:.2} m off centre in {axis}, and the tile is centred on its anchor — so \
+         that costs {:.2} m. Arrow it back toward the middle.",
+        off * 2.0
+    ))
+}
+
 /// How many steps the tile assembler remembers.
 ///
 /// The same 64 the mesh tab keeps, and bounded for the same reason: a snapshot is a whole
