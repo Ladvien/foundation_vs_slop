@@ -75,6 +75,31 @@ impl SnapLevel {
         }
     }
 
+    /// **One rung down, and it stops at the bottom.**
+    ///
+    /// Saturating rather than wrapping, because this is what `Shift` means at a call site — *"finer
+    /// than what I am on"* — and a modifier that jumps from the finest rung back to the whole tile
+    /// would be the largest possible movement dressed as the smallest. Wrapping belongs to a key
+    /// that cycles, and that is [`SnapLevel::next`].
+    pub fn finer(self) -> SnapLevel {
+        match self {
+            SnapLevel::Tile => SnapLevel::Fine,
+            SnapLevel::Fine | SnapLevel::Finer => SnapLevel::Finer,
+        }
+    }
+
+    /// **The next rung, wrapping** — what a key that cycles the ladder steps through.
+    ///
+    /// Coarsest first, so an author who presses it once from the default lands on the rung they are
+    /// most likely to want next rather than on the finest one.
+    pub fn next(self) -> SnapLevel {
+        match self {
+            SnapLevel::Tile => SnapLevel::Fine,
+            SnapLevel::Fine => SnapLevel::Finer,
+            SnapLevel::Finer => SnapLevel::Tile,
+        }
+    }
+
     /// The lattice pitch in metres, dividing [`TILE`] by `divisor` once per rung.
     ///
     /// `divisor` is a project policy rather than a constant, so a kit authored on halves and one
@@ -260,5 +285,39 @@ mod tests {
                 snap_span(span)
             );
         }
+    }
+
+    /// **`finer` saturates and `next` wraps**, which is the difference between a modifier and a key
+    /// that cycles.
+    ///
+    /// A `Shift` that jumped from the finest rung back to the whole tile would be the largest
+    /// movement available dressed as the smallest, so the two step differently on purpose and this
+    /// pins both. `emerge-mapper`'s `snap_level` reads the first; its `J` reads the second.
+    #[test]
+    fn the_ladder_steps_one_way_for_a_modifier_and_another_for_a_cycle() {
+        assert_eq!(SnapLevel::Tile.finer(), SnapLevel::Fine);
+        assert_eq!(SnapLevel::Fine.finer(), SnapLevel::Finer);
+        assert_eq!(
+            SnapLevel::Finer.finer(),
+            SnapLevel::Finer,
+            "the bottom rung stays put — a modifier must never be the biggest jump on offer"
+        );
+
+        assert_eq!(SnapLevel::Tile.next(), SnapLevel::Fine);
+        assert_eq!(SnapLevel::Fine.next(), SnapLevel::Finer);
+        assert_eq!(
+            SnapLevel::Finer.next(),
+            SnapLevel::Tile,
+            "a key that cycles must come back round, or the third press does nothing"
+        );
+
+        // Every rung is reachable from every other by cycling, which is what makes one key enough.
+        let mut seen = vec![SnapLevel::Tile];
+        let mut at = SnapLevel::Tile;
+        for _ in 0..2 {
+            at = at.next();
+            seen.push(at);
+        }
+        assert_eq!(seen, vec![SnapLevel::Tile, SnapLevel::Fine, SnapLevel::Finer]);
     }
 }
