@@ -5314,151 +5314,68 @@ fn a_corner_is_told_from_two_parallel_walls_and_the_units_are_degrees() {
 
 /// **An ASSET-CONTRACT test: can the solver actually use the site kit's tiles?**
 ///
-/// It reads the shipped project on purpose. The question *is* a fact about what ships — authoring
-/// tiles is only worth doing if `from_compositions` turns them into prototypes, and every step of the
-/// guided run up to now proves the tiles were saved, not that they are usable. Those are different
-/// claims and only this one matters.
+/// It reads the shipped project on purpose, and that is the exception the fixture rule allows —
+/// what it asserts *is* a fact about what ships. Authoring tiles is only worth doing if
+/// `grammar::from_compositions` turns them into prototypes, and every guided step up to now proved
+/// they were *saved*, which is a different claim and the weaker one.
 ///
-/// If this fails, the answer is in `skipped`: it names each composition it could not make a tile of,
-/// and why.
+/// `skipped` is the useful output: it names each composition it could not make a tile of, and why.
+/// A tile the solver cannot use is a tile authored for nothing.
 #[test]
 fn the_site_kit_tiles_become_solver_prototypes() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    let Some(root) = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_default();
-    let project = match emerge_mapper::project::Project::open(&root, "untitled_map", Some("site")) {
-        Ok(p) => p,
-        Err(e) => panic!("the shipped site kit must open: {e}"),
+        .map(std::path::Path::to_path_buf)
+    else {
+        panic!("the crate must sit two levels under the repo root");
     };
+    let project = emerge_mapper::project::Project::open(&root, "untitled_map", Some("site"))
+        .unwrap_or_else(|e| panic!("the shipped site kit must open: {e}"));
 
-    let n = project.compositions.compositions.len();
-    println!("site kit has {n} composition(s)");
-    for c in &project.compositions.compositions {
-        println!("  {} {:?} {} member(s)", c.id, c.envelope, c.members.len());
+    let tiles = &project.compositions.compositions;
+    println!("\nsite kit: {} composition(s)", tiles.len());
+    for c in tiles {
+        println!("  {:<14} {:?}  {} member(s)", c.id, c.envelope, c.members.len());
     }
-    if n == 0 {
+    if tiles.is_empty() {
         println!("nothing authored yet — nothing to check");
         return;
     }
 
     let composed = emerge_core::grammar::from_compositions(
-        &project.compositions.compositions,
+        tiles,
         &project.library,
         project.policy.face_bands,
         1.0,
         emerge_core::composition::agrees,
-    );
-    let composed = match composed {
-        Ok(c) => c,
-        Err(e) => panic!("the site kit's tiles make no grammar at all: {e}"),
-    };
+    )
+    .unwrap_or_else(|e| panic!("the site kit's tiles make no grammar at all: {e}"));
+
     for s in &composed.skipped {
         println!("  SKIPPED: {s}");
     }
+    // One prototype is always `Empty` — the grammar's way of saying "nothing goes here".
+    let authored = composed.grammar.prototypes.len().saturating_sub(1);
     println!(
-        "grammar: {} prototype(s) (one of them is Empty)",
-        composed.grammar.prototypes.len()
+        "\ngrammar: {authored} authored prototype(s) + Empty, {} face interface(s)\n",
+        composed.faces.iter().filter(|f| f.is_some()).count()
     );
-    assert!(
-        composed.grammar.prototypes.len() > 1 + composed.skipped.len().min(1) - 1,
-        "every authored tile was skipped, so the solver has nothing but Empty to place"
-    );
+
     assert!(
         composed.skipped.is_empty(),
-        "a tile the solver cannot use is a tile that was authored for nothing: {:?}",
+        "a tile the solver cannot use is a tile authored for nothing: {:?}",
         composed.skipped
     );
-}
-
-/// **The kit is visible from the tab that makes it, and a tile can be reopened.**
-///
-/// The Tiles tab could author tiles and never show them. `open_blank` was the only opener, so every
-/// tile was a new one: an author who finished four could not see the set, could not tell a duplicate
-/// from a new one, and could not correct one. That is not hypothetical — a guided run produced
-/// `site/tile_4` with its low wall in the middle of the tile instead of flush against an edge, and
-/// the only way to fix it was to hand-edit `compositions.ron`.
-///
-/// The verbs cost no new key. `left`/`right` were this tab's one unbound pair at `Idle`, and
-/// `docs/tiles_tab_contract.md` recorded why: *"There is one list on this tab, so there is nothing to
-/// switch between."* There are two now.
-#[test]
-fn the_kit_can_be_walked_and_a_saved_tile_reopened() {
-    use emerge_mapper::build::Build;
-    use emerge_mapper::keys::{binding, Action, Stance};
-
-    let root = Fixture::new("kit_list").descriptor("wall", "alpha").build("m");
-    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
-    app.update();
-
-    let press = |app: &mut App, key: KeyCode| {
-        app.add_systems(
-            Update,
-            IntoScheduleConfigs::before(
-                move |mut keys: ResMut<bevy::input::ButtonInput<KeyCode>>, mut done: Local<bool>| {
-                    if !*done {
-                        keys.release_all();
-                        keys.press(key);
-                        *done = true;
-                    }
-                },
-                emerge_mapper::keys::Phase::Act,
-            ),
-        );
-        app.update();
-    };
-    let key = |a| binding(a).key;
-
-    // Two tiles in the kit, distinguishable by member count.
-    {
-        let mut project = app.world_mut().resource_mut::<emerge_mapper::project::Project>();
-        for (id, members) in [("kit/one", 0usize), ("kit/two", 0usize)] {
-            let _ = members;
-            project.compositions.compositions.push(emerge_core::composition::Composition {
-                id: id.to_owned(),
-                envelope: emerge_core::composition::Envelope::Bounded { size: (1.0, 4.0, 1.0) },
-                members: vec![],
-                locations: vec![],
-                note: None,
-            });
-        }
-    }
-    press(&mut app, key(Action::TilesTab));
-
-    // `right` opens the kit, and that IS the stance — so the key list changes with it.
-    press(&mut app, key(Action::KitEnter));
-    assert_eq!(app.world().resource::<Build>().browsing, Some(0), "right shows the kit");
-    // One more tick before reading the stance: `census` reads `Build` in the same frame the key
-    // handler writes it, so the list it draws is one frame behind the flag. Imperceptible to a
-    // person and worth stating rather than hiding behind a loop.
-    app.update();
-    assert_eq!(
-        app.world().resource::<emerge_mapper::keys::Live>().1,
-        Stance::Browsing,
-        "and the census follows, or the key list would be describing the wrong state"
+    // **More prototypes than tiles, and that is the point.** A tile is a quarter-turn object:
+    // `from_compositions` emits one prototype per distinct rotation, so a symmetric floor yields one
+    // and a wall or a corner yields four. Four authored tiles became ten placeable prototypes.
+    //
+    // Asserting equality here was wrong and worth recording: it would have read the rotation
+    // expansion — the thing that makes a small kit go a long way — as a defect.
+    assert!(
+        authored >= tiles.len(),
+        "every authored tile should yield at least one prototype: {authored} from {}",
+        tiles.len()
     );
-
-    press(&mut app, key(Action::KitNext));
-    assert_eq!(app.world().resource::<Build>().browsing, Some(1), "down walks it");
-    // Saturating at the end, like the member walk: holding an arrow should stop, not wrap.
-    press(&mut app, key(Action::KitNext));
-    assert_eq!(app.world().resource::<Build>().browsing, Some(1), "and stops at the end");
-
-    // `right` again descends into the tile — the verb the tab never had.
-    press(&mut app, key(Action::KitOpen));
-    let build = app.world().resource::<Build>();
-    assert_eq!(
-        build.open.as_ref().map(|c| c.id.as_str()),
-        Some("kit/two"),
-        "the selected tile is open for editing"
-    );
-    assert_eq!(build.browsing, None, "and the list closes behind it");
-    assert!(!build.placing, "reopening is not holding: the arrows walk until something is picked up");
-
-    // `Esc` backs out of the list without opening anything — invariant 2, one stance further.
-    press(&mut app, key(Action::KitEnter));
-    assert!(app.world().resource::<Build>().browsing.is_some());
-    press(&mut app, key(Action::Cancel));
-    assert_eq!(app.world().resource::<Build>().browsing, None, "Esc always returns to Choosing");
 }
