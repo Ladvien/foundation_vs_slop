@@ -1,0 +1,106 @@
+{
+  "steps": [
+    {
+      "label": "open the Tiles tab with the site kit",
+      "goal": "the site kit is the architectural set -- floor, wall, corner -- and it has NO tiles at all yet, which is why the solver has nothing to place",
+      "do": [
+        "press 3"
+      ],
+      "checkpoint": "the Tiles tab is open",
+      "recovery": "if the palette shows fridges and beds you are on the furniture kit: restart with `cargo run -p emerge-mapper . untitled_map --kit site`"
+    },
+    {
+      "label": "start the floor tile",
+      "goal": "a floor tile is the default cell a solver fills space with -- open on all four sides",
+      "do": [
+        "press N for a new tile"
+      ],
+      "checkpoint": "the open tile is unsaved",
+      "recovery": "if nothing changes you are not on the Tiles tab: press 3 first"
+    },
+    {
+      "label": "build and save the floor tile",
+      "goal": "the open cell. Every layout is mostly this one, so it is the one worth getting right first.",
+      "do": [
+        "walk the library to site/floor",
+        "press Enter",
+        "press Cmd+S"
+      ],
+      "checkpoint": "the tile is saved",
+      "recovery": "site/floor is 1.00 x 1.00, exactly one cell, so the size line should read 1 x 1 with nothing under it"
+    },
+    {
+      "label": "start the wall tile",
+      "goal": "one solid side is what makes a room a room",
+      "do": [
+        "press N for a new tile"
+      ],
+      "checkpoint": "the open tile is unsaved",
+      "recovery": "if nothing changes you are not on the Tiles tab: press 3 first"
+    },
+    {
+      "label": "build and save the wall tile",
+      "goal": "floor plus one wall, flush to a side. The wall has to TOUCH the boundary or the edge derives as open and the solver will happily put a doorway through it.",
+      "do": [
+        "bring site/floor in with Enter",
+        "press Escape, walk to site/wall, press Enter",
+        "hold shift and press an arrow to put it flush against one side",
+        "press Cmd+S"
+      ],
+      "checkpoint": "the tile is saved",
+      "recovery": "site/wall is 0.10 x 1.00; flush it lands at 0.45 off centre and still fits one cell. If the size line grows, the line under it names the piece"
+    },
+    {
+      "label": "start the corner tile",
+      "goal": "a corner is where two solid sides meet -- without it the solver can only make corridors",
+      "do": [
+        "press N for a new tile"
+      ],
+      "checkpoint": "the open tile is unsaved",
+      "recovery": "if nothing changes you are not on the Tiles tab: press 3 first"
+    },
+    {
+      "label": "build and save the corner tile",
+      "goal": "floor plus two walls meeting at 90 degrees. Turn the second one with R before flushing it.",
+      "do": [
+        "build the wall tile again: floor, then a flushed wall",
+        "bring a second site/wall in and press R to turn it a quarter",
+        "shift-arrow it flush against an adjacent side",
+        "press Cmd+S"
+      ],
+      "checkpoint": "the tile is saved",
+      "recovery": "if the turned wall makes the tile too big, it is off centre on the axis it now spans -- plain arrows bring it back"
+    },
+    {
+      "label": "start the low wall tile",
+      "goal": "a knee-high divider reads as separation without becoming a corridor",
+      "do": [
+        "press N for a new tile"
+      ],
+      "checkpoint": "the open tile is unsaved",
+      "recovery": "if nothing changes you are not on the Tiles tab: press 3 first"
+    },
+    {
+      "label": "build and save the low wall tile",
+      "goal": "floor plus site/wall_low, flush. Same shape as the wall tile but see-over, which gives the solver a way to divide space without blocking sight.",
+      "do": [
+        "floor, then site/wall_low",
+        "shift-arrow it flush against a side",
+        "press Cmd+S"
+      ],
+      "checkpoint": "the tile is saved",
+      "recovery": "site/wall_low is 0.20 x 1.00 and fits the same way the wall does"
+    },
+    {
+      "label": "do these four make a room",
+      "goal": "the last question no checkpoint can answer, and the only one that decides whether this kit is worth extending",
+      "do": [
+        "go to the Map tab with 1",
+        "try filling a region from the composed tiles",
+        "say whether what comes out looks like architecture"
+      ],
+      "checkpoint": null,
+      "recovery": "there is nothing to recover here -- an answer of no is the finding, and names the tile that is missing"
+    }
+  ]
+}

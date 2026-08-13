@@ -92,6 +92,24 @@ impl Plugin for GuidePlugin {
                 project.compositions.compositions.iter().any(|s| s.id == c.id && s.members == c.members)
             })
         });
+        // **The other half of "is it saved", and a multi-tile session needs it.**
+        //
+        // A script that authors several tiles has a step per tile whose condition is `the tile is
+        // saved`. After the first one that condition stays true -- the saved tile is still open --
+        // so the next step arrives with its checkpoint already met and advances the instant it
+        // becomes current. The author sees two cards flash past and lands on step four.
+        //
+        // Alternating with this one is what makes each step's condition genuinely false on arrival,
+        // which `the_tile_authoring_script_can_actually_be_followed` requires of any action step.
+        let unsaved = app.register_system(|build: Res<Build>, project: Res<Project>| {
+            build.open.as_ref().is_some_and(|c| {
+                !project
+                    .compositions
+                    .compositions
+                    .iter()
+                    .any(|s| s.id == c.id && s.members == c.members)
+            })
+        });
         let edges_staged =
             app.register_system(|derived: Res<crate::tiles::DerivedEdges>| derived.0.is_some());
         let proposal_on_the_map =
@@ -106,6 +124,7 @@ impl Plugin for GuidePlugin {
         checkpoints.register("a piece is in hand", placing);
         checkpoints.register("the tile is one cell", one_cell);
         checkpoints.register("the tile is saved", saved);
+        checkpoints.register("the open tile is unsaved", unsaved);
         checkpoints.register("edges are staged", edges_staged);
         checkpoints.register("a proposal is on the map", proposal_on_the_map);
     }
