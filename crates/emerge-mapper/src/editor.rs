@@ -2107,6 +2107,10 @@ pub fn sense_context(
         // in the tile the library could never be walked again, so every second drop was a repeat.
         //
         // The pair says what the arrows are for: there is a piece, and you are placing it.
+        // **The kit list outranks a held piece**, and cannot honestly collide with it: `KitEnter` is
+        // bound at `Idle`, so nothing is in hand at the moment the list opens, and `open_saved`
+        // clears both flags.
+        keys::Context::Tiles if build.browsing.is_some() => keys::Stance::Browsing,
         keys::Context::Tiles if build.placing && crate::build::focused(&build) => {
             keys::Stance::Holding
         }

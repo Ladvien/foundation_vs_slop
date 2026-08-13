@@ -5011,6 +5011,49 @@ fn build_detail(
         p.spawn((Text::new(text), TextColor(colour), TextFont::from_font_size(size)));
     };
 
+    // **The kit, above the tile being built.** The tab could author tiles and never show them: an
+    // author finished four, could not see the set, could not reopen one to correct it, and had no
+    // way to notice a duplicate. The one that was wrong was only fixable by hand-editing the .ron.
+    //
+    // Drawn whenever there is a kit, not only while browsing, because "what is in this kit" is a
+    // property of the project rather than a mode — the same argument the size line makes. The cursor
+    // and the hint appear only while the arrows are actually on it.
+    if !project.compositions.compositions.is_empty() {
+        let browsing = build.browsing;
+        // **The census counts, not this panel.** `census_is_the_one_counter` forbids a panel
+        // rendering `compositions.compositions.len()` itself, and it caught this the first time it
+        // ran: one table, everything derived from it, so two panels disagreeing about the same
+        // number is unrepresentable rather than unlikely.
+        let catalog = emerge_core::census::of_catalog(
+            &project.library,
+            &project.compositions.compositions,
+        );
+        crate::chrome::section(p, &format!("KIT ({})", catalog.compositions));
+        for (i, c) in project.compositions.compositions.iter().enumerate() {
+            let here = browsing == Some(i);
+            let open_now = build.open.as_ref().is_some_and(|o| o.id == c.id);
+            // One row says three things an author has to know: which tile the arrows are on, which
+            // one is open for editing, and how much is in each.
+            let mark = if here { ">" } else if open_now { "*" } else { " " };
+            line(
+                p,
+                format!("{mark} {}  {} member(s)", c.id, c.members.len()),
+                if here { ACCENT } else if open_now { TEXT } else { DIM },
+                10.0,
+            );
+        }
+        line(
+            p,
+            if browsing.is_some() {
+                "right reopens it / Esc goes back to the meshes".to_owned()
+            } else {
+                "right shows the kit".to_owned()
+            },
+            DIM,
+            9.0,
+        );
+    }
+
     let Some(comp) = build.open.as_ref() else {
         crate::chrome::section(p, "TILE");
         line(

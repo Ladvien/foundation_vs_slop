@@ -94,6 +94,12 @@ pub struct Build {
     /// spans two of them makes `Cmd+Z` mean whichever was touched last. `TileHistory`'s own note
     /// already makes that argument about the two *tabs*; this is the same argument one level down.
     pub opened: u32,
+    /// **Whether the kit list is showing**, and where the cursor is in it.
+    ///
+    /// `Some(row)` is `Stance::Browsing`. Kept here rather than in a resource of its own because it
+    /// is the same kind of fact as `placing` — what the arrows are for — and the stance already reads
+    /// this struct to decide.
+    pub browsing: Option<usize>,
 }
 
 /// The rung a tile is built on before anyone changes it.
@@ -1071,6 +1077,12 @@ pub fn build_keys(
         });
         return;
     }
+    // **`Esc` leaves the kit list**, which is invariant 2 of `docs/tiles_tab_contract.md` -- "Esc
+    // always returns to Choosing" -- extended one stance further rather than given a second key.
+    if build.browsing.is_some() && just_pressed(&keyboard, *live, Action::Cancel) {
+        build.browsing = None;
+        return;
+    }
     if build.placing && just_pressed(&keyboard, *live, Action::Cancel) {
         build.placing = false;
         state.status.note("arrows walk the library".to_owned());
@@ -1441,6 +1453,50 @@ pub fn build_keys(
         let id = build.open.as_ref().map(|c| c.id.clone()).unwrap_or_default();
         state.status.note(format!("new tile `{id}`"));
     }
+
+    // ── the kit ──────────────────────────────────────────────────────────────────────────────
+    //
+    // Walking a list and opening from it. The tab could make tiles and never show them, so an
+    // author had no way to see the kit, reopen a tile to correct it, or notice they had built the
+    // same thing twice.
+    let kit = project.compositions.compositions.len();
+    if pressed(Action::KitEnter) {
+        if kit == 0 {
+            // A note, not a problem: an empty kit is where every project starts, and the answer is
+            // to make one rather than to fix anything.
+            state.status.note("no tiles in the kit yet — build one and press Cmd+S".to_owned());
+        } else {
+            build.browsing = Some(0);
+        }
+    }
+    if let Some(row) = build.browsing {
+        let step = |row: usize, by: i32| -> usize {
+            // Saturating, like the member walk: an author holding an arrow at the end of a list
+            // should stop there rather than wrap to the other end of it.
+            (row as i32 + by).clamp(0, kit.saturating_sub(1) as i32) as usize
+        };
+        if pressed(Action::KitPrev) {
+            build.browsing = Some(step(row, -1));
+        }
+        if pressed(Action::KitNext) {
+            build.browsing = Some(step(row, 1));
+        }
+        if pressed(Action::KitOpen) {
+            match project.compositions.compositions.get(row).cloned() {
+                Some(comp) => {
+                    let id = comp.id.clone();
+                    let n = comp.members.len();
+                    open_saved(&mut build, comp);
+                    state.status.note(format!("`{id}` opened — {n} member(s), Cmd+S saves over it"));
+                }
+                // The list is drawn from the same slice this indexes, so this is unreachable rather
+                // than unlikely — said out loud because the alternative is an `unwrap`.
+                None => state
+                    .status
+                    .problem(format!("no tile at row {row}; the kit has {kit}")),
+            }
+        }
+    }
 }
 
 /// **Open a blank tile at the default rung.**
@@ -1453,6 +1509,26 @@ fn open_blank(build: &mut Build, project: &crate::project::Project) {
     build.open = Some(comp);
     build.focus = 0;
     // The one place a different tile becomes the open one, so the one place the boundary is marked.
+    build.opened = build.opened.wrapping_add(1);
+}
+
+/// **Reopen an authored tile for editing.**
+///
+/// The verb the tab never had. `open_blank` was the only opener, so every tile was a new one and a
+/// tile saved wrong stayed wrong — an author who put a piece in the middle of a tile instead of
+/// flush against its edge could only fix it by editing `compositions.ron` by hand.
+///
+/// Goes through the same fields `open_blank` sets, including `opened`, because this is a different
+/// document by exactly the argument that field carries: an undo that crossed the boundary would
+/// write one tile's members under another's name.
+pub fn open_saved(build: &mut Build, comp: Composition) {
+    build.rung = DEFAULT_RUNG;
+    build.open = Some(comp);
+    build.focus = 0;
+    // Reopening is not holding: the arrows should walk, not move, until something is picked up. That
+    // is `Stance::Idle`, and leaving `placing` set would put the tab in the state the drop leaves.
+    build.placing = false;
+    build.browsing = None;
     build.opened = build.opened.wrapping_add(1);
 }
 

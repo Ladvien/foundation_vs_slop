@@ -122,6 +122,20 @@ pub enum Stance {
     /// takes its place. The Map context stays at twelve either way, and an author cannot start a
     /// second generate on top of an answer they have not looked at yet.
     Proposed,
+    /// **The kit list is live** — the arrows walk the tiles already authored, not the meshes.
+    ///
+    /// The fourth phase, and it exists because the Tiles tab could make tiles and never show them.
+    /// An author finished four and could not see the kit, could not reopen one to correct it, and had
+    /// no way to notice they had built the same thing twice. The one that was wrong — a low wall
+    /// sitting in the middle of its tile instead of flush — was only fixable by editing
+    /// `compositions.ron` by hand.
+    ///
+    /// It is a stance rather than a flag for the same reason `Proposed` is: the arrows and `Enter`
+    /// mean something different while it is on, and a key list that did not say so would be lying.
+    /// **It costs no new key.** `left`/`right` were unbound on this tab at `Idle`, and
+    /// `docs/tiles_tab_contract.md` recorded exactly why — *"There is one list on this tab, so there
+    /// is nothing to switch between."* There are two now, so the reservation is spent.
+    Browsing,
 }
 
 impl Stance {
@@ -217,6 +231,13 @@ pub enum Action {
     AcceptProposal,
     /// Keep the set in hand as a reusable group — see `editor::composition_from_set`.
     GroupFromSet,
+    /// **Show the kit** — the tiles already authored — and let the arrows walk it.
+    KitEnter,
+    KitPrev,
+    KitNext,
+    /// **Reopen the selected tile for editing.** The verb the tab never had: every tile was a new
+    /// blank one, so a tile saved wrong stayed wrong.
+    KitOpen,
     PanForward,
     PanBack,
     PanLeft,
@@ -703,6 +724,16 @@ pub const BINDINGS: &[Binding] = &[
     // **The list walk is `bp`, not `bsp`.** It is *indifferent* to Shift on purpose: `Shift`+arrow is
     // the five-row stride the Meshes tab already uses, and the same shared system serves both tabs.
     // The tile-moving pair is `bsp` because bare and shifted are genuinely different verbs there.
+    // **The kit, and it costs no new key.** `left`/`right` were the tab's one unbound pair at
+    // `Idle`, reserved by the contract against there being a second list; this is that list.
+    bp(Action::KitEnter, KeyCode::ArrowRight, false, Stance::Idle, Context::Tiles, "right", "show the kit / Esc goes back"),
+    bp(Action::KitPrev, KeyCode::ArrowUp, false, Stance::Browsing, Context::Tiles, "up", "walk the kit"),
+    bp(Action::KitNext, KeyCode::ArrowDown, false, Stance::Browsing, Context::Tiles, "down", "walk the kit"),
+    // **`right` descends**: into the kit from the mesh list, then into the tile from the kit. `Esc`
+    // backs out of either. A column browser's idiom, and it is what keeps `Enter` meaning one thing:
+    // `BuildDrop` is bound across every stance, so an `Enter` here would be one key with two
+    // meanings — the collision the census forbids, and the reason the stance axis exists at all.
+    bp(Action::KitOpen, KeyCode::ArrowRight, false, Stance::Browsing, Context::Tiles, "right", "reopen this tile"),
     bp(Action::TileListPrev, KeyCode::ArrowUp, false, Stance::Idle, Context::Tiles, "up", "walk the library / Shift: x5"),
     bp(Action::TileListNext, KeyCode::ArrowDown, false, Stance::Idle, Context::Tiles, "down", "walk the library / Shift: x5"),
     bsp(Action::BuildForward, KeyCode::ArrowUp, false, false, Stance::Holding, Context::Tiles, "up", "move the piece"),
@@ -1335,6 +1366,7 @@ mod tests {
             Action::UndoBuild, Action::RedoBuild,
             Action::AlignForward, Action::AlignBack, Action::AlignLeft, Action::AlignRight,
             Action::BuildTurn, Action::BuildDropMember, Action::ClearTile, Action::BuildNew,
+            Action::KitEnter, Action::KitPrev, Action::KitNext, Action::KitOpen,
         ];
         assert_eq!(
             actions.len(),
@@ -1699,7 +1731,12 @@ mod tests {
             (Context::Meshes, 31),
             // 21 -> 22: `ClearTile`. `MemberPrev`/`MemberNext` replace the X nudge rather than
             // adding to it, so the walk costs nothing here.
-            (Context::Tiles, 22),
+            // 22 -> 26: the KIT list (FVS: the tab could author tiles and never show them).
+            // `right` opens it, `up`/`down` walk it, `right` again reopens the selected tile -- four
+            // bindings, and **no new key to learn**: every one is an arrow this tab already used,
+            // kept out of each other's lists by the stance. `Esc` backs out, which the tab already
+            // promised ("Esc always returns to Choosing").
+            (Context::Tiles, 26),
             (Context::Anim, 11),
             (Context::Compose, 7),
         ];
