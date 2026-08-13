@@ -199,7 +199,7 @@ pub(crate) fn suggest_labels(
     tasks: Res<LabelTasks>,
     mut rig: ResMut<ShotRig>,
 ) {
-    if !crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::SuggestLabels) {
+    if !crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::SuggestLabels) {
         return;
     }
     let Some(project) = project else { return };
@@ -593,7 +593,7 @@ pub(crate) fn suggest_all(
     mut queue: ResMut<LabelQueue>,
     mut rig: ResMut<ShotRig>,
 ) {
-    if !crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::SuggestAll) {
+    if !crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::SuggestAll) {
         return;
     }
     if queue.running() {

@@ -151,11 +151,62 @@ impl Fixture {
         self
     }
 
+    /// **A piece that must sit on something** — `mount: OnSurface(class)`.
+    ///
+    /// The shape every fixture, lamp and screen in a real kit has, and the one a tile refuses when
+    /// nothing under it offers the class.
+    pub fn mounted_descriptor(mut self, id: &str, pack: &str, class: &str) -> Fixture {
+        self = self.descriptor(id, pack);
+        if let Some(last) = self.descriptors.last_mut() {
+            let was = "mount: Some(OnFloor)";
+            assert!(last.contains(was), "the fixture's descriptor shape changed under this helper");
+            *last = last.replace(was, &format!("mount: Some(OnSurface( class: \"{class}\" ))"));
+        }
+        self
+    }
+
+    /// **A piece that offers a surface** — a desk, a table, a shelf.
+    ///
+    /// The other half of the pair: without one in the library, a refusal about a missing host has
+    /// nothing true to point at.
+    pub fn surface_descriptor(mut self, id: &str, pack: &str, class: &str) -> Fixture {
+        self = self.descriptor(id, pack);
+        if let Some(last) = self.descriptors.last_mut() {
+            let was = "offers: ( surfaces: [], sockets: [] )";
+            assert!(last.contains(was), "the fixture's descriptor shape changed under this helper");
+            *last = last.replace(
+                was,
+                &format!("offers: ( surfaces: [\"{class}\"], sockets: [] )"),
+            );
+        }
+        self
+    }
+
     /// **A `slot` token, so a tile can declare a hole.**
     ///
     /// `new` writes an empty slot axis, which is the honest default: a project that has not grown
     /// one refuses `Shift+Enter` by name rather than inventing a token. A test about holes needs
     /// one, and rewriting the file is how any other axis would be set too.
+    /// **Declare edge tokens**, so a test can exercise both sides of the derivation's commit door.
+    ///
+    /// The fixture ships one token, `wall`, which is deliberately *not* what
+    /// `adjacency::derive_edges` names — so the refusal branch is the default and a test has to opt
+    /// in to the accepting one.
+    pub fn edge_tokens(self, names: &[&str]) -> Fixture {
+        let at = self.dir.join("assets/emerge/vocab.ron");
+        let was = std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("cannot read {at:?}: {e}"));
+        let one = r#"edge: (tokens: [( name: "wall", note: "a solid run-face" )]),"#;
+        assert!(was.contains(one), "the fixture's edge axis must be the shipped one, or this is a no-op");
+        let mut rows = vec![r#"( name: "wall", note: "a solid run-face" )"#.to_owned()];
+        for n in names {
+            rows.push(format!(r#"( name: "{n}", note: "derived from the mesh" )"#));
+        }
+        let full = format!("edge: (tokens: [{}]),", rows.join(", "));
+        std::fs::write(&at, was.replace(one, &full))
+            .unwrap_or_else(|e| panic!("cannot write {at:?}: {e}"));
+        self
+    }
+
     pub fn slot_token(self, name: &str) -> Fixture {
         let at = self.dir.join("assets/emerge/vocab.ron");
         let was = std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("cannot read {at:?}: {e}"));

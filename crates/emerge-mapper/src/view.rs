@@ -166,10 +166,10 @@ fn drive(
     }
 
     let step = TAU / ROTATION_STEPS as f32;
-    if keys::just_pressed(&keys, live.0, Action::TurnViewLeft) {
+    if keys::just_pressed(&keys, *live, Action::TurnViewLeft) {
         rig.goal_yaw += step;
     }
-    if keys::just_pressed(&keys, live.0, Action::TurnViewRight) {
+    if keys::just_pressed(&keys, *live, Action::TurnViewRight) {
         rig.goal_yaw -= step;
     }
     // Ease toward the detent rather than snapping, so a rapid double-tap reads as one smooth turn.
@@ -189,7 +189,7 @@ fn drive(
         (Action::PanLeft, Vec2::new(-1.0, 0.0)),
         (Action::PanRight, Vec2::new(1.0, 0.0)),
     ] {
-        if keys::pressed(&keys, live.0, action) {
+        if keys::pressed(&keys, *live, action) {
             wish += dir;
         }
     }

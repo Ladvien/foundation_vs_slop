@@ -58,7 +58,19 @@ pub fn add_editor_plugins(app: &mut App) -> &mut App {
         // Two plugins, two jobs: the capture rig is the shared crate, the verbs are ours.
         bevy_devshot::DevShotPlugin,
         crate::devshot::DrivePlugin,
-    ))
+    ));
+    // **The guide vocabulary belongs in the shared list; the transport does not.**
+    //
+    // `add_debugger_plugins` sits outside this function because it binds a port and a test process
+    // builds several `App`s. `GuidePlugin` binds nothing — it registers one-shot systems answering
+    // `bool` under the editor's own names — and the harness is precisely where they are wanted:
+    // `every_checkpoint_a_shipped_guide_names_is_registered` boots this app to prove no shipped
+    // script names a condition nobody watches.
+    //
+    // The `#[cfg]` is on the module rather than on a tuple element, so the list above stays one list.
+    #[cfg(feature = "debugger")]
+    app.add_plugins(crate::guided::GuidePlugin);
+    app
 }
 
 /// **The agent's way in, when the feature is on.**

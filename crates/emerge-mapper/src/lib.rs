@@ -56,6 +56,8 @@ pub mod stages;
 pub mod devshot;
 pub mod editor;
 pub mod fill;
+#[cfg(feature = "debugger")]
+pub mod guided;
 pub mod filter;
 pub mod keys;
 pub mod label_booth;

@@ -263,9 +263,9 @@ fn cycle_focus(
     keys: Res<keys::Live>,
     input: Res<ButtonInput<KeyCode>>,
 ) {
-    let by = if keys::just_pressed(&input, keys.0, Action::ComposeMemberNext) {
+    let by = if keys::just_pressed(&input, *keys, Action::ComposeMemberNext) {
         1
-    } else if keys::just_pressed(&input, keys.0, Action::ComposeMemberPrev) {
+    } else if keys::just_pressed(&input, *keys, Action::ComposeMemberPrev) {
         -1
     } else {
         return;
@@ -283,9 +283,9 @@ fn walk(
     input: Res<ButtonInput<KeyCode>>,
 ) {
     let step = if input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight) { 5 } else { 1 };
-    let by = if keys::just_pressed(&input, keys.0, Action::ComposeNext) {
+    let by = if keys::just_pressed(&input, *keys, Action::ComposeNext) {
         step
-    } else if keys::just_pressed(&input, keys.0, Action::ComposePrev) {
+    } else if keys::just_pressed(&input, *keys, Action::ComposePrev) {
         -step
     } else {
         return;
@@ -328,7 +328,7 @@ fn arm(
     keys: Res<keys::Live>,
     input: Res<ButtonInput<KeyCode>>,
 ) {
-    if !keys::just_pressed(&input, keys.0, Action::ComposeArm) {
+    if !keys::just_pressed(&input, *keys, Action::ComposeArm) {
         return;
     }
     toggle_arm(&mut state, &project);
@@ -1082,7 +1082,7 @@ fn draw_stage(
         }
         // The seating lattice on its floor — `grid::SNAP`, the same quantum `seated` steps by and the
         // Map snaps to. Drawing anything else here would be the drawn-grid-disagrees-with-the-snap bug
-        // that `GridSpacing`'s note records. The focal group is always at scale 1, so this is the
+        // that `editor::Rung`'s note records. The focal group is always at scale 1, so this is the
         // lattice a seat step actually lands on rather than a scaled picture of one.
         let cells = (
             (size.0 / step).round().max(1.0) as u32,
@@ -1241,8 +1241,8 @@ fn step_carousel(
     mut state: ResMut<ComposeState>,
 ) {
     let by = match (
-        keys::just_pressed(&keys, live.0, Action::CarouselNext),
-        keys::just_pressed(&keys, live.0, Action::CarouselPrev),
+        keys::just_pressed(&keys, *live, Action::CarouselNext),
+        keys::just_pressed(&keys, *live, Action::CarouselPrev),
     ) {
         (true, false) => 1i64,
         (false, true) => -1,
@@ -1504,7 +1504,7 @@ pub fn member_footprint(
 ///
 /// Horizontal steps are [`emerge_core::grid::SNAP`] and vertical ones are `SNAP / divisions` — the
 /// exact quanta [`crate::editor`]'s `snap` and `lift_step` already apply to every `Placed`. A second
-/// quantum for the same act is the mistake `GridSpacing`'s note records: the drawn grid said 1.0 m
+/// quantum for the same act is the mistake `editor::Rung`'s note records: the drawn grid said 1.0 m
 /// while the snap was 0.5 m, and an author cannot see which one a piece obeyed.
 ///
 /// # It refuses rather than clamping
