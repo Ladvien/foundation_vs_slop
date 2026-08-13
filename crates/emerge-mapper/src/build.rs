@@ -1066,6 +1066,62 @@ pub fn build_keys(
         return;
     }
 
+    // **Step the focus through the members.**
+    //
+    // The verb `Build::focus` never had. It is what `R`, `Delete`, the arrows and the flush act on,
+    // and it is drawn in amber — and until now a drop set it and nothing else could. Reported from
+    // the keyboard, 2026-08-12: *"how do I switch between two meshes to edit its placement?"*
+    //
+    // Saturating rather than wrapping: the ends of a short list are somewhere an author can feel,
+    // and a focus that jumps from the last member to the first is the largest possible move on the
+    // smallest possible keystroke — the argument `SnapLevel::finer` already makes.
+    let step_focus = i32::from(pressed(Action::MemberNext)) - i32::from(pressed(Action::MemberPrev));
+    if step_focus != 0 {
+        let n = build.open.as_ref().map_or(0, |c| c.members.len());
+        if n == 0 {
+            state
+                .status
+                .note("nothing in the tile yet — Enter brings the picked mesh in".to_owned());
+            return;
+        }
+        let want = (build.focus as i32 + step_focus).clamp(0, n as i32 - 1) as usize;
+        build.focus = want;
+        let named = build
+            .open
+            .as_ref()
+            .and_then(|c| c.members.get(want))
+            .map(|m| m.id.clone())
+            .unwrap_or_default();
+        state
+            .status
+            .note(format!("`{named}` — {} of {n}", want + 1));
+        return;
+    }
+
+    // **Empty the tile.** The shifted form of removing one member, on the `RemoveTile`/`DemoteTile`
+    // precedent. One `edit` call, so the history records it as one step and `Cmd+Z` brings the whole
+    // tile back — which is what makes it safe to offer at all.
+    if pressed(Action::ClearTile) {
+        let n = build.open.as_ref().map_or(0, |c| c.members.len());
+        if n == 0 {
+            state.status.note("the tile is already empty".to_owned());
+            return;
+        }
+        match edit(&mut build, &project.library, |comp| {
+            comp.members.clear();
+            Ok(())
+        }) {
+            Ok(()) => {
+                build.focus = 0;
+                state
+                    .status
+                    .note(format!("emptied — {n} taken out, {} puts them back", crate::keys::chord(Action::UndoBuild)));
+            }
+            Err(e) => state.status.problem(e),
+        }
+        return;
+    }
+
     // **The arrows move the member, not a cursor.**
     //
     // There is no cursor any more, and that is the point: a brought-in mesh lands centred and the
@@ -1079,13 +1135,10 @@ pub fn build_keys(
     // four bindings declare `Stance::Holding`, so `keys::just_pressed` refuses them with nothing in
     // hand. The guard was correct and invisible — a rule about when a key fires, kept somewhere the
     // key table could not state it. `keys::Stance` is where it lives now.
+    // **Left and right walk the members now**, so only the forward/back pair moves the piece. See
+    // `keys::Action::MemberPrev` for the trade: sideways is reached by turning the view, which
+    // `step_in_view` maps the arrows through anyway.
     let mut wish = Vec2::ZERO;
-    if pressed(Action::BuildLeft) {
-        wish.x -= 1.0;
-    }
-    if pressed(Action::BuildRight) {
-        wish.x += 1.0;
-    }
     // Screen wishes are negative up, the convention `view::pan_direction` already reads.
     if pressed(Action::BuildForward) {
         wish.y -= 1.0;

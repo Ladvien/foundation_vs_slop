@@ -262,9 +262,20 @@ pub enum Action {
     TileListPrev,
     TileListNext,
     BuildForward,
-    BuildLeft,
     BuildBack,
-    BuildRight,
+    /// **Step to the previous / next member of the tile.**
+    ///
+    /// The missing primitive, reported 2026-08-12: *"once I place mesh down, and I place the second
+    /// mesh down, how do I switch between two meshes to edit its placement?"* You could not.
+    /// `Build::focus` is what `R`, `Delete`, the arrows and the flush all act on, and it is drawn in
+    /// amber — and nothing an author could press moved it. A drop set it, removal and undo clamped
+    /// it, and that was every writer there was.
+    ///
+    /// Left/right because **Compose already binds exactly this verb to them**, one level up: walking
+    /// the members of the group in hand. Same key, same job, one level down — and it fills the arrow
+    /// pair that did nothing on this tab.
+    MemberPrev,
+    MemberNext,
     BuildDown,
     BuildUp,
     BuildDrop,
@@ -282,6 +293,9 @@ pub enum Action {
     AlignRight,
     BuildNew,
     BuildDropMember,
+    /// **Empty the tile** — the shifted form of removing one member, on the `RemoveTile`/`DemoteTile`
+    /// precedent. One undo step, so it is recoverable.
+    ClearTile,
     BuildTurn,
     BuildRung,
     CellEdge,
@@ -693,8 +707,12 @@ pub const BINDINGS: &[Binding] = &[
     bp(Action::TileListNext, KeyCode::ArrowDown, false, Stance::Idle, Context::Tiles, "down", "walk the library / Shift: x5"),
     bsp(Action::BuildForward, KeyCode::ArrowUp, false, false, Stance::Holding, Context::Tiles, "up", "move the piece"),
     bsp(Action::BuildBack, KeyCode::ArrowDown, false, false, Stance::Holding, Context::Tiles, "down", "move the piece"),
-    bsp(Action::BuildLeft, KeyCode::ArrowLeft, false, false, Stance::Holding, Context::Tiles, "left", "move the piece"),
-    bsp(Action::BuildRight, KeyCode::ArrowRight, false, false, Stance::Holding, Context::Tiles, "right", "move the piece"),
+    // **Left/right walk the members, and that is a trade made deliberately.** They used to nudge on
+    // the X axis; the cost of taking them is that sideways is reached by turning the view (`Q`/`E`
+    // step quarter detents and `step_in_view` maps the arrows through the yaw) or by `Shift`+arrow
+    // to the edge. The gain is that the focus can be moved at all — see [`Action::MemberPrev`].
+    bsp(Action::MemberPrev, KeyCode::ArrowLeft, false, false, Stance::Holding, Context::Tiles, "left", "step to the previous / next member"),
+    bsp(Action::MemberNext, KeyCode::ArrowRight, false, false, Stance::Holding, Context::Tiles, "right", "step to the previous / next member"),
     // **Flush is its own verb, not a finer rung.** The author's word for it was *"left aligned"*,
     // and it is what a wall needs: a 0.1 m panel sits flush at -0.45 in a 1 m tile, and no rung of
     // any divisor lands on -0.45 — the position is a function of the piece's own width.
@@ -717,8 +735,12 @@ pub const BINDINGS: &[Binding] = &[
     // A hole rather than a piece is the rarer of the two, so it takes the modifier.
     bs(Action::BuildDrop, KeyCode::Enter, false, false, Context::Tiles, "Enter", "drop the piece / Shift: a slot"),
     bs(Action::BuildSlot, KeyCode::Enter, false, true, Context::Tiles, "Enter", "drop the piece / Shift: a slot"),
-    b(Action::BuildTurn, KeyCode::KeyR, false, Context::Tiles, "R", "turn / remove this member"),
-    b(Action::BuildDropMember, REMOVE_KEY, false, Context::Tiles, REMOVE_NAME, "turn / remove this member"),
+    b(Action::BuildTurn, KeyCode::KeyR, false, Context::Tiles, "R", "turn / remove this / Shift: empty the tile"),
+    // **`bs`, both of them.** A bare binding is indifferent to Shift and would swallow the shifted
+    // chord — the collision the census exists to catch, and the precedent `RemoveTile`/`DemoteTile`
+    // set on the Meshes tab.
+    bs(Action::BuildDropMember, REMOVE_KEY, false, false, Context::Tiles, REMOVE_NAME, "turn / remove this / Shift: empty the tile"),
+    bs(Action::ClearTile, REMOVE_KEY, false, true, Context::Tiles, REMOVE_NAME, "turn / remove this / Shift: empty the tile"),
     // **No save key here, on purpose.** `Cmd+S` is Global and already means *save what is open*; a
     // second one in this context would collide with it, and the collision is the census pointing out
     // that they are the same verb. The handler asks which mode is live.
@@ -1307,12 +1329,12 @@ mod tests {
             // The Tiles tab's verbs. `Build*` rather than `Tile*` because they name the act, not the
             // tab — dropping and turning are building whatever the strip calls the place it happens.
             Action::TileListPrev, Action::TileListNext,
-            Action::BuildForward, Action::BuildLeft, Action::BuildBack, Action::BuildRight,
+            Action::BuildForward, Action::BuildBack, Action::MemberPrev, Action::MemberNext,
             Action::BuildDown, Action::BuildUp, Action::BuildRung,
             Action::BuildDrop, Action::BuildSlot, Action::BuildArm,
             Action::UndoBuild, Action::RedoBuild,
             Action::AlignForward, Action::AlignBack, Action::AlignLeft, Action::AlignRight,
-            Action::BuildTurn, Action::BuildDropMember, Action::BuildNew,
+            Action::BuildTurn, Action::BuildDropMember, Action::ClearTile, Action::BuildNew,
         ];
         assert_eq!(
             actions.len(),
@@ -1444,18 +1466,32 @@ mod tests {
             "the holding list must not offer a verb that cannot fire: {holding:?}"
         );
 
-        // **Four arrows, one row, in each stance.** The collapse is what keeps this honest rather
-        // than merely correct: if a future edit gives the four directions four different `does`
-        // strings the list grows to eight rows and the cap test says so.
+        // **The arrow cluster is split in two while holding, and both halves are offered.**
+        //
+        // Up/down move the focused member; left/right step which member that is. The second was the
+        // verb this tab never had — `Build::focus` was drawn, acted on by five verbs, and unreachable
+        // (reported 2026-08-12: *"how do I switch between two meshes to edit its placement?"*). The
+        // pair is checked together because taking left/right for the walk is what paid for it, and a
+        // future edit that quietly gave them back to the nudge would leave the focus stranded again.
         let moving = holding
             .iter()
             .find(|r| r.does == "move the piece")
-            .unwrap_or_else(|| panic!("no single row for moving the piece: {holding:?}"));
+            .unwrap_or_else(|| panic!("no row for moving the piece: {holding:?}"));
         assert_eq!(
             moving.chord.split(", ").count(),
-            4,
-            "all four arrows belong on one row, and it reads `{}`",
+            2,
+            "up and down move the piece, and it reads `{}`",
             moving.chord
+        );
+        let walking = holding
+            .iter()
+            .find(|r| r.does.contains("member"))
+            .unwrap_or_else(|| panic!("no row walks the members: {holding:?}"));
+        assert_eq!(
+            walking.chord.split(", ").count(),
+            2,
+            "left and right walk the members, and it reads `{}`",
+            walking.chord
         );
     }
 
@@ -1661,7 +1697,9 @@ mod tests {
             // Costs no row — `Accept` is `Stance::Idle` and this is `Stance::Proposed`, so the
             // two never share a list.
             (Context::Meshes, 31),
-            (Context::Tiles, 21),
+            // 21 -> 22: `ClearTile`. `MemberPrev`/`MemberNext` replace the X nudge rather than
+            // adding to it, so the walk costs nothing here.
+            (Context::Tiles, 22),
             (Context::Anim, 11),
             (Context::Compose, 7),
         ];

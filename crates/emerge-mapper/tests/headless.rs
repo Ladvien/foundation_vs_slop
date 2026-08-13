@@ -2594,7 +2594,10 @@ fn shift_arrow_flushes_the_mesh_and_the_bare_arrow_still_nudges() {
 
     let root = Fixture::new("tile_align")
         // 0.2 m across in a 1 m tile: flush left is -0.4, which is not a multiple of either rung.
-        .sized_descriptor("panel", "alpha", 0.2, 1.0)
+        // **Square, and that is deliberate.** Left/right walk the members now, so the only bare
+        // nudge axis is Z — and a piece spanning the tile on Z grows the envelope the moment it is
+        // nudged, which is a fact about that piece rather than about the pair being tested here.
+        .sized_descriptor("panel", "alpha", 0.2, 0.2)
         .build("test_map");
     let mut app = harness::build_headless(&root, "test_map", None)
         .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
@@ -2633,12 +2636,13 @@ fn shift_arrow_flushes_the_mesh_and_the_bare_arrow_still_nudges() {
     once(&mut app, vec![binding(Action::BuildDrop).key]);
     assert_eq!(at(&app), (0.0, 0.0), "brought in centred");
 
-    // Bare arrow: a nudge of one rung, not a flush.
-    once(&mut app, vec![binding(Action::BuildLeft).key]);
+    // Bare arrow: a nudge of one rung, not a flush. **Down, because left/right walk the members
+    // now** — see `keys::Action::MemberPrev`. The pair being checked is still bare-versus-shifted.
+    once(&mut app, vec![binding(Action::BuildBack).key]);
     let nudged = at(&app);
     assert_ne!(nudged, (0.0, 0.0), "the unshifted arrow must still nudge");
     assert!(
-        nudged.0.abs() < 0.4,
+        nudged.1.abs() < 0.4,
         "a nudge is one rung, not the edge — got {nudged:?}"
     );
 
@@ -2651,7 +2655,7 @@ fn shift_arrow_flushes_the_mesh_and_the_bare_arrow_still_nudges() {
     );
     assert!(
         (flush.1 - nudged.1).abs() < 1e-6,
-        "and it must not move the other axis: {flush:?} from {nudged:?}"
+        "and it must not move the axis the nudge moved: {flush:?} from {nudged:?}"
     );
 
     // **The tile did not grow to hold it.** Flush is the extreme position that still fits, so an
@@ -2818,7 +2822,7 @@ fn a_tile_survives_a_save_and_a_reopen() {
     once(&mut app, vec![binding(Action::BuildDrop).key]);
     // The wall lands centred like everything else, then moves — which is the model: bring it in,
     // then adjust it.
-    once(&mut app, vec![binding(Action::BuildRight).key]);
+    once(&mut app, vec![binding(Action::BuildBack).key]);
     once(&mut app, vec![binding(Action::BuildUp).key]);
     once(&mut app, vec![KeyCode::ShiftLeft, binding(Action::BuildSlot).key]);
 
@@ -3259,7 +3263,7 @@ fn the_tiles_tab_opens_a_tile_and_walks_its_grid() {
     assert_eq!(placed(&app), (0.0, 0.0), "a brought-in mesh is centred, bottom on the floor");
 
     // One rung, one axis — the neighbouring square, never the diagonal one.
-    before(&mut app, key(emerge_mapper::keys::Action::BuildRight));
+    before(&mut app, key(emerge_mapper::keys::Action::BuildBack));
     let moved = placed(&app);
     assert_ne!(moved, (0.0, 0.0), "an arrow must move the member it is focused on");
     assert!(
@@ -3805,7 +3809,7 @@ fn a_dropped_member_moves_under_the_arrows_without_space_first() {
     };
     let before = at(&app);
 
-    step(&mut app, key(emerge_mapper::keys::Action::BuildRight));
+    step(&mut app, key(emerge_mapper::keys::Action::BuildBack));
     let after = at(&app);
 
     assert_ne!(
@@ -4048,7 +4052,7 @@ fn undo_after_two_drops_removes_the_second_mesh() {
     step(&mut app, vec![key(emerge_mapper::keys::Action::BuildDrop)]);
     let landed = at(&app);
     for _ in 0..4 {
-        step(&mut app, vec![key(emerge_mapper::keys::Action::BuildRight)]);
+        step(&mut app, vec![key(emerge_mapper::keys::Action::BuildBack)]);
     }
     assert_eq!(n(&app), 2, "dropped and nudged four times");
     assert_ne!(at(&app), landed, "the nudges moved it");
@@ -4573,11 +4577,19 @@ fn no_reachable_tiles_state_leaves_the_arrows_doing_nothing() {
         // which is a property of the schedule and not a bug in the tab.
         app.update();
         let live = *app.world().resource::<emerge_mapper::keys::Live>();
-        let claimed: Vec<Action> = [
-            Action::TileListNext,
-            Action::BuildBack,
-            Action::BuildRight,
-        ]
+        // `MemberPrev` rather than `MemberNext`: a drop focuses the member it just added, which on
+        // a sorted list is often the last one — so `next` saturates there for the same reason `up`
+        // saturates at row 0. Walking *back* can always move while there is more than one member,
+        // and with one member both directions saturate, which is checked below rather than here.
+        //
+        // And only where there is somewhere to walk: with a single member both directions saturate,
+        // which is the same legitimate no-op as `up` at row 0 of the library. The verb is still
+        // covered — the `two members` state below is where it has to move.
+        let mut probes = vec![Action::TileListNext, Action::BuildBack];
+        if read(&app).members > 1 {
+            probes.push(Action::MemberPrev);
+        }
+        let claimed: Vec<Action> = probes
         .into_iter()
         .filter(|a| {
             let b = emerge_mapper::keys::binding(*a);
@@ -4630,4 +4642,106 @@ fn no_reachable_tiles_state_leaves_the_arrows_doing_nothing() {
         dead.len(),
         dead.join("\n  ")
     );
+}
+
+/// **The focus can be moved, and the tile can be emptied** — the two verbs the tab never had.
+///
+/// Both reported from the keyboard, 2026-08-12: *"once I place mesh down, and I place the second
+/// mesh down, how do I switch between two meshes to edit its placement?"* and *"how do I clear the
+/// tile creation area after I've added a mesh."* You could not do either. `Build::focus` is what
+/// `R`, `Delete`, the arrows and the flush all act on and it is drawn in amber — and every writer of
+/// it was a side effect: a drop set it, removal and undo clamped it. Emptying a tile meant pressing
+/// `Delete` once per member, and `N` gave you a *different* tile rather than clearing this one.
+///
+/// See `docs/tiles_tab_contract.md` — these are the Placing clauses for `left`/`right` and
+/// `Shift+Delete`.
+#[test]
+fn the_focus_walks_the_members_and_shift_delete_empties_the_tile() {
+    use emerge_mapper::build::Build;
+    use emerge_mapper::keys::Action;
+
+    let root = Fixture::new("focus-walk")
+        .descriptor("alpha_one", "alpha")
+        .descriptor("beta_two", "beta")
+        .build("m");
+    let mut app =
+        emerge_mapper::harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    app.update();
+
+    let press = |app: &mut bevy::prelude::App, chord: Vec<bevy::prelude::KeyCode>| {
+        app.add_systems(
+            bevy::prelude::Update,
+            bevy::prelude::IntoScheduleConfigs::before(
+                move |mut keys: bevy::prelude::ResMut<
+                    bevy::input::ButtonInput<bevy::prelude::KeyCode>,
+                >,
+                      mut done: bevy::prelude::Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        for k in &chord {
+                            keys.press(*k);
+                        }
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    };
+    let key = |a| emerge_mapper::keys::binding(a).key;
+    let focus = |app: &bevy::prelude::App| app.world().resource::<Build>().focus;
+    let n = |app: &bevy::prelude::App| {
+        app.world()
+            .resource::<Build>()
+            .open
+            .as_ref()
+            .map_or(0, |c| c.members.len())
+    };
+
+    // Two members in.
+    press(&mut app, vec![key(Action::TilesTab)]);
+    press(&mut app, vec![key(Action::BuildDrop)]);
+    press(&mut app, vec![key(Action::Cancel)]);
+    press(&mut app, vec![key(Action::TileListNext)]);
+    press(&mut app, vec![key(Action::BuildDrop)]);
+    assert_eq!(n(&app), 2, "two members to walk between");
+    let landed = focus(&app);
+
+    // **Walking back reaches the other one**, which is the whole point: the first mesh was
+    // unreachable once the second was down.
+    press(&mut app, vec![key(Action::MemberPrev)]);
+    let walked = focus(&app);
+    assert_ne!(walked, landed, "left must step to the other member — it stayed on {landed}");
+
+    // And forward comes back, so it is a walk rather than a one-way door.
+    press(&mut app, vec![key(Action::MemberNext)]);
+    assert_eq!(focus(&app), landed, "right must come back");
+
+    // **Saturating, not wrapping** — a focus that jumped from the last member to the first would be
+    // the largest possible move on the smallest keystroke, the argument `SnapLevel::finer` makes.
+    press(&mut app, vec![key(Action::MemberNext)]);
+    assert_eq!(focus(&app), landed, "the end of the list stays put");
+
+    // **Shift+Delete empties it, and one undo brings the whole tile back.**
+    press(
+        &mut app,
+        vec![bevy::prelude::KeyCode::ShiftLeft, key(Action::ClearTile)],
+    );
+    assert_eq!(n(&app), 0, "Shift+Delete must empty the tile");
+
+    press(
+        &mut app,
+        vec![emerge_mapper::keys::MOD_KEYS[0], key(Action::UndoBuild)],
+    );
+    assert_eq!(
+        n(&app),
+        2,
+        "and it is one step, so a single undo puts both members back — that is what makes it safe \
+         to offer"
+    );
+
+    // The bare key still removes exactly one, or the shifted form has eaten its sibling.
+    press(&mut app, vec![key(Action::BuildDropMember)]);
+    assert_eq!(n(&app), 1, "bare Delete removes one member, not the tile");
 }
