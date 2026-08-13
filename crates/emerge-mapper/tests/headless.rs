@@ -4832,3 +4832,269 @@ fn a_refused_mount_names_a_piece_that_would_hold_it() {
     );
 }
 
+/// **A guide is a contract with a person, and this is the half a machine can check.**
+///
+/// `bevy_debugger/guide+watch` refuses a checkpoint nobody registered — by name, listing what would
+/// have worked — which is right at runtime and far too late. By then the author is at the keyboard
+/// with a script that stops at step four, and the whole reason the channel exists is that their time
+/// is the expensive part of the loop.
+///
+/// So both halves are asserted here, on every file this crate ships under `guides/`:
+///
+/// 1. **Every named checkpoint is registered.** A typo'd name is a stranded exercise.
+/// 2. **Every registered checkpoint actually runs**, against a booted editor. This is the Bevy 0.19
+///    trap the harness exists for: a missing `Res<T>` **panics its system** rather than skipping it,
+///    and a one-shot system is not in any schedule, so nothing else in the suite would ever call it.
+///    A checkpoint that panics the first time an author reaches its step is worse than no checkpoint.
+///
+/// It also pins two shapes the schema allows and that are easy to get wrong by leaving a field out:
+/// a step with `"checkpoint": null` is a **supported state** (only a person can judge it), and every
+/// step needs `recovery` — the field Chauvergne et al. 2023 could not find in one of twenty-one
+/// shipped tutorials.
+#[cfg(feature = "debugger")]
+#[test]
+fn every_checkpoint_a_shipped_guide_names_is_registered_and_runs() {
+    use bevy_debugger_bevy::Checkpoints;
+
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(emerge_mapper::guided::GUIDES_DIR);
+    let entries = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+
+    let root = Fixture::new("guides").descriptor("wall", "alpha").build("m");
+    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    app.update();
+
+    let registered = app.world().resource::<Checkpoints>().names();
+    assert!(!registered.is_empty(), "GuidePlugin registered nothing");
+
+    let mut seen = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        seen += 1;
+        let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {name}: {e}"));
+        let script: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("{name} is not valid JSON: {e}"));
+        let steps = script["steps"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name} has no `steps` array"));
+        assert!(!steps.is_empty(), "{name} has an empty script");
+
+        for step in steps {
+            let label = step["label"].as_str().unwrap_or("");
+            assert!(!label.is_empty(), "{name} has a step with no label");
+            assert!(
+                step["recovery"].as_str().is_some_and(|r| !r.is_empty()),
+                "{name}: step `{label}` has no recovery. That is the field twenty-one of \
+                 twenty-one shipped tutorials were missing, and the one an author needs at the \
+                 exact moment the step does not work"
+            );
+            // `null` is a real value here: a step only a person can judge.
+            let Some(checkpoint) = step["checkpoint"].as_str() else {
+                continue;
+            };
+            assert!(
+                registered.iter().any(|r| r == checkpoint),
+                "{name}: step `{label}` watches `{checkpoint}`, which this editor does not \
+                 register. It would park for ever. Registered: {}",
+                registered.join(", ")
+            );
+        }
+    }
+    assert!(seen > 0, "no guides found under {}", dir.display());
+
+    // Every one of them runs. A panic here is the test failing, and it names the system.
+    for name in &registered {
+        let Some(id) = app.world().resource::<Checkpoints>().get(name) else {
+            panic!("`{name}` was listed and then could not be fetched");
+        };
+        if let Err(e) = app.world_mut().run_system(id) {
+            panic!("checkpoint `{name}` could not run: {e}");
+        }
+    }
+}
+
+/// **The shipped script, driven — because a script whose checkpoints nobody has watched pass is a
+/// script that will strand its author.**
+///
+/// `every_checkpoint_a_shipped_guide_names_is_registered_and_runs` proves the names resolve. That is
+/// necessary and not close to sufficient: a step can name a real condition that the tab it is written
+/// for cannot reach, and the author finds out by standing in front of it.
+///
+/// This walks `guides/author_a_tile.json` in order, presses the keys an author following it would
+/// press, and asserts each step's checkpoint goes from **false to true** at that step and no earlier.
+/// The false half matters as much: a checkpoint already true when its step comes up is not measuring
+/// the step, and a script full of those reads as a green run while proving nothing.
+///
+/// It earned its keep before it was finished. Two of the ten steps first written here were wrong —
+/// the Tiles tab is `3` and the script said `4` (which is Compose), and a "derive the edges" step
+/// watched `edges are staged`, which is written by `B` on the **Meshes** tab off a mesh's subgrid and
+/// is not a tile verb at all. Both were found by reading `keys.rs` while writing this; neither was
+/// visible to the name check, because both names existed.
+///
+/// **The key sequence is the one thing here a machine cannot derive**, and it is deliberately not
+/// derived: the hints are prose for a person, and a test that parsed them would be testing a parser.
+/// What it does instead is bind the sequence to the *bindings* rather than to literal key codes, so a
+/// rebound key moves this test with it.
+#[cfg(feature = "debugger")]
+#[test]
+fn the_tile_authoring_script_can_actually_be_followed() {
+    use bevy_debugger_bevy::Checkpoints;
+    use emerge_mapper::keys::Action;
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(emerge_mapper::guided::GUIDES_DIR)
+        .join("author_a_tile.json");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let script: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("bad JSON: {e}"));
+    let empty = vec![];
+    let steps = script["steps"].as_array().unwrap_or(&empty);
+
+    // A project with something to bring in. Two descriptors, so "another piece" has one to be.
+    let root = Fixture::new("script")
+        .descriptor("floor_a", "kit")
+        .descriptor("wall_a", "kit")
+        .build("m");
+    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let key = |a| emerge_mapper::keys::binding(a).key;
+    let press = |app: &mut App, chord: Vec<KeyCode>| {
+        app.add_systems(
+            Update,
+            IntoScheduleConfigs::before(
+                move |mut keys: ResMut<bevy::input::ButtonInput<KeyCode>>,
+                      mut done: Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        for k in &chord {
+                            keys.press(*k);
+                        }
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    };
+
+    /// What an author does at each step, by label. Sequences, not single keys, because "bring a
+    /// floor in" is a walk and a drop.
+    fn keystrokes(label: &str) -> Vec<Vec<Action>> {
+        match label {
+            "open the Tiles tab" => vec![vec![Action::TilesTab]],
+            // `N` opens the name field; the field is typed into and committed below, out of band,
+            // because text is a message stream rather than a key press.
+            "start a tile" => vec![vec![Action::BuildNew]],
+            "bring a floor in" => vec![vec![Action::BuildDrop]],
+            // Nothing to press: the previous drop is what puts a piece in hand. That IS the step —
+            // it asserts the state the drop left behind, which is the bug reported from the keyboard.
+            "the arrows should now move the piece" => vec![],
+            // `Esc` first, and that is the friction this exercise found: `TileListNext` is bound at
+            // `Stance::Idle` only, so the arrows cannot walk the library while a piece is in hand.
+            // The script's first draft said "press Enter again, pick a wall", which would have
+            // dropped a second copy of the floor.
+            "bring a wall in as well" => vec![
+                vec![Action::Cancel],
+                vec![Action::TileListNext],
+                vec![Action::BuildDrop],
+            ],
+            "is the tile still one cell" => vec![],
+            "save it" => vec![vec![Action::Save]],
+            _ => vec![],
+        }
+    }
+
+    let mut reached = 0;
+    for step in steps {
+        let label = step["label"].as_str().unwrap_or("");
+        let Some(name) = step["checkpoint"].as_str() else {
+            // A step only a person can judge. Nothing to drive and nothing to assert; the script
+            // says so with `null` and the watch stream says so with `waiting_on_a_person`.
+            continue;
+        };
+        let Some(id) = app.world().resource::<Checkpoints>().get(name) else {
+            panic!("`{name}` is not registered — the other test should have caught this");
+        };
+
+        // **Two kinds of step, and the difference is whether anything is pressed.**
+        //
+        // An *action* step must find its checkpoint false on arrival, or it is measuring nothing —
+        // that check is what caught "start a tile", which asked the author to press N and name a tile
+        // when the tab had already opened one for them under a generated id.
+        //
+        // An *observation* step presses nothing: it asks the author to look at what the previous step
+        // left behind, and its checkpoint being true IS the pass. "The arrows should now move the
+        // piece" is the whole reason the exercise exists — it is the bug reported from the keyboard
+        // on 2026-08-12 — and it is an observation, not an action.
+        let strokes = keystrokes(label);
+        if !strokes.is_empty() {
+            let before = app.world_mut().run_system(id).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(
+                !before,
+                "step `{label}` watches `{name}`, which was ALREADY true before the step ran. An \
+                 action step whose condition already holds measures nothing"
+            );
+        }
+
+        for chord in strokes {
+            // A binding's modifier is part of the chord, and `Cmd+S` is the only one this script
+            // reaches. Driven through `MOD_KEYS` rather than a named `SuperLeft`, so the test says
+            // what the editor says on both platforms.
+            let mut codes: Vec<KeyCode> = chord.iter().copied().map(key).collect();
+            if chord.iter().any(|a| emerge_mapper::keys::binding(*a).needs_mod) {
+                codes.push(emerge_mapper::keys::MOD_KEYS[0]);
+            }
+            press(&mut app, codes);
+        }
+        // The name field is a text field, so it reads `KeyboardInput` **messages** rather than
+        // `ButtonInput` — the distinction `bevy_debugger/input` exists to honour, and the reason an
+        // agent could press keys but not type into them until it wrote the stream. This is what
+        // `{"kind":"Keyboard","text":"kit/tile_a"}` followed by `{"key":"Enter"}` does over BRP.
+        if label == "start a tile" {
+            let mut tap = |logical: bevy::input::keyboard::Key, code: KeyCode| {
+                for state in [bevy::input::ButtonState::Pressed, bevy::input::ButtonState::Released]
+                {
+                    app.world_mut().write_message(bevy::input::keyboard::KeyboardInput {
+                        key_code: code,
+                        logical_key: logical.clone(),
+                        state,
+                        text: None,
+                        repeat: false,
+                        window: Entity::PLACEHOLDER,
+                    });
+                }
+                app.update();
+            };
+            for c in "kit/tile_a".chars() {
+                tap(
+                    bevy::input::keyboard::Key::Character(c.to_string().into()),
+                    KeyCode::KeyA,
+                );
+            }
+            tap(bevy::input::keyboard::Key::Enter, KeyCode::Enter);
+        }
+        for _ in 0..3 {
+            app.update();
+        }
+
+        let after = app.world_mut().run_system(id).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(
+            after,
+            "step `{label}` says pressing {:?} makes `{name}` true, and it did not. An author \
+             following this script stops here.",
+            keystrokes(label)
+        );
+        reached += 1;
+    }
+    assert!(reached >= 6, "only {reached} checkpointed steps were driven");
+}
