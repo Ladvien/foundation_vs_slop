@@ -2828,7 +2828,13 @@ impl Plugin for TilesPlugin {
                     rename_candidate.in_set(crate::keys::Phase::Text),
                     cell_keys.in_set(crate::keys::Phase::Text),
                     style_tabs,
-                    rebuild_candidates.run_if(resource_changed::<ImportState>.or_else(resource_changed::<crate::filter::Filters>)),
+                    rebuild_candidates.run_if(
+                        resource_changed::<ImportState>
+                            .or_else(resource_changed::<crate::filter::Filters>)
+                            // The list has two tabs now, and `Build::browsing` is which one is
+                            // showing -- so a tab flip has to rebuild it like any other change.
+                            .or_else(resource_changed::<crate::build::Build>),
+                    ),
                     // **Structure only.** The selection and the carets are repainted in place by
                     // `refresh_cells`; rebuilding the pane for them is the bounce.
                     // **And on the tile in hand.** `Mode` and `Build` are here because this one pane
@@ -4783,6 +4789,64 @@ fn refresh_lines(
 
 /// Rebuild the candidate list.
 ///
+/// **The list's two tabs**, drawn as a strip so which one is showing is visible rather than inferred.
+///
+/// `left`/`right` switch them, which costs no key: they were unbound on this tab while nothing was in
+/// hand, and `docs/tiles_tab_contract.md` recorded exactly why — *"There is one list on this tab, so
+/// there is nothing to switch between."* There are two now.
+fn tab_strip(p: &mut ChildSpawnerCommands, on_kit: bool, kit: usize) {
+    p.spawn(Node {
+        flex_direction: FlexDirection::Row,
+        column_gap: Val::Px(10.0),
+        ..default()
+    })
+    .with_children(|row| {
+        for (label, active) in [
+            ("MESHES".to_owned(), !on_kit),
+            (format!("KIT ({kit})"), on_kit),
+        ] {
+            row.spawn((
+                Text::new(label),
+                TextColor(if active { ACCENT } else { DIM }),
+                TextFont::from_font_size(10.0),
+            ));
+        }
+        row.spawn((
+            Text::new(if on_kit { "  right reopens / left back" } else { "  right for the kit" }),
+            TextColor(DIM),
+            TextFont::from_font_size(9.0),
+        ));
+    });
+}
+
+/// The authored tiles, with the cursor and which one is open for editing.
+///
+/// Until this existed the tab could author tiles and never show them: `open_blank` was the only
+/// opener, so a tile saved wrong stayed wrong and an author had no way to spot a duplicate.
+fn kit_rows(p: &mut ChildSpawnerCommands, project: &Project, cursor: usize) {
+    if project.compositions.compositions.is_empty() {
+        p.spawn((
+            Text::new("nothing authored yet — build a tile and press Cmd+S"),
+            TextColor(DIM),
+            TextFont::from_font_size(10.0),
+        ));
+        return;
+    }
+    for (i, c) in project.compositions.compositions.iter().enumerate() {
+        let here = i == cursor;
+        p.spawn((
+            Text::new(format!(
+                "{} {}  {} member(s)",
+                if here { ">" } else { " " },
+                c.id,
+                c.members.len()
+            )),
+            TextColor(if here { ACCENT } else { TEXT }),
+            TextFont::from_font_size(11.0),
+        ));
+    }
+}
+
 /// Wholesale rather than diffed: it changes on a rescan and on nothing else, and a diffing rebuild of
 /// a list this long would be more code than the thing it saves.
 fn rebuild_candidates(
@@ -4790,6 +4854,7 @@ fn rebuild_candidates(
     state: Res<ImportState>,
     project: Res<Project>,
     filters: Res<crate::filter::Filters>,
+    build: Res<crate::build::Build>,
     lists: Query<Entity, With<CandidateList>>,
 ) {
     // **The counts are of what is SHOWN.** A heading reading 318 above a filtered list of four is a
@@ -4808,9 +4873,27 @@ fn rebuild_candidates(
         .filter(|c| filters.keeps(pane, &c.mesh))
         .count();
 
+    // **Two tabs on the one list, not two lists.** The kit started as a section stacked above the
+    // mesh palette in the LEFT controls column, which the author called weird and was: two lists
+    // competing for one panel, and the wrong panel. One list showing one of two things is the shape
+    // a palette already has.
+    let browsing = build.browsing;
+    // The census counts, not this panel -- `census_is_the_one_counter` forbids a panel
+    // rendering `compositions.compositions.len()` itself.
+    let kit = emerge_core::census::of_catalog(
+        &project.library,
+        &project.compositions.compositions,
+    )
+    .compositions;
+
     for list in &lists {
         commands.entity(list).despawn_related::<Children>();
         commands.entity(list).with_children(|p| {
+            tab_strip(p, browsing.is_some(), kit);
+            if let Some(row) = browsing {
+                kit_rows(p, &project, row);
+                return;
+            }
             // **What is already a tile**, above what could become one. Both halves are "configuring
             // the tiles", and an editor that can add but not remove makes a mistyped import permanent.
             p.spawn((
@@ -5010,49 +5093,6 @@ fn build_detail(
     let line = |p: &mut ChildSpawnerCommands, text: String, colour: Color, size: f32| {
         p.spawn((Text::new(text), TextColor(colour), TextFont::from_font_size(size)));
     };
-
-    // **The kit, above the tile being built.** The tab could author tiles and never show them: an
-    // author finished four, could not see the set, could not reopen one to correct it, and had no
-    // way to notice a duplicate. The one that was wrong was only fixable by hand-editing the .ron.
-    //
-    // Drawn whenever there is a kit, not only while browsing, because "what is in this kit" is a
-    // property of the project rather than a mode — the same argument the size line makes. The cursor
-    // and the hint appear only while the arrows are actually on it.
-    if !project.compositions.compositions.is_empty() {
-        let browsing = build.browsing;
-        // **The census counts, not this panel.** `census_is_the_one_counter` forbids a panel
-        // rendering `compositions.compositions.len()` itself, and it caught this the first time it
-        // ran: one table, everything derived from it, so two panels disagreeing about the same
-        // number is unrepresentable rather than unlikely.
-        let catalog = emerge_core::census::of_catalog(
-            &project.library,
-            &project.compositions.compositions,
-        );
-        crate::chrome::section(p, &format!("KIT ({})", catalog.compositions));
-        for (i, c) in project.compositions.compositions.iter().enumerate() {
-            let here = browsing == Some(i);
-            let open_now = build.open.as_ref().is_some_and(|o| o.id == c.id);
-            // One row says three things an author has to know: which tile the arrows are on, which
-            // one is open for editing, and how much is in each.
-            let mark = if here { ">" } else if open_now { "*" } else { " " };
-            line(
-                p,
-                format!("{mark} {}  {} member(s)", c.id, c.members.len()),
-                if here { ACCENT } else if open_now { TEXT } else { DIM },
-                10.0,
-            );
-        }
-        line(
-            p,
-            if browsing.is_some() {
-                "right reopens it / Esc goes back to the meshes".to_owned()
-            } else {
-                "right shows the kit".to_owned()
-            },
-            DIM,
-            9.0,
-        );
-    }
 
     let Some(comp) = build.open.as_ref() else {
         crate::chrome::section(p, "TILE");

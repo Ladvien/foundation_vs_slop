@@ -1248,9 +1248,13 @@ pub fn build_keys(
     // four bindings declare `Stance::Holding`, so `keys::just_pressed` refuses them with nothing in
     // hand. The guard was correct and invisible — a rule about when a key fires, kept somewhere the
     // key table could not state it. `keys::Stance` is where it lives now.
-    // **Left and right walk the members now**, so only the forward/back pair moves the piece. See
-    // `keys::Action::MemberPrev` for the trade: sideways is reached by turning the view, which
-    // `step_in_view` maps the arrows through anyway.
+    // **All four arrows move the piece.** `step_in_view` maps a screen wish through the camera yaw
+    // to one of the four world axes, so `up` is whatever up looks like from here -- north-east on
+    // this isometric view -- and the sideways pair costs nothing but the wish.
+    //
+    // Two of them used to walk the member list, which the author reported as unintuitive and was:
+    // the arrows offered half the directions the screen suggests and the other half did something
+    // unrelated. The walk is `,` and `.` now.
     let mut wish = Vec2::ZERO;
     // Screen wishes are negative up, the convention `view::pan_direction` already reads.
     if pressed(Action::BuildForward) {
@@ -1258,6 +1262,12 @@ pub fn build_keys(
     }
     if pressed(Action::BuildBack) {
         wish.y += 1.0;
+    }
+    if pressed(Action::BuildLeft) {
+        wish.x -= 1.0;
+    }
+    if pressed(Action::BuildRight) {
+        wish.x += 1.0;
     }
     let lift_by = i32::from(pressed(Action::BuildUp)) - i32::from(pressed(Action::BuildDown));
     if wish != Vec2::ZERO || lift_by != 0 {

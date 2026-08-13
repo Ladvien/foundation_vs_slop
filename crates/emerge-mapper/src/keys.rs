@@ -283,6 +283,11 @@ pub enum Action {
     TileListPrev,
     TileListNext,
     BuildForward,
+    /// The other two of the four. Added when the author said the arrows were not intuitive: two of
+    /// four directions moved the piece and the other two walked the member list, so an isometric view
+    /// offered NE/SW and nothing else. All four move it now, and `,`/`.` walk the members.
+    BuildLeft,
+    BuildRight,
     BuildBack,
     /// **Step to the previous / next member of the tile.**
     ///
@@ -742,8 +747,15 @@ pub const BINDINGS: &[Binding] = &[
     // the X axis; the cost of taking them is that sideways is reached by turning the view (`Q`/`E`
     // step quarter detents and `step_in_view` maps the arrows through the yaw) or by `Shift`+arrow
     // to the edge. The gain is that the focus can be moved at all — see [`Action::MemberPrev`].
-    bsp(Action::MemberPrev, KeyCode::ArrowLeft, false, false, Stance::Holding, Context::Tiles, "left", "step to the previous / next member"),
-    bsp(Action::MemberNext, KeyCode::ArrowRight, false, false, Stance::Holding, Context::Tiles, "right", "step to the previous / next member"),
+    // **All four arrows move the piece**, mapped through the camera yaw by `step_in_view` -- so on
+    // this isometric view `up` is north-east and `left` is north-west, which is what the screen
+    // shows. Two of them used to walk the member list instead, which meant the arrows offered half
+    // the directions and the missing half did something unrelated.
+    bsp(Action::BuildLeft, KeyCode::ArrowLeft, false, false, Stance::Holding, Context::Tiles, "left", "move the piece"),
+    bsp(Action::BuildRight, KeyCode::ArrowRight, false, false, Stance::Holding, Context::Tiles, "right", "move the piece"),
+    // The member walk moved here to free them. A prev/next pair, no modifier, under the fingers.
+    bsp(Action::MemberPrev, KeyCode::Comma, false, false, Stance::Holding, Context::Tiles, ",", "step to the previous / next member"),
+    bsp(Action::MemberNext, KeyCode::Period, false, false, Stance::Holding, Context::Tiles, ".", "step to the previous / next member"),
     // **Flush is its own verb, not a finer rung.** The author's word for it was *"left aligned"*,
     // and it is what a wall needs: a 0.1 m panel sits flush at -0.45 in a 1 m tile, and no rung of
     // any divisor lands on -0.45 — the position is a function of the piece's own width.
@@ -1360,7 +1372,8 @@ mod tests {
             // The Tiles tab's verbs. `Build*` rather than `Tile*` because they name the act, not the
             // tab — dropping and turning are building whatever the strip calls the place it happens.
             Action::TileListPrev, Action::TileListNext,
-            Action::BuildForward, Action::BuildBack, Action::MemberPrev, Action::MemberNext,
+            Action::BuildForward, Action::BuildBack, Action::BuildLeft, Action::BuildRight,
+            Action::MemberPrev, Action::MemberNext,
             Action::BuildDown, Action::BuildUp, Action::BuildRung,
             Action::BuildDrop, Action::BuildSlot, Action::BuildArm,
             Action::UndoBuild, Action::RedoBuild,
@@ -1498,21 +1511,27 @@ mod tests {
             "the holding list must not offer a verb that cannot fire: {holding:?}"
         );
 
-        // **The arrow cluster is split in two while holding, and both halves are offered.**
+        // **The whole arrow cluster moves the piece, and the member walk is elsewhere.**
         //
-        // Up/down move the focused member; left/right step which member that is. The second was the
-        // verb this tab never had — `Build::focus` was drawn, acted on by five verbs, and unreachable
-        // (reported 2026-08-12: *"how do I switch between two meshes to edit its placement?"*). The
-        // pair is checked together because taking left/right for the walk is what paid for it, and a
-        // future edit that quietly gave them back to the nudge would leave the focus stranded again.
+        // This asserted the opposite until 2026-08-13: up/down moved and left/right walked the
+        // members. The author's report was that the arrows were not intuitive, and they were right in
+        // a way the split made invisible — `step_in_view` maps a wish through the camera yaw, so on
+        // an isometric view the arrows point at the four diagonals the screen shows, and offering two
+        // of them while the other two did something unrelated is exactly what "not intuitive" means.
+        //
+        // The walk still has to exist: `Build::focus` is drawn and acted on by five verbs, and was
+        // unreachable before it (reported 2026-08-12: *"how do I switch between two meshes to edit
+        // its placement?"*). It is `,` and `.` now. Both halves are checked together, because an edit
+        // that quietly took the arrows back would either strand the focus again or halve the
+        // directions again, and the pair is what says which.
         let moving = holding
             .iter()
             .find(|r| r.does == "move the piece")
             .unwrap_or_else(|| panic!("no row for moving the piece: {holding:?}"));
         assert_eq!(
             moving.chord.split(", ").count(),
-            2,
-            "up and down move the piece, and it reads `{}`",
+            4,
+            "all four arrows move the piece, and it reads `{}`",
             moving.chord
         );
         let walking = holding
@@ -1522,7 +1541,12 @@ mod tests {
         assert_eq!(
             walking.chord.split(", ").count(),
             2,
-            "left and right walk the members, and it reads `{}`",
+            "a prev/next pair walks the members, and it reads `{}`",
+            walking.chord
+        );
+        assert!(
+            !walking.chord.contains("left") && !walking.chord.contains("right"),
+            "the walk must not take an arrow back: `{}`",
             walking.chord
         );
     }
@@ -1733,10 +1757,15 @@ mod tests {
             // adding to it, so the walk costs nothing here.
             // 22 -> 26: the KIT list (FVS: the tab could author tiles and never show them).
             // `right` opens it, `up`/`down` walk it, `right` again reopens the selected tile -- four
+            // 26 -> 28: `,` and `.` for the member walk, freeing `left`/`right` so that all four
+            // arrows move the piece. The author's report was that two of four directions moved it
+            // and the other two did something unrelated, which on an isometric view is exactly what
+            // it looks like.
+            //
             // bindings, and **no new key to learn**: every one is an arrow this tab already used,
             // kept out of each other's lists by the stance. `Esc` backs out, which the tab already
             // promised ("Esc always returns to Choosing").
-            (Context::Tiles, 26),
+            (Context::Tiles, 28),
             (Context::Anim, 11),
             (Context::Compose, 7),
         ];

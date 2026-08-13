@@ -5379,3 +5379,53 @@ fn the_site_kit_tiles_become_solver_prototypes() {
         tiles.len()
     );
 }
+
+/// **All four arrows move the focused piece, in the four directions the screen shows.**
+///
+/// Reported from the keyboard on 2026-08-13: the arrows were not intuitive. They were right, and the
+/// reason was invisible from the key table alone — `up`/`down` moved the piece and `left`/`right`
+/// walked the member list, so on an isometric view the arrows offered two of the four diagonals the
+/// screen suggests and the other two did something unrelated.
+///
+/// `step_in_view` maps a screen wish through the camera yaw, so the fix was a wish rather than any
+/// new geometry. What this pins is that all four produce a *distinct* world step: a version that
+/// mapped `left` and `right` onto the same axis, or onto the axis `up` already uses, would still
+/// "work" for anyone testing one direction at a time.
+#[test]
+fn all_four_arrows_step_the_piece_in_four_different_directions() {
+    use emerge_mapper::build::step_in_view;
+    use bevy::math::Vec2;
+
+    // The four screen wishes the bindings produce. Negative y is up, the convention
+    // `view::pan_direction` reads.
+    let wishes = [
+        ("up", Vec2::new(0.0, -1.0)),
+        ("down", Vec2::new(0.0, 1.0)),
+        ("left", Vec2::new(-1.0, 0.0)),
+        ("right", Vec2::new(1.0, 0.0)),
+    ];
+
+    // Checked at several camera yaws, because the whole point is that the mapping follows the view.
+    // A 45-degree isometric yaw is the one the editor opens on; the others guard the rounding.
+    for yaw in [0.0_f32, 45.0, 90.0, 135.0, 180.0, 225.0] {
+        let yaw = yaw.to_radians();
+        let steps: Vec<(i32, i32)> = wishes.iter().map(|(_, w)| step_in_view(*w, yaw)).collect();
+        for (name, step) in wishes.iter().map(|(n, _)| n).zip(&steps) {
+            assert_ne!(
+                *step,
+                (0, 0),
+                "`{name}` must move the piece at yaw {:.0}deg",
+                yaw.to_degrees()
+            );
+        }
+        let mut sorted = steps.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            4,
+            "the four arrows must reach four different cells at yaw {:.0}deg, not {steps:?}",
+            yaw.to_degrees()
+        );
+    }
+}
