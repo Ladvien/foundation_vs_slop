@@ -151,6 +151,37 @@ impl Fixture {
         self
     }
 
+    /// **A piece that must sit on something** — `mount: OnSurface(class)`.
+    ///
+    /// The shape every fixture, lamp and screen in a real kit has, and the one a tile refuses when
+    /// nothing under it offers the class.
+    pub fn mounted_descriptor(mut self, id: &str, pack: &str, class: &str) -> Fixture {
+        self = self.descriptor(id, pack);
+        if let Some(last) = self.descriptors.last_mut() {
+            let was = "mount: Some(OnFloor)";
+            assert!(last.contains(was), "the fixture's descriptor shape changed under this helper");
+            *last = last.replace(was, &format!("mount: Some(OnSurface( class: \"{class}\" ))"));
+        }
+        self
+    }
+
+    /// **A piece that offers a surface** — a desk, a table, a shelf.
+    ///
+    /// The other half of the pair: without one in the library, a refusal about a missing host has
+    /// nothing true to point at.
+    pub fn surface_descriptor(mut self, id: &str, pack: &str, class: &str) -> Fixture {
+        self = self.descriptor(id, pack);
+        if let Some(last) = self.descriptors.last_mut() {
+            let was = "offers: ( surfaces: [], sockets: [] )";
+            assert!(last.contains(was), "the fixture's descriptor shape changed under this helper");
+            *last = last.replace(
+                was,
+                &format!("offers: ( surfaces: [\"{class}\"], sockets: [] )"),
+            );
+        }
+        self
+    }
+
     /// **A `slot` token, so a tile can declare a hole.**
     ///
     /// `new` writes an empty slot axis, which is the honest default: a project that has not grown

@@ -4745,3 +4745,90 @@ fn the_focus_walks_the_members_and_shift_delete_empties_the_tile() {
     press(&mut app, vec![key(Action::BuildDropMember)]);
     assert_eq!(n(&app), 1, "bare Delete removes one member, not the tile");
 }
+
+/// **A refused mount names what would satisfy it.**
+///
+/// Reported from the keyboard, 2026-08-12 — three in a row, building a bedroom tile:
+///
+/// > `crt_a` mounts to a `support` and nothing here offers one.
+/// > `plant_b` mounts to a `support` and nothing here offers one.
+/// > `lamp_tall` mounts to a `worktop` and nothing here offers one.
+///
+/// Each refusal was correct and each was a dead end: it named what was missing and not what to do
+/// about it, so the only route forward was guessing which of seventy-five library rows offers a
+/// `support`. The editor has that list — `Offers::surfaces` is a field, and `stack::offers_for` is
+/// the predicate the refusal itself just used.
+///
+/// `docs/2026-08-11-editor-visual-inspection.md` records this shape as D2: *"The information exists;
+/// only the channel is missing."*
+#[test]
+fn a_refused_mount_names_a_piece_that_would_hold_it() {
+    use emerge_mapper::build::Build;
+    use emerge_mapper::keys::Action;
+    use emerge_mapper::tiles::ImportState;
+
+    let root = Fixture::new("mount-refusal")
+        // A guest that needs a worktop, and a host that offers one — so the refusal has something
+        // true to point at. `aa_` / `zz_` fix the library order, and therefore the drop order.
+        .mounted_descriptor("aa_lamp", "alpha", "worktop")
+        .surface_descriptor("zz_desk", "beta", "worktop")
+        .build("m");
+    let mut app =
+        emerge_mapper::harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    app.update();
+
+    let press = |app: &mut bevy::prelude::App, chord: Vec<bevy::prelude::KeyCode>| {
+        app.add_systems(
+            bevy::prelude::Update,
+            bevy::prelude::IntoScheduleConfigs::before(
+                move |mut keys: bevy::prelude::ResMut<
+                    bevy::input::ButtonInput<bevy::prelude::KeyCode>,
+                >,
+                      mut done: bevy::prelude::Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        for k in &chord {
+                            keys.press(*k);
+                        }
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    };
+    let key = |a| emerge_mapper::keys::binding(a).key;
+
+    // Drop the lamp into an empty tile: nothing holds it, so this must refuse.
+    press(&mut app, vec![key(Action::TilesTab)]);
+    press(&mut app, vec![key(Action::BuildDrop)]);
+    assert_eq!(
+        app.world().resource::<Build>().open.as_ref().map_or(0, |c| c.members.len()),
+        0,
+        "a guest with no host must not land"
+    );
+
+    let said = app
+        .world()
+        .resource::<ImportState>()
+        .status
+        .problem_text()
+        .to_owned();
+    assert!(said.contains("worktop"), "the refusal names what is wanted: `{said}`");
+    assert!(
+        said.contains("zz_desk"),
+        "and names a piece that offers one, or the author is left to guess which of the library \
+         does — `{said}`"
+    );
+    assert!(
+        said.contains("Shift+Enter") || said.contains("hole"),
+        "and keeps the slot route it already offered: `{said}`"
+    );
+    // The padding bug that shipped in the message an author actually read.
+    assert!(
+        !said.contains("  "),
+        "no run of spaces from a broken line continuation: `{said}`"
+    );
+}
+

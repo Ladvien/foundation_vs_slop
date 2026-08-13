@@ -387,10 +387,46 @@ pub fn host_for(
     }
 
     match found.as_slice() {
-        [] => Err(format!(
-            "`{}` mounts to a `{want}` and nothing here offers one. Drop the piece it mounts to              first, or press Shift+Enter for a hole the generator fills.",
-            guest.id
-        )),
+        [] => {
+            // **Name what would work.** The refusal knew what was missing and not what to do about
+            // it, so an author was left to guess which of seventy-five rows offers a `support` —
+            // and the editor has that list. `docs/2026-08-11-editor-visual-inspection.md` records
+            // this exact shape as D2: *"The information exists; only the channel is missing."*
+            //
+            // Three, then a count. A refusal naming twenty pieces is not read, and the three are
+            // sorted so the same tile refuses the same way on every machine.
+            let mut hosts: Vec<&str> = library
+                .descriptors
+                .iter()
+                .filter(|d| stack::offers_for(d, guest))
+                .map(|d| d.id.as_str())
+                .collect();
+            hosts.sort_unstable();
+            let offer = match hosts.as_slice() {
+                [] => format!(
+                    " Nothing in this kit offers a `{want}`, so a hole is the only way to place it."
+                ),
+                some => {
+                    let named = some
+                        .iter()
+                        .take(3)
+                        .map(|i| format!("`{i}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let rest = some.len().saturating_sub(3);
+                    if rest == 0 {
+                        format!(" {named} offers one.")
+                    } else {
+                        format!(" {named} and {rest} more offer one.")
+                    }
+                }
+            };
+            Err(format!(
+                "`{}` mounts to a `{want}` and nothing in this tile offers one.{offer} Drop that \
+                 first, or press Shift+Enter for a hole the generator fills.",
+                guest.id
+            ))
+        }
         [one] => Ok(Some((*one).to_owned())),
         many => Err(format!(
             "`{}` touches {} — move it against one of them, so the tile says which it is mounted on.",
