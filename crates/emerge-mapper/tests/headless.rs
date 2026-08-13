@@ -4913,7 +4913,9 @@ fn every_checkpoint_a_shipped_guide_names_is_registered_and_runs() {
         let Some(id) = app.world().resource::<Checkpoints>().get(name) else {
             panic!("`{name}` was listed and then could not be fetched");
         };
-        if let Err(e) = app.world_mut().run_system(id) {
+        // Every checkpoint takes `In<Value>` now, so a step can be as specific as its claim.
+        // `null` is what a step with no `with` supplies.
+        if let Err(e) = app.world_mut().run_system_with(id, serde_json::Value::Null) {
             panic!("checkpoint `{name}` could not run: {e}");
         }
     }
@@ -5038,7 +5040,10 @@ fn the_tile_authoring_script_can_actually_be_followed() {
         // on 2026-08-12 — and it is an observation, not an action.
         let strokes = keystrokes(label);
         if !strokes.is_empty() {
-            let before = app.world_mut().run_system(id).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let before = app
+                .world_mut()
+                .run_system_with(id, step.get("with").cloned().unwrap_or(serde_json::Value::Null))
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
             assert!(
                 !before,
                 "step `{label}` watches `{name}`, which was ALREADY true before the step ran. An \
@@ -5087,7 +5092,10 @@ fn the_tile_authoring_script_can_actually_be_followed() {
             app.update();
         }
 
-        let after = app.world_mut().run_system(id).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let after = app
+            .world_mut()
+            .run_system_with(id, step.get("with").cloned().unwrap_or(serde_json::Value::Null))
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(
             after,
             "step `{label}` says pressing {:?} makes `{name}` true, and it did not. An author \
@@ -5168,4 +5176,138 @@ fn a_tile_too_big_to_generate_names_the_member_that_did_it() {
     let size = emerge_mapper::build::fit_envelope(&fits, library, 4.0);
     assert!(emerge_mapper::build::is_one_cell(size));
     assert!(emerge_mapper::build::what_made_it_big(&fits, library, size).is_none());
+}
+
+/// **A step that authors a new tile must not pass by reopening an old one.**
+///
+/// This is the defect that made the transcript untrustworthy, and it is worth stating exactly,
+/// because it looked like the tool working. An author ran the site-kit script; the step "build and
+/// save the corner tile" reported PASS; `compositions.ron` contained no corner tile, then or after.
+/// The transcript recorded 1/1 for work that never happened, and `k/n` being believable is the whole
+/// reason this module exists.
+///
+/// The cause was a condition weaker than the step that claimed it. `the tile is saved` asks whether
+/// *whatever is currently open* is committed — so it says yes for a tile saved ten minutes ago, and
+/// says nothing at all about which tile, whether it is new, or what is in it.
+///
+/// The fix is not a better sentence, it is arguments: `the kit has tiles` with `{"n": 3}` counts what
+/// is committed, and a count **cannot go down**, so revisiting old work cannot re-satisfy it. That
+/// property is what this test pins — prefer a monotonic condition in any script that authors more
+/// than one thing.
+#[cfg(feature = "debugger")]
+#[test]
+fn reopening_a_saved_tile_cannot_pass_a_step_that_asks_for_a_new_one() {
+    use bevy_debugger_bevy::Checkpoints;
+    use serde_json::json;
+
+    let root = Fixture::new("monotonic").descriptor("wall", "alpha").build("m");
+    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    app.update();
+
+    let run = |app: &mut App, name: &str, args: serde_json::Value| -> bool {
+        let Some(id) = app.world().resource::<Checkpoints>().get(name) else {
+            panic!("`{name}` is not registered");
+        };
+        app.world_mut()
+            .run_system_with(id, args)
+            .unwrap_or_else(|e| panic!("{name}: {e}"))
+    };
+
+    // Two tiles committed, and the second one left open — the state the author was actually in.
+    let saved = |app: &mut App, id: &str| {
+        let comp = emerge_core::composition::Composition {
+            id: id.to_owned(),
+            envelope: emerge_core::composition::Envelope::Bounded { size: (1.0, 4.0, 1.0) },
+            members: vec![],
+            locations: vec![],
+            note: None,
+        };
+        let mut project = app.world_mut().resource_mut::<emerge_mapper::project::Project>();
+        project.compositions.compositions.push(comp.clone());
+        app.world_mut().resource_mut::<emerge_mapper::build::Build>().open = Some(comp);
+    };
+    saved(&mut app, "kit/tile_1");
+    saved(&mut app, "kit/tile_2");
+
+    // The weak condition says yes, which is the bug: `kit/tile_2` is open and committed, so a step
+    // asking for a *third* tile passes without one existing.
+    assert!(
+        run(&mut app, "the tile is saved", json!(null)),
+        "the open tile is committed, so the weak condition holds — this is the state that lied"
+    );
+
+    // The monotonic one counts what is on disk and is not fooled.
+    assert!(run(&mut app, "the kit has tiles", json!({"n": 2})));
+    assert!(
+        !run(&mut app, "the kit has tiles", json!({"n": 3})),
+        "two tiles exist, so a step that authors the third must NOT pass"
+    );
+
+    // And it passes the moment a third actually exists.
+    saved(&mut app, "kit/tile_3");
+    assert!(run(&mut app, "the kit has tiles", json!({"n": 3})));
+}
+
+/// **A corner is two walls that are NOT parallel, and the condition has to know the units.**
+///
+/// `the tile has turns` counts distinct quarter-turns among the members, which is the only thing in
+/// this vocabulary that can tell a corner from two walls side by side.
+///
+/// It is pinned because the first version divided by `FRAC_PI_2` — treating `Member::yaw` as radians
+/// when `build::turn` writes `(m.yaw + 90.0).rem_euclid(360.0)`, i.e. degrees. That version would
+/// have **passed the case it was written for**: 90/1.5708 rounds to 57, which is not 0, so a two-wall
+/// corner still counted two turns. It fails at 270, which rounds to 172 and collides with 0. Right by
+/// accident on the example you tried is the same defect as plain wrong, and harder to notice.
+#[cfg(feature = "debugger")]
+#[test]
+fn a_corner_is_told_from_two_parallel_walls_and_the_units_are_degrees() {
+    use bevy_debugger_bevy::Checkpoints;
+    use emerge_core::composition::{Body, Composition, Envelope, Member};
+    use serde_json::json;
+
+    let root = Fixture::new("turns").descriptor("wall", "alpha").build("m");
+    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    app.update();
+
+    let at = |yaw: f32| Member {
+        id: format!("wall_{yaw}"),
+        body: Body::Descriptor { id: "wall".to_owned(), tip: (0, 0), on: None, patch: None },
+        at: (0.0, 0.0),
+        yaw,
+        lift: 0.0,
+        paint: 0,
+        of_fingerprint: None,
+        note: None,
+    };
+    let open = |app: &mut App, yaws: &[f32]| {
+        app.world_mut().resource_mut::<emerge_mapper::build::Build>().open = Some(Composition {
+            id: "kit/t".to_owned(),
+            envelope: Envelope::Bounded { size: (1.0, 4.0, 1.0) },
+            members: yaws.iter().copied().map(at).collect(),
+            locations: vec![],
+            note: None,
+        });
+    };
+    let turns = |app: &mut App, n: u64| -> bool {
+        let Some(id) = app.world().resource::<Checkpoints>().get("the tile has turns") else {
+            panic!("`the tile has turns` is not registered");
+        };
+        app.world_mut()
+            .run_system_with(id, json!({ "n": n }))
+            .unwrap_or_else(|e| panic!("{e}"))
+    };
+
+    open(&mut app, &[0.0, 0.0]);
+    assert!(!turns(&mut app, 2), "two parallel walls are not a corner");
+
+    open(&mut app, &[0.0, 90.0]);
+    assert!(turns(&mut app, 2), "a quarter turn apart is");
+
+    // The case the radians version got wrong: 270 must not read as 0.
+    open(&mut app, &[0.0, 270.0]);
+    assert!(turns(&mut app, 2), "and so is three quarters, which the radians version collided with 0");
+
+    // A full turn is the same wall.
+    open(&mut app, &[0.0, 360.0]);
+    assert!(!turns(&mut app, 2), "360 is 0, not a second direction");
 }
