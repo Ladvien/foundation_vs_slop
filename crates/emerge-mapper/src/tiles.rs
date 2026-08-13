@@ -959,8 +959,8 @@ fn tile_history_keys(
     mut project: ResMut<Project>,
     mut state: ResMut<ImportState>,
 ) {
-    let back = keys::just_pressed(&keyboard, live.0, Action::UndoTile);
-    let forward = keys::just_pressed(&keyboard, live.0, Action::RedoTile);
+    let back = keys::just_pressed(&keyboard, *live, Action::UndoTile);
+    let forward = keys::just_pressed(&keyboard, *live, Action::RedoTile);
     if !back && !forward {
         return;
     }
@@ -1314,20 +1314,67 @@ fn held_shift(keyboard: &ButtonInput<KeyCode>) -> bool {
 ///   judgement, and a scan that erased them would make the button unusable on a tuned piece.
 /// * **The count is stated.** Vertex occupancy under-marks a large flat face with no vertex inside a
 ///   cell — the middle of a tabletop — and "27 of 30 cells" is what tells an author to look.
-fn scan_mesh(project: &mut Project, state: &mut ImportState) {
+/// **Edge tokens read off the mesh, waiting for a yes.**
+///
+/// The proposal half of FVS-R-26. `emerge_core::adjacency::derive_edges` does the reading; this holds
+/// the answer until an author accepts it, on the machine-proposed / human-confirmed pattern
+/// `labels.rs` already runs for the vision model. Nothing here reaches `library.ron`.
+///
+/// **Keyed by descriptor id**, because the selection moves: a proposal about `site/wall` must not be
+/// applied to whatever the author walked to afterwards. `accept_derived_edges` checks it.
+#[derive(Resource, Default)]
+pub struct DerivedEdges(pub Option<Derived>);
+
+/// One staged derivation.
+pub struct Derived {
+    /// The descriptor the cells were read from.
+    pub id: String,
+    /// `(cell, token)` for every boundary cell, ascending — see `adjacency::derive_edges`.
+    pub cells: Vec<((u32, u32, u32), &'static str)>,
+}
+
+impl Derived {
+    /// How many of the proposals would actually change something, and how many are already that.
+    ///
+    /// Stated as a delta rather than a total, because `docs/ui.md` §3.2 asks for the change and
+    /// because "propose 48 cells" on a piece that already carries 48 identical tokens reads as work
+    /// about to happen when none is.
+    pub fn delta(&self, grid: Option<&emerge_core::descriptor::Subgrid>) -> (usize, usize) {
+        let mut changed = 0;
+        let mut same = 0;
+        for (at, token) in &self.cells {
+            let now = grid.and_then(|g| g.at(*at)).and_then(|c| c.edge.as_deref());
+            if now == Some(*token) {
+                same += 1;
+            } else {
+                changed += 1;
+            }
+        }
+        (changed, same)
+    }
+}
+
+/// Returns the derivation for the caller to stage, or `None` when there was nothing to read.
+///
+/// **The caller decides whether to stage it, and that is load-bearing.** `autoscan_candidate` runs
+/// this on every selection change; staging there would put the tab into `keys::Stance::Proposed`
+/// without anybody asking, which silently changes what `Enter` means while an author is only walking
+/// the list. The automatic scan is deliberately unobtrusive — its own note says so — and a proposal
+/// that reassigns a key is not. Only the asked-for `B` stages.
+fn scan_mesh(project: &mut Project, state: &mut ImportState) -> Option<Derived> {
     let div = match focused_div(state, project) {
         Ok(div) => div,
         Err(why) => {
             state.status.problem(why);
-            return;
+            return None;
         }
     };
     let Some(d) = state.editing(&project.measured) else {
-        return;
+        return None;
     };
     let Some(mesh) = d.mesh.clone() else {
         state.status.problem(format!("`{}` has no mesh to scan", d.id));
-        return;
+        return None;
     };
     // **The rotation the divisions were derived with.** `div` comes from the piece's `extent`, which
     // `import::remeasure_rotated` already baked `align.rotate` into — so the rasteriser has to read
@@ -1339,7 +1386,7 @@ fn scan_mesh(project: &mut Project, state: &mut ImportState) {
             Ok(q) => q,
             Err(why) => {
                 state.status.problem(why);
-                return;
+                return None;
             }
         },
         None => (0, 0, 0),
@@ -1352,14 +1399,14 @@ fn scan_mesh(project: &mut Project, state: &mut ImportState) {
         Ok(cells) => cells,
         Err(why) => {
             state.status.problem(format!("{mesh}: {why}"));
-            return;
+            return None;
         }
     };
 
     // Taken before the write — the only moment the old value still exists.
     let history_before = state.snapshot(&project);
     let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
-        return;
+        return None;
     };
     let grid = d.lattice_mut();
     for &at in &cells {
@@ -1367,12 +1414,140 @@ fn scan_mesh(project: &mut Project, state: &mut ImportState) {
     }
     d.settle_lattice();
     let total = emerge_core::descriptor::Subgrid::volume(div);
+    // **The same rasterisation, read a second way** — and this is what `SubCell::solid` turns out to
+    // be for. Its own note records that nothing read it to decide anything (FVS-Q-9, closed *no*);
+    // the boundary of a solid lattice is exactly the socket a neighbour has to match, so the scan
+    // that marks the solids can propose the tokens in the same act.
+    let proposal = d
+        .subgrid
+        .as_ref()
+        .map(|g| emerge_core::adjacency::derive_edges(g, div))
+        .unwrap_or_default();
+    let id = d.id.clone();
     let said = format!(
         "scanned {mesh}: {} of {total} cells solid",
         cells.len()
     );
     state.record(history_before);
     state.status.say(persist(project, where_to, said));
+
+    Some(Derived { id, cells: proposal })
+}
+
+/// **Write derived tokens onto a descriptor's lattice**, returning how many cells actually moved.
+///
+/// One function, called twice: once on a throwaway candidate to ask the vocabulary whether the
+/// result is loadable, and once on the real descriptor when it is. Two spellings of "apply the
+/// proposal" would be two things to keep in step, and the whole point of the candidate is that it is
+/// the *same* edit.
+fn apply_edges(d: &mut emerge_core::descriptor::Descriptor, cells: &[((u32, u32, u32), &'static str)]) -> usize {
+    let grid = d.lattice_mut();
+    let mut written = 0usize;
+    for (at, token) in cells {
+        match grid.cells.iter_mut().find(|c| c.at == *at) {
+            Some(c) => {
+                if c.edge.as_deref() != Some(*token) {
+                    c.edge = Some((*token).to_owned());
+                    written += 1;
+                }
+            }
+            None => {
+                grid.cells.push(emerge_core::descriptor::SubCell {
+                    at: *at,
+                    edge: Some((*token).to_owned()),
+                    ..Default::default()
+                });
+                written += 1;
+            }
+        }
+    }
+    d.settle_lattice();
+    written
+}
+
+/// **Take the derived edges, or leave them** — the commit door on FVS-R-26.
+///
+/// # It refuses an undeclared token by name, and that is the design rather than a gap
+///
+/// `edge` is a **closed** vocabulary axis. `vocab.rs` says why in as many words: an empty axis is
+/// *"the honest reading of 'this project has not decided what its tiles present'"*, and the tokens
+/// are matched by equality, so *"a typo does not read as a wrong token, it reads as a token that
+/// matches nothing."* A derivation that quietly widened `vocab.ron` would be taking that decision on
+/// the author's behalf — so this states which tokens to declare and refuses until they are.
+///
+/// One round-trip the first time, and none after. The alternative — writing the axis from an
+/// authoring action — was considered and turned down (author's call, 2026-08-12).
+fn accept_derived_edges(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<crate::keys::Live>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<ImportState>,
+    mut derived: ResMut<DerivedEdges>,
+) {
+    let accept = keys::just_pressed(&keyboard, *live, Action::AcceptEdges);
+    let discard = keys::just_pressed(&keyboard, *live, Action::Cancel);
+    if !accept && !discard {
+        return;
+    }
+    if discard {
+        if derived.0.take().is_some() {
+            state
+                .status
+                .note("derived edges thrown away — the lattice is as it was".to_owned());
+        }
+        return;
+    }
+    let Some(proposal) = derived.0.take() else {
+        return;
+    };
+
+    // **The selection may have moved.** A proposal names the descriptor it was read from, so it can
+    // never be applied to whatever the author walked to since.
+    let editing = state.editing(&project.measured).map(|d| d.id.clone());
+    if editing.as_deref() != Some(proposal.id.as_str()) {
+        state.status.problem(format!(
+            "the derived edges are for `{}`, and the focus has moved — rescan with {} to propose \
+             again",
+            proposal.id,
+            crate::keys::chord(Action::ScanMesh),
+        ));
+        return;
+    }
+
+    // **The vocabulary is asked before anything is written, and it is asked of the vocabulary.**
+    //
+    // Not a second copy of the rule: `Vocabularies::masks` already refuses an undeclared edge token
+    // by name, and its message is better than one written here would be — it names the token, prints
+    // the axis as it stands, and says *"Growing a vocabulary is one row in the table — never a second
+    // list."* Restating that would be the second census `keys.rs` exists to prevent, one layer down.
+    //
+    // What this adds is only *when*. Without it the write lands in memory and `persist` refuses at
+    // save time, leaving the editor showing tokens the project cannot load — which is exactly the
+    // defect `9af92aa` fixed one tab over, under the title *"the tile assembler stops writing state
+    // it then refuses to save"*. So the check is run against a **candidate**, and the real descriptor
+    // is only touched once the candidate passes.
+    let Some(current) = state.editing(&project.measured).cloned() else {
+        return;
+    };
+    let mut candidate = current;
+    apply_edges(&mut candidate, &proposal.cells);
+    if let Err(why) = project.vocab.masks(&candidate) {
+        state.status.problem(format!(
+            "not applied — {why} Declare it in vocab.ron and press {} again.",
+            crate::keys::chord(Action::ScanMesh),
+        ));
+        return;
+    }
+
+    let history_before = state.snapshot(&project);
+    let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
+        return;
+    };
+    let written = apply_edges(d, &proposal.cells);
+    d.settle_lattice();
+    let said = format!("kept the derived edges: {written} cell(s) written");
+    state.record(history_before);
+    state.status.say(persist(&mut project, where_to, said));
 }
 
 /// **Scan a candidate the moment it is selected**, so the common case needs no keypress at all.
@@ -1414,7 +1589,9 @@ fn autoscan_candidate(
     if already_marked {
         return;
     }
-    scan_mesh(&mut project, &mut state);
+    // Deliberately dropped: see `scan_mesh`'s note. An automatic scan marks solids and proposes
+    // nothing, so walking the candidate list never changes what a key does.
+    let _ = scan_mesh(&mut project, &mut state);
 }
 
 /// The chip.
@@ -1423,11 +1600,28 @@ fn on_scan_mesh(
     buttons: Query<&ScanMeshButton>,
     mut project: ResMut<Project>,
     mut state: ResMut<ImportState>,
+    mut derived: ResMut<DerivedEdges>,
 ) {
     if buttons.get(activate.entity).is_err() {
         return;
     }
-    scan_mesh(&mut project, &mut state);
+    // **Only the asked-for scan stages a proposal** — see `scan_mesh`'s note on why the automatic
+    // one must not.
+    if let Some(proposal) = scan_mesh(&mut project, &mut state) {
+        let count = proposal.cells.len();
+        let (changed, same) = proposal.delta(
+            state
+                .editing(&project.measured)
+                .and_then(|d| d.subgrid.as_ref()),
+        );
+        *derived = DerivedEdges(Some(proposal));
+        state.status.note(format!(
+            "{count} boundary cell(s) read from the mesh — {changed} would change, {same} already \
+             match. {} keeps them, {} throws them away",
+            crate::keys::chord(crate::keys::Action::AcceptEdges),
+            crate::keys::chord(crate::keys::Action::Cancel),
+        ));
+    }
 }
 
 /// **The lattice the focused piece stands on**, or the sentence explaining why it has none.
@@ -1711,6 +1905,7 @@ fn lattice_keys(
     mut edit: ResMut<CellEdit>,
     mut project: ResMut<Project>,
     mut state: ResMut<ImportState>,
+    mut derived: ResMut<DerivedEdges>,
 ) {
     let Ok((dx, dy, dz)) = focused_div(&state, &project) else {
         return;
@@ -1720,12 +1915,28 @@ fn lattice_keys(
         return;
     }
 
-    let pressed = |a| keys::just_pressed(&keyboard, live.0, a);
+    let pressed = |a| keys::just_pressed(&keyboard, *live, a);
 
     // Everything reachable by mouse is reachable by key (`docs/ui.md` §4.2), so the scan chip has
     // one too — and it goes through the same `scan_mesh` the chip calls, not a second copy.
     if pressed(Action::ScanMesh) {
-        scan_mesh(&mut project, &mut state);
+        // **Only the asked-for scan stages a proposal** — see `scan_mesh`'s note on why the automatic
+    // one must not.
+    if let Some(proposal) = scan_mesh(&mut project, &mut state) {
+        let count = proposal.cells.len();
+        let (changed, same) = proposal.delta(
+            state
+                .editing(&project.measured)
+                .and_then(|d| d.subgrid.as_ref()),
+        );
+        *derived = DerivedEdges(Some(proposal));
+        state.status.note(format!(
+            "{count} boundary cell(s) read from the mesh — {changed} would change, {same} already \
+             match. {} keeps them, {} throws them away",
+            crate::keys::chord(crate::keys::Action::AcceptEdges),
+            crate::keys::chord(crate::keys::Action::Cancel),
+        ));
+    }
         return;
     }
     for (action, axis) in [
@@ -2522,6 +2733,7 @@ impl Plugin for TilesPlugin {
             .init_resource::<ImportState>()
             .init_resource::<MapView>()
             .init_resource::<CellEdit>()
+            .init_resource::<DerivedEdges>()
             .init_resource::<LatticePick>()
             .init_resource::<NoteEdit>()
             // Registered in the same commit as `scale_keys` and `rebuild_detail` read it — a missing
@@ -2551,6 +2763,11 @@ impl Plugin for TilesPlugin {
                     // walks the tile's. `Context` keeps them from firing into each other.
                     (
                         lattice_keys.in_set(crate::keys::Phase::Act),
+                        // After `lattice_keys`, so the `B` that stages a derivation cannot
+                        // have its proposal answered by the same frame's `Enter`.
+                        accept_derived_edges
+                            .in_set(crate::keys::Phase::Act)
+                            .after(lattice_keys),
                         // **After the tab is settled**, because arriving on the Tiles tab is what
                         // opens a tile — and `toggle_mode`/`tab_shortcuts` are the two systems that
                         // decide which tab that is. Unordered, they share `Phase::Act` with this
@@ -2803,7 +3020,7 @@ fn tab_shortcuts(
     mut state: ResMut<ImportState>,
 ) {
     for want in Mode::ALL {
-        if keys::just_pressed(&keyboard, live.0, want.action()) && *mode != want {
+        if keys::just_pressed(&keyboard, *live, want.action()) && *mode != want {
             *mode = want;
             if want == Mode::Meshes && !state.scanned {
                 scan(&project, &mut state);
@@ -2925,13 +3142,13 @@ fn toggle_mode(
     mut mode: ResMut<Mode>,
     mut state: ResMut<ImportState>,
 ) {
-    let want_scan = if keys::just_pressed(&keyboard, live.0, Action::NextTab) {
+    let want_scan = if keys::just_pressed(&keyboard, *live, Action::NextTab) {
         // Cycle, not toggle: a third tab then costs a row in `Mode::ALL` and nothing else.
         let at = Mode::ALL.iter().position(|m| m == &*mode).unwrap_or(0);
         *mode = Mode::ALL[(at + 1) % Mode::ALL.len()];
         *mode == Mode::Meshes && !state.scanned
     } else {
-        *mode == Mode::Meshes && keys::just_pressed(&keyboard, live.0, Action::Rescan)
+        *mode == Mode::Meshes && keys::just_pressed(&keyboard, *live, Action::Rescan)
     };
 
     if want_scan {
@@ -3134,7 +3351,7 @@ fn rename_candidate(
     mut state: ResMut<ImportState>,
 ) {
     if state.renaming.is_none() {
-        if keys::just_pressed(&keyboard, live.0, Action::TypeId) {
+        if keys::just_pressed(&keyboard, *live, Action::TypeId) {
             if let Some(id) = state.selected_library_id.clone() {
                 state.status.problem(format!(
                     "`{id}` is in the library — renaming it would strand every placement that names it"
@@ -3227,7 +3444,7 @@ fn cycle_mount(
     mut project: ResMut<Project>,
     mut state: ResMut<ImportState>,
 ) {
-    if !keys::just_pressed(&keyboard, live.0, Action::CycleMount) {
+    if !keys::just_pressed(&keyboard, *live, Action::CycleMount) {
         return;
     }
     let surfaces: Vec<String> = project.vocab.surfaces.names().map(str::to_owned).collect();
@@ -3291,7 +3508,7 @@ fn suggestion_keys(
     mut rig: ResMut<crate::label_booth::ShotRig>,
 ) {
     // `Shift+Y`: the whole labeler emptied at once — proposals, batch, booth queue, in-flight.
-    if keys::just_pressed(&keyboard, live.0, Action::DiscardAllSuggestions) {
+    if keys::just_pressed(&keyboard, *live, Action::DiscardAllSuggestions) {
         state.status.note(crate::labels::clear_all_labels(
             &mut suggestions,
             &mut generation,
@@ -3301,8 +3518,8 @@ fn suggestion_keys(
         ));
         return;
     }
-    let apply = keys::just_pressed(&keyboard, live.0, Action::ApplySuggestion);
-    let discard = keys::just_pressed(&keyboard, live.0, Action::DiscardSuggestion);
+    let apply = keys::just_pressed(&keyboard, *live, Action::ApplySuggestion);
+    let discard = keys::just_pressed(&keyboard, *live, Action::DiscardSuggestion);
     if !apply && !discard {
         return;
     }
@@ -3401,7 +3618,7 @@ fn commit_candidate(
     mut project: ResMut<Project>,
     mut state: ResMut<ImportState>,
 ) {
-    if !keys::just_pressed(&keyboard, live.0, Action::Accept) {
+    if !keys::just_pressed(&keyboard, *live, Action::Accept) {
         return;
     }
     if let Some(id) = state.selected_library_id.clone() {
@@ -3498,7 +3715,7 @@ fn remove_tile(
     mut project: ResMut<Project>,
     mut state: ResMut<ImportState>,
 ) {
-    if !keys::just_pressed(&keyboard, live.0, Action::RemoveTile) {
+    if !keys::just_pressed(&keyboard, *live, Action::RemoveTile) {
         return;
     }
     let Some(id) = state.selected_library_id.clone() else {
@@ -3665,7 +3882,7 @@ fn demote_tile(
     mut suggestions: ResMut<crate::labels::Suggestions>,
     mut generation: ResMut<crate::labels::LabelGeneration>,
 ) {
-    if !keys::just_pressed(&keyboard, live.0, Action::DemoteTile) {
+    if !keys::just_pressed(&keyboard, *live, Action::DemoteTile) {
         return;
     }
     let Some(id) = state.selected_library_id.clone() else {
@@ -3792,10 +4009,11 @@ fn on_tag_chip(
     state.status.say(persist(&mut project, where_to, said));
 }
 
+// **No `Res<Build>` any more.** This system used to read `build.placing` to decide whether the arrows
+// were its business; the census answers that now, so the dependency went with the guard.
 fn move_selection(
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<crate::keys::Live>,
-    build: Res<crate::build::Build>,
     time: Res<Time>,
     mut repeat: ResMut<crate::keys::Repeat>,
     project: Res<Project>,
@@ -3813,21 +4031,20 @@ fn move_selection(
     // together: `Repeat` carries a single countdown, so asking it about two actions in one frame
     // would have the second reset the first's cadence.
     //
-    // **And on the Tiles tab only while nothing is in hand.** The same two keys walk the tile once
-    // the author has taken a piece (`Space`), so this steps aside rather than both moving at once —
-    // see `build::Build::placing`. One key, one job at a time, decided by a state the ghost draws.
-    if live.0 == crate::keys::Context::Tiles && build.placing {
-        return;
-    }
+    // **And on the Tiles tab only while nothing is in hand** — which this no longer has to check.
+    // `TileListPrev`/`TileListNext` declare `Stance::Idle`, so taking a piece with `Space` stops them
+    // firing at the census rather than here. The early return that used to live here was the second
+    // census `keys.rs` exists to prevent: a rule about when a key fires, written somewhere a reader
+    // of the key table could not see it.
     let (prev, next) = if live.0 == crate::keys::Context::Tiles {
-        (Action::BuildForward, Action::BuildBack)
+        (Action::TileListPrev, Action::TileListNext)
     } else {
         (Action::PrevCandidate, Action::NextCandidate)
     };
-    let down = keys::repeating(&keyboard, live.0, next, &mut repeat, dt);
-    let up = keys::repeating(&keyboard, live.0, prev, &mut repeat, dt);
-    let to_library = keys::just_pressed(&keyboard, live.0, Action::FocusLibrary);
-    let to_candidates = keys::just_pressed(&keyboard, live.0, Action::FocusCandidates);
+    let down = keys::repeating(&keyboard, *live, next, &mut repeat, dt);
+    let up = keys::repeating(&keyboard, *live, prev, &mut repeat, dt);
+    let to_library = keys::just_pressed(&keyboard, *live, Action::FocusLibrary);
+    let to_candidates = keys::just_pressed(&keyboard, *live, Action::FocusCandidates);
 
     // Left/right choose which list the arrows walk. `selected_library_id` is already the one
     // discriminant the detail pane reads, so this sets it and everything else follows.
@@ -4818,6 +5035,26 @@ fn build_detail(
         DIM,
         9.0,
     );
+    // **Whether a solver can place this, said where the size is said.**
+    //
+    // `grammar::from_compositions` skips anything that is not one cell across, so a group that has
+    // grown past a tile is hand-stamped content rather than solver content. That was a *problem*
+    // raised on every size change, which the author's own log showed accumulating fifteen deep from
+    // one nudge and still on screen after the tile was emptied — see `build::refit_tile`.
+    //
+    // It is a property, so it lives beside the property it qualifies and is true exactly while it is
+    // visible. `ACCENT`, not `DANGER`: nothing is wrong — a bigger group is still what Compose
+    // composes and still stamps by hand — but an author who believes they are building solver content
+    // has to be able to see that they are not.
+    if !crate::build::is_one_cell(size) {
+        let (nx, nz) = crate::build::tiles_across(size);
+        line(
+            p,
+            format!("{nx} x {nz} tiles — hand-stamped, too big to generate"),
+            ACCENT,
+            9.0,
+        );
+    }
 
     // **The grid, and where you are on it.** The cell counts come from the rung rather than being
     // stated, so the number an author reads is the number of squares they will walk.

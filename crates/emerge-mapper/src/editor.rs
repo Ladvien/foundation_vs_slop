@@ -61,6 +61,18 @@ const BOUNDS_FILL: Color = Color::srgb(0.105, 0.100, 0.092);
 /// against to 0.105, so holding that separation puts the lines here. Warm-neutral rather than pure
 /// grey, because every other colour in this editor is.
 pub(crate) const GRID_LINE: Color = Color::srgb(0.270, 0.262, 0.248);
+/// **The dressing rungs' lines, quieter than the module's.**
+///
+/// A minor line that reads as loud as a major one is not a second scale, it is noise: the eye has to
+/// count to find the tile boundary instead of seeing it. Darker rather than a different hue, because
+/// they are the same ladder and a colour change would say they were not.
+pub(crate) const GRID_MINOR: Color = Color::srgb(0.176, 0.170, 0.161);
+/// **A cell a pending layout would take.**
+///
+/// The same slate `chrome::PROPOSAL` uses for the VLM labeler's machine-proposed state, and for the
+/// same reason its note gives: a proposal is *a question*, so it must read as neither an answer
+/// (amber, a live edit of yours) nor an alarm (red, something wrong).
+pub(crate) const PROPOSAL_LINE: Color = Color::srgb(0.42, 0.55, 0.68);
 
 /// The **least** the slab drops below the datum, metres — enough to beat z-fighting against a piece
 /// lying at `y_offset: 0.0`. See [`ground_drop`], which is usually deeper.
@@ -191,6 +203,13 @@ pub struct EditorState {
 }
 
 impl EditorState {
+    /// **How many steps back are available**, for a test that needs to assert an act recorded
+    /// *nothing* — discarding a proposal, for one, which writes nothing and so must take nothing
+    /// back. The stack itself stays private: this answers a question, it does not hand over the rows.
+    pub fn undo_depth(&self) -> usize {
+        self.undo.len()
+    }
+
     /// **Record an edit**, and drop anything that was waiting to be redone.
     ///
     /// One place, so no edit site can forget the second half. A redo stack that survived a new edit
@@ -735,7 +754,8 @@ impl Plugin for EditorPlugin {
             .init_resource::<UnderCursor>()
             // Read by `draw_map_grid` as a bare `Res<_>`, which panics its system in 0.19 if
             // nobody registered it.
-            .init_resource::<GridSpacing>()
+            .init_resource::<Rung>()
+            .init_resource::<Proposal>()
             .init_resource::<FineAnchor>()
             .init_resource::<PlaceDrag>()
             // **This plugin reads it, so this plugin registers it** (CLAUDE.md's rule, and the
@@ -829,7 +849,19 @@ impl Plugin for EditorPlugin {
                     // side of a Tiles-tab write, so it rides with the other per-frame repaints.
                     // Nested: the tuple is at Bevy 0.19's cap of 20. `cycle_grid` is a census
                     // action, so it goes in `Act` with the rest of them.
-                    (style_rows, redraw_edited, cycle_grid.in_set(keys::Phase::Act)),
+                    // Nested: the tuple is at Bevy 0.19's cap of 20. `walk_palette` is a census
+                    // action, so it goes in `Act` with the rest of them.
+                    (
+                        style_rows,
+                        redraw_edited,
+                        cycle_grid.in_set(keys::Phase::Act),
+                        walk_palette.in_set(keys::Phase::Act),
+                        // `apply_proposal` after `keys`, so the `Enter` that accepts cannot be seen
+                        // by the same frame's `Esc` peel — the two halves of one door must not both
+                        // fire on one press.
+                        apply_proposal.in_set(keys::Phase::Act).after(keys),
+                        draw_proposal,
+                    ),
                     refresh_status,
                     rebuild_palette.run_if(
                         // `or_else`, not the deprecated `or`: 0.19 spells the lazy form this way,
@@ -1091,21 +1123,7 @@ fn rebuild_palette(
     for list in &lists {
         commands.entity(list).despawn_related::<Children>();
         commands.entity(list).with_children(|p| {
-            for (category, mut members) in categories(&project) {
-                // **The filter narrows; it never reorders.** Rows that survive keep the positions
-                // they had, so what an author learned about where a piece sits is still true —
-                // Samp 2011, via `docs/ui.md` §3.5.
-                members.retain(|ix| {
-                    project
-                        .library
-                        .descriptors
-                        .get(*ix)
-                        .is_some_and(|d| filters.keeps(crate::filter::Pane::Palette, &d.id))
-                });
-                // A heading with nothing under it is a heading about nothing.
-                if members.is_empty() {
-                    continue;
-                }
+            for (category, members) in palette_categories(&project, &filters) {
                 let folded = state.collapsed.contains(&category);
                 p.spawn((
                     UiButton,
@@ -1219,6 +1237,54 @@ fn rebuild_palette(
 /// old `category` field straight across — and for the few that carry several, the first is the one
 /// the author wrote first, which is a better guess at "what this mainly is" than any rule this
 /// function could invent.
+/// **What the palette shows, filtered, in the order it shows it.**
+///
+/// The one answer to that question, asked by the panel that draws the rows and by the arrows that
+/// walk them. Two copies of this rule would drift the moment a filter changed — `brush_at` is the
+/// precedent, and its note records what that drift cost: the ghost and the commit sat on lattices
+/// half a tile apart because four call sites were threaded by hand.
+///
+/// Folding is **not** applied here: the panel needs a folded category's member count to print it,
+/// and only the walk needs it gone. [`palette_indices`] is where that happens.
+fn palette_categories(
+    project: &Project,
+    filters: &crate::filter::Filters,
+) -> Vec<(String, Vec<usize>)> {
+    let mut out = categories(project);
+    for (_, members) in out.iter_mut() {
+        // **The filter narrows; it never reorders.** Rows that survive keep the positions they had,
+        // so what an author learned about where a piece sits is still true — Samp 2011, via
+        // `docs/ui.md` §3.5.
+        members.retain(|ix| {
+            project
+                .library
+                .descriptors
+                .get(*ix)
+                .is_some_and(|d| filters.keeps(crate::filter::Pane::Palette, &d.id))
+        });
+    }
+    // A heading with nothing under it is a heading about nothing.
+    out.retain(|(_, members)| !members.is_empty());
+    out
+}
+
+/// **Every palette row an author can reach right now**, flattened in screen order.
+///
+/// What the arrows walk. A folded category's members are not on screen, so stepping onto one would
+/// arm a brush whose row cannot be seen — the selection and the picture would disagree, which is the
+/// same class of fault `keep_*_selection_visible` exists to prevent one tab over.
+pub fn palette_indices(
+    project: &Project,
+    state: &EditorState,
+    filters: &crate::filter::Filters,
+) -> Vec<usize> {
+    palette_categories(project, filters)
+        .into_iter()
+        .filter(|(category, _)| !state.collapsed.contains(category))
+        .flat_map(|(_, members)| members)
+        .collect()
+}
+
 fn categories(project: &Project) -> Vec<(String, Vec<usize>)> {
     let mut out: Vec<(String, Vec<usize>)> = project
         .vocab
@@ -1260,6 +1326,70 @@ fn on_category_click(
     if !state.collapsed.remove(&header.0) {
         state.collapsed.insert(header.0.clone());
     }
+}
+
+/// **Choose what to place, from the keyboard.**
+///
+/// The Map tab had no way to do this. `EditorState::brush` had a single writer — [`on_row_click`],
+/// below — so arming a brush meant reaching for the pointer, on the tab the code calls *"the job"*
+/// and in a tool whose brief was *"this should be done by the keyboard, as key strokes are faster."*
+///
+/// It walks [`palette_indices`], which is what the panel draws, so the selection can never step onto
+/// a row that is filtered out or folded away. Held arrows repeat at the shared
+/// [`keys::REPEAT_SECS`] cadence, and `Shift` is the same five-row stride every other list here uses.
+fn walk_palette(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<keys::Live>,
+    time: Res<Time>,
+    mut repeat: ResMut<keys::Repeat>,
+    project: Res<Project>,
+    filters: Res<crate::filter::Filters>,
+    mut state: ResMut<EditorState>,
+) {
+    let dt = time.delta_secs();
+    // One `repeating` call per direction, never two OR'd together: `Repeat` carries a single
+    // countdown, so asking it about two actions in one frame has the second reset the first's
+    // cadence. The Meshes tab paid for this already.
+    let down = keys::repeating(&keyboard, *live, keys::Action::PaletteNext, &mut repeat, dt);
+    let up = keys::repeating(&keyboard, *live, keys::Action::PalettePrev, &mut repeat, dt);
+    if !down && !up {
+        return;
+    }
+
+    let visible = palette_indices(&project, &state, &filters);
+    if visible.is_empty() {
+        // A refusal, not silence: an empty palette after a filter looks exactly like a dead key.
+        state
+            .status
+            .problem("no palette rows to walk — the filter hides them all".to_owned());
+        return;
+    }
+
+    let stride = if keys::shift_held(&keyboard) { 5 } else { 1 };
+    let at = state.brush.and_then(|b| visible.iter().position(|ix| *ix == b));
+    let want = match at {
+        Some(at) if down => at + stride,
+        Some(at) => at.saturating_sub(stride),
+        // **Nothing armed, or armed to something not on screen** — an arrow then means "start from
+        // the end of the list I am moving towards", which is where the eye already is. Same rule the
+        // candidate list follows when its selection has been filtered away.
+        None if down => 0,
+        None => visible.len().saturating_sub(1),
+    };
+    let Some(&next) = visible.get(want.min(visible.len().saturating_sub(1))) else {
+        return;
+    };
+    state.brush = Some(next);
+    // **Arming from the keyboard returns to placing**, for the reason `on_row_click` gives below:
+    // picking something to place is an unambiguous statement that you are done deleting or moving.
+    state.tool = Tool::Place;
+    let name = project
+        .library
+        .descriptors
+        .get(next)
+        .map(|d| d.id.clone())
+        .unwrap_or_else(|| "?".to_owned());
+    state.status.note(format!("`{name}` armed"));
 }
 
 /// One observer for the whole palette. `Activate` carries the entity, so the index lives on the row
@@ -1512,57 +1642,77 @@ const FAULT_LINE: Color = DANGER;
 
 /// **How far apart the drawn grid's lines are, in metres.**
 ///
-/// A view setting the author owns, because the one right answer does not exist. `grid::SNAP` is
-/// 0.5 — where a piece can *land* — while the site kit builds on a 1 m module, so `site/floor` and
-/// `ozea/floor_grate` are 1 m pieces. A grid fixed to the snap draws two squares per tile; a grid
-/// fixed to the module hides where the half-steps are. Which of those an author wants depends on
-/// what they are doing, so `J` steps it.
+/// **The rung the map places on, latched.**
 ///
-/// **Defaults to the module, not the snap.** A square that means "one tile of this kit" is what an
-/// author counts in; the half-steps are still reachable and now land on a line rather than halving
-/// every square.
+/// # This used to be a drawn grid that nothing landed on
 ///
-/// Not persisted: it is about this session's view, not about the map or the kit, and neither file
-/// is a place to keep it.
-#[derive(Resource)]
-pub struct GridSpacing(pub f32);
+/// It was `GridSpacing(f32)`, cycled by `J` through `[0.5, 1.0, 2.0, 4.0]` metres — *a view setting*,
+/// explicitly not the lattice. The lattice was reached by a **held modifier** instead: bare
+/// `SnapLevel::Tile`, `Shift` one rung finer, `{MOD}+Shift` two. So the map ran two grid mechanisms
+/// at once, and the one with a key on it was the one that decided nothing:
+///
+/// | | what `J` did | what you landed on |
+/// |---|---|---|
+/// | Map | drew a 0.5/1/2/4 m grid | a held modifier |
+/// | Tiles | **latched the rung** | the latched rung |
+///
+/// Two tabs, one key, two meanings — and 2 m and 4 m were lines no piece could ever sit on. This is
+/// the most likely single cause of *"I can't predict where the piece will go"*, and it is the open
+/// half of FVS-R-19, whose own note says it plainly: *"Holding Shift is right for one nudge and
+/// wrong for a dressing session."*
+///
+/// Now there is one ladder. `J` steps it, the drawn grid *is* it, and `Shift` stays what it always
+/// meant — one rung finer, for a single nudge — with [`grid::SnapLevel::finer`] saturating at the
+/// bottom so the modifier can never be the largest movement available.
+///
+/// **Latched is safe here because it is drawn**, which is Bier's snap-dragging argument and the same
+/// one `build::Build::rung` makes one tab over.
+///
+/// Not persisted: it is about this session's hand, not about the map or the kit, and neither file is
+/// a place to keep it.
+#[derive(Resource, Default)]
+pub struct Rung(pub SnapLevel);
 
-impl Default for GridSpacing {
-    fn default() -> Self {
-        GridSpacing(1.0)
-    }
+/// **A generated layout that has not been written to the map.**
+///
+/// See [`keys::Stance::Proposed`] for why this is a phase rather than a flag, and `generate_from`
+/// for the measured reason it exists at all.
+///
+/// It holds only what the solver produced. What the layout would *clear* is decided by
+/// [`apply_proposal`] against the live map, because an index captured now and used later is a bug
+/// waiting for the first author who places a piece while a proposal is up.
+pub struct Proposed {
+    /// True when the source was `Composed`, which lays stamps rather than placements — and therefore
+    /// clears the unpinned stamps rather than the unpinned placements.
+    pub composes: bool,
+    pub placements: Vec<Placed>,
+    pub stamps: Vec<emerge_core::composition::Stamped>,
 }
 
-/// What `J` steps through. Coarsest last, and nothing finer than the snap — a line where no piece
-/// can land is a line that means nothing.
-const GRID_STEPS: [f32; 4] = [0.5, 1.0, 2.0, 4.0];
+/// The proposal in hand, or `None`. `None` is a real state: it is what makes the Map's key list show
+/// the region-fills instead of the door.
+#[derive(Resource, Default)]
+pub struct Proposal(pub Option<Proposed>);
 
-/// `J`: the next spacing, wrapping. Says which, because a grid an author cannot name is one they
-/// cannot ask for again.
+/// `J`: the next rung, wrapping. Says the pitch in metres, because a grid an author cannot name is
+/// one they cannot ask for again.
 fn cycle_grid(
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<keys::Live>,
     project: Res<Project>,
-    mut spacing: ResMut<GridSpacing>,
+    mut rung: ResMut<Rung>,
     mut state: ResMut<EditorState>,
 ) {
-    if !keys::just_pressed(&keyboard, live.0, Action::CycleGrid) {
+    if !keys::just_pressed(&keyboard, *live, Action::CycleGrid) {
         return;
     }
-    let at = GRID_STEPS
-        .iter()
-        .position(|s| (s - spacing.0).abs() < 1e-4)
-        .unwrap_or(0);
-    spacing.0 = GRID_STEPS[(at + 1) % GRID_STEPS.len()];
-    state
-        .status
-        .note(format!(
-            "grid {:.2} m — snap is the tile, Shift {:.3} m, {}+Shift {:.3} m",
-            spacing.0,
-            SnapLevel::Fine.pitch(project.policy.snap_divisor),
-            keys::MOD_NAME,
-            SnapLevel::Finer.pitch(project.policy.snap_divisor),
-        ));
+    rung.0 = rung.0.next();
+    let divisor = project.policy.snap_divisor;
+    state.status.note(format!(
+        "grid {:.3} m — Shift nudges at {:.3} m",
+        rung.0.pitch(divisor),
+        rung.0.finer().pitch(divisor),
+    ));
 }
 
 /// The slab that shows how far the map goes. See [`BOUNDS_FILL`].
@@ -1619,54 +1769,113 @@ fn fit_bounds_floor(project: Res<Project>, mut slab: Query<&mut Transform, With<
 ///
 /// `Gizmos::grid` is bounded by construction — a cell count, not a plane — so "stop at the edge"
 /// costs nothing and cannot drift from `draw_bounds`, which reads the same rectangle.
+/// **How many cells a dressing rung draws across, per axis.**
+///
+/// The tile rung is not subject to this — see [`draw_map_grid`] for why the two are different kinds
+/// of thing. Thirty-two is the largest count that still reads as *squares you could point at* rather
+/// than as a fill: at the default divisor that is about 10.7 m of fine grid or 3.6 m of finer.
+const DRESSING_CELLS: u32 = 32;
+
 fn draw_map_grid(
     project: Res<Project>,
     keyboard: Res<ButtonInput<KeyCode>>,
-    spacing: Res<GridSpacing>,
+    rung: Res<Rung>,
+    rig: Res<crate::view::Rig>,
     mut gizmos: Gizmos,
 ) {
     let (min_x, min_z, max_x, max_z) = project.map.floor_rect();
     let (w, _h, d) = project.map.bounds;
-    // Guarded rather than trusted: a zero would divide to infinity and ask the gizmo for every cell
-    // there is. `GRID_STEPS` cannot produce one, and this is what keeps that true of a future step.
-    // **While a rung modifier is held, the grid IS the lattice you will land on.**
+    // **The grid IS the lattice you will land on. There is no longer a second answer.**
     //
     // `pcgbook-ch11`: *"a human designer may become frustrated or confused if the computer
     // consistently acts as though it is not following the model that the human designer has in her
-    // head."* Drawing one static grid over a three-rung ladder is that, three times over — and this
-    // file already records the drawn grid and the snap drifting apart once before, with `view.rs` set
-    // to 1.0 m "under a comment insisting it was the snap".
+    // head."* This drew the held rung already — the half that was right — and fell back to the
+    // author's cycled `GridSpacing` when no modifier was down, which could be 2 m or 4 m: lines no
+    // piece could ever sit on. One expression now, so the picture cannot disagree with the commit.
     //
-    // Bare, there is nothing to disambiguate — the tile IS the bare rung — so the author's own cycled
-    // spacing stands.
-    let level = snap_level(&keyboard);
-    let step = if level == SnapLevel::Tile {
-        if spacing.0 > 0.0 { spacing.0 } else { grid::TILE }
-    } else {
-        level.pitch(project.policy.snap_divisor)
-    };
-    // At least one cell each way: a map smaller than a cell still has a floor to draw.
-    let cells = UVec2::new(
-        ((w / step).round() as u32).max(1),
-        ((d / step).round() as u32).max(1),
-    );
+    // `pitch` divides `TILE` by a divisor clamped at 2, so it cannot return zero and ask the gizmo
+    // for every cell there is.
+    let level = snap_level(&keyboard, rung.0);
+    let step = level.pitch(project.policy.snap_divisor);
+
+    // **The tile rung covers the map; the rungs below it cover where you are working.**
+    //
+    // Not a legibility hack bolted on afterwards — it is the distinction `grid::SnapLevel` already
+    // draws and states: the tile is *"the solver's cell"* and the rungs under it are *"a dressing
+    // tool"*. A module is a property of the whole map, and dressing happens somewhere in particular.
+    //
+    // Measured, which is why this exists at all: latching the rung made a wash that used to be
+    // momentary into a permanent one. At the finest rung over the default 32 m map the gizmo draws
+    // 288 lines each way — a solid field with no square in it big enough to point at, and no way to
+    // tell where a piece would land. Held on `Cmd+Shift` that lasted as long as your fingers did;
+    // latched on `J` it does not, so the extent has to answer for it.
+    // The height every line sits at: on the backdrop, not above it. A cell an author has already
+    // floored does not need a line drawn through it, and a line that survived the floor would be
+    // drawing the grid on top of the map rather than under it.
+    let y = project.map.origin.1 - ground_drop(&project) + BOUNDS_FILL_CLEARANCE * 0.5;
+    // `grid` draws in the isometry's XY plane; a quarter turn about X lays it on the ground, the
+    // same correction `spawn_bounds_floor` makes for its rectangle.
+    let flat = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+    let tile = grid::TILE;
+
+    // **The module, always, over the whole map.**
     gizmos.grid(
         Isometry3d::new(
             Vec3::new(
                 project.map.origin.0 + (min_x + max_x) * 0.5,
-                // On the backdrop, not above it: a cell an author has already floored does not
-                // need a line drawn through it, and a line that survived the floor would be
-                // drawing the grid on top of the map rather than under it.
-                project.map.origin.1 - ground_drop(&project) + BOUNDS_FILL_CLEARANCE * 0.5,
+                y,
                 project.map.origin.2 + (min_z + max_z) * 0.5,
             ),
-            // `grid` draws in the isometry's XY plane; a quarter turn about X lays it on the ground,
-            // the same correction `spawn_bounds_floor` makes for its rectangle.
-            Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+            flat,
+        ),
+        // At least one cell each way: a map smaller than a cell still has a floor to draw.
+        UVec2::new(
+            ((w / tile).round() as u32).max(1),
+            ((d / tile).round() as u32).max(1),
+        ),
+        Vec2::splat(tile),
+        GRID_LINE,
+    );
+
+    // **And the dressing rung on top of it, where you are working.**
+    //
+    // Drawing only the fine window was tried and looked at: the module vanished, so an author on a
+    // dressing rung lost the reference they place *against* — the tile grid is what says a wall will
+    // meet the floor next to it. Two scales of one ladder is the major/minor idiom every CAD tool
+    // uses, and it is not two mechanisms: both come from the same `SnapLevel` and the same divisor.
+    if level == SnapLevel::Tile {
+        return;
+    }
+    // Never wider than the map: a window bigger than the floor it describes is drawing lines outside
+    // the only place a piece may go.
+    let span = DRESSING_CELLS as f32 * step;
+    let cells = UVec2::new(
+        ((w.min(span) / step).round() as u32).max(1),
+        ((d.min(span) / step).round() as u32).max(1),
+    );
+    // Centred on what the camera is looking at, clamped so the window stays over the floor. The
+    // rig's focus rather than the cursor: the cursor leaves the window every time it crosses a
+    // panel, and a grid that flinches away from the pointer is worse than one that sits still.
+    let half_w = cells.x as f32 * step * 0.5;
+    let half_d = cells.y as f32 * step * 0.5;
+    let centre_x = (rig.focus.x - project.map.origin.0)
+        .clamp(min_x + half_w, (max_x - half_w).max(min_x + half_w));
+    let centre_z = (rig.focus.z - project.map.origin.2)
+        .clamp(min_z + half_d, (max_z - half_d).max(min_z + half_d));
+    gizmos.grid(
+        Isometry3d::new(
+            Vec3::new(
+                project.map.origin.0 + centre_x,
+                // A hair above the module's lines, so the finer ones are not z-fighting the coarse
+                // ones they land exactly on top of every `divisor` cells.
+                y + BOUNDS_FILL_CLEARANCE * 0.25,
+                project.map.origin.2 + centre_z,
+            ),
+            flat,
         ),
         cells,
         Vec2::splat(step),
-        GRID_LINE,
+        GRID_MINOR,
     );
 }
 
@@ -1851,6 +2060,11 @@ pub fn sense_context(
     note: Res<crate::tiles::NoteEdit>,
     width: Res<crate::tiles::ScaleEdit>,
     height: Res<crate::tiles::HeightEdit>,
+    build: Res<crate::build::Build>,
+    move_drag: Res<MoveDrag>,
+    clone_drag: Res<CloneDrag>,
+    proposal: Res<Proposal>,
+    derived: Res<crate::tiles::DerivedEdges>,
     mut live: ResMut<keys::Live>,
 ) {
     let typing = state.renaming.is_some()
@@ -1867,7 +2081,49 @@ pub fn sense_context(
         || note.typing()
         || width.typing()
         || height.typing();
-    let want = keys::Live(keys::live(mode.context(), typing));
+    // **What is in hand, asked of the tab that can be holding something.** Two tabs can, and they hold
+    // different things: the assembler has a piece taken with `Space`, the map has one picked up in
+    // Move or a set captured in Clone. Both answer the same question — *do the arrows move a thing, or
+    // walk a list* — so both fold into one `Stance` rather than into two tab-shaped flags, which is
+    // what lets `keys::rows` render the answer without knowing which tab asked.
+    let stance = match mode.context() {
+        // **Holding means there is something the arrows would move — nothing else.**
+        //
+        // Twice now this was keyed on the wrong fact, and both were reported from the keyboard. First
+        // on `Build::placing`, which only `Space` set: `Enter` brings a piece in without it, so the
+        // arrows went dead over a member sitting focused in the tile. Then on a drop *setting*
+        // `placing`, which fixed that and broke the other end — removing the last member left
+        // `placing` true over an empty tile, so the arrows went on trying to move a piece that was
+        // no longer there instead of walking the library, and the next `Enter` re-dropped the same
+        // mesh. Measured: two captures of the "second" drop, byte-identical.
+        //
+        // **Both, and neither alone was enough** — each was tried and each broke the other end.
+        //
+        // `placing` is the *intent*: `Space` takes a piece, a drop leaves you adjusting what you
+        // dropped, `Esc` puts you back on the library list. `focused` is the *subject*: is there a
+        // member for the arrows to act on. Holding on intent alone left the arrows moving a piece
+        // that had just been deleted, so the next `Enter` re-dropped the same mesh — measured live,
+        // two captures byte-identical. Holding on the subject alone made it permanent: with anything
+        // in the tile the library could never be walked again, so every second drop was a repeat.
+        //
+        // The pair says what the arrows are for: there is a piece, and you are placing it.
+        keys::Context::Tiles if build.placing && crate::build::focused(&build) => {
+            keys::Stance::Holding
+        }
+        // **A proposal outranks a held piece**, because it is the more consequential thing waiting
+        // for an answer — and because the two cannot honestly be true at once anyway: `generate_from`
+        // is `Stance::Idle`, so nothing can be in hand at the moment a proposal is made.
+        keys::Context::Map if proposal.0.is_some() => keys::Stance::Proposed,
+        // The same phase, one tab over: edge tokens read off a mesh are a proposal in exactly
+        // the sense a generated layout is, and they take the same door. See
+        // `tiles::DerivedEdges`.
+        keys::Context::Meshes if derived.0.is_some() => keys::Stance::Proposed,
+        keys::Context::Map if move_drag.held.is_some() || clone_drag.held.is_some() => {
+            keys::Stance::Holding
+        }
+        _ => keys::Stance::Idle,
+    };
+    let want = keys::live(mode.context(), typing, stance);
     // Written through the change detector only when it actually moves, so `Live` staying put does not
     // wake every `resource_changed` reader in the editor every frame.
     if *live != want {
@@ -1904,7 +2160,7 @@ fn rename_keys(
         // enough to stop a keypress both starting the rename and being typed into it; it is not —
         // the reader's cursor only advances when `read()` is called, and this branch returns without
         // calling it. `events.clear()` below is what actually holds the invariant.
-        if keys::just_pressed(&keyboard, live.0, Action::RenameMap) {
+        if keys::just_pressed(&keyboard, *live, Action::RenameMap) {
             // **Empty, not seeded with the current name.** Seeding it meant the first keystroke
             // appended, so renaming `site_67_hub` to `galley_deck` produced
             // `site_67_hubgalley_deck` — and it looked like it had worked, because the panel showed a
@@ -2103,6 +2359,7 @@ pub fn stamp_snap(
     project: &Project,
     compose: &crate::compose::ComposeState,
     keyboard: &ButtonInput<KeyCode>,
+    rung: SnapLevel,
 ) -> (SnapLevel, (f32, f32)) {
     let armed = compose
         .armed
@@ -2112,7 +2369,7 @@ pub fn stamp_snap(
         Some(emerge_core::composition::Envelope::Bounded { size }) => {
             (SnapLevel::Tile, (size.0, size.2))
         }
-        _ => (snap_level(keyboard), (0.0, 0.0)),
+        _ => (snap_level(keyboard, rung), (0.0, 0.0)),
     }
 }
 
@@ -2132,16 +2389,20 @@ pub fn held_span(project: &Project, drag: &MoveDrag) -> (f32, f32) {
     }
 }
 
-/// **Which rung of the placement ladder the modifiers are asking for.**
+/// **Which rung of the placement ladder is being asked for** — the latched one, or finer.
 ///
 /// Extracted as a pure decision so a test can ask it directly — the projection needs a viewport and
-/// this does not. Shift always means *one rung finer*; free placement is [`keys::alt_held`] and is
-/// not on this ladder at all.
-pub fn snap_level(keyboard: &ButtonInput<KeyCode>) -> SnapLevel {
+/// this does not. Free placement is [`keys::alt_held`] and is not on this ladder at all.
+///
+/// `Shift` still means exactly *one rung finer than where you are*, which is what it always claimed
+/// to mean; what changed is that "where you are" is now [`Rung`] rather than always the tile. The
+/// modified pair saturates through [`grid::SnapLevel::finer`], so from the finest rung both
+/// modifiers are no-ops rather than wrapping back to the whole tile.
+pub fn snap_level(keyboard: &ButtonInput<KeyCode>, rung: SnapLevel) -> SnapLevel {
     match (keys::mod_held(keyboard), keys::shift_held(keyboard)) {
-        (true, true) => SnapLevel::Finer,
-        (_, true) => SnapLevel::Fine,
-        _ => SnapLevel::Tile,
+        (true, true) => rung.finer().finer(),
+        (_, true) => rung.finer(),
+        _ => rung,
     }
 }
 
@@ -2231,6 +2492,7 @@ pub fn map_at(
 pub fn brush_at(
     project: &Project,
     keyboard: &ButtonInput<KeyCode>,
+    rung: SnapLevel,
     anchor: &FineAnchor,
     hit: Vec3,
     d: &emerge_core::descriptor::Descriptor,
@@ -2241,7 +2503,7 @@ pub fn brush_at(
         hit,
         keys::alt_held(keyboard),
         anchor,
-        snap_level(keyboard),
+        snap_level(keyboard, rung),
         brush_span(d, yaw),
     )
 }
@@ -2338,6 +2600,7 @@ fn drive_clone(
     assets: Res<AssetServer>,
     mouse: Res<ButtonInput<MouseButton>>,
     keyboard: Res<ButtonInput<KeyCode>>,
+    rung: Res<Rung>,
     hovered_ui: Query<&Hovered>,
     pointer: Res<crate::view::Pointer>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
@@ -2386,8 +2649,8 @@ fn drive_clone(
     // dragged out.
     let rect = if let Some(set) = &drag.held {
         Some(set.bounds((
-            snap_point(&project, at.0, snap_level(&keyboard)),
-            snap_point(&project, at.1, snap_level(&keyboard)),
+            snap_point(&project, at.0, snap_level(&keyboard, rung.0)),
+            snap_point(&project, at.1, snap_level(&keyboard, rung.0)),
         )))
     } else {
         drag.from.map(|from| {
@@ -2421,8 +2684,8 @@ fn drive_clone(
             return;
         };
         let anchor_at = (
-            snap_point(&project, at.0, snap_level(&keyboard)),
-            snap_point(&project, at.1, snap_level(&keyboard)),
+            snap_point(&project, at.0, snap_level(&keyboard, rung.0)),
+            snap_point(&project, at.1, snap_level(&keyboard, rung.0)),
         );
         stamp_set(&mut commands, &assets, &mut project, &mut state, &set, anchor_at);
         // Back in hand whatever happened: a refusal's fix is usually "two cells to the left".
@@ -3196,6 +3459,7 @@ fn drive_place(
     mouse: Res<ButtonInput<MouseButton>>,
     // Held, the platform modifier drops the grid snap — see `map_at`.
     keyboard: Res<ButtonInput<KeyCode>>,
+    rung: Res<Rung>,
     assets: Res<AssetServer>,
     hovered_ui: Query<&Hovered>,
     pointer: Res<crate::view::Pointer>,
@@ -3255,7 +3519,7 @@ fn drive_place(
             // placing one off the cell lattice would author a state no solve could reproduce — and
             // `to_cell` would floor it into a cell it half covers. `Anchored` groups claim no tile
             // (`from_compositions` skips them by name as furniture), so they get the ladder.
-            let (level, span) = stamp_snap(&project, &compose, &keyboard);
+            let (level, span) = stamp_snap(&project, &compose, &keyboard, rung.0);
             let at = map_at(&project, hit, keys::alt_held(&keyboard), &anchor, level, span);
             stamp_here(&mut project, &mut state, &mut compose, at);
         }
@@ -3273,7 +3537,7 @@ fn drive_place(
         return;
     };
     let free = keys::alt_held(&keyboard);
-    let at = brush_at(&project, &keyboard, &anchor, hit, &d, state.brush_yaw);
+    let at = brush_at(&project, &keyboard, rung.0, &anchor, hit, &d, state.brush_yaw);
 
     if mouse.just_pressed(MouseButton::Left) {
         drag.from = Some(at);
@@ -3325,7 +3589,7 @@ fn drive_place(
     if !free && ((from.0 - at.0).abs() > CLICK_EPS || (from.1 - at.1).abs() > CLICK_EPS) {
         // The rung the author is holding right now — the same one `brush_at` just snapped `at` to,
         // so the box lays its pieces exactly where clicking each of them would have.
-        let pitch = snap_level(&keyboard).pitch(project.policy.snap_divisor);
+        let pitch = snap_level(&keyboard, rung.0).pitch(project.policy.snap_divisor);
         box_fill_between(
             &mut commands,
             &assets,
@@ -3818,6 +4082,7 @@ fn short_id(descriptor_id: &str) -> &str {
 fn keys(
     mut commands: Commands,
     keyboard: Res<ButtonInput<KeyCode>>,
+    rung: Res<Rung>,
     live: Res<keys::Live>,
     assets: Res<AssetServer>,
     // **The layout, not `Hovered`.** Every verb in this system that acts on "the piece under the
@@ -3844,7 +4109,14 @@ fn keys(
     mut repeat: ResMut<keys::Repeat>,
     // One tuple param, three tools: a Bevy system takes at most sixteen parameters, and this
     // one is full — a tuple of params counts as one.
-    mut tools: (ResMut<MoveDrag>, ResMut<CloneDrag>, ResMut<TargetLock>),
+    // `Proposal` rides here for the same reason: the door's discard branch lives in this system's
+    // `Esc` peel, and a seventeenth parameter is not available.
+    mut tools: (
+        ResMut<MoveDrag>,
+        ResMut<CloneDrag>,
+        ResMut<TargetLock>,
+        ResMut<Proposal>,
+    ),
     // **The Tiles tab's state, as one param.** `EditTile` sends a piece over to be defined. A Bevy
     // system takes at most sixteen parameters and this one is full, so they travel as a tuple, which
     // counts as one.
@@ -3852,7 +4124,7 @@ fn keys(
 ) {
 
     let (mode, import) = &mut tiles;
-    let (move_drag, clone_drag, target) = &mut tools;
+    let (move_drag, clone_drag, target, proposal) = &mut tools;
     // One clock for every key that repeats while held — see `keys::repeating`.
     let dt = time.delta_secs();
 
@@ -3868,19 +4140,19 @@ fn keys(
         ui_nodes.iter(),
     );
 
-    if keys::just_pressed(&keyboard, live.0, Action::Undo) {
+    if keys::just_pressed(&keyboard, *live, Action::Undo) {
         undo(&mut commands, &assets, &mut project, &mut state, &placed);
         return;
     }
 
-    if keys::just_pressed(&keyboard, live.0, Action::Redo) {
+    if keys::just_pressed(&keyboard, *live, Action::Redo) {
         redo(&mut commands, &assets, &mut project, &mut state, &placed);
         return;
     }
 
     // **Map to Tiles, carrying the piece.** Before the branches below, because they consume the
     // window and camera singles.
-    if keys::just_pressed(&keyboard, live.0, Action::EditTile) {
+    if keys::just_pressed(&keyboard, *live, Action::EditTile) {
         // **A panel is drawn over the map, so a cursor on one is not pointing at the world.** Asked
         // of the layout rather than of `Hovered` — see `view::over_ui`, which carries why. Without
         // it "the piece under the cursor" would answer with whatever happens to stand behind the
@@ -3896,7 +4168,7 @@ fn keys(
     // **The delete key arms a tool; it does not delete.** Removing on the keypress meant the only
     // preview of what was about to go was the author's memory of where the cursor was. Now the key
     // turns the mode on, the red marker answers "this one", and a click or a dragged box commits.
-    if keys::just_pressed(&keyboard, live.0, Action::Remove) {
+    if keys::just_pressed(&keyboard, *live, Action::Remove) {
         // Toggles against `Remove` specifically, not against "any tool": pressing X while the move
         // tool is armed should reach removal, not return to placing.
         state.tool = if state.tool == Tool::Remove {
@@ -3922,7 +4194,7 @@ fn keys(
     // **The move tool.** Same shape as removal: the key arms it, the click commits. Arming it also
     // clears what was armed to place — an author who means to move something is not also asking to
     // drop a copy of the brush on their first click, and `drive_place` refuses while this is live.
-    if keys::just_pressed(&keyboard, live.0, Action::MoveMode) {
+    if keys::just_pressed(&keyboard, *live, Action::MoveMode) {
         state.tool = if state.tool == Tool::Move {
             Tool::Place
         } else {
@@ -3944,7 +4216,7 @@ fn keys(
 
     // **The clone tool.** The move key's shifted sibling: drag a box to take a copy of everything
     // inside, click to stamp the set — as many times as it is held.
-    if keys::just_pressed(&keyboard, live.0, Action::CloneMode) {
+    if keys::just_pressed(&keyboard, *live, Action::CloneMode) {
         state.tool = if state.tool == Tool::Clone {
             Tool::Place
         } else {
@@ -3980,11 +4252,21 @@ fn keys(
     // of them needs a key that means "I have read that". The *peel* below is still map-only, so this
     // one branch does need to know which tab is live — and `crate::notice::dismiss` handles the
     // other three so no tab is without it.
-    if **mode == crate::tiles::Mode::Map && keys::just_pressed(&keyboard, live.0, Action::Cancel) {
+    if **mode == crate::tiles::Mode::Map && keys::just_pressed(&keyboard, *live, Action::Cancel) {
         // The outermost layer. Cleared here rather than in `notice::dismiss` so a single press
         // cannot both take the block down and peel a tool — the promise this comment makes.
         if state.status.has_problem() {
             state.status.dismiss();
+            return;
+        }
+        // **The proposal is the next layer down**, above every tool, because it is the largest thing
+        // waiting for an answer: a generate can clear every unpinned row on the map. Discarding it
+        // is not an undo — nothing was written — so there is nothing to record and nothing to put
+        // back. That is the whole point of the door.
+        if proposal.0.take().is_some() {
+            state
+                .status
+                .note("layout thrown away — the map is as it was".to_owned());
             return;
         }
         if move_drag.held.is_some() {
@@ -4020,7 +4302,7 @@ fn keys(
     // **`M`: keep the set in hand as a composition.** It opens a name field rather than inventing a name —
     // the composition is the author's, and the tool's job is to ask. Nothing is captured implicitly, which
     // is the mixed-initiative rule: suggestions only when requested.
-    if keys::just_pressed(&keyboard, live.0, Action::GroupFromSet) {
+    if keys::just_pressed(&keyboard, *live, Action::GroupFromSet) {
         if clone_drag.holding() {
             state.grouping = Some(String::new());
             state.status.note("name the composition — Enter to keep it, Esc to leave it alone");
@@ -4040,7 +4322,7 @@ fn keys(
     // writes **both** files: this branch is the only call to `Project::save` in the crate, so a Tiles
     // tab that only committed the composition answered "saved" to an author who had twenty unsaved
     // Map edits behind them.
-    if keys::just_pressed(&keyboard, live.0, Action::Save)
+    if keys::just_pressed(&keyboard, *live, Action::Save)
         && live.0 != keys::Context::Tiles
     {
         match project.save() {
@@ -4070,7 +4352,7 @@ fn keys(
         (Action::TurnPieceLeft, -YAW_STEP),
         (Action::TurnPieceRight, YAW_STEP),
     ] {
-        if keys::repeating(&keyboard, live.0, action, &mut repeat, dt)
+        if keys::repeating(&keyboard, *live, action, &mut repeat, dt)
             && !on_ui
         {
             turn_under_cursor(
@@ -4089,7 +4371,7 @@ fn keys(
     }
 
     // **`H` targets the stack** — see `cycle_target`; the verbs below act on its pick.
-    if keys::just_pressed(&keyboard, live.0, Action::CycleTarget)
+    if keys::just_pressed(&keyboard, *live, Action::CycleTarget)
         && !on_ui
     {
         cycle_target(*pointer, camera, &project, &mut state, target.as_mut());
@@ -4100,7 +4382,7 @@ fn keys(
     // Deliberately `just_pressed` where the yaw keys repeat: each axis has four states, and a held
     // key cycling them at repeat pace reads as flicker, not control.
     for (action, about_x) in [(Action::TipX, true), (Action::TipZ, false)] {
-        if keys::just_pressed(&keyboard, live.0, action) && !on_ui {
+        if keys::just_pressed(&keyboard, *live, action) && !on_ui {
             tip_under_cursor(
                 &mut commands,
                 &assets,
@@ -4119,7 +4401,7 @@ fn keys(
     // **The brackets lift** — one subgrid unit per press, held like the turn keys because a piece
     // three metres up is a long tap-tap-tap otherwise.
     for (action, sign) in [(Action::LiftUp, 1.0), (Action::LiftDown, -1.0)] {
-        if keys::repeating(&keyboard, live.0, action, &mut repeat, dt)
+        if keys::repeating(&keyboard, *live, action, &mut repeat, dt)
             && !on_ui
         {
             lift_under_cursor(
@@ -4134,53 +4416,39 @@ fn keys(
                 sign,
                 // The rung the author is holding, so a lift and a nudge across move by the same
                 // distance — one ladder, asked at the moment of the act.
-                snap_level(&keyboard),
+                snap_level(&keyboard, rung.0),
             );
             return;
         }
     }
 
     // **O pins or unpins the piece under the cursor.** A pin is what the solver routes around.
-    if keys::just_pressed(&keyboard, live.0, Action::OwnToggle) && !on_ui {
+    if keys::just_pressed(&keyboard, *live, Action::OwnToggle) && !on_ui {
         toggle_pin(*pointer, camera, &mut project, &mut state, target.as_mut());
         return;
     }
 
     // **G continues the layout.** Learn the grammar from what is already placed, then fill the free
     // cells with more of it — see `emerge_core::grammar`.
-    if keys::just_pressed(&keyboard, live.0, Action::GenerateDeclared) {
-        generate_from(
-            &mut commands,
-            &assets,
-            &mut project,
-            &mut state,
-            &placed,
-            Source::Declared,
-        );
+    if keys::just_pressed(&keyboard, *live, Action::GenerateDeclared) {
+        generate_from(&project, &mut state, proposal, Source::Declared);
     }
     // The three arms need no `return` between them and no ordering: `just_pressed` refuses a binding
     // whose modifier state does not match exactly (`keys.rs`, `b.needs_mod != mod_held || !shift_ok`),
     // so bare, Shift and the platform modifier are mutually exclusive by construction. `keys`'
     // `the_three_generate_sources_do_not_shadow_each_other` is what keeps that true.
-    if keys::just_pressed(&keyboard, live.0, Action::GenerateComposed) {
-        generate_from(
-            &mut commands,
-            &assets,
-            &mut project,
-            &mut state,
-            &placed,
-            Source::Composed,
-        );
+    if keys::just_pressed(&keyboard, *live, Action::GenerateComposed) {
+        generate_from(&project, &mut state, proposal, Source::Composed);
     }
-    if keys::just_pressed(&keyboard, live.0, Action::Generate) {
-        generate(&mut commands, &assets, &mut project, &mut state, &placed);
+    if keys::just_pressed(&keyboard, *live, Action::Generate) {
+        generate(&project, &mut state, proposal);
         return;
     }
 
     // **F floods.** From the cell under the cursor outward, stopping at anything already placed and
     // at the map's edge — see `crate::fill`.
-    if keys::just_pressed(&keyboard, live.0, Action::Fill) && !on_ui {
-        let pitch = snap_level(&keyboard).pitch(project.policy.snap_divisor);
+    if keys::just_pressed(&keyboard, *live, Action::Fill) && !on_ui {
+        let pitch = snap_level(&keyboard, rung.0).pitch(project.policy.snap_divisor);
         flood_from_cursor(
             &mut commands,
             &assets,
@@ -4196,7 +4464,7 @@ fn keys(
     // **V puts the brush back where it started.** Turning is relative, so a piece three quarters round
     // is one press from straight in one direction and three in the other — and an author who has been
     // tapping `Z` has no reason to be keeping count. This is the only absolute among the aim keys.
-    if keys::just_pressed(&keyboard, live.0, Action::AimReset) {
+    if keys::just_pressed(&keyboard, *live, Action::AimReset) {
         state.brush_yaw = 0.0;
         state.status.note("brush aimed straight again".to_owned());
         return;
@@ -4206,9 +4474,9 @@ fn keys(
     // one held key. `keys::repeating` fires the press immediately and then every
     // `keys::REPEAT_SECS`, so tapping is unchanged and only holding is new — the comment above about
     // "an author who has been tapping `Z`" is still true, there is just less of it.
-    let step = if keys::repeating(&keyboard, live.0, Action::AimRight, &mut repeat, dt) {
+    let step = if keys::repeating(&keyboard, *live, Action::AimRight, &mut repeat, dt) {
         YAW_STEP
-    } else if keys::repeating(&keyboard, live.0, Action::AimLeft, &mut repeat, dt) {
+    } else if keys::repeating(&keyboard, *live, Action::AimLeft, &mut repeat, dt) {
         -YAW_STEP
     } else {
         0.0
@@ -5706,6 +5974,7 @@ fn drive_move(
     mouse: Res<ButtonInput<MouseButton>>,
     // Held, the platform modifier drops the grid snap — see `map_at`.
     keyboard: Res<ButtonInput<KeyCode>>,
+    rung: Res<Rung>,
     assets: Res<AssetServer>,
     hovered_ui: Query<&Hovered>,
     pointer: Res<crate::view::Pointer>,
@@ -5773,7 +6042,7 @@ fn drive_move(
         // `redraw_stamps` puts them where the new `at` says. FVS-R-14's move arm.
         Some(Held::Stamp(id)) => {
             let free = keys::alt_held(&keyboard);
-            let at = map_at(&project, hit, free, &anchor, snap_level(&keyboard), held_span(&project, &drag));
+            let at = map_at(&project, hit, free, &anchor, snap_level(&keyboard, rung.0), held_span(&project, &drag));
             // Resolved now, not at grab — the list can have moved under it, exactly as for a piece.
             let Some(st) = project.map.stamps.iter_mut().find(|s| s.id == id) else {
                 drag.held = None;
@@ -5807,7 +6076,7 @@ fn drive_move(
                 return;
             };
             let free = keys::alt_held(&keyboard);
-            let at = map_at(&project, hit, free, &anchor, snap_level(&keyboard), held_span(&project, &drag));
+            let at = map_at(&project, hit, free, &anchor, snap_level(&keyboard, rung.0), held_span(&project, &drag));
             // One `deref_mut`, then two disjoint field borrows. `ResMut`'s `Deref` cannot split them
             // for us, so `(&mut project.map, &project.library)` is a double borrow of the resource.
             let p = &mut *project;
@@ -6555,21 +6824,17 @@ enum Source {
 }
 
 fn generate(
-    commands: &mut Commands,
-    assets: &AssetServer,
-    project: &mut Project,
+    project: &Project,
     state: &mut EditorState,
-    placed: &Query<(Entity, &Placement)>,
+    proposal: &mut Proposal,
 ) {
-    generate_from(commands, assets, project, state, placed, Source::Learned);
+    generate_from(project, state, proposal, Source::Learned);
 }
 
 fn generate_from(
-    commands: &mut Commands,
-    assets: &AssetServer,
-    project: &mut Project,
+    project: &Project,
     state: &mut EditorState,
-    placed: &Query<(Entity, &Placement)>,
+    proposal: &mut Proposal,
     source: Source,
 ) {
     // One metre: the tile the kits are authored on, and coarse enough that a 32 m map is a grid the
@@ -6693,6 +6958,125 @@ fn generate_from(
     // make `Shift+G` silently delete every group an author had stamped.
     let composes = matches!(source, Source::Composed);
 
+    // **Nothing is written. The layout becomes a proposal, and the author decides.**
+    //
+    // `G` used to rewrite the map on the keypress. Alvarez et al. 2018 (FDG,
+    // `10.1145/3235765.3235815`) put a two-step commit into the Evolutionary Dungeon Designer for
+    // exactly that, and said why: apply-on-click was **"occasionally causing work loss due to
+    // accidental replacements"**. A generate here can clear every unpinned row on the map, which is
+    // the largest single act the editor has — and it was the one with no way back except undo.
+    //
+    // **What to clear is decided at apply time, not here.** Holding indices captured now and using
+    // them later would be a stale-index bug waiting for the first author who places something while
+    // a proposal is up; `apply_proposal` reads the live map instead.
+    let shortfall = if solved.unmet > 0 {
+        format!(
+            " — but does not reach the {}% enclosure it aims for; the kit's rules do not allow more \
+             here",
+            (ENCLOSURE_WISH * 100.0).round() as u32
+        )
+    } else {
+        String::new()
+    };
+    for s in &skipped {
+        state.status.problem(format!("not a tile: {s}"));
+    }
+
+    let count = solved.placements.len();
+    let stamped = solved.stamps.len();
+    // **The delta, not the absolute** — `docs/ui.md` §3.2, and the same thing EDD's suggestion panel
+    // shows: what would change if this were taken, next to what is there now.
+    let replaces = if composes {
+        project.map.stamps.iter().filter(|s| !s.owned).count()
+    } else {
+        project.map.placements.iter().filter(|p| !p.owned).count()
+    };
+    let laid = if composes {
+        format!("{stamped} stamp(s)")
+    } else {
+        format!("{count} piece(s)")
+    };
+    state.status.note(format!(
+        "proposed: {laid} replacing {replaces}, around {} pinned cell(s), from {} prototype(s)\
+         {shortfall} — {} keeps it, {} throws it away",
+        solved.owned_cells,
+        grammar.len() - 1,
+        keys::chord(Action::AcceptProposal),
+        keys::chord(Action::Cancel),
+    ));
+
+    proposal.0 = Some(Proposed {
+        composes,
+        placements: solved.placements,
+        stamps: solved.stamps,
+    });
+}
+
+/// **What the proposal would put down, drawn where it would go.**
+///
+/// A door with nothing behind it is worse than no door: *"keep this layout"* is unanswerable if the
+/// layout is invisible, and the author would be pressing `Enter` on faith. Alvarez et al. 2018's
+/// participants asked for exactly this in as many words — the study's own missing-features table
+/// lists *"preview suggestions in-place before committing"*.
+///
+/// **Gizmo outlines rather than spawned meshes**, and that is a stated limit rather than a shortcut.
+/// The proposal is about *where things go* — a solver lays a layout, not a dressing — and an outline
+/// per cell answers that at a hundredth of the cost of instancing several hundred GLBs that are about
+/// to be thrown away. `docs/2026-08-11-editor-visual-inspection.md` measured what the instancing
+/// costs here: a keystroke that changed nothing rebuilt 1,616 entities.
+fn draw_proposal(project: Res<Project>, proposal: Res<Proposal>, mut gizmos: Gizmos) {
+    let Some(p) = proposal.0.as_ref() else {
+        return;
+    };
+    let y = project.map.origin.1 - ground_drop(&project) + BOUNDS_FILL_CLEARANCE;
+    let flat = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+    let cell = Vec2::splat(CELL * 0.94);
+
+    // Placements and stamps both answer "a tile's worth of map, here" — one loop over their `at`s,
+    // because the outline is about the cell and not about what fills it.
+    let spots = p
+        .placements
+        .iter()
+        .map(|r| r.at)
+        .chain(p.stamps.iter().map(|s| s.at));
+    for (x, z) in spots {
+        gizmos.rect(
+            Isometry3d::new(
+                Vec3::new(project.map.origin.0 + x, y, project.map.origin.2 + z),
+                flat,
+            ),
+            cell,
+            PROPOSAL_LINE,
+        );
+    }
+}
+
+/// **Take the proposal, or leave it** — the other half of the commit door.
+///
+/// The write `generate_from` used to do inline. It reads the live map to decide what to clear, so a
+/// piece placed between the proposal and the acceptance is accounted for rather than being addressed
+/// by an index that has since moved.
+fn apply_proposal(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<keys::Live>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<EditorState>,
+    mut proposal: ResMut<Proposal>,
+    placed: Query<(Entity, &Placement)>,
+) {
+    if !keys::just_pressed(&keyboard, *live, Action::AcceptProposal) {
+        return;
+    }
+    let Some(taken) = proposal.0.take() else {
+        return;
+    };
+    let composes = taken.composes;
+
+    // **A grammar over descriptors lays placements, so it clears the unpinned placements; a grammar
+    // over compositions lays stamps, so it clears the unpinned stamps** and must leave the author's
+    // placements alone. Clearing both would make `Cmd+G` silently delete every piece hand-placed.
     let removed: Vec<(usize, Box<Placed>)> = if composes {
         Vec::new()
     } else {
@@ -6717,7 +7101,7 @@ fn generate_from(
     } else {
         Vec::new()
     };
-    for (entity, marker) in placed {
+    for (entity, marker) in &placed {
         if removed.iter().any(|(_, p)| p.id == marker.0) {
             commands.entity(entity).despawn();
         }
@@ -6733,16 +7117,16 @@ fn generate_from(
     // **Into the map first, drawn second.** The solver lays pieces on the floor grid; how high each
     // one ends up is a question about the finished map, so the map has to be finished before it is
     // asked.
-    let count = solved.placements.len();
+    let count = taken.placements.len();
     let first = project.map.placements.len();
-    project.map.placements.extend(solved.placements);
-    spawn_range(commands, assets, project, state, first);
+    project.map.placements.extend(taken.placements);
+    spawn_range(&mut commands, &assets, &mut project, &mut state, first);
 
     // **Stamps need no spawn call.** `redraw_stamps` rebuilds the whole stamped picture from
     // `map.stamps` whenever it changes, so writing the rows is the whole job — unlike the placement
     // path above, which owns its entities.
-    let stamped = solved.stamps.len();
-    project.map.stamps.extend(solved.stamps);
+    let stamped = taken.stamps.len();
+    project.map.stamps.extend(taken.stamps);
     project.dirty = true;
 
     // One act, one entry: undoing a generate first strips the solver rows (the `Added`/`Stamped`),
@@ -6765,35 +7149,13 @@ fn generate_from(
         state.record(Undo::Group { ops });
     }
 
-    for s in &skipped {
-        state.status.problem(format!("not a tile: {s}"));
-    }
-    // **A wish it could not grant is a note, not a problem.** The arrangement is real and on screen;
-    // what the solver could not do is a fact about the region, not a failure of the tool — so it
-    // rides the same line rather than the red banner, which is reserved for "nothing happened".
-    // Before this, a region that could not meet what was asked returned an error and an empty map.
-    //
-    // **What it says is the wish, not the shortfall**, because a shortfall is not a thing `unmet`
-    // knows. It is a *weight* — `Solved::unmet` is "the total weight of the wishes this arrangement
-    // could not grant", and `enclosure_rules` charges one ungranted wish exactly `ENCLOSURE_WEIGHT`
-    // — so a solve that closed 99 cells of the 100 it wished for reports the same 200 as one that
-    // closed none. Printing `ENCLOSURE_WISH` as the part that *failed* turned that into "could not
-    // close 25% of it", which is a number the solver never said and which reads as near-total
-    // failure on a region that very nearly got there.
-    let shortfall = if solved.unmet > 0 {
-        format!(
-            " — but did not reach the {}% enclosure it aims for; the kit's rules do not allow more \
-             here",
-            (ENCLOSURE_WISH * 100.0).round() as u32
-        )
-    } else {
-        String::new()
-    };
     state.status.note(format!(
-        "continued the layout: {} around {} pinned cell(s), from {} prototype(s){shortfall}",
-        if composes { format!("{stamped} stamped") } else { format!("{count} placed") },
-        solved.owned_cells,
-        grammar.len() - 1
+        "kept the layout: {}",
+        if composes {
+            format!("{stamped} stamped")
+        } else {
+            format!("{count} placed")
+        }
     ));
 }
 
@@ -6894,6 +7256,7 @@ fn drive_ghost(
     // The ghost must snap exactly when the click will, or the preview is a lie about where the
     // piece lands — which is the one thing this whole system exists to prevent.
     keyboard: Res<ButtonInput<KeyCode>>,
+    rung: Res<Rung>,
     anchor: Res<FineAnchor>,
 ) {
     let clear = |commands: &mut Commands| {
@@ -6967,7 +7330,7 @@ fn drive_ghost(
     // **The same expression the commit asks** — see [`brush_at`], which exists because this call site
     // and `drive_place`'s disagreed. `want_yaw` is the authored yaw for both tools: `state.brush_yaw`
     // under Place, the held piece's own under Move, which is exactly what `held_span` snaps by.
-    let at = brush_at(&project, &keyboard, &anchor, hit, d, want_yaw);
+    let at = brush_at(&project, &keyboard, rung.0, &anchor, hit, d, want_yaw);
     let yaw = emerge_bevy::draw_yaw(d, want_yaw);
 
     // **The ghost asks the question the drop will ask** — against a map the carried group is NOT in.
@@ -7103,6 +7466,7 @@ fn drive_stamp_ghost(
     mut commands: Commands,
     assets: Res<AssetServer>,
     keyboard: Res<ButtonInput<KeyCode>>,
+    rung: Res<Rung>,
     project: Res<Project>,
     state: Res<EditorState>,
     compose: Res<crate::compose::ComposeState>,
@@ -7140,7 +7504,7 @@ fn drive_stamp_ghost(
     // **Exactly the arithmetic the stamp uses**, through the same two calls — `stamp_snap` for the
     // rung and the span, `map_at` for the snap. Anything else here is a promise about a landing that
     // will not happen.
-    let (level, span) = stamp_snap(&project, &compose, &keyboard);
+    let (level, span) = stamp_snap(&project, &compose, &keyboard, rung.0);
     let at = map_at(
         &project,
         hit,
@@ -7221,6 +7585,7 @@ fn drive_clone_ghost(
     mut commands: Commands,
     assets: Res<AssetServer>,
     keyboard: Res<ButtonInput<KeyCode>>,
+    rung: Res<Rung>,
     project: Res<Project>,
     state: Res<EditorState>,
     drag: Res<CloneDrag>,
@@ -7264,7 +7629,7 @@ fn drive_clone_ghost(
     // one thing this editor's previews are held to. That now includes the RUNG — a ghost snapping to
     // the tile while the drop snaps to a third would be the same broken promise at a new scale.
     let at = project.map.to_map_space((hit.x, hit.z));
-    let level = snap_level(&keyboard);
+    let level = snap_level(&keyboard, rung.0);
     let target = (
         snap_point(&project, at.0, level),
         snap_point(&project, at.1, level),
@@ -7582,14 +7947,14 @@ mod snap_tests {
 
         // A 1 m tile fills the cell the cursor is in, rather than centring on the corner of four.
         let tile = tests::piece("floor", 1.0, 1.0);
-        near(brush_at(&p, &keys_up, &anchor, aim, &tile, 0.0), (0.5, 0.5));
+        near(brush_at(&p, &keys_up, SnapLevel::Tile, &anchor, aim, &tile, 0.0), (0.5, 0.5));
 
         // The old ghost's answer, for contrast: a zero span rounds the centre onto the lattice, so
         // the preview straddled four cells while the click filled one.
         let centre_snapped = map_at(&p, aim, false, &anchor, SnapLevel::Tile, (0.0, 0.0));
         near(centre_snapped, (0.0, 1.0));
         assert_ne!(
-            brush_at(&p, &keys_up, &anchor, aim, &tile, 0.0),
+            brush_at(&p, &keys_up, SnapLevel::Tile, &anchor, aim, &tile, 0.0),
             centre_snapped,
             "if these agree the span is being ignored again"
         );
@@ -7597,10 +7962,10 @@ mod snap_tests {
         // A wall is thin on one axis and a whole cell on the other, so it is the case where the two
         // lattices differ on BOTH axes at once — and by different amounts.
         let wall = tests::piece("wall", 0.1, 1.0);
-        near(brush_at(&p, &keys_up, &anchor, aim, &wall, 0.0), (0.05, 0.5));
+        near(brush_at(&p, &keys_up, SnapLevel::Tile, &anchor, aim, &wall, 0.0), (0.05, 0.5));
 
         // Turned a quarter, the footprint swaps and so must the phase.
-        near(brush_at(&p, &keys_up, &anchor, aim, &wall, 90.0), (0.5, 1.05));
+        near(brush_at(&p, &keys_up, SnapLevel::Tile, &anchor, aim, &wall, 90.0), (0.5, 1.05));
     }
 
     /// **One ladder: across, up, and inside a tile are the same distance.**
@@ -7658,7 +8023,7 @@ mod snap_tests {
         held.press(keys::SHIFT_KEYS[0]);
         held.press(keys::MOD_KEYS[0]);
 
-        let (level, span) = stamp_snap(&p, &compose, &held);
+        let (level, span) = stamp_snap(&p, &compose, &held, SnapLevel::Tile);
         let place = |aim: f32| {
             map_at(&p, Vec3::new(aim, 0.0, 0.4), false, &FineAnchor::default(), level, span).0
         };
@@ -7704,22 +8069,22 @@ mod snap_tests {
         let mut shifted = ButtonInput::<KeyCode>::default();
         shifted.press(keys::SHIFT_KEYS[0]);
         shifted.press(keys::MOD_KEYS[0]);
-        assert_eq!(snap_level(&shifted), SnapLevel::Finer, "the modifiers really do ask for the finest rung");
+        assert_eq!(snap_level(&shifted, SnapLevel::Tile), SnapLevel::Finer, "the modifiers really do ask for the finest rung");
 
         let armed = |id: &str| crate::compose::ComposeState {
             armed: Some(id.to_owned()),
             ..Default::default()
         };
 
-        let (level, span) = stamp_snap(&p, &armed("tile_a"), &shifted);
+        let (level, span) = stamp_snap(&p, &armed("tile_a"), &shifted, SnapLevel::Tile);
         assert_eq!(level, SnapLevel::Tile, "a Bounded composition must ignore the ladder");
         assert_eq!(span, (1.0, 1.0), "and snap by its own envelope, so its corner lands on a cell");
 
-        let (level, _) = stamp_snap(&p, &armed("loose_a"), &shifted);
+        let (level, _) = stamp_snap(&p, &armed("loose_a"), &shifted, SnapLevel::Tile);
         assert_eq!(level, SnapLevel::Finer, "an Anchored group claims no tile, so it is dressing");
 
         // Nothing armed, or an id the kit no longer has: the ladder, and no invented footprint.
-        let (level, span) = stamp_snap(&p, &crate::compose::ComposeState::default(), &shifted);
+        let (level, span) = stamp_snap(&p, &crate::compose::ComposeState::default(), &shifted, SnapLevel::Tile);
         assert_eq!((level, span), (SnapLevel::Finer, (0.0, 0.0)));
     }
 
@@ -7744,15 +8109,15 @@ mod snap_tests {
     #[test]
     fn shift_means_one_rung_finer_whatever_else_is_held() {
         let mut k = ButtonInput::<KeyCode>::default();
-        assert_eq!(snap_level(&k), SnapLevel::Tile);
+        assert_eq!(snap_level(&k, SnapLevel::Tile), SnapLevel::Tile);
         k.press(keys::SHIFT_KEYS[0]);
-        assert_eq!(snap_level(&k), SnapLevel::Fine);
+        assert_eq!(snap_level(&k, SnapLevel::Tile), SnapLevel::Fine);
         k.press(keys::MOD_KEYS[0]);
-        assert_eq!(snap_level(&k), SnapLevel::Finer);
+        assert_eq!(snap_level(&k, SnapLevel::Tile), SnapLevel::Finer);
         // Alt is free placement and is not a rung, so it must not move the ladder.
         let mut k = ButtonInput::<KeyCode>::default();
         k.press(keys::ALT_KEYS[0]);
-        assert_eq!(snap_level(&k), SnapLevel::Tile);
+        assert_eq!(snap_level(&k, SnapLevel::Tile), SnapLevel::Tile);
     }
 
     /// **Held, it does not.** The point comes through exactly as the cursor gave it.

@@ -532,7 +532,7 @@ fn adopt_measured(
     mut reports: ResMut<crate::anim_watch::BenchReports>,
     mut generation: ResMut<crate::anim_watch::BenchGeneration>,
 ) {
-    if !crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::AdoptMeasured) {
+    if !crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::AdoptMeasured) {
         return;
     }
     // A failed write REPLACES the message — an author told "adopted" by a program that could not
@@ -562,8 +562,8 @@ fn bench_history_keys(
     mut reports: ResMut<crate::anim_watch::BenchReports>,
     mut generation: ResMut<crate::anim_watch::BenchGeneration>,
 ) {
-    let undo = crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::UndoBench);
-    let redo = crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::RedoBench);
+    let undo = crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::UndoBench);
+    let redo = crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::RedoBench);
     if !undo && !redo {
         return;
     }
@@ -650,11 +650,11 @@ fn move_selection(
         1
     };
     let step = if crate::keys::repeating(
-        &keyboard, live.0, crate::keys::Action::NextRig, &mut repeat, dt,
+        &keyboard, *live, crate::keys::Action::NextRig, &mut repeat, dt,
     ) {
         stride
     } else if crate::keys::repeating(
-        &keyboard, live.0, crate::keys::Action::PrevRig, &mut repeat, dt,
+        &keyboard, *live, crate::keys::Action::PrevRig, &mut repeat, dt,
     ) {
         n - stride
     } else {
@@ -698,7 +698,7 @@ fn check_all_keys(
     mut queue: ResMut<crate::anim_watch::MeasureQueue>,
     reports: Res<crate::anim_watch::BenchReports>,
 ) {
-    if !crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::CheckAllRigs) {
+    if !crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::CheckAllRigs) {
         return;
     }
     // Only what is unmeasured: reports persist for the session and the watcher re-measures on a

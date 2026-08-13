@@ -257,7 +257,7 @@ fn dismiss(
     mut bench: ResMut<crate::anim_tab::BenchState>,
     mut compose: ResMut<crate::compose::ComposeState>,
 ) {
-    if !keys::just_pressed(&keyboard, live.0, Action::Cancel) {
+    if !keys::just_pressed(&keyboard, *live, Action::Cancel) {
         return;
     }
     match *mode {
@@ -293,7 +293,7 @@ fn copy_out(
     children: Query<&Children>,
     texts: Query<&Text>,
 ) {
-    if !keys::just_pressed(&keyboard, live.0, Action::CopyInfo) {
+    if !keys::just_pressed(&keyboard, *live, Action::CopyInfo) {
         return;
     }
     let tab = *mode;

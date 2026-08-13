@@ -496,7 +496,7 @@ pub fn problem_log_line(parent: &mut ChildSpawnerCommands, text: &str, colour: C
 ///
 /// Two aligned columns rather than a run-on line: a run-on wraps unpredictably at any width, and the
 /// eye finds a row in a table without reading the others.
-pub fn key_census(parent: &mut ChildSpawnerCommands, contexts: &[Context]) {
+pub fn key_census(parent: &mut ChildSpawnerCommands, contexts: &[Context], stance: keys::Stance) {
     parent
         .spawn(Node {
             flex_direction: FlexDirection::Column,
@@ -505,14 +505,20 @@ pub fn key_census(parent: &mut ChildSpawnerCommands, contexts: &[Context]) {
             ..default()
         })
         .with_children(|list| {
-            for row_def in contexts.iter().flat_map(|c| keys::rows(*c)) {
-                list.spawn(Node {
-                    flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::Center,
-                    // A guaranteed gutter, so the widest chord still has air before its label.
-                    column_gap: Val::Px(10.0),
-                    ..default()
-                })
+            for row_def in contexts.iter().flat_map(|c| keys::rows(*c, stance)) {
+                list.spawn((
+                    Node {
+                        flex_direction: FlexDirection::Row,
+                        align_items: AlignItems::Center,
+                        // A guaranteed gutter, so the widest chord still has air before its label.
+                        column_gap: Val::Px(10.0),
+                        // Room for the highlight to sit in without the rows moving when it appears.
+                        padding: UiRect::axes(Val::Px(4.0), Val::Px(1.0)),
+                        ..default()
+                    },
+                    CensusRow(row_def.actions.clone()),
+                    BackgroundColor(Color::NONE),
+                ))
                 .with_children(|row| {
                     row.spawn((
                         Node {
@@ -721,6 +727,52 @@ fn paint_name_box(
     }
 }
 
+/// **One rendered census row, and the actions it stands for.**
+///
+/// Carried so [`flash_live_rows`] can light the row whose key is down. The actions rather than the
+/// chord text, because a chord is a *rendering* and asking "is `Shift+Cmd+Z` held" from a string
+/// would be a second parser for something [`keys::just_pressed`] already answers.
+#[derive(Component)]
+pub struct CensusRow(pub Vec<keys::Action>);
+
+/// **The novice path and the expert path are the same motion — this is what says so.**
+///
+/// Holding `K` and pressing `G` already *worked*: `editor::sense_context` never suppressed actions
+/// while the overlay was up, so every key on screen was live the whole time. What was missing is that
+/// nothing said it had happened, and an unremarked coincidence is not a bridge.
+///
+/// Cockburn, Gutwin, Scarr & Malacria 2014 (`10.1145/2659796`) is the reason this matters: offering a
+/// fast path beside a slow one **does not work on its own** — users plateau on the slow one, because
+/// no single moment hurts enough to justify switching. The fix they name is a *bridge* where the
+/// novice route rehearses the expert route, Kurtenbach & Buxton's marking menus being the canonical
+/// one. `docs/ui.md` §3.5 states the practical form: *"a control group that binds invisibly is a
+/// control group nobody binds twice — the readout has to show it happened."*
+///
+/// So the overlay is not a card you read and then put down. It is a surface you can act through, and
+/// the row lights under the key you press.
+///
+/// **Held rather than flashed.** A one-frame highlight on `just_pressed` is invisible at 60 Hz for
+/// exactly the key you were looking at. This uses [`keys::pressed`], so the row stays lit as long as
+/// the key is down — which for a repeating key is also its cadence, drawn.
+fn flash_live_rows(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<keys::Live>,
+    mut rows: Query<(&CensusRow, &mut BackgroundColor)>,
+) {
+    for (row, mut bg) in &mut rows {
+        let lit = row
+            .0
+            .iter()
+            .any(|a| keys::pressed(&keyboard, *live, *a));
+        let want = if lit { ROW_SELECTED } else { Color::NONE };
+        // Written through a compare: `BackgroundColor` is change-detected, and touching every row
+        // every frame would mark the whole overlay dirty sixty times a second for one lit line.
+        if bg.0 != want {
+            bg.0 = want;
+        }
+    }
+}
+
 /// The held-key overlay's root. `Display::None` when it is not being asked for.
 #[derive(Component)]
 pub struct ShortcutsOverlay;
@@ -729,10 +781,15 @@ pub struct ShortcutsOverlay;
 #[derive(Component)]
 struct ShortcutsBody;
 
-/// Which tab's list the overlay is currently showing, so it is rebuilt on a tab change and not on
-/// every frame the key is held.
-#[derive(Resource, Default)]
-struct ShowingFor(Option<crate::tiles::Mode>);
+/// Which tab's list the overlay is currently showing **and in which [`keys::Stance`]**, so it is
+/// rebuilt on a tab change or when something is picked up — and not on every frame the key is held.
+///
+/// **The stance belongs in this key, not only in the render.** Without it the overlay would render
+/// the stance it was opened in and then keep it: pick a piece up with the list already on screen and
+/// the arrows change job while their row does not, which is the exact failure this whole change is
+/// about, reintroduced one layer up.
+#[derive(Resource, Default, PartialEq, Eq)]
+struct ShowingFor(Option<(crate::tiles::Mode, keys::Stance)>);
 
 /// **The key list, on demand.**
 ///
@@ -752,7 +809,15 @@ impl Plugin for ChromePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShowingFor>()
             .add_systems(Startup, (spawn_shortcuts_overlay, spawn_name_box))
-            .add_systems(Update, drive_shortcuts_overlay.in_set(keys::Phase::Act))
+            // `flash_live_rows` after the rebuild, so a row spawned this frame is lit this frame
+            // rather than one frame late — which for a tap is the difference between a readout and
+            // a flicker.
+            .add_systems(
+                Update,
+                (drive_shortcuts_overlay, flash_live_rows)
+                    .chain()
+                    .in_set(keys::Phase::Act),
+            )
             // **After `Phase::Text`, not in it.** The field consumes the keystroke there; painting
             // before it would show the box one character behind what has been typed.
             .add_systems(Update, paint_name_box.after(keys::Phase::Text));
@@ -806,7 +871,7 @@ fn drive_shortcuts_overlay(
     mut roots: Query<&mut Node, With<ShortcutsOverlay>>,
     bodies: Query<Entity, With<ShortcutsBody>>,
 ) {
-    let want = keys::pressed(&keyboard, live.0, keys::Action::Shortcuts);
+    let want = keys::pressed(&keyboard, *live, keys::Action::Shortcuts);
     for mut node in &mut roots {
         let display = if want { Display::Flex } else { Display::None };
         if node.display != display {
@@ -815,19 +880,36 @@ fn drive_shortcuts_overlay(
     }
     // Rebuilt on the transition and on a tab change, never per frame: the rows are static text and
     // respawning them sixty times a second would be sixty times the work for one picture.
-    let key = want.then_some(*mode);
+    let key = want.then_some((*mode, live.1));
     if showing.0 == key {
         return;
     }
     showing.0 = key;
-    let Some(tab) = key else { return };
+    let Some((tab, stance)) = key else { return };
     for body in &bodies {
         commands.entity(body).despawn_related::<Children>();
         commands.entity(body).with_children(|p| {
             title(p, &format!("{} KEYS", tab.label()));
+            // **The heading says what is in hand**, because the list below it is only true of one
+            // stance and a reader has no other way to tell which they are looking at. It is the same
+            // argument `docs/ui.md` §3.2 makes for showing the delta rather than only the state.
+            if stance == keys::Stance::Holding {
+                // [`ACCENT`], not [`LABEL`] — the palette's own rule is that amber is a live edit,
+                // and a piece in hand is exactly that. `section` would render it as a quiet heading,
+                // which is what a *category* looks like, not a state.
+                p.spawn((
+                    Text::new("holding a piece — Esc puts it back".to_owned()),
+                    TextColor(ACCENT),
+                    TextFont::from_font_size(10.0),
+                    Node {
+                        margin: UiRect::bottom(Val::Px(GAP_ROW)),
+                        ..default()
+                    },
+                ));
+            }
             // This tab first, then the frame around it — the same order the panels used, so anyone
             // who learned the old list finds the rows where they were.
-            key_census(p, &[tab.context(), Context::Global]);
+            key_census(p, &[tab.context(), Context::Global], stance);
         });
     }
 }

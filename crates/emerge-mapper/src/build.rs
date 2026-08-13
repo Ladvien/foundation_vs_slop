@@ -86,6 +86,14 @@ pub struct Build {
     /// Safe to latch because it is **visible**: the drawn grid redraws at the active rung, so this is
     /// not a mode anyone can forget they are in.
     pub rung: SnapLevel,
+    /// **How many times a different tile has been opened.**
+    ///
+    /// A document boundary, as data rather than as a call. `TileHistory` watches the tile rather than
+    /// hooking each verb — which is what makes every *mutation* covered by construction — but
+    /// "a different tile is open now" is not a mutation, it is a new document, and a stack that
+    /// spans two of them makes `Cmd+Z` mean whichever was touched last. `TileHistory`'s own note
+    /// already makes that argument about the two *tabs*; this is the same argument one level down.
+    pub opened: u32,
 }
 
 /// The rung a tile is built on before anyone changes it.
@@ -471,7 +479,7 @@ fn edit<T>(
 /// everything the door refuses is a refusal. A note is replaced by the next keystroke; a problem is
 /// sticky until `Esc`, and an author who pressed an arrow on a tile they have not put anything in
 /// yet has not done anything wrong.
-fn focused(build: &Build) -> bool {
+pub fn focused(build: &Build) -> bool {
     build
         .open
         .as_ref()
@@ -590,7 +598,7 @@ pub fn refit(
     build: &mut Build,
     library: &emerge_core::library::Library,
     height: f32,
-) -> Option<String> {
+) -> Option<(f32, f32, f32)> {
     let Some(comp) = build.open.as_ref() else {
         return None;
     };
@@ -614,21 +622,22 @@ pub fn refit(
         comp.envelope = Envelope::Bounded { size: want };
     }
 
-    // **What the size means, said when it changes.** `grammar::from_compositions` takes tiles of the
-    // grid's size and *skips* anything else by name — "so it cannot be a tile" — because `solve`
-    // lays prototypes at cell centres and a group that is not one cell across would be placed at a
-    // spacing with nothing to do with its extent. That is not an error and this is not a refusal:
-    // a bigger group is still stamped by hand on the Map, and it is still what Compose composes.
-    // But an author who thinks they are building solver content should find out here rather than
-    // from a generate that quietly never uses it.
+    Some(want)
+}
+
+/// **How many whole tiles across a group is**, which is what decides whether a solver can place it.
+///
+/// `grammar::from_compositions` takes tiles of the grid's size and *skips* anything else by name,
+/// because `solve` lays prototypes at cell centres and a group that is not one cell across would be
+/// placed at a spacing with nothing to do with its extent.
+pub fn tiles_across(size: (f32, f32, f32)) -> (i32, i32) {
     let tile = emerge_core::grid::TILE;
-    let (nx, nz) = ((want.0 / tile).round() as i32, (want.2 / tile).round() as i32);
-    (nx != 1 || nz != 1).then(|| {
-        format!(
-            "this is now {nx} x {nz} tiles — the solver places one-cell tiles only, so a group this \
-             size is stamped by hand rather than generated."
-        )
-    })
+    ((size.0 / tile).round() as i32, (size.2 / tile).round() as i32)
+}
+
+/// **Is this a size a solver can place?** One cell, both ways.
+pub fn is_one_cell(size: (f32, f32, f32)) -> bool {
+    tiles_across(size) == (1, 1)
 }
 
 /// How many steps the tile assembler remembers.
@@ -651,6 +660,85 @@ pub struct TileHistory {
     future: Vec<Option<Composition>>,
     /// What the tile looked like when this system last ran — the thing a change is measured against.
     seen: Option<Option<Composition>>,
+    /// Which opened tile the stacks belong to — see [`Build::opened`].
+    opened: u32,
+    /// **Which member the top of `past` is a run of adjustments to**, or `None` when it is anything
+    /// else. See [`adjusted_member`] for why a run is one step.
+    run: Option<usize>,
+}
+
+/// **Which single member two tiles differ by, if they differ only by adjusting one.**
+///
+/// `Some(i)` when both hold the same members in the same order and exactly one of them has moved,
+/// lifted or turned. `None` for anything else — a drop, a removal, a hole, a resize, or a change to
+/// more than one member.
+///
+/// This is the classifier the undo grouping rests on, and it is deliberately narrow: it answers
+/// *"is this the same act continuing"*, and a wrong `Some` would swallow an edit an author wanted
+/// back.
+fn adjusted_member(before: &Option<Composition>, after: &Option<Composition>) -> Option<usize> {
+    let (a, b) = (before.as_ref()?, after.as_ref()?);
+    // **The envelope is deliberately not compared.** It is *derived* from the members by
+    // `fit_envelope`, and `refit` runs before this system exactly so that a resize is part of the
+    // same step as the edit that caused it. Comparing it broke every run that mattered: nudging a
+    // piece toward the edge grows the tile, so the classifier called each tap a different kind of
+    // act and pushed a fresh entry — the coalescing was there and never once applied.
+    if a.id != b.id || a.members.len() != b.members.len() {
+        return None;
+    }
+    let mut moved = None;
+    for (i, (x, y)) in a.members.iter().zip(b.members.iter()).enumerate() {
+        if x == y {
+            continue;
+        }
+        // Same piece, different placement — anything else (a different body or id) is a new member
+        // wearing an old index, which is a drop or a swap rather than an adjustment.
+        if x.id != y.id || x.body != y.body {
+            return None;
+        }
+        if moved.is_some() {
+            return None;
+        }
+        moved = Some(i);
+    }
+    moved
+}
+
+/// **What one history step did, in the fewest words that stay true.**
+///
+/// Undo used to answer `"undo — 2 in the tile"`, which says how many are left and not what left. That
+/// is ambiguous exactly when it matters: `place` uses `insert_sorted`, so the MEMBERS list is in **id
+/// order, not the order you dropped things** — bring in `zulu` and then `alfa` and the panel shows
+/// `alfa` on top, so a correct undo of the most recent drop looks like it threw out the first mesh.
+/// The author read it that way, and the mechanism was right the whole time.
+///
+/// Naming the piece removes the ambiguity without touching the ordering, which exists so the file is
+/// the same on every machine.
+fn step_says(from: &Option<Composition>, to: &Option<Composition>) -> String {
+    let names = |c: &Option<Composition>| -> Vec<String> {
+        c.as_ref()
+            .map(|c| c.members.iter().map(|m| m.id.clone()).collect())
+            .unwrap_or_default()
+    };
+    let (was, now) = (names(from), names(to));
+    let gone: Vec<&String> = was.iter().filter(|n| !now.contains(n)).collect();
+    let came: Vec<&String> = now.iter().filter(|n| !was.contains(n)).collect();
+    match (gone.as_slice(), came.as_slice()) {
+        ([], []) => match adjusted_member(from, to) {
+            // The members are the same, so this step is a move — name the piece that moved.
+            Some(i) => to
+                .as_ref()
+                .and_then(|c| c.members.get(i))
+                .map(|m| format!("`{}` back where it was", m.id))
+                .unwrap_or_else(|| "the tile".to_owned()),
+            None => "the tile".to_owned(),
+        },
+        ([one], []) => format!("`{one}` out"),
+        ([], [one]) => format!("`{one}` back in"),
+        // A step that both adds and removes is a replacement, and a multi-member step is a resize or
+        // a fresh tile. Counted rather than listed: a line naming six pieces is not read.
+        _ => format!("{} out, {} in", gone.len(), came.len()),
+    }
 }
 
 /// **Record what changed, and step back and forth through it.**
@@ -676,15 +764,40 @@ pub fn tile_history(
     // First run on this tab: adopt what is open without calling it an edit.
     if history.seen.is_none() {
         history.seen = Some(build.open.clone());
+        history.opened = build.opened;
     }
 
-    let back = crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::UndoBuild);
-    let forward = crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::RedoBuild);
+    // **A new tile starts a new history.**
+    //
+    // Reported by the author, 2026-08-12: *"it all works except for the last undo. It just goes back
+    // to a different mesh instead of blank."* It did, because opening a tile is a change like any
+    // other to a system that watches the tile — so `N` pushed the tile you had just left onto the
+    // stack, and undoing past the blank walked back into it.
+    //
+    // That is the hazard this very type's note already argues against for the two *tabs*: *"Two tabs
+    // editing different files through one stack would make 'undo' mean whichever thing was touched
+    // last."* Two tiles through one stack is the same sentence one level down — and worse here,
+    // because `Cmd+S` saves under the open tile's id, so an undo that quietly swapped the document
+    // could write one tile's members over another's name.
+    if history.opened != build.opened {
+        history.past.clear();
+        history.future.clear();
+        history.run = None;
+        history.seen = Some(build.open.clone());
+        history.opened = build.opened;
+        return;
+    }
+
+    let back = crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::UndoBuild);
+    let forward = crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::RedoBuild);
     if back || forward {
         let step = if back { history.past.pop() } else { history.future.pop() };
         match step {
             Some(to) => {
                 let from = build.open.clone();
+                // Kept for the readout below — the stacks take the value, so the description has to
+                // be made from a copy rather than from what was just pushed.
+                let said = step_says(&from, &to);
                 if back {
                     history.future.push(from);
                 } else {
@@ -695,8 +808,11 @@ pub fn tile_history(
                 let n = build.open.as_ref().map_or(0, |c| c.members.len());
                 build.focus = build.focus.min(n.saturating_sub(1));
                 history.seen = Some(to);
+                // Stepping through history ends the run: the next nudge is a new act, not a
+                // continuation of one the author has already walked away from.
+                history.run = None;
                 let what = if back { "undo" } else { "redo" };
-                state.status.note(format!("{what} — {n} in the tile"));
+                state.status.note(format!("{what}: {said} — {n} in the tile"));
             }
             None => state
                 .status
@@ -707,11 +823,33 @@ pub fn tile_history(
 
     // Not a history key, so anything different is an edit worth remembering.
     if history.seen.as_ref() != Some(&build.open) {
-        let was = history.seen.take().flatten();
-        history.past.push(was);
-        if history.past.len() > BUILD_HISTORY {
-            history.past.remove(0);
+        // **A run of adjustments to one member is one step.**
+        //
+        // Reported by the author, 2026-08-12: *"if I bring one mesh in, then another, when I hit
+        // undo it doesn't remove the second mesh I added."* It did not, because every keystroke was
+        // its own entry — drop, nudge, nudge is three, so one `Cmd+Z` stepped back a nudge and left
+        // the mesh where it was. The arrows also **repeat** at `keys::REPEAT_SECS`, so holding one
+        // for a second buries the drop under seven entries and undo reads as dead.
+        //
+        // Ousterhout, *A Philosophy of Software Design* §6.7, is explicit that this is the UI's
+        // decision and not the history's: a `History` manages actions, and *"the policy for grouping
+        // actions"* belongs to the layer that knows what a user thinks one act is. Here that is
+        // moving a piece: an author drags a wall into place and calls it one thing, however many
+        // taps it took.
+        //
+        // So a continuing run **replaces** rather than pushes — the entry already on top holds the
+        // state from before the run began, which is exactly where undo should land. Anything else
+        // ends the run, so nudge / drop / nudge never merges across the drop.
+        let now = adjusted_member(&history.seen.clone().flatten(), &build.open);
+        let continuing = now.is_some() && now == history.run && !history.past.is_empty();
+        if !continuing {
+            let was = history.seen.take().flatten();
+            history.past.push(was);
+            if history.past.len() > BUILD_HISTORY {
+                history.past.remove(0);
+            }
         }
+        history.run = now;
         // A new edit is a new branch: what was undone past is no longer reachable.
         history.future.clear();
         history.seen = Some(build.open.clone());
@@ -727,15 +865,25 @@ pub fn tile_history(
 pub fn refit_tile(
     mut build: ResMut<Build>,
     project: Res<crate::project::Project>,
-    mut state: ResMut<crate::tiles::ImportState>,
     mode: Res<crate::tiles::Mode>,
 ) {
     if *mode != crate::tiles::Mode::Tiles || !(build.is_changed() || project.is_changed()) {
         return;
     }
-    if let Some(said) = refit(&mut build, &project.library, project.map.bounds.1) {
-        state.status.problem(said);
-    }
+    // **Refit, and say nothing.**
+    //
+    // This used to raise a *problem* whenever the envelope grew past one cell, and the author's own
+    // log showed what that cost: fifteen of them from one continuous nudge — `2 x 3`, `2 x 4`,
+    // `3 x 3`, `3 x 4`, `3 x 5`, `4 x 4` — none folding, because `Status` folds *consecutive
+    // identical* lines and every one of these carried a different size. Problems are sticky by
+    // design, so they outlived the tile: the panel read `MEMBERS: nothing yet` under twelve warnings
+    // about a 4 x 4, plus a note that three more had been dropped at the cap.
+    //
+    // The fact was right and the shape was wrong. "This group is too big for the solver" is a
+    // **property of the tile**, not an event in its history — `docs/ui.md` §3.2, show the state where
+    // the state lives. It is one line in the TILE block now, true exactly while it is on screen, and
+    // it costs the alert budget (§3.4) nothing.
+    refit(&mut build, &project.library, project.map.bounds.1);
 }
 
 /// **Every BUILD verb, in one system.**
@@ -769,7 +917,7 @@ pub fn build_keys(
     if *mode != crate::tiles::Mode::Tiles {
         return;
     }
-    let pressed = |a: Action| just_pressed(&keyboard, live.0, a);
+    let pressed = |a: Action| just_pressed(&keyboard, *live, a);
 
     // **Arriving on the tab opens a tile**, so the first keystroke does something rather than asking
     // for another. This hung off a mode key until the tab existed; the tab becoming live is the same
@@ -822,7 +970,7 @@ pub fn build_keys(
         });
         return;
     }
-    if build.placing && just_pressed(&keyboard, live.0, Action::Cancel) {
+    if build.placing && just_pressed(&keyboard, *live, Action::Cancel) {
         build.placing = false;
         state.status.note("arrows walk the library".to_owned());
         return;
@@ -878,6 +1026,11 @@ pub fn build_keys(
                 .note("a hole has no width to put flush — nudge it instead".to_owned());
             return;
         };
+        let was = build
+            .open
+            .as_ref()
+            .and_then(|c| c.members.get(focus))
+            .map(|m| m.at);
         let moved = edit(&mut build, &project.library, |comp| {
             let Some(m) = comp.members.get_mut(focus) else {
                 return Err("the focused member went away".to_owned());
@@ -886,6 +1039,25 @@ pub fn build_keys(
             Ok(m.at)
         });
         match moved {
+            // **A flush that moves nothing says why.**
+            //
+            // Found by authoring: a 0.1 x 1.0 m wall flushed *along its length* is a genuine no-op —
+            // `aligned` returns `(size/2 - span/2) * dir`, and a piece already spanning the tile on
+            // that axis is already as flush as it can be. The arithmetic is right and the picture
+            // does not move, which is indistinguishable from a key that never arrived. I did it twice
+            // in a row with the source open, and only found out by reading the RON afterwards.
+            //
+            // This is the `refused`-versus-`did nothing` gap `docs/2026-08-11-editor-visual-inspection.md`
+            // names as D2, in a new place: *"The information exists; only the channel is missing."*
+            // A note rather than a problem, because nothing went wrong — it names the axis that would
+            // move instead, which is the thing the author actually wants to know.
+            Ok(to) if was == Some(to) => {
+                let across = if dir.0 != 0 { "up/down" } else { "left/right" };
+                state.status.note(format!(
+                    "already flush that way — this piece spans the tile on that axis. Shift+{across} \
+                     moves it across instead"
+                ));
+            }
             Ok(to) => state
                 .status
                 .note(format!("flush — ({:+.3}, {:+.3})", to.0, to.1)),
@@ -902,21 +1074,24 @@ pub fn build_keys(
     // contents the two disagreed — the cursor said a cell, the tile said a size, and dropping in the
     // middle cell grew a one-tile floor to 2 x 2. It survived one commit longer as a derived readout
     // and went stale at once; the panel reads the member now. See [`Build::focus`].
+    //
+    // **The `if build.placing` that used to wrap this is gone**, and its absence is the point: these
+    // four bindings declare `Stance::Holding`, so `keys::just_pressed` refuses them with nothing in
+    // hand. The guard was correct and invisible — a rule about when a key fires, kept somewhere the
+    // key table could not state it. `keys::Stance` is where it lives now.
     let mut wish = Vec2::ZERO;
-    if build.placing {
-        if pressed(Action::BuildLeft) {
-            wish.x -= 1.0;
-        }
-        if pressed(Action::BuildRight) {
-            wish.x += 1.0;
-        }
-        // Screen wishes are negative up, the convention `view::pan_direction` already reads.
-        if pressed(Action::BuildForward) {
-            wish.y -= 1.0;
-        }
-        if pressed(Action::BuildBack) {
-            wish.y += 1.0;
-        }
+    if pressed(Action::BuildLeft) {
+        wish.x -= 1.0;
+    }
+    if pressed(Action::BuildRight) {
+        wish.x += 1.0;
+    }
+    // Screen wishes are negative up, the convention `view::pan_direction` already reads.
+    if pressed(Action::BuildForward) {
+        wish.y -= 1.0;
+    }
+    if pressed(Action::BuildBack) {
+        wish.y += 1.0;
     }
     let lift_by = i32::from(pressed(Action::BuildUp)) - i32::from(pressed(Action::BuildDown));
     if wish != Vec2::ZERO || lift_by != 0 {
@@ -990,8 +1165,15 @@ pub fn build_keys(
                 // down. Ignoring the index left them acting on whatever sorted first, which is a
                 // different piece as soon as a tile holds two.
                 build.focus = i;
+                // **A drop leaves you adjusting what you dropped**, whichever key brought it in.
+                // `Enter` alone used to leave `placing` false and the arrows dead over a focused
+                // member — the author's first report. `Esc` is the way back to the library list.
+                build.placing = true;
                 let n = build.open.as_ref().map_or(0, |c| c.members.len());
-                state.status.note(format!("`{}` dropped — {n} in the tile", d.id));
+                state.status.note(format!(
+                    "`{}` dropped — {n} in the tile. Arrows move it, Esc goes back to the list",
+                    d.id
+                ));
             }
             Err(e) => state.status.problem(e),
         }
@@ -1116,6 +1298,8 @@ fn open_blank(build: &mut Build, project: &crate::project::Project) {
     build.rung = DEFAULT_RUNG;
     build.open = Some(comp);
     build.focus = 0;
+    // The one place a different tile becomes the open one, so the one place the boundary is marked.
+    build.opened = build.opened.wrapping_add(1);
 }
 
 /// The next unused `<kit>/tile_n` id, so a new tile opens rather than asking for a name first.
@@ -1808,9 +1992,16 @@ mod tests {
         assert!(refit(&mut b, &lib, 2.4).is_none(), "an empty tile is one cell and says nothing");
 
         drop_in(&mut b, &lib, &pallet).expect("it drops");
-        let said = refit(&mut b, &lib, 2.4).expect("growing past one cell is worth saying");
-        assert!(said.contains("1 x 2 tiles"), "it must say the size: {said}");
-        assert!(said.contains("solver"), "and what that costs: {said}");
+        let grew = refit(&mut b, &lib, 2.4).expect("growing past one cell is a change");
+        // **The size, not a sentence about it.** This used to return the warning text and
+        // `refit_tile` raised it as a sticky problem on every size change — fifteen deep from one
+        // nudge, still on screen after the tile was emptied. The fact is a property of the tile now
+        // and the panel states it beside the size; see `is_one_cell`.
+        assert_eq!(tiles_across(grew), (1, 2), "it grew to two tiles on Z: {grew:?}");
+        assert!(
+            !is_one_cell(grew),
+            "and that is the thing the panel qualifies the size with"
+        );
 
         // Silent when nothing moved, or `Build`'s change flag would rebuild the stage every frame.
         assert!(refit(&mut b, &lib, 2.4).is_none(), "a refit that changes nothing writes nothing");
@@ -1830,7 +2021,15 @@ mod tests {
         let floor = lib.get("site/floor").unwrap_or_else(|| panic!("the kit has a floor"));
         drop_in(&mut b, &lib, floor).expect("the floor drops");
 
-        assert!(refit(&mut b, &lib, 3.5).is_none(), "a height change alone is not worth saying");
+        // **A height change is a refit**, and `refit` now answers "did the envelope move" rather
+        // than "is this worth warning about" — the warning was a sticky problem and is a live panel
+        // line instead (see `refit_tile`). What must stay true is that following the map's height
+        // does not make the tile un-generatable: it is still one cell across.
+        let grew = refit(&mut b, &lib, 3.5).expect("following the map's height is a change");
+        assert!(
+            is_one_cell(grew),
+            "a taller room must not cost the tile its solver eligibility: {grew:?}"
+        );
         let Some(Envelope::Bounded { size }) = b.open.as_ref().map(|c| c.envelope) else {
             panic!("a tile claims a tile");
         };

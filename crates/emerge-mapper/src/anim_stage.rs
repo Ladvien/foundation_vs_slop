@@ -142,7 +142,7 @@ pub(crate) fn cycle_cam_preset(
     live: Res<crate::keys::Live>,
     mut cam: ResMut<BenchCamera>,
 ) {
-    if crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::CycleCamPreset) {
+    if crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::CycleCamPreset) {
         cam.0 = cam.0.next();
     }
 }
@@ -523,11 +523,11 @@ pub(crate) fn drive_bench_scrub(
     >,
 ) {
     // Space toggles; the phase carries across the toggle in both directions.
-    if crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::PlayPause) {
+    if crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::PlayPause) {
         scrub.playing = !scrub.playing;
     }
-    let back = crate::keys::pressed(&keyboard, live.0, crate::keys::Action::ScrubBack);
-    let fwd = crate::keys::pressed(&keyboard, live.0, crate::keys::Action::ScrubFwd);
+    let back = crate::keys::pressed(&keyboard, *live, crate::keys::Action::ScrubBack);
+    let fwd = crate::keys::pressed(&keyboard, *live, crate::keys::Action::ScrubFwd);
     if !scrub.playing && (back || fwd) {
         let fine = if crate::keys::shift_held(&keyboard) {
             FINE_DIVISOR
@@ -630,7 +630,7 @@ pub(crate) fn toggle_ghost_key(
     live: Res<crate::keys::Live>,
     mut ab: ResMut<BenchAb>,
 ) {
-    if crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::ToggleGhost) {
+    if crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::ToggleGhost) {
         ab.0 = !ab.0;
     }
 }
