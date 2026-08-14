@@ -5570,3 +5570,55 @@ fn reopening_an_empty_tile_leaves_the_arrows_walking() {
         "an empty tile has nothing for the arrows to move, so they must walk the library"
     );
 }
+
+/// **The tile's centre is always reachable, whatever you did to the piece first.**
+///
+/// Reported at the keyboard: *"I'd expect even if J isn't pressed, the movements of a mesh still
+/// include a centre placement too."* They were right, and the cause was not the one I first named.
+///
+/// The nudge was purely relative — `m.at += d * step` — so a piece kept whatever phase it started
+/// on. That is fine from a fresh drop, which lands at 0.00. But `shift`+arrow flushes to an absolute
+/// edge (0.40 for a 0.2 m piece in a 1 m tile), and from there every 333 mm step lands on 0.067 or
+/// 0.733. One flush and the middle of the tile was unreachable for ever.
+///
+/// `snap_centre` re-establishes phase on every nudge. What this pins is the property rather than the
+/// arithmetic: from an off-lattice start, *some* sequence of nudges reaches exactly 0.0.
+#[test]
+fn a_flushed_piece_can_still_be_nudged_back_to_the_centre() {
+    use emerge_core::grid::{snap_centre, SnapLevel};
+
+    let pitch = SnapLevel::Fine.pitch(3);
+    // Where a flush leaves a 0.2 m piece in a 1 m tile: hard against the face, off every rung.
+    let flushed = 0.4_f32;
+    assert!(
+        (flushed / pitch - (flushed / pitch).round()).abs() > 0.1,
+        "the premise: a flushed piece is not on the lattice"
+    );
+
+    // Walk inward the way an author would, one nudge at a time.
+    let mut at = flushed;
+    let mut reached_centre = false;
+    for _ in 0..8 {
+        at = snap_centre(at - pitch, pitch);
+        if at.abs() < 1e-4 {
+            reached_centre = true;
+            break;
+        }
+    }
+    assert!(reached_centre, "nudging inward from a flush must reach 0.0, got {at}");
+
+    // And it is stable once there: nudging out and back returns exactly, not approximately.
+    let out = snap_centre(0.0 + pitch, pitch);
+    let back = snap_centre(out - pitch, pitch);
+    assert_eq!(back, 0.0, "out and back must return to exactly the centre");
+
+    // The old behaviour, kept as the contrast: relative stepping from a flush never lands on zero.
+    let mut relative = flushed;
+    for _ in 0..8 {
+        relative -= pitch;
+        assert!(
+            relative.abs() > 1e-3,
+            "a purely relative nudge should never hit the centre from a flush — that was the bug"
+        );
+    }
+}

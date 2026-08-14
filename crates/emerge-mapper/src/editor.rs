@@ -2469,6 +2469,17 @@ pub fn map_at(
         (false, _) => {
             let pitch = level.pitch(project.policy.snap_divisor);
             (
+                // **Corner here, centre in the tile assembler, and that is not a disagreement.**
+                //
+                // The map's origin is a cell CORNER: cell k spans [k, k+1], so a 1 m piece fills a
+                // cell only when its near edge is on the lattice, and three careless aims abut only
+                // for the same reason. A tile's members are positioned relative to the tile's own
+                // ANCHOR, which is its centre, so there the lattice has to run through zero.
+                //
+                // Both mean "aligned to the cell"; they are measured from different zeros. Switching
+                // this one to `snap_centre` put every map tile on a cell corner and left gaps
+                // between them — `a_tile_click_lands_filling_a_cell` and
+                // `three_tiles_aimed_carelessly_still_abut` said so immediately.
                 grid::snap_corner(x, span.0, pitch),
                 grid::snap_corner(z, span.1, pitch),
             )

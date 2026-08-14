@@ -1284,8 +1284,23 @@ pub fn build_keys(
             let Some(m) = comp.members.get_mut(focus) else {
                 return Err("the focused member went away".to_owned());
             };
-            m.at.0 += dx as f32 * step;
-            m.at.1 += dz as f32 * step;
+            // **Snapped to the rung, measured from the tile's centre.** The nudge used to be purely
+            // relative, so a piece kept whatever phase it started on -- and `shift`+arrow flushes to
+            // an absolute edge, 0.40 for a 0.2 m piece in a 1 m tile, from which every 333 mm step
+            // lands on 0.067 or 0.733. The centre became unreachable the moment you flushed once,
+            // permanently, which is what the author found: *"the movements of a mesh should include
+            // a centre placement too"*.
+            //
+            // `snap_centre` rather than `snap_corner` because a member's `at` is relative to the
+            // tile's ANCHOR, which is its centre — so the lattice has to run through zero. The map
+            // uses `snap_corner` for the mirror-image reason: its origin is a cell corner, so a 1 m
+            // piece fills a cell only when its near edge is on the lattice. Both mean "aligned to
+            // the cell", measured from different zeros, and swapping either one breaks the other's
+            // tests immediately.
+            //
+            // Edge contact remains `shift`+arrow's job and ignores the rung entirely.
+            m.at.0 = emerge_core::grid::snap_centre(m.at.0 + dx as f32 * step, step);
+            m.at.1 = emerge_core::grid::snap_centre(m.at.1 + dz as f32 * step, step);
             // The floor is the floor: a member cannot be nudged under the tile it is in.
             m.lift = (m.lift + lift_by as f32 * step).max(0.0);
             Ok((m.at, m.lift))
