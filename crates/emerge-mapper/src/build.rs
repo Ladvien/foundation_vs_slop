@@ -1535,9 +1535,16 @@ pub fn open_saved(build: &mut Build, comp: Composition) {
     build.rung = DEFAULT_RUNG;
     build.open = Some(comp);
     build.focus = 0;
-    // Reopening is not holding: the arrows should walk, not move, until something is picked up. That
-    // is `Stance::Idle`, and leaving `placing` set would put the tab in the state the drop leaves.
-    build.placing = false;
+    // **Reopening a tile IS holding it**, and the first version of this said the opposite: "the
+    // arrows should walk, not move, until something is picked up". There is nothing to pick up in a
+    // reopened tile -- the members are already in it -- so that landed the author in `Idle` with a
+    // tile on screen they could not touch, and `,`/`.` bound at `Holding` did nothing at all. They
+    // reported it within a minute of the verb existing.
+    //
+    // The third time this tab has keyed the stance on how you ARRIVED rather than on what there is
+    // to do; `docs/tiles_tab_contract.md` carries the other two. `focused` still decides, so a tile
+    // reopened with no members is `Idle`, which is right -- there is genuinely nothing to move.
+    build.placing = true;
     build.browsing = None;
     build.opened = build.opened.wrapping_add(1);
 }

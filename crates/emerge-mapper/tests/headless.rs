@@ -5429,3 +5429,144 @@ fn all_four_arrows_step_the_piece_in_four_different_directions() {
         );
     }
 }
+
+/// **Restored after being deleted by accident, which is its own lesson.** This test was removed in
+/// f8d0553 by a slice that meant to drop one duplicated block and took everything between two
+/// markers with it. The suite stayed green, because a deleted test cannot fail — the same shape as
+/// every other defect found today, one level further out.
+/// **The kit is visible from the tab that makes it, and a tile can be reopened.**
+///
+/// The Tiles tab could author tiles and never show them. `open_blank` was the only opener, so every
+/// tile was a new one: an author who finished four could not see the set, could not tell a duplicate
+/// from a new one, and could not correct one. That is not hypothetical — a guided run produced
+/// `site/tile_4` with its low wall in the middle of the tile instead of flush against an edge, and
+/// the only way to fix it was to hand-edit `compositions.ron`.
+///
+/// The verbs cost no new key. `left`/`right` were this tab's one unbound pair at `Idle`, and
+/// `docs/tiles_tab_contract.md` recorded why: *"There is one list on this tab, so there is nothing to
+/// switch between."* There are two now.
+#[test]
+fn the_kit_can_be_walked_and_a_saved_tile_reopened() {
+    use emerge_mapper::build::Build;
+    use emerge_mapper::keys::{binding, Action, Stance};
+
+    let root = Fixture::new("kit_list").descriptor("wall", "alpha").build("m");
+    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    app.update();
+
+    let press = |app: &mut App, key: KeyCode| {
+        app.add_systems(
+            Update,
+            IntoScheduleConfigs::before(
+                move |mut keys: ResMut<bevy::input::ButtonInput<KeyCode>>, mut done: Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        keys.press(key);
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    };
+    let key = |a| binding(a).key;
+
+    // Two tiles in the kit, distinguishable by member count.
+    {
+        let mut project = app.world_mut().resource_mut::<emerge_mapper::project::Project>();
+        for (id, members) in [("kit/one", 0usize), ("kit/two", 0usize)] {
+            let _ = members;
+            project.compositions.compositions.push(emerge_core::composition::Composition {
+                id: id.to_owned(),
+                envelope: emerge_core::composition::Envelope::Bounded { size: (1.0, 4.0, 1.0) },
+                members: vec![],
+                locations: vec![],
+                note: None,
+            });
+        }
+    }
+    press(&mut app, key(Action::TilesTab));
+
+    // `right` opens the kit, and that IS the stance — so the key list changes with it.
+    press(&mut app, key(Action::KitEnter));
+    assert_eq!(app.world().resource::<Build>().browsing, Some(0), "right shows the kit");
+    // One more tick before reading the stance: `census` reads `Build` in the same frame the key
+    // handler writes it, so the list it draws is one frame behind the flag. Imperceptible to a
+    // person and worth stating rather than hiding behind a loop.
+    app.update();
+    assert_eq!(
+        app.world().resource::<emerge_mapper::keys::Live>().1,
+        Stance::Browsing,
+        "and the census follows, or the key list would be describing the wrong state"
+    );
+
+    press(&mut app, key(Action::KitNext));
+    assert_eq!(app.world().resource::<Build>().browsing, Some(1), "down walks it");
+    // Saturating at the end, like the member walk: holding an arrow should stop, not wrap.
+    press(&mut app, key(Action::KitNext));
+    assert_eq!(app.world().resource::<Build>().browsing, Some(1), "and stops at the end");
+
+    // `right` again descends into the tile — the verb the tab never had.
+    press(&mut app, key(Action::KitOpen));
+    let build = app.world().resource::<Build>();
+    assert_eq!(
+        build.open.as_ref().map(|c| c.id.as_str()),
+        Some("kit/two"),
+        "the selected tile is open for editing"
+    );
+    assert_eq!(build.browsing, None, "and the list closes behind it");
+    // **Reopening lands you able to edit**, which is the whole reason the verb exists. This
+    // asserted the opposite for an hour: `open_saved` cleared `placing`, so an author who reopened a
+    // tile got `Stance::Idle` -- arrows walking the library, `,`/`.` not bound at all -- with the
+    // tile they had just asked to edit sitting there untouchable. Reported from the keyboard within
+    // a minute of the verb shipping: "these keys aren't doing anything".
+    assert!(build.placing, "reopening a tile is holding it: there is nothing else to pick up");
+
+    // `Esc` backs out of the list without opening anything — invariant 2, one stance further.
+    press(&mut app, key(Action::KitEnter));
+    assert!(app.world().resource::<Build>().browsing.is_some());
+    press(&mut app, key(Action::Cancel));
+    assert_eq!(app.world().resource::<Build>().browsing, None, "Esc always returns to Choosing");
+}
+
+/// **A tile reopened with nothing in it stays Idle**, because then there genuinely is nothing to
+/// move. `focused` decides alongside `placing`, and this is what stops the fix above overshooting
+/// into the failure it replaced — `placing` true over an empty tile, arrows trying to move a piece
+/// that is not there, and the next `Enter` re-dropping the same mesh.
+///
+/// Both ends have now been wrong once each. `docs/tiles_tab_contract.md` is where that is written
+/// down; this is the executable half.
+#[test]
+fn reopening_an_empty_tile_leaves_the_arrows_walking() {
+    use emerge_mapper::build::{open_saved, Build};
+
+    let root = Fixture::new("reopen_empty").descriptor("wall", "alpha").build("m");
+    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    app.update();
+
+    let empty = emerge_core::composition::Composition {
+        id: "kit/empty".to_owned(),
+        envelope: emerge_core::composition::Envelope::Bounded { size: (1.0, 4.0, 1.0) },
+        members: vec![],
+        locations: vec![],
+        note: None,
+    };
+    {
+        let mut build = app.world_mut().resource_mut::<Build>();
+        open_saved(&mut build, empty);
+    }
+    for _ in 0..3 {
+        app.update();
+    }
+
+    assert!(
+        app.world().resource::<Build>().placing,
+        "the flag is set either way; it is `focused` that has to decide"
+    );
+    assert_eq!(
+        app.world().resource::<emerge_mapper::keys::Live>().1,
+        emerge_mapper::keys::Stance::Idle,
+        "an empty tile has nothing for the arrows to move, so they must walk the library"
+    );
+}
