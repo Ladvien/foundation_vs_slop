@@ -336,6 +336,31 @@ al. 2024 (`10.1109/tvcg.2024.3420236`) split it further: flat menus favour direc
 *hierarchical* ones favour marking. Samp 2011 adds that radial's cost is paid at first sight — so fix
 item positions permanently and never reorder by recency.
 
+**Corrected 2026-08-15: that last clause was over-generalised, and it nearly decided a design.** Samp
+2011 is a PhD on **radial** menus; "never reorder by recency" is a conclusion drawn in that context,
+and this sentence let it read as a law over linear lists. It was cited that way while planning the
+`emerge-mapper` chooser and had to be withdrawn.
+
+**Sears & Shneiderman 1994, *Split menus* (`10.1145/174630.174632`), is the paper that governs linear
+lists, and it is now in the library, full text.** It does not say "never reorder" — it says a small
+high-frequency zone above an otherwise traditionally-ordered list beats a purely alphabetic one, by
+17–58% in two in-situ studies, and users **preferred** it (1.40 vs 2.00 vs 2.60 for frequency-order,
+which they liked least). What it also says, and what actually decides most cases here:
+
+- *"If all items are selected with near equal frequency, minimal benefits would be expected."*
+- *"If the frequently selected items are located at the top of the traditional menu minimal benefits
+  would be expected"* — their Distribution Three, for which *"split menus would not be recommended."*
+- *"This advantage will increase with menu length and with more skewed distributions"* — so it
+  **shrinks** with short ones. Their experiment ran fifteen-item menus for "just a few tenths of a
+  second".
+- Their own guideline caps the high-frequency section at **four items or fewer**.
+
+So: for a **long** list with a **skewed** distribution, split it and order both sections
+traditionally. For a short flat one — four kits in a chooser — the high-frequency section would be
+the whole menu, and fixed alphabetical is what the paper's own procedure returns. Reorder-by-recency
+specifically is the *frequency-ordered* condition, which lost on both speed and preference; that much
+of the original clause survives, and it survives on Sears & Shneiderman rather than on Samp.
+
 **Offering a fast path beside a slow one does not work on its own.** Cockburn, Gutwin, Scarr &
 Malacria 2014 (`10.1145/2659796`) document the intermodal-transition failure: users plateau on the
 slow method and never switch, because no single moment hurts enough to justify the switching cost.
@@ -557,15 +582,30 @@ here was false for some time and nobody noticed.**
   slopes and both of the paper's own controls, where the abstract had supported only "makes a change
   pop out".
 - **Downloaded and catalogued, conversion failing:** `10.3758/s13423-020-01859-9`,
-  `10.1109/access.2019.2924200`, `10.26503/dl.v2018i3.1051`, `10.1109/tvcg.2024.3420236`,
-  `10.1080/10447318.2023.2210880`. The PDFs are on disk; `scribe_convert` returns *"olmocr did not
-  write the expected file"* for each. The scribe instances both report `healthy`, so this is the
-  backend writing no output rather than a queue — the same **service-ownership** question this section
-  has recorded before, not a code change. Retrying is cheap once it is resolved.
+  `10.1109/access.2019.2924200`, `10.26503/dl.v2018i3.1051`, `10.1080/10447318.2023.2210880`. The
+  PDFs are on disk; `scribe_convert` returns *"olmocr did not write the expected file"* for each. The
+  scribe instances both report `healthy`, so this is the backend writing no output rather than a
+  queue — the same **service-ownership** question this section has recorded before, not a code
+  change. Retrying is cheap once it is resolved.
 - **No open-access PDF for the DOI at all**, needs a manual fetch: Cockburn et al.
   (`10.1145/2659796`), the M3 gesture menu (`10.1145/3173574.3173823`), both Misztal papers,
-  Rosenholtz (`10.1146/annurev-vision-082114-035733`), van den Berg (`10.1167/9.4.24`), Itthipuripat
-  (`10.1523/jneurosci.0440-18.2018`).
+  Rosenholtz (`10.1146/annurev-vision-082114-035733`), van den Berg (`10.1167/9.4.24`), and Samp 2011
+  (`10.13025/17344`, the radial-menus PhD — `paper_download` finds nothing; NUI Galway's repository
+  at `hdl.handle.net/10379/2672` is the manual route).
+
+**Corrected 2026-08-15 — two of the entries above were stale, and one of them mattered.**
+
+- **`10.1109/tvcg.2024.3420236`** (Wentzel et al., VR menu archetypes) was listed as
+  conversion-failing. **It converted**; `distill_search` returns full prose from it. Moved out.
+- **`10.1523/jneurosci.0440-18.2018`** (Itthipuripat) was listed as having no open-access PDF. **It
+  is PMC-deposited** (`PMC6170981`) and now **downloaded, converted and indexed, 26 chunks** — full
+  text in hand. `paper_download` does not resolve it from the DOI or the PMC id; the PDF came from
+  `europepmc.org/articles/PMC6170981?pdf=render` by hand. The §3.5 claim it carries is unchanged by
+  reading it: *"having more options largely spares early sensory processing and slows down
+  decision-making via a selective increase in decision thresholds."*
+- **Added the same day: `10.1145/174630.174632`** — Sears & Shneiderman 1994, *Split menus*,
+  downloaded, converted, indexed, 21 chunks. Fetched to settle a question §3.5 could not answer; see
+  the correction there.
 
 Every claim attributed to anything in the last two groups — in §1.3, §3.4, §3.4.1, §3.4.2 or §3.5 —
 is sourced from its **abstract or published results summary, not from full text**, and the module docs

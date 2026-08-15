@@ -30,7 +30,10 @@ fn main() {
         }
     }
     let root = PathBuf::from(
-        positional.first().cloned().unwrap_or_else(|| ".".to_owned()),
+        positional
+            .first()
+            .cloned()
+            .unwrap_or_else(|| ".".to_owned()),
     );
     // **Absolute, before anything derives from it.** The asset root below is handed to Bevy's
     // `AssetPlugin.file_path`, which resolves RELATIVE paths against `BEVY_ASSET_ROOT` or
@@ -39,6 +42,17 @@ fn main() {
     // path replaces whatever base Bevy picked (`Path::join`'s contract), so the editor works the
     // same from `cargo run`, the bare binary, or any cwd — no env var required.
     let root = std::fs::canonicalize(&root).unwrap_or(root);
+    // **No map named means the chooser, not a defaulted one.**
+    //
+    // This changes what three previously-working invocations do — `emerge-mapper`,
+    // `emerge-mapper .` and `emerge-mapper . --kit site` all used to open `untitled_map` silently.
+    // That default is exactly the problem: on 2026-08-15 an author relaunched three times against
+    // the wrong kit because nothing on screen said which one was loaded. A `--kit` given here is
+    // **preselected rather than discarded** — it has already answered half of what the screen asks.
+    if positional.len() < 2 {
+        run_chooser(&root, kit.as_deref());
+        return;
+    }
     // A NAME, not a filename — `emerge-mapper . site_67` opens assets/emerge/site_67.map.ron.
     let map_name = positional
         .get(1)
@@ -59,42 +73,41 @@ fn main() {
     let project_name = project.map.name.clone();
 
     let mut app = App::new();
-    app
-        .add_plugins(
-            DefaultPlugins
-                .set(AssetPlugin {
-                    // Meshes are named relative to the project, so the project IS the asset root.
-                    file_path: root.to_string_lossy().into_owned() + "/assets",
-                    ..default()
-                })
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: format!("emerge-mapper — {}", project_name),
-                        // **Fullscreen for automated checks.** The way this editor gets verified is
-                        // `scripts/vinput.py` driving a real kernel input device and
-                        // `scripts/framestats.py` measuring the frame — and a virtual pointer is
-                        // ABSOLUTE over the whole output, so a screen fraction only means a window
-                        // fraction when the window IS the screen. Under a tiling WM the editor gets
-                        // an arbitrary slot, and clicks aimed at the palette land on the desktop
-                        // instead, which looks exactly like a palette that does not respond.
-                        mode: if std::env::var("EMERGE_FULLSCREEN").as_deref() == Ok("1") {
-                            bevy::window::WindowMode::BorderlessFullscreen(
-                                bevy::window::MonitorSelection::Primary,
-                            )
-                        } else {
-                            bevy::window::WindowMode::Windowed
-                        },
-                        ..default()
-                    }),
+    app.add_plugins(
+        DefaultPlugins
+            .set(AssetPlugin {
+                // Meshes are named relative to the project, so the project IS the asset root.
+                file_path: root.to_string_lossy().into_owned() + "/assets",
+                ..default()
+            })
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: format!("emerge-mapper — {}", project_name),
+                    // **Fullscreen for automated checks.** The way this editor gets verified is
+                    // `scripts/vinput.py` driving a real kernel input device and
+                    // `scripts/framestats.py` measuring the frame — and a virtual pointer is
+                    // ABSOLUTE over the whole output, so a screen fraction only means a window
+                    // fraction when the window IS the screen. Under a tiling WM the editor gets
+                    // an arbitrary slot, and clicks aimed at the palette land on the desktop
+                    // instead, which looks exactly like a palette that does not respond.
+                    mode: if std::env::var("EMERGE_FULLSCREEN").as_deref() == Ok("1") {
+                        bevy::window::WindowMode::BorderlessFullscreen(
+                            bevy::window::MonitorSelection::Primary,
+                        )
+                    } else {
+                        bevy::window::WindowMode::Windowed
+                    },
                     ..default()
                 }),
-        )
-        .insert_resource(project)
-        .insert_resource(ClearColor(Color::srgb(0.035, 0.033, 0.030)))
-        // **One knob for the whole interface.** `UiScale` multiplies every `Val::Px` and every font
-        // size, so the panels grow together and nothing has to be re-tuned relative to anything else
-        // — the alternative is forty constants that drift apart the first time one is missed.
-        .insert_resource(UiScale(1.2));
+                ..default()
+            }),
+    )
+    .insert_resource(project)
+    .insert_resource(ClearColor(Color::srgb(0.035, 0.033, 0.030)))
+    // **One knob for the whole interface.** `UiScale` multiplies every `Val::Px` and every font
+    // size, so the panels grow together and nothing has to be re-tuned relative to anything else
+    // — the alternative is forty constants that drift apart the first time one is missed.
+    .insert_resource(UiScale(1.2));
 
     // **The one list of the editor's plugins**, shared with `harness::build_headless`. A binary and a
     // test that each assembled their own graph would be two editors, and the tests would be checking
@@ -121,4 +134,80 @@ fn main() {
     }
 
     app.run();
+}
+
+/// **The chooser, then the editor it chose** — two `App`s, two processes, one at a time.
+///
+/// The chooser cannot be a state inside the editor's `App` without gating every system that takes
+/// `Res<Project>`, which in Bevy 0.19 panics when the resource is absent. `chooser.rs`'s module note
+/// carries the full argument. So this runs the chooser to completion, and only then launches the
+/// editor with what it chose.
+///
+/// **Spawn and wait, not `exec`.** `exec` is tidier — it replaces this process rather than leaving a
+/// parent waiting — but it lives behind `std::os::unix::process::CommandExt` and would be this
+/// crate's first platform `cfg`. One path that works everywhere is worth a sleeping parent process.
+///
+/// The child's exit code is propagated, so `emerge-mapper && something` still means what it says.
+fn run_chooser(root: &std::path::Path, kit: Option<&str>) {
+    use emerge_mapper::chooser::{Catalog, Chooser, ChooserPlugin};
+
+    let catalog = match Catalog::scan(root) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("emerge-mapper: {e}");
+            std::process::exit(1);
+        }
+    };
+    if catalog.kits.is_empty() {
+        eprintln!(
+            "emerge-mapper: {}/assets/emerge holds no kits — a kit is a directory with a \
+             library.ron in it.",
+            root.display()
+        );
+        std::process::exit(1);
+    }
+
+    let out: emerge_mapper::chooser::Choice = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let mut app = App::new();
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            title: "emerge-mapper — choose a map".to_owned(),
+            resolution: bevy::window::WindowResolution::new(900, 640),
+            ..default()
+        }),
+        ..default()
+    }))
+    .insert_resource(ClearColor(Color::srgb(0.035, 0.033, 0.030)))
+    .insert_resource(UiScale(1.2))
+    .add_plugins(ChooserPlugin {
+        chooser: Chooser::new(root.to_path_buf(), catalog, kit),
+        out: out.clone(),
+    });
+    // The same borrowed face the editor installs — without it every `—` in this screen's copy draws
+    // as a tofu box, because Bevy's embedded default is 95 codepoints of ASCII.
+    if let Err(e) = harness::install_font(&mut app, root) {
+        eprintln!("emerge-mapper: {e}");
+        std::process::exit(1);
+    }
+    app.run();
+
+    // Nothing chosen — the author quit. That is a success, not a failure.
+    let Some(args) = out.lock().ok().and_then(|slot| slot.clone()) else {
+        return;
+    };
+
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("emerge-mapper: cannot find my own binary to relaunch: {e}");
+            std::process::exit(1);
+        }
+    };
+    match std::process::Command::new(&exe).args(&args).status() {
+        Ok(status) => std::process::exit(status.code().unwrap_or(0)),
+        Err(e) => {
+            eprintln!("emerge-mapper: cannot launch the editor: {e}");
+            std::process::exit(1);
+        }
+    }
 }

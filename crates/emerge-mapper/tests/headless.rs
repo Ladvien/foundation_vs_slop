@@ -5531,7 +5531,13 @@ fn every_piece_a_shipped_guide_names_exists_in_the_shipped_kit() {
         .descriptors
         .iter()
         .map(|d| d.id.clone())
-        .chain(project.compositions.compositions.iter().map(|c| c.id.clone()))
+        .chain(
+            project
+                .compositions
+                .compositions
+                .iter()
+                .map(|c| c.id.clone()),
+        )
         .collect();
 
     let dir =
@@ -5549,7 +5555,8 @@ fn every_piece_a_shipped_guide_names_exists_in_the_shipped_kit() {
         let ok = |s: &str| {
             !s.is_empty()
                 && s.starts_with(|c: char| c.is_ascii_lowercase())
-                && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                && s.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
         };
         ok(kit) && ok(piece)
     };
@@ -8100,5 +8107,70 @@ fn the_room_script_can_actually_be_followed() {
         "nine tiles were stamped and {} loose placements appeared; if a stamp ever expands into \
          rows on the map, this card's counts stop meaning what they say",
         project.map.placements.len()
+    );
+}
+
+/// **An ASSET-CONTRACT test — it reads the shipped corpus on purpose.**
+///
+/// The chooser exists because nothing on screen said which kit was loaded, and the piece count is
+/// the fact that answers it. This asserts that fact is available from what actually ships: the
+/// scan finds the shipped kits, and it can tell the blank one from a populated one.
+///
+/// # Why the counts are not pinned exactly
+///
+/// `site`'s piece count changes the moment somebody authors a piece, which is what this editor is
+/// *for* — pinning 45 would make importing a mesh a failing test, the corpus-dependence trap
+/// `tests/fixtures/mod.rs` exists to avoid. What is pinned is the **contract**: every shipped kit
+/// scans, `site_v2` is empty by design (`docs/2026-08-15-blank-slate-handoff.md` §1) and `site` is
+/// not, and the root kit is reachable with no `--kit` at all.
+#[test]
+fn the_chooser_sees_the_shipped_kits() {
+    use emerge_mapper::chooser::Catalog;
+
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap_or_else(|| panic!("the crate must live two levels under the workspace"))
+        .to_path_buf();
+
+    let catalog = Catalog::scan(&workspace).unwrap_or_else(|e| panic!("{e}"));
+    let labels: Vec<&str> = catalog.kits.iter().map(|k| k.label.as_str()).collect();
+
+    for want in ["emerge", "site", "site_greybox", "site_v2"] {
+        assert!(
+            labels.contains(&want),
+            "the shipped kit `{want}` did not scan. Found: {labels:?}"
+        );
+    }
+
+    let pieces = |label: &str| -> usize {
+        catalog
+            .kits
+            .iter()
+            .find(|k| k.label == label)
+            .map_or_else(|| panic!("`{label}` is missing"), |k| k.pieces)
+    };
+    assert_eq!(
+        pieces("site_v2"),
+        0,
+        "site_v2 is the blank slate on purpose; something restored it"
+    );
+    assert!(
+        pieces("site") > 0,
+        "the SHIPPED site kit is empty. It is the game's kit too — author on `--kit site_v2` \
+         instead, and put this back with `git checkout HEAD -- assets/emerge/site/`"
+    );
+
+    // The root kit is `Project::open(kit: None)` — reachable with no flag, and a subdirectory scan
+    // cannot produce it, so it is carried explicitly or that mode is lost.
+    let rooted = catalog
+        .kits
+        .iter()
+        .find(|k| k.flag.is_none())
+        .unwrap_or_else(|| panic!("the root kit is not offered: {labels:?}"));
+    assert_eq!(rooted.label, "emerge");
+    assert!(
+        catalog.kits.iter().filter(|k| k.flag.is_none()).count() == 1,
+        "exactly one kit may be the no-flag one"
     );
 }

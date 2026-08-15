@@ -47,6 +47,7 @@ pub mod anim_stage;
 pub mod anim_tab;
 pub mod anim_watch;
 pub mod build;
+pub mod chooser;
 pub mod chrome;
 pub mod compass;
 pub mod compose;
