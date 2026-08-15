@@ -1,0 +1,5 @@
+(
+    version: 1,
+    note: Some("Deliberately EMPTY -- this is the blank slate, and it is a KIT OF ITS OWN so that being blank costs the game nothing. Created 2026-08-15 to author the Site's next kit from scratch against the 418 meshes in assets/ozea_kit/: pieces are imported on the Meshes tab and the tiles assembled on the Tiles tab. Open it with `cargo run -p emerge-mapper --kit site_v2`. Do NOT restore this from git history -- empty is the state that was asked for. The blank slate lived in assets/emerge/site/ for a few hours on 2026-08-15 and that was a mistake: assets/emerge/site/ is simultaneously the game's shipped kit (src/site/kit.rs SITE_PROJECT_DIR), so emptying it took 32 game tests down with it. One directory, one job -- the shape this repo already had in site vs site_greybox, \"two kits, two projects\"."),
+    descriptors: [],
+)

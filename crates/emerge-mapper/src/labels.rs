@@ -67,7 +67,54 @@ pub struct Suggestions {
     entries: BTreeMap<String, Entry>,
 }
 
+impl Entry {
+    /// A bare entry for tests that care only that a proposal EXISTS — the gate on the Tiles palette
+    /// asks nothing about its contents.
+    #[cfg(any(test, feature = "debugger"))]
+    pub fn for_test(mesh: &str) -> Entry {
+        Entry {
+            suggestion: Suggestion {
+                what: "a thing".to_owned(),
+                kind: vec![],
+                effects: vec![],
+                look: vec![],
+                offers_surfaces: vec![],
+                mount: None,
+                front: None,
+                needs_turn: None,
+                note: None,
+                rooms: vec![],
+                group: None,
+                confidence: crate::vlm::Confidence::Low,
+                token_proposals: vec![],
+            },
+            provenance: Provenance {
+                model: "test".to_owned(),
+                date: "2026-08-15".to_owned(),
+                attempts: 1,
+            },
+            mesh: mesh.to_owned(),
+            fingerprint: 0,
+        }
+    }
+}
+
 impl Suggestions {
+    /// Any one pending target — what a batch reaches for when it confirms its own work. The order
+    /// is the map's, which is arbitrary and does not matter: every one of them is applied.
+    pub fn first_target(&self) -> Option<EditTarget> {
+        // The key IS the target, spelled by `key_of`; read it back rather than storing the target
+        // twice and letting the two disagree.
+        self.entries.keys().next().and_then(|k| {
+            k.strip_prefix("library:")
+                .map(|id| EditTarget::Library(id.to_owned()))
+                .or_else(|| {
+                    k.strip_prefix("candidate:")
+                        .map(|mesh| EditTarget::Candidate(mesh.to_owned()))
+                })
+        })
+    }
+
     pub fn get(&self, target: &EditTarget) -> Option<&Entry> {
         self.entries.get(&key_of(target))
     }
@@ -157,7 +204,11 @@ pub(crate) fn request_photos(
     };
     let scale = d.align.scale.unwrap_or(1.0);
     let said = format!("photographing `{}` for labels...", name_of(&target));
-    rig.push_unique(crate::label_booth::ShotJob { target, mesh, scale });
+    rig.push_unique(crate::label_booth::ShotJob {
+        target,
+        mesh,
+        scale,
+    });
     said
 }
 
@@ -178,6 +229,9 @@ pub(crate) fn clear_all_labels(
     suggestions.entries.clear();
     queue.queue.clear();
     queue.total = 0;
+    queue.paused = false;
+    queue.auto_apply = false;
+    queue.current = None;
     tasks.0.clear();
     if proposals + queued + in_flight > 0 {
         generation.0 = generation.0.wrapping_add(1);
@@ -209,7 +263,9 @@ pub(crate) fn suggest_labels(
         return;
     }
     let Some(target) = state.target() else {
-        state.status.note("nothing focused — select a piece to label".to_owned());
+        state
+            .status
+            .note("nothing focused — select a piece to label".to_owned());
         return;
     };
     let Some(d) = state.placed_at_target(&target, &project) else {
@@ -237,7 +293,10 @@ pub(crate) fn watch_sentinel(
     if !std::path::Path::new(REQUEST).exists() {
         return;
     }
-    let content = std::fs::read_to_string(REQUEST).unwrap_or_default().trim().to_owned();
+    let content = std::fs::read_to_string(REQUEST)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
     let _ = std::fs::remove_file(REQUEST);
     if content == "clear" {
         state.status.note(clear_all_labels(
@@ -257,11 +316,18 @@ pub(crate) fn watch_sentinel(
         return;
     }
     let Some(d) = project.library.get(&content).cloned() else {
-        state.status.problem(format!("labels sentinel: no library entry named `{content}`"));
+        state.status.problem(format!(
+            "labels sentinel: no library entry named `{content}`"
+        ));
         warn!("{}", state.status.line());
         return;
     };
-    state.status.note(request_photos(EditTarget::Library(content), &d, &tasks, &mut rig));
+    state.status.note(request_photos(
+        EditTarget::Library(content),
+        &d,
+        &tasks,
+        &mut rig,
+    ));
     info!("labels sentinel: {}", state.status.line());
 }
 
@@ -295,8 +361,7 @@ pub(crate) fn spawn_request(
                 .map_err(|e| format!("cannot read {}: {e}", mesh_abs.display()))?;
             let fingerprint = emerge_core::glb::fnv1a(&bytes);
             let pngs = [encode_png(&images[0])?, encode_png(&images[1])?];
-            let (suggestion, provenance) =
-                vlm::label_with_retry(&cfg, &pngs, &vocab, &ctx, date)?;
+            let (suggestion, provenance) = vlm::label_with_retry(&cfg, &pngs, &vocab, &ctx, date)?;
             Ok((suggestion, provenance, fingerprint))
         });
         tasks.0.push(InFlight {
@@ -314,6 +379,9 @@ pub(crate) fn poll_tasks(
     mut generation: ResMut<LabelGeneration>,
     mut state: ResMut<crate::tiles::ImportState>,
     project: Option<Res<Project>>,
+    // A walk that has lost its endpoint is stopped rather than burned through — see the `Err` arm.
+    mut queue: ResMut<LabelQueue>,
+    mut rig: ResMut<crate::label_booth::ShotRig>,
 ) {
     let Some(project) = project else { return };
     let mut finished = Vec::new();
@@ -330,7 +398,9 @@ pub(crate) fn poll_tasks(
                     .placed_at_target(&inflight.target, &project)
                     .is_some_and(|d| d.mesh.as_deref() == Some(inflight.mesh.as_str()));
                 if !still {
-                    state.status.problem(format!("labels for `{name}` arrived after it changed — dropped"));
+                    state.status.problem(format!(
+                        "labels for `{name}` arrived after it changed — dropped"
+                    ));
                     continue;
                 }
                 let entry = Entry {
@@ -344,12 +414,32 @@ pub(crate) fn poll_tasks(
                 record_proposals(&project.root, &entry, &name);
                 suggestions.insert(&inflight.target, entry);
                 generation.0 = generation.0.wrapping_add(1);
-                state.status.note(format!("labels proposed for `{name}` — U applies, Y discards"));
+                state.status.note(format!(
+                    "labels proposed for `{name}` — U applies, Y discards"
+                ));
             }
             // The gate's rejection text (axis + legal tokens) or the transport's complaint,
             // verbatim — the author decides what to do with it.
             Err(e) => {
-                state.status.problem(format!("labeling `{name}` failed: {e}"));
+                // **An endpoint that has gone away stops the walk.** One mesh failing is that
+                // mesh's news; the transport being down is the whole batch's, and reporting it once
+                // per queued mesh — 778 times, measured — buries the one line that says what to do.
+                //
+                // Only the transport aborts. A rejection from the gate is about THIS mesh and the
+                // walk carries on to the next, which is the whole point of a batch.
+                if e.contains("endpoint is unreachable") && queue.running() {
+                    let (done, total) = queue.progress();
+                    queue.queue.clear();
+                    queue.total = 0;
+                    let dropped = rig.clear_queue();
+                    state.status.problem(format!(
+                        "batch stopped at {done}/{total} ({dropped} unphotographed) — {e}. The                          model runs on `bmb`: bring the forward up and press Shift+L again"
+                    ));
+                } else {
+                    state
+                        .status
+                        .problem(format!("labeling `{name}` failed: {e}"));
+                }
             }
         }
     }
@@ -562,11 +652,43 @@ fn record_proposals(root: &std::path::Path, entry: &Entry, asset: &str) {
 pub struct LabelQueue {
     queue: std::collections::VecDeque<EditTarget>,
     total: usize,
+    /// **A batch confirms its own proposals.**
+    ///
+    /// The single `L` still stages for `U`, because one mesh is a decision an author is present
+    /// for. A walk of hundreds is not: asked for at the keyboard, 2026-08-15 — *"I wanted it to
+    /// auto confirm when I'm doing a whole batch labeling."* The confirmation is the decision to
+    /// run the walk, and the review moves after the fact — a wrong label is visible in the list
+    /// (unjudged rows are plain, judged ones green) and `Shift+Delete` sends a piece back stripped.
+    auto_apply: bool,
+    /// **What is being photographed and asked about right now**, for the panel. The status line
+    /// carried this and nothing else did, so it was gone the moment anything else wrote a note.
+    current: Option<String>,
+    /// **Held, not abandoned.** A walk of several hundred meshes is minutes of photography and
+    /// inference, and stopping it to look at something must not mean doing that work twice.
+    /// Asked for at the keyboard, 2026-08-15: *"there should be a way to pause... we don't want to
+    /// undo what was already labeled."* Nothing already proposed is touched either way — pausing
+    /// stops the pump, and that is all it does.
+    paused: bool,
 }
 
 impl LabelQueue {
     pub fn running(&self) -> bool {
         !self.queue.is_empty()
+    }
+
+    /// Held mid-walk, with work still queued.
+    pub fn paused(&self) -> bool {
+        self.paused
+    }
+
+    /// The subject in hand, if any.
+    pub fn current(&self) -> Option<&str> {
+        self.current.as_deref()
+    }
+
+    /// Whether this walk confirms what it proposes.
+    pub fn auto_apply(&self) -> bool {
+        self.auto_apply
     }
 
     pub fn progress(&self) -> (usize, usize) {
@@ -591,45 +713,105 @@ pub(crate) fn suggest_all(
     suggestions: Res<Suggestions>,
     tasks: Res<LabelTasks>,
     mut queue: ResMut<LabelQueue>,
-    mut rig: ResMut<ShotRig>,
+    // **The walk takes what the list is showing.** See the note where the targets are gathered.
+    filters: Res<crate::filter::Filters>,
 ) {
     if !crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::SuggestAll) {
         return;
     }
+    // **A second press HOLDS the walk; it does not throw it away.** Cancelling meant re-photographing
+    // everything already done to get back to where you were, which after a few hundred meshes is the
+    // wrong default. Abandoning is still one key — `Shift+Y` drops the queue, the proposals and
+    // anything in flight together — so nothing lost the ability to stop, only the ability to lose
+    // work by accident.
     if queue.running() {
         let (done, total) = queue.progress();
-        queue.queue.clear();
-        queue.total = 0;
-        let dropped = rig.clear_queue();
-        state.status.problem(format!(
-            "batch cancelled at {done}/{total} ({dropped} unphotographed); pending proposals keep"
-        ));
+        queue.paused = !queue.paused;
+        if queue.paused {
+            state.status.note(format!(
+                "batch held at {done}/{total} — Shift+L resumes, Shift+Y abandons it. Nothing                  already proposed is affected"
+            ));
+        } else {
+            state
+                .status
+                .note(format!("batch resumed at {done}/{total}"));
+        }
         return;
     }
     let Some(project) = project else { return };
-    if let Err(remedy) = VlmConfig::load(&project.root) {
-        state.status.note(remedy);
-        return;
+    let cfg = match VlmConfig::load(&project.root) {
+        Ok(cfg) => cfg,
+        Err(remedy) => {
+            state.status.note(remedy);
+            return;
+        }
+    };
+    // **Ask whether anybody is home before committing to a walk.**
+    //
+    // Configured and reachable are different questions, and only the first was being asked: with the
+    // SSH forward down, `Shift+L` queued 778 meshes and reported 778 identical failures, one per
+    // mesh, burning the whole queue to learn one fact. Reported from the keyboard, 2026-08-15.
+    //
+    // A warming endpoint is NOT a refusal — `llama-swap` loads a cold model in tens of seconds, so
+    // the batch starts and says so rather than making the author retry until it happens to be up.
+    match crate::vlm::probe(&cfg) {
+        crate::vlm::Reach::Ready => {}
+        crate::vlm::Reach::Warming(why) => {
+            state.status.note(format!(
+                "{why} — starting anyway, the first shot may take a while"
+            ));
+        }
+        crate::vlm::Reach::Unreachable(remedy) => {
+            state.status.problem(format!("no batch: {remedy}"));
+            return;
+        }
     }
+    // **The batch is scoped by the filter box** — the same predicate, on the same keys, that the
+    // list beside it is drawn with (`d.id` for a library row, `c.mesh` for a candidate).
+    //
+    // Asked for at the keyboard, 2026-08-15: *"scope it to just the ozea meshes."* With the kit
+    // cleared, an unscoped walk is all 778 meshes in `assets/` — characters, the prototype kit,
+    // barrels — against one GPU slot that serialises. A dedicated "which pack" control would be a
+    // second way to say what the filter already says, so `F`, type `ozea`, `Shift+L` is the whole
+    // feature, and it narrows to anything else the same way.
+    let pane = crate::filter::Pane::Candidates;
+    let scope = filters.text(pane).to_owned();
     let mut targets: Vec<EditTarget> = Vec::new();
     for d in &project.measured.descriptors {
-        if needs_labels(d) && d.mesh.is_some() {
+        if needs_labels(d) && d.mesh.is_some() && filters.keeps(pane, &d.id) {
             targets.push(EditTarget::Library(d.id.clone()));
         }
     }
     for c in &state.candidates {
-        if !c.blocked() && needs_labels(&c.proposed) {
+        if !c.blocked() && needs_labels(&c.proposed) && filters.keeps(pane, &c.mesh) {
             targets.push(EditTarget::Candidate(c.mesh.clone()));
         }
     }
     targets.retain(|t| suggestions.get(t).is_none() && !tasks.holds(t));
     if targets.is_empty() {
-        state.status.note("nothing is missing labels — L re-asks for a single piece".to_owned());
+        // **Say which set was empty.** "Nothing is missing labels" is a lie when a filter is on and
+        // the unfiltered library is full of unjudged meshes.
+        state.status.note(if scope.is_empty() {
+            "nothing is missing labels — L re-asks for a single piece".to_owned()
+        } else {
+            format!(
+                "nothing matching `{scope}` is missing labels — Backspace in the filter widens it"
+            )
+        });
         return;
     }
     queue.total = targets.len();
     queue.queue = targets.into_iter().collect();
-    state.status.note(format!("labeling {} piece(s)... Shift+L cancels", queue.total));
+    queue.paused = false;
+    queue.auto_apply = true;
+    state.status.note(if scope.is_empty() {
+        format!("labeling {} piece(s)... Shift+L holds it", queue.total)
+    } else {
+        format!(
+            "labeling {} piece(s) matching `{scope}`... Shift+L holds it",
+            queue.total
+        )
+    });
 }
 
 /// Feed the booth one subject at a time — fully serial, matching the one-subject booth and the
@@ -643,10 +825,13 @@ pub(crate) fn drive_batch(
     mut rig: ResMut<ShotRig>,
 ) {
     let Some(project) = project else { return };
-    if queue.queue.is_empty() || !rig.is_idle() || tasks.in_flight() > 0 {
+    // A paused walk keeps its queue and its proposals; only the pump stops.
+    if queue.paused || queue.queue.is_empty() || !rig.is_idle() || tasks.in_flight() > 0 {
         return;
     }
-    let Some(target) = queue.queue.pop_front() else { return };
+    let Some(target) = queue.queue.pop_front() else {
+        return;
+    };
     // The target may have vanished since the walk was built (a rescan, a removal) — skip, the
     // next frame takes the next one.
     let Some(d) = state.placed_at_target(&target, &project) else {
@@ -655,8 +840,16 @@ pub(crate) fn drive_batch(
     let Some(mesh) = d.mesh.clone() else { return };
     let scale = d.align.scale.unwrap_or(1.0);
     let (done, total) = queue.progress();
-    state.status.note(format!("labeling {done}/{total} - `{}`", name_of(&target)));
-    rig.push_unique(crate::label_booth::ShotJob { target, mesh, scale });
+    let name = name_of(&target);
+    state
+        .status
+        .note(format!("labeling {done}/{total} - `{name}`"));
+    queue.current = Some(name.to_string());
+    rig.push_unique(crate::label_booth::ShotJob {
+        target,
+        mesh,
+        scale,
+    });
 }
 
 /// The Tiles tab strip carries the pending-proposal count — `anim_watch::paint_stale_badge`'s
@@ -666,12 +859,17 @@ pub(crate) fn paint_labels_badge(
     tabs: Query<(&crate::tiles::Tab, &Children)>,
     mut labels: Query<&mut Text, With<crate::tiles::TabLabel>>,
 ) {
-    let Some(suggestions) = suggestions else { return };
+    let Some(suggestions) = suggestions else {
+        return;
+    };
     let pending = suggestions.pending();
     let want = if pending == 0 {
         crate::tiles::Mode::Meshes.label().to_owned()
     } else {
-        format!("{} ({pending} PROPOSED)", crate::tiles::Mode::Meshes.label())
+        format!(
+            "{} ({pending} PROPOSED)",
+            crate::tiles::Mode::Meshes.label()
+        )
     };
     for (tab, children) in &tabs {
         if tab.0 != crate::tiles::Mode::Meshes {
@@ -729,9 +927,8 @@ struct CacheFile {
 /// Does a cached suggestion still speak the live vocabulary? A retired token invalidates exactly
 /// the suggestions that used it; an appended token invalidates nothing.
 fn still_valid(s: &Suggestion, vocab: &emerge_core::vocab::Vocabularies) -> bool {
-    let ok = |list: &[String], v: &emerge_core::vocab::Vocabulary| {
-        list.iter().all(|t| v.contains(t))
-    };
+    let ok =
+        |list: &[String], v: &emerge_core::vocab::Vocabulary| list.iter().all(|t| v.contains(t));
     let mount_ok = match &s.mount {
         Some(emerge_core::descriptor::Mount::OnSurface { class }) => vocab.surfaces.contains(class),
         _ => true,
@@ -814,7 +1011,10 @@ pub(crate) fn save_cache(project: Option<Res<Project>>, suggestions: Res<Suggest
     let Some(project) = project else { return };
     let file = CacheFile {
         version: CACHE_VERSION,
-        entries: suggestions.iter().map(|(k, e)| (k.clone(), e.clone())).collect(),
+        entries: suggestions
+            .iter()
+            .map(|(k, e)| (k.clone(), e.clone()))
+            .collect(),
     };
     let Ok(text) = ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default()) else {
         return;
@@ -909,7 +1109,10 @@ mod tests {
         let mut d = emerge_core::descriptor::Descriptor::default();
         d.id = "valkyrie".to_owned();
         d.mesh = Some("characters/valkyrie.glb".to_owned());
-        emerge_core::library::Library { descriptors: vec![d], ..Default::default() }
+        emerge_core::library::Library {
+            descriptors: vec![d],
+            ..Default::default()
+        }
     }
 
     fn write_cache_file(root: &std::path::Path, entries: BTreeMap<String, Entry>, version: u32) {
@@ -974,7 +1177,10 @@ mod tests {
         let mut entries = BTreeMap::new();
         entries.insert("library:valkyrie".to_owned(), entry(&root));
         write_cache_file(&root, entries, CACHE_VERSION);
-        let empty = emerge_core::library::Library { descriptors: vec![], ..Default::default() };
+        let empty = emerge_core::library::Library {
+            descriptors: vec![],
+            ..Default::default()
+        };
         assert!(
             warm_entries(&root, &empty, &vocab()).is_empty(),
             "a removed library entry must drop its suggestion"
@@ -987,9 +1193,16 @@ mod tests {
         let mut entries = BTreeMap::new();
         entries.insert("candidate:characters/valkyrie.glb".to_owned(), entry(&root));
         write_cache_file(&root, entries, CACHE_VERSION);
-        let empty = emerge_core::library::Library { descriptors: vec![], ..Default::default() };
+        let empty = emerge_core::library::Library {
+            descriptors: vec![],
+            ..Default::default()
+        };
         let warmed = warm_entries(&root, &empty, &vocab());
-        assert_eq!(warmed.len(), 1, "a candidate's suggestion needs no library row");
+        assert_eq!(
+            warmed.len(),
+            1,
+            "a candidate's suggestion needs no library row"
+        );
         // Delete the GLB: the candidate is gone and so is its suggestion.
         std::fs::remove_file(root.join("assets/characters/valkyrie.glb"))
             .unwrap_or_else(|e| panic!("{e}"));
@@ -1022,18 +1235,31 @@ mod tests {
             scale: 1.0,
         });
 
-        let said =
-            clear_all_labels(&mut suggestions, &mut generation, &mut queue, &mut tasks, &mut rig);
+        let said = clear_all_labels(
+            &mut suggestions,
+            &mut generation,
+            &mut queue,
+            &mut tasks,
+            &mut rig,
+        );
         assert!(said.contains("2 proposal(s)"), "{said}");
         assert!(said.contains("3 queued"), "{said}");
         assert_eq!(suggestions.pending(), 0);
         assert!(!queue.running());
         assert!(rig.is_idle());
-        assert_eq!(generation.0, 1, "the bump that empties the disk cache via save_cache");
+        assert_eq!(
+            generation.0, 1,
+            "the bump that empties the disk cache via save_cache"
+        );
 
         // Idempotent, and a no-op clear does not bump the generation.
-        let said =
-            clear_all_labels(&mut suggestions, &mut generation, &mut queue, &mut tasks, &mut rig);
+        let said = clear_all_labels(
+            &mut suggestions,
+            &mut generation,
+            &mut queue,
+            &mut tasks,
+            &mut rig,
+        );
         assert!(said.contains("0 proposal(s)"), "{said}");
         assert_eq!(generation.0, 1);
     }
@@ -1051,16 +1277,31 @@ mod tests {
         let text = merge_proposals(None, &[hob.clone()], "kitchen_stove", "stub", "2026-08-06")
             .unwrap_or_else(|e| panic!("{e}"))
             .unwrap_or_else(|| panic!("nothing written"));
-        assert!(text.contains("PROPOSALS ONLY"), "the readme rides in the file");
+        assert!(
+            text.contains("PROPOSALS ONLY"),
+            "the readme rides in the file"
+        );
         assert!(text.contains("hob"));
         // Second sighting from another asset: the row grows, no duplicate.
-        let text2 = merge_proposals(Some(&text), &[hob.clone()], "camp_stove", "stub", "2026-08-07")
-            .unwrap_or_else(|e| panic!("{e}"))
-            .unwrap_or_else(|| panic!("nothing written"));
+        let text2 = merge_proposals(
+            Some(&text),
+            &[hob.clone()],
+            "camp_stove",
+            "stub",
+            "2026-08-07",
+        )
+        .unwrap_or_else(|e| panic!("{e}"))
+        .unwrap_or_else(|| panic!("nothing written"));
         let parsed: ProposalsFile = ron::from_str(&text2).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(parsed.proposals.len(), 1);
-        assert_eq!(parsed.proposals[0].assets, vec!["kitchen_stove", "camp_stove"]);
-        assert_eq!(parsed.proposals[0].first_seen, "2026-08-06", "first sighting keeps its date");
+        assert_eq!(
+            parsed.proposals[0].assets,
+            vec!["kitchen_stove", "camp_stove"]
+        );
+        assert_eq!(
+            parsed.proposals[0].first_seen, "2026-08-06",
+            "first sighting keeps its date"
+        );
         // The same asset again: nothing changed, nothing written.
         assert!(
             merge_proposals(Some(&text2), &[hob], "camp_stove", "stub", "2026-08-08")
@@ -1127,6 +1368,88 @@ mod tests {
         assert!(!q.running());
     }
 
+    /// **The walk takes what the list is showing, on the same keys the list matches by.**
+    ///
+    /// Asked for at the keyboard, 2026-08-15: *"scope it to just the ozea meshes."* With the kit
+    /// cleared an unscoped walk is 778 meshes against one GPU slot, so the filter box — which is
+    /// already how an author narrows that list — is what narrows the batch.
+    ///
+    /// The keys differ by kind and that is the part worth pinning: a **library** row is matched on
+    /// its id, a **candidate** on its mesh path. Matching a candidate by id would silently take the
+    /// whole set, because a candidate has no id yet.
+    #[test]
+    fn the_filter_box_scopes_which_meshes_a_walk_takes() {
+        use crate::filter::{Filters, Pane};
+
+        let mut filters = Filters::default();
+        filters.take_focus(Pane::Candidates);
+        for c in "ozea".chars() {
+            filters.push_for_test(Pane::Candidates, c);
+        }
+
+        // A library row is matched on its id...
+        assert!(filters.keeps(Pane::Candidates, "ozea/wall_low"));
+        assert!(!filters.keeps(Pane::Candidates, "site/wall_low"));
+        // ...and a candidate on the mesh path it was found at, which is where the pack name lives.
+        assert!(filters.keeps(Pane::Candidates, "ozea_kit/crate_small.glb"));
+        assert!(!filters.keeps(Pane::Candidates, "characters/valkyrie.glb"));
+        assert!(!filters.keeps(
+            Pane::Candidates,
+            "kenney_prototype-kit/Models/GLB format/animal-bison.glb"
+        ));
+
+        // An empty filter is the unscoped walk, which is still what an author gets by default.
+        let wide = Filters::default();
+        assert!(wide.keeps(Pane::Candidates, "characters/valkyrie.glb"));
+    }
+
+    /// **A held walk keeps its place and its work.**
+    ///
+    /// `Shift+L` mid-walk used to cancel: the queue was cleared and getting back to where you were
+    /// meant re-photographing every mesh already done. Asked for at the keyboard, 2026-08-15 —
+    /// *"there should be a way to pause... we don't want to undo what was already labeled."*
+    ///
+    /// Two properties, and the second is the one that would be easy to lose: a hold leaves the
+    /// remaining queue intact, and a *fresh* walk is never born held.
+    #[test]
+    fn a_held_walk_keeps_its_queue_and_a_fresh_one_starts_running() {
+        let mut q = LabelQueue::default();
+        q.total = 3;
+        q.queue = vec![
+            EditTarget::Library("a".to_owned()),
+            EditTarget::Library("b".to_owned()),
+            EditTarget::Library("c".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        let _ = q.queue.pop_front();
+
+        q.paused = true;
+        assert!(q.paused(), "held");
+        assert!(
+            q.running(),
+            "and still a walk — a hold is not an abandonment"
+        );
+        assert_eq!(
+            q.progress(),
+            (1, 3),
+            "with its place kept, so nothing is re-photographed"
+        );
+
+        q.paused = false;
+        assert_eq!(
+            q.progress(),
+            (1, 3),
+            "resuming picks up exactly where it stopped"
+        );
+
+        // Abandoning is the other verb, and it is the one that empties the queue.
+        q.queue.clear();
+        q.total = 0;
+        q.paused = false;
+        assert!(!q.running() && !q.paused());
+    }
+
     /// Apply semantics: axis lists REPLACE (the model answered with the complete proposed state —
     /// union would make review a merge puzzle); `Some`-carrying scalars overwrite; everything the
     /// suggestion does not carry is untouched.
@@ -1147,13 +1470,20 @@ mod tests {
 
         assert_eq!(d.kind, vec!["light".to_owned()], "kind replaced");
         assert_eq!(d.effects, vec!["emit".to_owned()], "effects replaced");
-        assert!(d.look.is_empty(), "an empty proposed axis clears — replacement, not union");
+        assert!(
+            d.look.is_empty(),
+            "an empty proposed axis clears — replacement, not union"
+        );
         assert_eq!(
             d.mount,
             Some(emerge_core::descriptor::Mount::OnWall { height: 1.8 }),
             "a carried mount overwrites"
         );
-        assert_eq!(d.note.as_deref(), Some("A small lamp."), "a carried note overwrites");
+        assert_eq!(
+            d.note.as_deref(),
+            Some("A small lamp."),
+            "a carried note overwrites"
+        );
         // Fields the suggestion did NOT carry stay the author's.
         assert_eq!(d.placement.rooms, vec!["office".to_owned()]);
         assert_eq!(d.placement.group.as_deref(), Some("desk_set"));

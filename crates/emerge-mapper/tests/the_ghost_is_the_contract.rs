@@ -129,3 +129,64 @@ fn the_scan_can_see_a_map_at_call_where_one_belongs() {
          which is the defect this whole file exists for"
     );
 }
+
+/// **A system that repaints something it does not own must use `try_insert`.**
+///
+/// `brighten_held` and `fade_ghost` both walk a hierarchy they did not spawn — the staged tile and
+/// the ghosts — and hand each mesh a fresh material. Both of those hierarchies are despawned and
+/// respawned **wholesale** by the systems that do own them, on every `Build` change, which is what
+/// an arrow key is. So an entity read this frame can be gone before the command applies, and in
+/// Bevy 0.19 `EntityCommands::insert` on a despawned entity is a **hard panic**, not a no-op:
+///
+/// ```text
+/// Encountered an error in command `insert<(MeshMaterial3d<StandardMaterial>, Brightened)>`:
+/// Entity despawned: The entity with ID 800v16 is invalid; its index now has generation 17.
+/// ```
+///
+/// That killed the editor mid-session on 2026-08-15, from nothing more exotic than nudging a held
+/// piece. `fade_ghost` had the identical shape and had simply not lost the race yet.
+///
+/// # Why a source scan and not a behavioural test
+///
+/// The same reason the scan above exists, and it was measured rather than assumed: a headless test
+/// that drops a piece and nudges it six times **passes with the bug put back**. `MinimalPlugins`
+/// has no renderer, so the GLB scene children these systems walk are never spawned, `painted` never
+/// matches, and no command is ever queued. A test that cannot fail reads as a guarantee, so it was
+/// written, checked against the reverted fix, and deleted.
+///
+/// What is left is the rule itself: these two systems queue their paint with `try_insert`.
+#[test]
+fn the_systems_that_repaint_borrowed_entities_tolerate_a_despawn() {
+    let src = editor_src();
+
+    for f in ["brighten_held", "fade_ghost"] {
+        let body = body_of(&src, f).unwrap_or_else(|| {
+            panic!(
+                "`{f}` is gone from editor.rs — this test names a function that no longer exists, \
+                 so it is guarding nothing. Repoint it or delete it deliberately."
+            )
+        });
+
+        let bare: Vec<String> = body
+            .iter()
+            .filter(|(_, l)| {
+                let c = code(l);
+                // `.insert(` that is not `.try_insert(` — the panicking form.
+                c.contains(".insert(") && !c.contains(".try_insert(")
+            })
+            .map(|(n, l)| format!("  src/editor.rs:{n}  {}", l.trim()))
+            .collect();
+        assert!(
+            bare.is_empty(),
+            "`{f}` inserts into an entity it does not own with the panicking form. That hierarchy \
+             is rebuilt wholesale while this system is mid-flight, so the entity can be gone before \
+             the command applies — which is a crash, not a dropped paint. Use `try_insert`:\n{}",
+            bare.join("\n")
+        );
+
+        assert!(
+            body.iter().any(|(_, l)| code(l).contains(".try_insert(")),
+            "`{f}` no longer paints anything at all — if that is deliberate, delete its arm here."
+        );
+    }
+}

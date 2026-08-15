@@ -47,6 +47,7 @@ pub fn add_editor_plugins(app: &mut App) -> &mut App {
         crate::keys::KeysPlugin,
         crate::chrome::ChromePlugin,
         crate::view::ViewPlugin,
+        crate::compass::CompassPlugin,
         crate::editor::EditorPlugin,
         crate::thumbs::ThumbsPlugin,
         crate::tiles::TilesPlugin,

@@ -59,6 +59,14 @@ pub const PROBLEM_TEXT: Color = Color::srgb(1.0, 0.93, 0.90);
 /// deliberately neither [`ACCENT`] (amber = a live edit, yours) nor [`DANGER`] (red = wrong):
 /// a proposal is a question, and it must not read as either an answer or an alarm.
 pub const SUGGEST: Color = Color::srgb(0.42, 0.58, 0.66);
+/// **A mesh that has been judged** — every axis answered, so it can compose a tile.
+///
+/// Asked for at the keyboard, 2026-08-15: *"could we add a visual indicator based on color to show
+/// whether a mesh has been labeled."* Green because it is the one state that means *ready*, and it
+/// has to be told apart at a glance from [`SUGGEST`] — a machine's proposal waiting on a human is a
+/// question, and a judged mesh is an answer.
+pub const LABELED: Color = Color::srgb(0.50, 0.76, 0.46);
+
 /// Empty preview tile, so an un-baked row reads as "not yet" rather than as a hole in the panel.
 /// `thumbs.rs` carries a third copy of this value as `BACKDROP`, for the booth's own background.
 pub const SLOT_BG: Color = Color::srgb(0.14, 0.135, 0.125);
@@ -480,7 +488,10 @@ pub fn problem_log_line(parent: &mut ChildSpawnerCommands, text: &str, colour: C
                 TextLayout::new(Justify::Left, LineBreak::NoWrap),
             ));
             row.spawn((
-                Node { min_width: Val::Px(0.0), ..default() },
+                Node {
+                    min_width: Val::Px(0.0),
+                    ..default()
+                },
                 Text::new(text.to_owned()),
                 TextColor(colour),
                 TextFont::from_font_size(10.0),
@@ -708,10 +719,32 @@ fn spawn_name_box(mut commands: Commands) {
 /// commits it — snake_case as you type. Relocating the prompt must not quietly change what is saved.
 fn paint_name_box(
     editor: Res<crate::editor::EditorState>,
+    build: Res<crate::build::Build>,
     mut roots: Query<&mut Node, With<NameBox>>,
-    mut titles: Query<&mut Text, (With<NameBoxTitle>, Without<NameBoxValue>, Without<NameBoxHint>)>,
-    mut values: Query<&mut Text, (With<NameBoxValue>, Without<NameBoxTitle>, Without<NameBoxHint>)>,
-    mut hints: Query<&mut Text, (With<NameBoxHint>, Without<NameBoxTitle>, Without<NameBoxValue>)>,
+    mut titles: Query<
+        &mut Text,
+        (
+            With<NameBoxTitle>,
+            Without<NameBoxValue>,
+            Without<NameBoxHint>,
+        ),
+    >,
+    mut values: Query<
+        &mut Text,
+        (
+            With<NameBoxValue>,
+            Without<NameBoxTitle>,
+            Without<NameBoxHint>,
+        ),
+    >,
+    mut hints: Query<
+        &mut Text,
+        (
+            With<NameBoxHint>,
+            Without<NameBoxTitle>,
+            Without<NameBoxValue>,
+        ),
+    >,
 ) {
     // **`grouping.is_some()` and the box being visible are the same condition**, and that is the
     // invariant rather than a description of the code.
@@ -725,15 +758,42 @@ fn paint_name_box(
     // The tab switch now clears `grouping` (see `tiles::leaving_a_tab_puts_the_name_prompt_down`), so
     // there is one owner and this reads it. The prompt is the Map's, and if a second tab ever asks
     // again the answer is another field, not another condition on this one.
-    let asking: Option<(&str, String, String)> = editor.grouping.as_ref().map(|raw| {
-        (
-            "NAME THIS COMPOSITION",
-            // Forced to snake_case as it is typed, so the naming rule teaches itself.
-            format!("{}_", emerge_core::naming::to_snake_case(raw)),
-            "Enter keeps it.   Esc leaves the set in hand.".to_owned(),
-        )
-    });
-    let display = if asking.is_some() { Display::Flex } else { Display::None };
+    // **Two fields, one box** — the Map names a composition, the Tiles tab names a tile, and each
+    // owns its own `Option<String>`. That is what this function's own note asked for when the
+    // second one arrived: *"another field, not another condition on this one."* They cannot both be
+    // open, because the tabs are never live together, and the title says which is being answered.
+    let asking: Option<(&str, String, String)> = editor
+        .grouping
+        .as_ref()
+        .map(|raw| {
+            (
+                "NAME THIS COMPOSITION",
+                // Forced to snake_case as it is typed, so the naming rule teaches itself.
+                format!("{}_", emerge_core::naming::to_snake_case(raw)),
+                "Enter keeps it.   Esc leaves the set in hand.".to_owned(),
+            )
+        })
+        .or_else(|| {
+            build.naming.as_ref().map(|prompt| {
+                (
+                    "NAME THIS TILE",
+                    format!("{}_", emerge_core::naming::to_snake_case(&prompt.raw)),
+                    match prompt.then {
+                        crate::build::NameThen::Open => {
+                            "Enter opens it.   Esc leaves things as they are.".to_owned()
+                        }
+                        crate::build::NameThen::Save => {
+                            "Enter names and saves it.   Esc goes back.".to_owned()
+                        }
+                    },
+                )
+            })
+        });
+    let display = if asking.is_some() {
+        Display::Flex
+    } else {
+        Display::None
+    };
     for mut node in &mut roots {
         if node.display != display {
             node.display = display;
@@ -795,10 +855,7 @@ fn flash_live_rows(
     mut rows: Query<(&CensusRow, &mut BackgroundColor)>,
 ) {
     for (row, mut bg) in &mut rows {
-        let lit = row
-            .0
-            .iter()
-            .any(|a| keys::pressed(&keyboard, *live, *a));
+        let lit = row.0.iter().any(|a| keys::pressed(&keyboard, *live, *a));
         let want = if lit { ROW_SELECTED } else { Color::NONE };
         // Written through a compare: `BackgroundColor` is change-detected, and touching every row
         // every frame would mark the whole overlay dirty sixty times a second for one lit line.
@@ -958,38 +1015,62 @@ mod scroll_tests {
     #[test]
     fn a_visible_row_asks_for_no_scroll() {
         // List centred at 200, half 100 → fold [100, 300]. Row at 150, half 10 → inside.
-        assert_eq!(scroll_to_reveal((150.0, 10.0), (200.0, 100.0), 0.0, 1.0), None);
+        assert_eq!(
+            scroll_to_reveal((150.0, 10.0), (200.0, 100.0), 0.0, 1.0),
+            None
+        );
         // Touching the edges exactly is still inside — flush is not off-screen.
-        assert_eq!(scroll_to_reveal((110.0, 10.0), (200.0, 100.0), 0.0, 1.0), None);
-        assert_eq!(scroll_to_reveal((290.0, 10.0), (200.0, 100.0), 0.0, 1.0), None);
+        assert_eq!(
+            scroll_to_reveal((110.0, 10.0), (200.0, 100.0), 0.0, 1.0),
+            None
+        );
+        assert_eq!(
+            scroll_to_reveal((290.0, 10.0), (200.0, 100.0), 0.0, 1.0),
+            None
+        );
     }
 
     /// Walking down past the fold scrolls down by exactly the overshoot; walking up, up.
     #[test]
     fn an_off_screen_row_scrolls_by_its_overshoot() {
         // Row bottom at 320 against a fold ending at 300: 20 px further down.
-        assert_eq!(scroll_to_reveal((310.0, 10.0), (200.0, 100.0), 40.0, 1.0), Some(60.0));
+        assert_eq!(
+            scroll_to_reveal((310.0, 10.0), (200.0, 100.0), 40.0, 1.0),
+            Some(60.0)
+        );
         // Row top at 80 against a fold starting at 100: 20 px back up.
-        assert_eq!(scroll_to_reveal((90.0, 10.0), (200.0, 100.0), 40.0, 1.0), Some(20.0));
+        assert_eq!(
+            scroll_to_reveal((90.0, 10.0), (200.0, 100.0), 40.0, 1.0),
+            Some(20.0)
+        );
     }
 
     /// The answer is logical pixels: a 2x display (inverse scale 0.5) halves the physical delta.
     #[test]
     fn the_correction_converts_physical_to_logical() {
-        assert_eq!(scroll_to_reveal((310.0, 10.0), (200.0, 100.0), 40.0, 0.5), Some(50.0));
+        assert_eq!(
+            scroll_to_reveal((310.0, 10.0), (200.0, 100.0), 40.0, 0.5),
+            Some(50.0)
+        );
     }
 
     /// The scroll never goes negative — the top of the list is the top.
     #[test]
     fn the_scroll_clamps_at_zero() {
-        assert_eq!(scroll_to_reveal((50.0, 10.0), (200.0, 100.0), 10.0, 1.0), Some(0.0));
+        assert_eq!(
+            scroll_to_reveal((50.0, 10.0), (200.0, 100.0), 10.0, 1.0),
+            Some(0.0)
+        );
     }
 
     /// A correction under half a pixel is noise, not a scroll — the dead-band that stops a
     /// float-jittering layout from re-marking the resource changed every frame.
     #[test]
     fn a_sub_pixel_correction_is_swallowed() {
-        assert_eq!(scroll_to_reveal((300.3, 0.1), (200.0, 100.0), 0.0, 1.0), None);
+        assert_eq!(
+            scroll_to_reveal((300.3, 0.1), (200.0, 100.0), 0.0, 1.0),
+            None
+        );
     }
 
     /// A row taller than the whole list aligns its TOP — the half you read first — rather than
@@ -997,7 +1078,10 @@ mod scroll_tests {
     #[test]
     fn an_over_tall_row_aligns_its_top() {
         // Row spans [40, 560] against fold [100, 300]: top wins, scroll up by 60.
-        assert_eq!(scroll_to_reveal((300.0, 260.0), (200.0, 100.0), 100.0, 1.0), Some(40.0));
+        assert_eq!(
+            scroll_to_reveal((300.0, 260.0), (200.0, 100.0), 100.0, 1.0),
+            Some(40.0)
+        );
     }
 }
 
@@ -1020,7 +1104,11 @@ mod status_tests {
                 "`{receipt}` erased the refusal"
             );
         }
-        assert_eq!(s.note_text(), "filled 12", "the receipt line stopped being current");
+        assert_eq!(
+            s.note_text(),
+            "filled 12",
+            "the receipt line stopped being current"
+        );
     }
 
     /// The other half, and the reason there are two slots rather than one that refuses to be
@@ -1066,7 +1154,11 @@ mod status_tests {
         // Only CONSECUTIVE ones, so the order stays honest.
         s.problem("NOT SAVED: read-only file system");
         s.problem("blocked: `floor@3` already covers that spot");
-        assert_eq!(s.problems().len(), 3, "a repeat after something else is a new entry");
+        assert_eq!(
+            s.problems().len(),
+            3,
+            "a repeat after something else is a new entry"
+        );
     }
 
     /// **The cap names what it dropped.** This crate's caps refuse and name rather than truncate; a
@@ -1101,7 +1193,11 @@ mod status_tests {
         // Deliberately worded like a receipt: routing must not depend on how it reads.
         s.say(Err("everything went fine, honestly".to_owned()));
         assert_eq!(s.problem_text(), "everything went fine, honestly");
-        assert_eq!(s.note_text(), "recorded 3 member(s)", "an Err overwrote the receipt");
+        assert_eq!(
+            s.note_text(),
+            "recorded 3 member(s)",
+            "an Err overwrote the receipt"
+        );
     }
 
     /// One line for a log or a captured frame, and it must be the bad news when there is any.

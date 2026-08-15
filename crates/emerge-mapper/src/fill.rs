@@ -75,18 +75,31 @@ pub fn covered_rect(from: (f32, f32), at: (f32, f32), extents: (f32, f32)) -> (f
     )
 }
 
-/// The (x, z) step this brush fills on at `yaw_deg`, rounded to the authoring snap.
+/// The (x, z) step this brush fills on at `yaw_deg`, tipped by `tip`, rounded to the authoring snap.
 ///
 /// A footprint is recorded before rotation, so a piece turned 90° or 270° presents its depth along X.
 /// Anything in between does not tile at all — a 30°-rotated rectangle has no grid that covers the
 /// plane — so those round to the nearer quarter turn, which is the yaw a fill is actually useful at.
-pub fn cell_extents(d: &Descriptor, yaw_deg: f32) -> (f32, f32) {
+///
+/// # The tip is the same question asked about the other two axes
+///
+/// [`emerge_core::map::Placed::tip`]'s own doc names this function as where the axis-swap lesson is
+/// recorded — and for a long time it recorded only half of it, swapping X against Z for yaw and
+/// ignoring the tip entirely. A tipped piece lies down: its height becomes one of its floor
+/// dimensions, so a 2.40 m wall tipped a quarter turn covers 2.40 m of floor and a lattice built
+/// from its standing footprint puts every row inside the last. Both turns are quarter turns for the
+/// same reason, so both belong in one answer.
+pub fn cell_extents(d: &Descriptor, yaw_deg: f32, tip: (u8, u8)) -> (f32, f32) {
     // **The placed footprint** — `stack::covers` reserves that box, so a fill stepping on the measured
     // one would lay a scaled piece down at a pitch its own reservation disagrees with.
     let (w, depth) =
-        emerge_core::descriptor::placed_footprint(d).unwrap_or((MIN_CELL, MIN_CELL));
+        emerge_core::descriptor::tipped_footprint(d, tip).unwrap_or((MIN_CELL, MIN_CELL));
     let quarter = (yaw_deg.rem_euclid(360.0) / 90.0).round() as i32 % 4;
-    let (x, z) = if quarter % 2 == 1 { (depth, w) } else { (w, depth) };
+    let (x, z) = if quarter % 2 == 1 {
+        (depth, w)
+    } else {
+        (w, depth)
+    };
     (snap_cell(x), snap_cell(z))
 }
 
@@ -141,13 +154,13 @@ impl Lattice {
     /// step is a flood fill that never terminates, and inventing a step here would put pieces at a
     /// spacing the caller did not ask for — the failure mode [`MIN_CELL`] exists to prevent for
     /// footprints, made loud instead of silent because a rung is not a measurement.
-    fn new(d: &Descriptor, yaw_deg: f32, pitch: f32) -> Result<Self, String> {
+    fn new(d: &Descriptor, yaw_deg: f32, tip: (u8, u8), pitch: f32) -> Result<Self, String> {
         if !(pitch.is_finite() && pitch > 0.0) {
             return Err(format!(
                 "a fill needs a positive step and the lattice offered {pitch}; nothing was placed"
             ));
         }
-        let (w, depth) = crate::editor::brush_span(d, yaw_deg);
+        let (w, depth) = crate::editor::brush_span(d, yaw_deg, tip);
         // `max(1.0)` covers both an unmeasured piece — `brush_span` answers `(0, 0)`, so it occupies
         // one rung, the same centre-snapping a click gives it — and a piece finer than the rung.
         let rungs = |span: f32| (span / pitch).ceil().max(1.0) * pitch;
@@ -184,6 +197,7 @@ pub fn flood(
     brush: &Descriptor,
     start: (f32, f32),
     yaw: f32,
+    tip: (u8, u8),
     pitch: f32,
     mut next_id: impl FnMut() -> String,
 ) -> Result<Filled, String> {
@@ -209,7 +223,7 @@ pub fn flood(
 
     // **The click's lattice, not one of its own.** See [`Lattice`] for the three-answer defect this
     // replaced.
-    let lat = Lattice::new(brush, yaw, pitch)?;
+    let lat = Lattice::new(brush, yaw, tip, pitch)?;
     // From the map, never re-derived here: `floor_rect` owns the centre-on-origin convention.
     let (min_x, min_z, max_x, max_z) = map.floor_rect();
 
@@ -253,6 +267,7 @@ pub fn flood(
             descriptor: brush.id.clone(),
             at,
             yaw,
+            tip,
             ..Placed::default()
         });
 
@@ -305,6 +320,7 @@ pub fn box_fill(
     brush: &Descriptor,
     corners: ((f32, f32), (f32, f32)),
     yaw: f32,
+    tip: (u8, u8),
     pitch: f32,
     mut next_id: impl FnMut() -> String,
 ) -> Result<Filled, String> {
@@ -320,10 +336,10 @@ pub fn box_fill(
     }
 
     // **The click's lattice**, the same one [`flood`] steps on — see [`Lattice`].
-    let lat = Lattice::new(brush, yaw, pitch)?;
+    let lat = Lattice::new(brush, yaw, tip, pitch)?;
     let (min_x, min_z, max_x, max_z) = map.floor_rect();
-    let (x0, z0) = (corners.0 .0.min(corners.1 .0), corners.0 .1.min(corners.1 .1));
-    let (x1, z1) = (corners.0 .0.max(corners.1 .0), corners.0 .1.max(corners.1 .1));
+    let (x0, z0) = (corners.0.0.min(corners.1.0), corners.0.1.min(corners.1.1));
+    let (x1, z1) = (corners.0.0.max(corners.1.0), corners.0.1.max(corners.1.1));
 
     let to_cell = |p: (f32, f32)| -> (i64, i64) { lat.cell(p) };
     let centre_of = |c: (i64, i64)| -> (f32, f32) { lat.centre(c) };
@@ -377,6 +393,7 @@ pub fn box_fill(
                 descriptor: brush.id.clone(),
                 at,
                 yaw,
+                tip,
                 ..Placed::default()
             });
         }
@@ -409,21 +426,39 @@ mod tests {
     fn a_fill_box_outlines_whole_cells() {
         // Anchors at cell centres on a 1 m grid: (0.5, 0.5) to (2.5, 0.5).
         let (x0, z0, x1, z1) = covered_rect((0.5, 0.5), (2.5, 0.5), (1.0, 1.0));
-        assert_eq!((x0, z0, x1, z1), (0.0, 0.0, 3.0, 1.0), "three cells, corner to corner");
+        assert_eq!(
+            (x0, z0, x1, z1),
+            (0.0, 0.0, 3.0, 1.0),
+            "three cells, corner to corner"
+        );
 
         // Direction cannot matter: a drag right-to-left covers the same ground.
-        assert_eq!(covered_rect((2.5, 0.5), (0.5, 0.5), (1.0, 1.0)), (0.0, 0.0, 3.0, 1.0));
+        assert_eq!(
+            covered_rect((2.5, 0.5), (0.5, 0.5), (1.0, 1.0)),
+            (0.0, 0.0, 3.0, 1.0)
+        );
 
         // A drag that never leaves one cell still outlines that whole cell, never a zero-area box.
-        assert_eq!(covered_rect((0.5, 0.5), (0.5, 0.5), (1.0, 1.0)), (0.0, 0.0, 1.0, 1.0));
+        assert_eq!(
+            covered_rect((0.5, 0.5), (0.5, 0.5), (1.0, 1.0)),
+            (0.0, 0.0, 1.0, 1.0)
+        );
 
         // A non-square brush grows by its own half-extents on each axis, not by a cell.
-        assert_eq!(covered_rect((1.0, 1.0), (1.0, 1.0), (2.0, 0.5)), (0.0, 0.75, 2.0, 1.25));
+        assert_eq!(
+            covered_rect((1.0, 1.0), (1.0, 1.0), (2.0, 0.5)),
+            (0.0, 0.75, 2.0, 1.25)
+        );
     }
     use emerge_core::descriptor::Extent;
     /// The tile rung, which is what every fill in these tests is driven at — the rung an author is on
     /// unless they are holding a modifier, and the only one a cell-sized piece may use.
     use emerge_core::grid::TILE;
+
+    /// A brush that has not been tipped — the state every test below but the tipping ones is about.
+    /// Spelled rather than defaulted so a test that *means* upright and one that merely forgot to
+    /// say are different text.
+    const UPRIGHT: (u8, u8) = (0, 0);
 
     fn brush(w: f32) -> Descriptor {
         Descriptor {
@@ -431,6 +466,19 @@ mod tests {
             extent: Extent {
                 footprint: Some((w, w)),
                 height: Some(0.1),
+            },
+            ..Descriptor::default()
+        }
+    }
+
+    /// A brush whose three dimensions are all different, so a tip that permutes the wrong pair is
+    /// visible instead of coincidentally right. `brush` is a square 0.1 m slab and would hide it.
+    fn slab(w: f32, depth: f32, height: f32) -> Descriptor {
+        Descriptor {
+            id: "wall".into(),
+            extent: Extent {
+                footprint: Some((w, depth)),
+                height: Some(height),
             },
             ..Descriptor::default()
         }
@@ -466,18 +514,29 @@ mod tests {
             ..brush(0.5)
         };
         let m = map((4.0, 3.0, 4.0));
-        let e = flood(&m, &lamp, (0.5, 0.5), 0.0, TILE, ids())
+        let e = flood(&m, &lamp, (0.5, 0.5), 0.0, UPRIGHT, TILE, ids())
             .err()
             .unwrap_or_else(|| panic!("a fill with a surface piece must be refused, not written"));
-        assert!(e.contains("worktop"), "the refusal must name the surface it wants: {e}");
+        assert!(
+            e.contains("worktop"),
+            "the refusal must name the surface it wants: {e}"
+        );
     }
 
     /// A dragged box lays exactly the cells it covers, once each.
     #[test]
     fn a_box_fills_the_rectangle_it_was_dragged_over() {
         let m = map((10.0, 3.0, 10.0));
-        let f = box_fill(&m, &brush(1.0), ((0.2, 0.2), (2.8, 1.8)), 0.0, TILE, ids())
-            .unwrap_or_else(|e| panic!("{e}"));
+        let f = box_fill(
+            &m,
+            &brush(1.0),
+            ((0.2, 0.2), (2.8, 1.8)),
+            0.0,
+            UPRIGHT,
+            TILE,
+            ids(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         // Cells are 1 m and the box spans x 0.2..2.8, z 0.2..1.8 — three columns by two rows.
         assert_eq!(f.placements.len(), 6, "{:?}", f.placements);
         assert!(!f.truncated);
@@ -500,8 +559,16 @@ mod tests {
     fn a_box_lays_only_cells_whose_centres_it_contains() {
         let m = map((10.0, 3.0, 10.0));
         // Clips four cells it does not contain: x centres are 0.5 (out), 1.5 (in), 2.5 (out).
-        let f = box_fill(&m, &brush(1.0), ((0.8, 0.2), (2.2, 1.8)), 0.0, TILE, ids())
-            .unwrap_or_else(|e| panic!("{e}"));
+        let f = box_fill(
+            &m,
+            &brush(1.0),
+            ((0.8, 0.2), (2.2, 1.8)),
+            0.0,
+            UPRIGHT,
+            TILE,
+            ids(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         let ats: Vec<_> = f.placements.iter().map(|p| p.at).collect();
         assert_eq!(ats, vec![(1.5, 0.5), (1.5, 1.5)], "{ats:?}");
     }
@@ -511,14 +578,39 @@ mod tests {
     #[test]
     fn a_box_is_the_same_box_dragged_from_any_corner() {
         let m = map((10.0, 3.0, 10.0));
-        let a = box_fill(&m, &brush(1.0), ((0.2, 0.2), (2.8, 1.8)), 0.0, TILE, ids())
-            .unwrap_or_else(|e| panic!("{e}"));
-        let b = box_fill(&m, &brush(1.0), ((2.8, 1.8), (0.2, 0.2)), 0.0, TILE, ids())
-            .unwrap_or_else(|e| panic!("{e}"));
+        let a = box_fill(
+            &m,
+            &brush(1.0),
+            ((0.2, 0.2), (2.8, 1.8)),
+            0.0,
+            UPRIGHT,
+            TILE,
+            ids(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let b = box_fill(
+            &m,
+            &brush(1.0),
+            ((2.8, 1.8), (0.2, 0.2)),
+            0.0,
+            UPRIGHT,
+            TILE,
+            ids(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         let ats = |f: &Filled| f.placements.iter().map(|p| p.at).collect::<Vec<_>>();
         assert_eq!(ats(&a), ats(&b));
-        let names = |f: &Filled| f.placements.iter().map(|p| p.id.clone()).collect::<Vec<_>>();
-        assert_eq!(names(&a), names(&b), "ids must not depend on the drag direction");
+        let names = |f: &Filled| {
+            f.placements
+                .iter()
+                .map(|p| p.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(&a),
+            names(&b),
+            "ids must not depend on the drag direction"
+        );
     }
 
     /// **A floor goes under the furniture.** A cell holding something else is not spoken for — the
@@ -534,9 +626,21 @@ mod tests {
             at: (0.5, 0.5),
             ..Placed::default()
         });
-        let f = box_fill(&m, &brush(1.0), ((0.2, 0.2), (2.8, 1.8)), 0.0, TILE, ids())
-            .unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(f.placements.len(), 6, "every cell in the box, the crate's included");
+        let f = box_fill(
+            &m,
+            &brush(1.0),
+            ((0.2, 0.2), (2.8, 1.8)),
+            0.0,
+            UPRIGHT,
+            TILE,
+            ids(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            f.placements.len(),
+            6,
+            "every cell in the box, the crate's included"
+        );
         assert!(
             f.placements.iter().any(|p| p.at == (0.5, 0.5)),
             "the floor must reach under the crate"
@@ -550,19 +654,30 @@ mod tests {
     fn filling_the_same_area_twice_with_the_same_piece_adds_nothing() {
         let mut m = map((10.0, 3.0, 10.0));
         let b = brush(1.0);
-        let first = box_fill(&m, &b, ((0.2, 0.2), (2.8, 1.8)), 0.0, TILE, ids())
+        let first = box_fill(&m, &b, ((0.2, 0.2), (2.8, 1.8)), 0.0, UPRIGHT, TILE, ids())
             .unwrap_or_else(|e| panic!("{e}"));
         m.placements.extend(first.placements);
 
-        let again = box_fill(&m, &b, ((0.2, 0.2), (2.8, 1.8)), 0.0, TILE, ids());
-        assert!(again.is_err(), "a second identical drag has nothing left to lay");
+        let again = box_fill(&m, &b, ((0.2, 0.2), (2.8, 1.8)), 0.0, UPRIGHT, TILE, ids());
+        assert!(
+            again.is_err(),
+            "a second identical drag has nothing left to lay"
+        );
 
         // But a DIFFERENT piece still fills the same cells — it is the descriptor that repeats, not
         // the cell that is taken.
         let mut other = brush(1.0);
         other.id = "rug".into();
-        let over = box_fill(&m, &other, ((0.2, 0.2), (2.8, 1.8)), 0.0, TILE, ids())
-            .unwrap_or_else(|e| panic!("{e}"));
+        let over = box_fill(
+            &m,
+            &other,
+            ((0.2, 0.2), (2.8, 1.8)),
+            0.0,
+            UPRIGHT,
+            TILE,
+            ids(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(over.placements.len(), 6);
     }
 
@@ -579,9 +694,17 @@ mod tests {
             ..brush(0.5)
         };
         let m = map((4.0, 3.0, 4.0));
-        let e = box_fill(&m, &lamp, ((0.2, 0.2), (1.8, 1.8)), 0.0, TILE, ids())
-            .err()
-            .unwrap_or_else(|| panic!("must be refused, not written"));
+        let e = box_fill(
+            &m,
+            &lamp,
+            ((0.2, 0.2), (1.8, 1.8)),
+            0.0,
+            UPRIGHT,
+            TILE,
+            ids(),
+        )
+        .err()
+        .unwrap_or_else(|| panic!("must be refused, not written"));
         assert!(e.contains("worktop"), "{e}");
     }
 
@@ -589,17 +712,30 @@ mod tests {
     #[test]
     fn a_box_outside_the_map_is_refused_by_name() {
         let m = map((4.0, 3.0, 4.0));
-        let e = box_fill(&m, &brush(1.0), ((50.0, 50.0), (60.0, 60.0)), 0.0, TILE, ids())
-            .err()
-            .unwrap_or_else(|| panic!("must be refused"));
+        let e = box_fill(
+            &m,
+            &brush(1.0),
+            ((50.0, 50.0), (60.0, 60.0)),
+            0.0,
+            UPRIGHT,
+            TILE,
+            ids(),
+        )
+        .err()
+        .unwrap_or_else(|| panic!("must be refused"));
         assert!(e.contains("outside the map"), "{e}");
     }
 
     #[test]
     fn a_fill_covers_the_map_exactly_once_per_cell() {
         let m = map((4.0, 3.0, 4.0));
-        let f = flood(&m, &brush(1.0), (0.5, 0.5), 0.0, TILE, ids()).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(f.placements.len(), 16, "4x4 m centred on the origin, at 1 m cells");
+        let f = flood(&m, &brush(1.0), (0.5, 0.5), 0.0, UPRIGHT, TILE, ids())
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            f.placements.len(),
+            16,
+            "4x4 m centred on the origin, at 1 m cells"
+        );
         assert!(!f.truncated);
 
         let mut seen = HashSet::new();
@@ -616,7 +752,8 @@ mod tests {
     #[test]
     fn the_cell_is_the_brushs_footprint() {
         let m = map((4.0, 3.0, 4.0));
-        let f = flood(&m, &brush(2.0), (1.0, 1.0), 0.0, TILE, ids()).unwrap_or_else(|e| panic!("{e}"));
+        let f = flood(&m, &brush(2.0), (1.0, 1.0), 0.0, UPRIGHT, TILE, ids())
+            .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(f.placements.len(), 4);
     }
 
@@ -634,7 +771,8 @@ mod tests {
             at: (0.5, -0.5),
             ..Placed::default()
         });
-        let f = flood(&m, &brush(1.0), (-2.5, -0.5), 0.0, TILE, ids()).unwrap_or_else(|e| panic!("{e}"));
+        let f = flood(&m, &brush(1.0), (-2.5, -0.5), 0.0, UPRIGHT, TILE, ids())
+            .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(f.placements.len(), 3, "should fill only up to the wall");
         for p in &f.placements {
             assert!(p.at.0 < 0.5, "leaked past the wall to {:?}", p.at);
@@ -644,7 +782,7 @@ mod tests {
     #[test]
     fn a_fill_outside_the_map_is_refused_not_clamped() {
         let m = map((4.0, 3.0, 4.0));
-        let err = flood(&m, &brush(1.0), (99.0, 99.0), 0.0, TILE, ids())
+        let err = flood(&m, &brush(1.0), (99.0, 99.0), 0.0, UPRIGHT, TILE, ids())
             .err()
             .unwrap_or_default();
         assert!(err.contains("outside the map"), "{err}");
@@ -659,10 +797,12 @@ mod tests {
             at: (0.5, 0.5),
             ..Placed::default()
         });
-        assert!(flood(&m, &brush(1.0), (0.5, 0.5), 0.0, TILE, ids())
-            .err()
-            .unwrap_or_default()
-            .contains("already something here"));
+        assert!(
+            flood(&m, &brush(1.0), (0.5, 0.5), 0.0, UPRIGHT, TILE, ids())
+                .err()
+                .unwrap_or_default()
+                .contains("already something here")
+        );
     }
 
     /// A silent cap is worse than no cap: a fill that stopped early looks exactly like one that
@@ -670,7 +810,8 @@ mod tests {
     #[test]
     fn a_huge_region_truncates_and_says_so() {
         let m = map((200.0, 3.0, 200.0));
-        let f = flood(&m, &brush(0.5), (0.25, 0.25), 0.0, TILE, ids()).unwrap_or_else(|e| panic!("{e}"));
+        let f = flood(&m, &brush(0.5), (0.25, 0.25), 0.0, UPRIGHT, TILE, ids())
+            .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(f.placements.len(), MAX_CELLS);
         assert!(f.truncated, "must report that it stopped short");
     }
@@ -691,23 +832,43 @@ mod tests {
         d.extent.footprint = Some((2.0, 0.5));
         // `cell_extents` is the marker-drawing helper, not the fill's lattice — it still answers the
         // piece's own occupied box, and still swaps axes on a quarter turn.
-        assert_eq!(cell_extents(&d, 0.0), (2.0, 0.5));
-        assert_eq!(cell_extents(&d, 90.0), (0.5, 2.0));
-        assert_eq!(cell_extents(&d, 270.0), (0.5, 2.0));
-        assert_eq!(cell_extents(&d, 180.0), (2.0, 0.5));
+        assert_eq!(cell_extents(&d, 0.0, UPRIGHT), (2.0, 0.5));
+        assert_eq!(cell_extents(&d, 90.0, UPRIGHT), (0.5, 2.0));
+        assert_eq!(cell_extents(&d, 270.0, UPRIGHT), (0.5, 2.0));
+        assert_eq!(cell_extents(&d, 180.0, UPRIGHT), (2.0, 0.5));
 
         // 4 x 4 m: X steps 2.0 so two columns fit; Z steps 1.0 so four rows do.
-        let f = flood(&map((4.0, 3.0, 4.0)), &d, (-1.0, -1.75), 0.0, TILE, ids())
-            .unwrap_or_else(|e| panic!("{e}"));
+        let f = flood(
+            &map((4.0, 3.0, 4.0)),
+            &d,
+            (-1.0, -1.75),
+            0.0,
+            UPRIGHT,
+            TILE,
+            ids(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(f.placements.len(), 8);
         let xs: HashSet<u32> = f.placements.iter().map(|p| p.at.0.to_bits()).collect();
         let zs: HashSet<u32> = f.placements.iter().map(|p| p.at.1.to_bits()).collect();
-        assert_eq!((xs.len(), zs.len()), (2, 4), "two columns of four, not one stripe");
+        assert_eq!(
+            (xs.len(), zs.len()),
+            (2, 4),
+            "two columns of four, not one stripe"
+        );
 
         // **And the gap is the rung, not the fill.** On a kit that divides by halves the middle rung
         // is 0.5, the piece is exactly one rung deep, and Z abuts — eight rows in the same map.
-        let f = flood(&map((4.0, 3.0, 4.0)), &d, (-1.0, -1.75), 0.0, 0.5, ids())
-            .unwrap_or_else(|e| panic!("{e}"));
+        let f = flood(
+            &map((4.0, 3.0, 4.0)),
+            &d,
+            (-1.0, -1.75),
+            0.0,
+            UPRIGHT,
+            0.5,
+            ids(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         let zs: HashSet<u32> = f.placements.iter().map(|p| p.at.1.to_bits()).collect();
         assert_eq!(zs.len(), 8, "at a 0.5 m rung a 0.5 m piece abuts");
     }
@@ -726,15 +887,27 @@ mod tests {
             ..Descriptor::default()
         };
         // The marker helper still falls back to a drawable box; that is a different question.
-        assert_eq!(cell_extents(&d, 0.0), (MIN_CELL, MIN_CELL));
+        assert_eq!(cell_extents(&d, 0.0, UPRIGHT), (MIN_CELL, MIN_CELL));
 
-        let f = flood(&map((2.0, 3.0, 1.0)), &d, (-0.75, -0.25), 0.0, TILE, ids())
-            .unwrap_or_else(|e| panic!("{e}"));
+        let f = flood(
+            &map((2.0, 3.0, 1.0)),
+            &d,
+            (-0.75, -0.25),
+            0.0,
+            UPRIGHT,
+            TILE,
+            ids(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         // A 2 x 1 m map on the tile rung: x centres −1 and 0 are inside, z centre 0 is.
         assert_eq!(f.placements.len(), 2, "{:?}", f.placements);
         for p in &f.placements {
             assert_eq!(p.at.1, 0.0);
-            assert!(p.at.0 == -1.0 || p.at.0 == 0.0, "{:?} is off the rung", p.at);
+            assert!(
+                p.at.0 == -1.0 || p.at.0 == 0.0,
+                "{:?} is off the rung",
+                p.at
+            );
         }
     }
 
@@ -745,10 +918,141 @@ mod tests {
     fn a_degenerate_rung_is_refused_by_name() {
         let m = map((4.0, 3.0, 4.0));
         for bad in [0.0, -1.0, f32::NAN] {
-            let e = flood(&m, &brush(1.0), (0.5, 0.5), 0.0, bad, ids())
+            let e = flood(&m, &brush(1.0), (0.5, 0.5), 0.0, UPRIGHT, bad, ids())
                 .err()
                 .unwrap_or_else(|| panic!("a {bad} step must be refused, not filled"));
             assert!(e.contains("positive step"), "{e}");
         }
+    }
+
+    /// **A fill lays the brush the way the author is holding it** — tip included.
+    ///
+    /// Both fills built their `Placed` with `..Placed::default()` after naming `yaw`, so `tip` came
+    /// out `(0, 0)` however the brush was tipped. The single-click path has always passed
+    /// `state.brush_tip` (`editor.rs`, beside the `stack::blocking` call that asks about the tipped
+    /// piece), so the same brush on the same cell landed **tipped by click and upright by drag** —
+    /// one piece, one spot, two answers chosen by the gesture, which is the disagreement
+    /// `CLAUDE.md`'s one-path rule exists to prevent and which `box_fill`'s own doc comment already
+    /// claims not to have.
+    ///
+    /// Recorded in `docs/2026-08-15-blank-slate-handoff.md` §6 as `box_fill` only. It was both.
+    #[test]
+    fn a_fill_lays_the_brush_tipped_the_way_the_author_tipped_it() {
+        let m = map((4.0, 3.0, 4.0));
+        let laid = slab(1.0, 0.5, 2.0);
+        let tip = (1, 0);
+
+        let boxed = box_fill(&m, &laid, ((0.0, 0.0), (4.0, 4.0)), 0.0, tip, TILE, ids())
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            !boxed.placements.is_empty(),
+            "the box must fill something to be evidence"
+        );
+        for p in &boxed.placements {
+            assert_eq!(p.tip, tip, "`{}` came out of a box fill standing up", p.id);
+        }
+
+        let flooded =
+            flood(&m, &laid, (0.5, 1.0), 0.0, tip, TILE, ids()).unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            !flooded.placements.is_empty(),
+            "the flood must fill something to be evidence"
+        );
+        for p in &flooded.placements {
+            assert_eq!(
+                p.tip, tip,
+                "`{}` came out of a flood fill standing up",
+                p.id
+            );
+        }
+    }
+
+    /// **A tipped brush fills on the footprint it actually presents**, not the one it had standing.
+    ///
+    /// The half a `Placed::tip` assertion cannot see. A tipped piece lies down, so its height
+    /// becomes one of its floor dimensions — and the lattice was still built from
+    /// `placed_footprint`, which is the standing box. The rows then come out at the upright pitch
+    /// and each one is laid partly **inside** the last: a fill that looks right in the file, wrong
+    /// on screen, and whose overlap only shows up as triangles.
+    ///
+    /// `Placed::tip`'s own doc names `fill::cell_extents` as where the axis-swap lesson is recorded.
+    /// It recorded half of it — the yaw half.
+    #[test]
+    fn a_tipped_brush_fills_on_the_footprint_it_actually_presents() {
+        // 2.0 wide, 0.5 deep, 1.0 tall — three different numbers, so a wrong permutation shows.
+        let d = slab(2.0, 0.5, 1.0);
+
+        assert_eq!(
+            cell_extents(&d, 0.0, UPRIGHT),
+            (2.0, 0.5),
+            "standing: its own footprint"
+        );
+        // Tipped about X, the depth and the height trade places: 0.5 deep becomes 1.0 deep.
+        assert_eq!(cell_extents(&d, 0.0, (1, 0)), (2.0, 1.0));
+        // Tipped about Z, the width and the height trade: 2.0 wide becomes 1.0 wide.
+        assert_eq!(cell_extents(&d, 0.0, (0, 1)), (1.0, 0.5));
+        // A half turn changes which face is down and not the box — the same rule `tipped_extents`
+        // states, checked here because a fill would otherwise re-derive it.
+        assert_eq!(cell_extents(&d, 0.0, (2, 0)), (2.0, 0.5));
+        // And the two turns compose: yaw still swaps X against Z after the tip has been applied.
+        assert_eq!(cell_extents(&d, 90.0, (1, 0)), (1.0, 2.0));
+
+        // **An upright piece never consults a height it does not have.** Routing the untipped case
+        // through `tipped_extents` would make this unmeasured and centre-snap every heightless
+        // floor tile in the kit — a regression with no error message.
+        let heightless = Descriptor {
+            extent: Extent {
+                footprint: Some((2.0, 0.5)),
+                height: None,
+            },
+            ..slab(2.0, 0.5, 1.0)
+        };
+        assert_eq!(
+            cell_extents(&heightless, 0.0, UPRIGHT),
+            (2.0, 0.5),
+            "a piece standing up covers its footprint whatever its height"
+        );
+
+        // **The lattice moves with it**, which is the part that decides where rows land. A 1.0 x 0.5
+        // brush 2.0 m tall steps one tile in Z standing; tipped about X it is 2.0 m deep and steps
+        // two, so the same drag over the same map lays half as many rows — none of them overlapping.
+        let m = map((4.0, 3.0, 4.0));
+        let laid = slab(1.0, 0.5, 2.0);
+        // Map space is centred on the origin — `Map::floor_rect` is `(-hx, -hz, hx, hz)` — so the
+        // whole floor of a 4 x 4 map is this box and not one anchored at zero.
+        let whole_map = ((-2.0, -2.0), (2.0, 2.0));
+        let standing = box_fill(&m, &laid, whole_map, 0.0, UPRIGHT, TILE, ids())
+            .unwrap_or_else(|e| panic!("{e}"));
+        let tipped = box_fill(&m, &laid, whole_map, 0.0, (1, 0), TILE, ids())
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            standing.placements.len(),
+            16,
+            "four rows of four at the upright pitch"
+        );
+        assert_eq!(
+            tipped.placements.len(),
+            8,
+            "tipped it is 2 m deep, so two rows of four — at the standing pitch it would lay four \
+             rows, each buried half inside the one before it"
+        );
+
+        // Rows two metres apart, not one: the spacing is the claim, the count is its shadow.
+        let rows = |f: &Filled| {
+            let mut zs: Vec<f32> = f.placements.iter().map(|p| p.at.1).collect();
+            zs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            zs.dedup();
+            zs
+        };
+        assert_eq!(
+            rows(&standing),
+            vec![-1.75, -0.75, 0.25, 1.25],
+            "the upright 0.5 m pitch"
+        );
+        assert_eq!(
+            rows(&tipped),
+            vec![-1.0, 1.0],
+            "one whole tipped depth between rows"
+        );
     }
 }

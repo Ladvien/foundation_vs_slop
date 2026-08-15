@@ -164,7 +164,13 @@ fn paint_is_zero(v: &i8) -> bool {
 /// Not zero. A zero-sized map is a map every placement is outside of, so the first thing an author
 /// would do is see every piece flagged — a default should be somewhere to start work, not a puzzle.
 fn default_bounds() -> (f32, f32, f32) {
-    (32.0, 4.0, 32.0)
+    // **Ten metres square, four tall.** It was 32 x 32, which is 1,024 cells of floor an author
+    // has to pan across before the map reads as a place rather than a plain — and the grid at the
+    // finest rung over 32 m is the wash `draw_map_grid` records. Ten is a room-and-corridor's worth
+    // of ground: big enough to lay a kit out on, small enough to see whole at the opening zoom.
+    // Asked for at the keyboard, 2026-08-15. A map that wants more says so in its own file; this is
+    // only what a NEW one starts at.
+    (10.0, 4.0, 10.0)
 }
 
 /// One instance of a descriptor, somewhere.
@@ -419,7 +425,11 @@ impl Map {
             });
         }
 
-        for (axis, v) in [("x", self.bounds.0), ("y", self.bounds.1), ("z", self.bounds.2)] {
+        for (axis, v) in [
+            ("x", self.bounds.0),
+            ("y", self.bounds.1),
+            ("z", self.bounds.2),
+        ] {
             if !(v.is_finite() && v > 0.0) {
                 return Err(format!(
                     "map: bounds.{axis} is {v}. A map has to enclose something — a non-positive \
@@ -517,7 +527,12 @@ impl Map {
                     st.id
                 ));
             }
-            if st.owned && st.owned_because.as_ref().is_none_or(|r| r.trim().is_empty()) {
+            if st.owned
+                && st
+                    .owned_because
+                    .as_ref()
+                    .is_none_or(|r| r.trim().is_empty())
+            {
                 return Err(format!(
                     "map: stamp `{}` is owned but says nothing about why. An owned stamp constrains a \
                      generator; in six months only that sentence can say whether it still should.",
@@ -700,7 +715,8 @@ mod tests {
     fn a_map_from_before_a_field_existed_still_loads() {
         let mut m = table_map();
         m.version = MAP_VERSION - 1;
-        m.validate().expect("an older map means what it always meant");
+        m.validate()
+            .expect("an older map means what it always meant");
         assert!(m.stamps.is_empty());
     }
 

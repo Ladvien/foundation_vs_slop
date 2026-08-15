@@ -101,7 +101,8 @@ impl Fixture {
     pub fn new(name: &str) -> Fixture {
         // A unique directory per test, since these run in parallel. The process id and the test's
         // own name are enough — no clock, so a rerun is reproducible.
-        let dir = std::env::temp_dir().join(format!("emerge-fixture-{}-{name}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("emerge-fixture-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let emerge = dir.join("assets/emerge");
         std::fs::create_dir_all(&emerge).unwrap_or_else(|e| panic!("cannot make {emerge:?}: {e}"));
@@ -117,8 +118,8 @@ impl Fixture {
             emerge.join("vocab.ron"),
             r#"(
     kind: (tokens: [( name: "prop", note: "a thing" )]),
-    effects: (tokens: []),
-    look: (tokens: []),
+    effects: (tokens: [( name: "inert", note: "does nothing" )]),
+    look: (tokens: [( name: "plain", note: "unremarkable" )]),
     surfaces: (tokens: [( name: "worktop", note: "a top" )]),
     capabilities: (tokens: []),
     edge: (tokens: [( name: "wall", note: "a solid run-face" )]),
@@ -133,7 +134,12 @@ impl Fixture {
         )
         .unwrap_or_else(|e| panic!("{e}"));
 
-        Fixture { dir, descriptors: Vec::new(), placements: Vec::new(), compositions: Vec::new() }
+        Fixture {
+            dir,
+            descriptors: Vec::new(),
+            placements: Vec::new(),
+            compositions: Vec::new(),
+        }
     }
 
     /// **A descriptor of a stated footprint**, for a test about what the footprint *does*.
@@ -145,7 +151,10 @@ impl Fixture {
         self = self.descriptor(id, pack);
         if let Some(last) = self.descriptors.last_mut() {
             let was = "footprint: Some((1.0, 1.0))";
-            assert!(last.contains(was), "the fixture's descriptor shape changed under this helper");
+            assert!(
+                last.contains(was),
+                "the fixture's descriptor shape changed under this helper"
+            );
             *last = last.replace(was, &format!("footprint: Some(({w}, {d}))"));
         }
         self
@@ -159,8 +168,14 @@ impl Fixture {
         self = self.descriptor(id, pack);
         if let Some(last) = self.descriptors.last_mut() {
             let was = "mount: Some(OnFloor)";
-            assert!(last.contains(was), "the fixture's descriptor shape changed under this helper");
-            *last = last.replace(was, &format!("mount: Some(OnSurface( class: \"{class}\" ))"));
+            assert!(
+                last.contains(was),
+                "the fixture's descriptor shape changed under this helper"
+            );
+            *last = last.replace(
+                was,
+                &format!("mount: Some(OnSurface( class: \"{class}\" ))"),
+            );
         }
         self
     }
@@ -173,7 +188,10 @@ impl Fixture {
         self = self.descriptor(id, pack);
         if let Some(last) = self.descriptors.last_mut() {
             let was = "offers: ( surfaces: [], sockets: [] )";
-            assert!(last.contains(was), "the fixture's descriptor shape changed under this helper");
+            assert!(
+                last.contains(was),
+                "the fixture's descriptor shape changed under this helper"
+            );
             *last = last.replace(
                 was,
                 &format!("offers: ( surfaces: [\"{class}\"], sockets: [] )"),
@@ -194,9 +212,13 @@ impl Fixture {
     /// in to the accepting one.
     pub fn edge_tokens(self, names: &[&str]) -> Fixture {
         let at = self.dir.join("assets/emerge/vocab.ron");
-        let was = std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("cannot read {at:?}: {e}"));
+        let was =
+            std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("cannot read {at:?}: {e}"));
         let one = r#"edge: (tokens: [( name: "wall", note: "a solid run-face" )]),"#;
-        assert!(was.contains(one), "the fixture's edge axis must be the shipped one, or this is a no-op");
+        assert!(
+            was.contains(one),
+            "the fixture's edge axis must be the shipped one, or this is a no-op"
+        );
         let mut rows = vec![r#"( name: "wall", note: "a solid run-face" )"#.to_owned()];
         for n in names {
             rows.push(format!(r#"( name: "{n}", note: "derived from the mesh" )"#));
@@ -209,9 +231,13 @@ impl Fixture {
 
     pub fn slot_token(self, name: &str) -> Fixture {
         let at = self.dir.join("assets/emerge/vocab.ron");
-        let was = std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("cannot read {at:?}: {e}"));
+        let was =
+            std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("cannot read {at:?}: {e}"));
         let empty = "slot: (tokens: []),";
-        assert!(was.contains(empty), "the fixture's slot axis must start empty, or this is a no-op");
+        assert!(
+            was.contains(empty),
+            "the fixture's slot axis must start empty, or this is a no-op"
+        );
         let full = format!("slot: (tokens: [( name: \"{name}\", note: \"a hole\" )]),");
         std::fs::write(&at, was.replace(empty, &full))
             .unwrap_or_else(|e| panic!("cannot write {at:?}: {e}"));
@@ -225,6 +251,22 @@ impl Fixture {
         for m in meshes {
             std::fs::write(at.join(format!("{m}.glb")), glb(0.6, 0.5, 0.6))
                 .unwrap_or_else(|e| panic!("{e}"));
+        }
+        self
+    }
+
+    /// **A piece that still owes judgement** — no `effects`, no `look`, no note.
+    ///
+    /// The `Fixture` default is fully judged, because most tests are about placing and composing and
+    /// an unjudged piece is invisible to the Tiles palette. This is the other entity: what the VLM
+    /// batch is FOR, and what `the_tiles_palette_lists_only_judged_meshes` contrasts against.
+    pub fn unjudged_descriptor(mut self, id: &str, pack: &str) -> Fixture {
+        self = self.descriptor(id, pack);
+        if let Some(last) = self.descriptors.last_mut() {
+            *last = last
+                .replace(r#"effects: ["inert"],"#, "effects: [],")
+                .replace(r#"look: ["plain"],"#, "look: [],")
+                .replace(r#"note: Some("a fixture piece"),"#, "note: None,");
         }
         self
     }
@@ -251,10 +293,10 @@ impl Fixture {
             clearance: [],
             offers: ( surfaces: [], sockets: [] ),
             kind: ["prop"],
-            effects: [],
-            look: [],
+            effects: ["inert"],
+            look: ["plain"],
             subgrid: None,
-            note: None,
+            note: Some("a fixture piece"),
             placement: ( rooms: [], group: None ),
         ),"#
         ));
@@ -305,7 +347,10 @@ impl Fixture {
         size: (f32, f32, f32),
         members: &[(&str, &str, (f32, f32))],
     ) -> Fixture {
-        let envelope = format!("Bounded( size: ({:.1}, {:.1}, {:.1}) )", size.0, size.1, size.2);
+        let envelope = format!(
+            "Bounded( size: ({:.1}, {:.1}, {:.1}) )",
+            size.0, size.1, size.2
+        );
         self.composition_with(id, &envelope, members)
     }
 

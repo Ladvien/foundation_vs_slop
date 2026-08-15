@@ -14,20 +14,19 @@
 //! selection and it made rotation feel broken: placing selects, so the next `]` turned the piece you
 //! had just put down while the ghost — the only thing on screen showing a facing — sat still.
 
-use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::camera::visibility::ViewVisibility;
+use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, Button as UiButton};
 use emerge_core::map::Placed;
 
 use crate::chrome::{
-    ACCENT, DANGER, DIM, HEADER_BG, LABEL, LIST_W, PANEL_BG, ROW_BG, ROW_SELECTED, SLOT_BG,
-    TEXT,
+    ACCENT, DANGER, DIM, HEADER_BG, LABEL, LIST_W, PANEL_BG, ROW_BG, ROW_SELECTED, SLOT_BG, TEXT,
 };
 use crate::keys::{self, Action};
 use crate::project::Project;
-use crate::view::{cursor_ground, MainCamera};
+use crate::view::{MainCamera, cursor_ground};
 
 /// **The authoring grid, from the one place that defines it.**
 ///
@@ -945,8 +944,7 @@ impl Plugin for EditorPlugin {
                     (
                         draw_bounds,
                         draw_map_grid,
-                        fit_bounds_floor
-                            .run_if(resource_changed::<Project>.or_else(run_once)),
+                        fit_bounds_floor.run_if(resource_changed::<Project>.or_else(run_once)),
                     ),
                     check_edges.run_if(resource_changed::<Project>.or_else(run_once)),
                     draw_edge_faults.run_if(in_map_mode),
@@ -1058,64 +1056,62 @@ fn spawn_panel(mut commands: Commands) {
 
         // **Map size.** Stated, adjustable, and drawn in the world — an edge nothing shows is an
         // edge nobody believes. It is also what gives the flood fill somewhere to stop.
-        p.spawn((
-            Node {
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(2.0),
-                margin: UiRect::top(Val::Px(8.0)),
-                ..default()
-            },
-        ))
-        .with_children(|s| {
-            s.spawn((
-                Text::new("MAP SIZE  (m)"),
-                TextColor(LABEL),
-                TextFont::from_font_size(10.0),
-            ));
-            for axis in [Axis::X, Axis::Y, Axis::Z] {
-                s.spawn(Node {
-                    flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::Center,
-                    column_gap: Val::Px(4.0),
-                    ..default()
-                })
-                .with_children(|row| {
-                    row.spawn((
-                        Node {
-                            width: Val::Px(14.0),
-                            flex_shrink: 0.0,
-                            ..default()
-                        },
-                        Text::new(axis.label()),
-                        TextColor(LABEL),
-                        TextFont::from_font_size(11.0),
-                    ));
-                    // **A field, not a pair of nudges.** Stepping to 48 m from 32 was four clicks
-                    // and no way to say the number; the author knows the size they want, so the
-                    // control should let them state it. Click to focus, type digits, Enter to keep.
-                    row.spawn((
-                        UiButton,
-                        Hovered::default(),
-                        SizeField(axis),
-                        Node {
-                            width: Val::Px(56.0),
-                            padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)),
-                            flex_shrink: 0.0,
-                            ..default()
-                        },
-                        BackgroundColor(ROW_BG),
-                    ))
-                    .with_children(|f| {
-                        f.spawn((
-                            Text::new(""),
-                            TextColor(TEXT),
+        p.spawn((Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(2.0),
+            margin: UiRect::top(Val::Px(8.0)),
+            ..default()
+        },))
+            .with_children(|s| {
+                s.spawn((
+                    Text::new("MAP SIZE  (m)"),
+                    TextColor(LABEL),
+                    TextFont::from_font_size(10.0),
+                ));
+                for axis in [Axis::X, Axis::Y, Axis::Z] {
+                    s.spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        align_items: AlignItems::Center,
+                        column_gap: Val::Px(4.0),
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        row.spawn((
+                            Node {
+                                width: Val::Px(14.0),
+                                flex_shrink: 0.0,
+                                ..default()
+                            },
+                            Text::new(axis.label()),
+                            TextColor(LABEL),
                             TextFont::from_font_size(11.0),
-                            SizeReadout(axis),
                         ));
+                        // **A field, not a pair of nudges.** Stepping to 48 m from 32 was four clicks
+                        // and no way to say the number; the author knows the size they want, so the
+                        // control should let them state it. Click to focus, type digits, Enter to keep.
+                        row.spawn((
+                            UiButton,
+                            Hovered::default(),
+                            SizeField(axis),
+                            Node {
+                                width: Val::Px(56.0),
+                                padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)),
+                                flex_shrink: 0.0,
+                                ..default()
+                            },
+                            BackgroundColor(ROW_BG),
+                        ))
+                        .with_children(|f| {
+                            f.spawn((
+                                Text::new(""),
+                                TextColor(TEXT),
+                                TextFont::from_font_size(11.0),
+                                SizeReadout(axis),
+                            ));
+                        });
                     });
-                });
-            }
-        });
+                }
+            });
 
         // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
         // the panel, and an auto margin in a column absorbs the free space above it — so
@@ -1427,7 +1423,9 @@ fn walk_palette(
     }
 
     let stride = if keys::shift_held(&keyboard) { 5 } else { 1 };
-    let at = state.brush.and_then(|b| visible.iter().position(|ix| *ix == b));
+    let at = state
+        .brush
+        .and_then(|b| visible.iter().position(|ix| *ix == b));
     let want = match at {
         Some(at) if down => at + stride,
         Some(at) => at.saturating_sub(stride),
@@ -1536,7 +1534,9 @@ fn size_edit_keys(
                     return;
                 };
                 if raw.is_empty() {
-                    state.status.note("nothing typed; the size is unchanged".to_owned());
+                    state
+                        .status
+                        .note("nothing typed; the size is unchanged".to_owned());
                     return;
                 }
                 // **Metres, not whole metres.** The old +/- nudges stepped Y by 0.5 m; the field that
@@ -1544,12 +1544,15 @@ fn size_edit_keys(
                 // never typed back — the author's only way to change it snapped it to 3 or 4. Bounds
                 // are `f32` in the schema and always were.
                 let Ok(want) = raw.parse::<f32>() else {
-                    state.status.problem(format!("`{raw}` is not a number of metres"));
+                    state
+                        .status
+                        .problem(format!("`{raw}` is not a number of metres"));
                     return;
                 };
                 if !want.is_finite() || !(MIN_BOUND as f32..=MAX_BOUND as f32).contains(&want) {
-                    state.status.problem(
-                        format!("a map axis runs {MIN_BOUND}..{MAX_BOUND} m; `{raw}` is outside it"));
+                    state.status.problem(format!(
+                        "a map axis runs {MIN_BOUND}..{MAX_BOUND} m; `{raw}` is outside it"
+                    ));
                     return;
                 }
                 let mut bounds = project.map.bounds;
@@ -1649,11 +1652,8 @@ pub struct EdgeFaults(pub Vec<emerge_core::adjacency::Fault>);
 fn check_edges(project: Res<Project>, mut faults: ResMut<EdgeFaults>) {
     // The **layered** library, because that is what the map places — and this project's divisions,
     // because a face's length is derived from a piece's size and how finely the project divides.
-    faults.0 = emerge_core::adjacency::faults(
-        &project.map,
-        &project.library,
-        project.policy.face_bands,
-    );
+    faults.0 =
+        emerge_core::adjacency::faults(&project.map, &project.library, project.policy.face_bands);
 }
 
 /// Outline both halves of every fault, so the sentence in the panel has something to point at.
@@ -1950,10 +1950,7 @@ fn refresh_status(
             Field::Edges => match faults.0.len() {
                 0 => ("ok".to_owned(), DIM),
                 1 => (faults.0[0].message.clone(), DANGER),
-                n => (
-                    format!("{n} — {}", faults.0[0].message),
-                    DANGER,
-                ),
+                n => (format!("{n} — {}", faults.0[0].message), DANGER),
             },
             // While renaming, the field shows what the name WILL be, not what was typed — that is
             // what "forced" means, and seeing `site_67` appear as you type "Site 67" teaches the rule
@@ -2039,12 +2036,18 @@ pub fn not_typing(
     note: Res<crate::tiles::NoteEdit>,
     width: Res<crate::tiles::ScaleEdit>,
     height: Res<crate::tiles::HeightEdit>,
+    // The tile name prompt, added when naming became explicit (2026-08-15). Adding a field here is
+    // the line this doc comment promises it would be — and leaving it out is not cosmetic: the
+    // `Enter` that confirms a name is also `BuildDrop`, so without this the same keypress named the
+    // tile and dropped a piece into it.
+    build: Res<crate::build::Build>,
 ) -> bool {
     state.renaming.is_none()
         && state.pinning.is_none()
         && state.grouping.is_none()
         && edit.active.is_none()
         && import.renaming.is_none()
+        && build.naming.is_none()
         && !filters.typing()
         && !cell.typing()
         && !note.typing()
@@ -2092,7 +2095,10 @@ pub fn sense_context(
         || cell.typing()
         || note.typing()
         || width.typing()
-        || height.typing();
+        || height.typing()
+        // The tile name prompt — the same key that confirms a name is `BuildDrop`, so the Tiles tab
+        // must stop dispatching while it is open.
+        || build.naming.is_some();
     // **What is in hand, asked of the tab that can be holding something.** Two tabs can, and they hold
     // different things: the assembler has a piece taken with `Space`, the map has one picked up in
     // Move or a set captured in Clone. Both answer the same question — *do the arrows move a thing, or
@@ -2204,7 +2210,9 @@ fn rename_keys(
                 let raw = state.renaming.take().unwrap_or_default();
                 let name = emerge_core::naming::to_snake_case(&raw);
                 if name.is_empty() {
-                    state.status.note("a map needs a name; nothing was changed".to_owned());
+                    state
+                        .status
+                        .note("a map needs a name; nothing was changed".to_owned());
                 } else if name != project.map.name {
                     let was = std::mem::replace(&mut project.map.name, name.clone());
                     project.dirty = true;
@@ -2331,13 +2339,19 @@ fn snap_point(project: &Project, v: f32, level: SnapLevel) -> f32 {
     grid::snap_corner(v, 0.0, level.pitch(project.policy.snap_divisor))
 }
 
-/// **The footprint a brush will occupy, turned by its own yaw.**
+/// **The footprint a brush will occupy, tipped onto its side and then turned by its own yaw.**
 ///
 /// Unmeasured pieces answer `(0, 0)`, which makes [`grid::snap_corner`] fall back to snapping the
 /// centre — the honest answer when nothing knows how big the thing is, and the same "refuse to invent
-/// a box" rule `compose::member_footprint` applies.
-pub fn brush_span(d: &emerge_core::descriptor::Descriptor, yaw: f32) -> (f32, f32) {
-    match d.extent.footprint {
+/// a box" rule `compose::member_footprint` applies. A **tipped** piece with no measured height is
+/// unmeasured by that same rule: once it is lying down its height is one of its floor dimensions, so
+/// not knowing it means not knowing the box. See `descriptor::tipped_footprint`, which is where the
+/// upright case is kept from ever consulting a height it does not need.
+///
+/// The two turns compose in the order they are drawn — tip in the piece's own frame first, then yaw
+/// about +Y — which is the order [`emerge_core::map::Placed::tip`] documents.
+pub fn brush_span(d: &emerge_core::descriptor::Descriptor, yaw: f32, tip: (u8, u8)) -> (f32, f32) {
+    match emerge_core::descriptor::tipped_footprint(d, tip) {
         Some(fp) => crate::compose::turned_footprint(fp, yaw),
         None => (0.0, 0.0),
     }
@@ -2377,10 +2391,13 @@ pub fn stamp_snap(
     keyboard: &ButtonInput<KeyCode>,
     rung: SnapLevel,
 ) -> (SnapLevel, (f32, f32)) {
-    let armed = compose
-        .armed
-        .as_ref()
-        .and_then(|id| project.compositions.compositions.iter().find(|c| &c.id == id));
+    let armed = compose.armed.as_ref().and_then(|id| {
+        project
+            .compositions
+            .compositions
+            .iter()
+            .find(|c| &c.id == id)
+    });
     match armed.map(|c| &c.envelope) {
         Some(emerge_core::composition::Envelope::Bounded { size }) => {
             (SnapLevel::Tile, (size.0, size.2))
@@ -2400,7 +2417,7 @@ pub fn held_span(project: &Project, drag: &MoveDrag) -> (f32, f32) {
         return (0.0, 0.0);
     };
     match project.library.get(&p.descriptor) {
-        Some(d) => brush_span(d, p.yaw),
+        Some(d) => brush_span(d, p.yaw, p.tip),
         None => (0.0, 0.0),
     }
 }
@@ -2466,10 +2483,7 @@ pub fn map_at(
         // half a step either side of it.
         (true, Some((cx, cz))) => {
             let half = level.pitch(project.policy.snap_divisor) * 0.5;
-            (
-                x.clamp(cx - half, cx + half),
-                z.clamp(cz - half, cz + half),
-            )
+            (x.clamp(cx - half, cx + half), z.clamp(cz - half, cz + half))
         }
         // The modifier went down off the ground plane, so there is no cell to hold to. Free, as it
         // was — refusing to place at all would be a worse answer than the one the author asked for.
@@ -2524,6 +2538,7 @@ pub fn brush_at(
     hit: Vec3,
     d: &emerge_core::descriptor::Descriptor,
     yaw: f32,
+    tip: (u8, u8),
 ) -> (f32, f32) {
     map_at(
         project,
@@ -2531,7 +2546,7 @@ pub fn brush_at(
         keys::alt_held(keyboard),
         anchor,
         snap_level(keyboard, rung),
-        brush_span(d, yaw),
+        brush_span(d, yaw, tip),
     )
 }
 
@@ -2559,10 +2574,18 @@ fn box_fill_between(
 ) {
     let mut n = state.next_id;
     let short = short_id(&brush.id).to_owned();
-    let filled = match crate::fill::box_fill(&project.map, brush, corners, state.brush_yaw, pitch, || {
-        n += 1;
-        format!("{short}@{n}")
-    }) {
+    let filled = match crate::fill::box_fill(
+        &project.map,
+        brush,
+        corners,
+        state.brush_yaw,
+        state.brush_tip,
+        pitch,
+        || {
+            n += 1;
+            format!("{short}@{n}")
+        },
+    ) {
         Ok(f) => f,
         // A refusal is the answer, not a failure — the same call `flood_from_cursor` makes.
         Err(e) => {
@@ -2681,7 +2704,12 @@ fn drive_clone(
         )))
     } else {
         drag.from.map(|from| {
-            (from.0.min(at.0), from.1.min(at.1), from.0.max(at.0), from.1.max(at.1))
+            (
+                from.0.min(at.0),
+                from.1.min(at.1),
+                from.0.max(at.0),
+                from.1.max(at.1),
+            )
         })
     };
     for (mut tf, mut vis) in &mut marker {
@@ -2694,7 +2722,11 @@ fn drive_clone(
                     project.map.origin.2 + (z0 + z1) * 0.5,
                 )
                 .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
-                .with_scale(Vec3::new((x1 - x0).max(0.05), (z1 - z0).max(0.05), 1.0));
+                .with_scale(Vec3::new(
+                    (x1 - x0).max(0.05),
+                    (z1 - z0).max(0.05),
+                    1.0,
+                ));
             }
             None => *vis = Visibility::Hidden,
         }
@@ -2714,7 +2746,14 @@ fn drive_clone(
             snap_point(&project, at.0, snap_level(&keyboard, rung.0)),
             snap_point(&project, at.1, snap_level(&keyboard, rung.0)),
         );
-        stamp_set(&mut commands, &assets, &mut project, &mut state, &set, anchor_at);
+        stamp_set(
+            &mut commands,
+            &assets,
+            &mut project,
+            &mut state,
+            &set,
+            anchor_at,
+        );
         // Back in hand whatever happened: a refusal's fix is usually "two cells to the left".
         drag.held = Some(set);
         return;
@@ -2724,7 +2763,9 @@ fn drive_clone(
         return;
     };
     if (from.0 - at.0).abs() <= CLICK_EPS && (from.1 - at.1).abs() <= CLICK_EPS {
-        state.status.note("drag a box to take a copy of what is inside it".to_owned());
+        state
+            .status
+            .note("drag a box to take a copy of what is inside it".to_owned());
         return;
     }
 
@@ -2800,7 +2841,7 @@ fn drive_clone(
         let (w, depth) = project
             .library
             .get(&p.descriptor)
-            .map(|d| crate::fill::cell_extents(d, p.yaw))
+            .map(|d| crate::fill::cell_extents(d, p.yaw, p.tip))
             .unwrap_or((crate::fill::MIN_CELL, crate::fill::MIN_CELL));
         bx0 = bx0.min(offset.0 - w * 0.5);
         bz0 = bz0.min(offset.1 - depth * 0.5);
@@ -2828,7 +2869,7 @@ fn drive_clone(
             let (w, depth) = project
                 .library
                 .get(&row.descriptor)
-                .map(|d| crate::fill::cell_extents(d, row.yaw))
+                .map(|d| crate::fill::cell_extents(d, row.yaw, row.tip))
                 .unwrap_or((crate::fill::MIN_CELL, crate::fill::MIN_CELL));
             let ro = (row.at.0 - anchor.0, row.at.1 - anchor.1);
             bx0 = bx0.min(ro.0 - w * 0.5);
@@ -2974,7 +3015,12 @@ fn stamp_set(
     // thing put down.
     let mut fresh: Vec<emerge_core::composition::Stamped> = Vec::with_capacity(set.stamps.len());
     for cs in &set.stamps {
-        if !project.compositions.compositions.iter().any(|c| c.id == cs.of) {
+        if !project
+            .compositions
+            .compositions
+            .iter()
+            .any(|c| c.id == cs.of)
+        {
             state.status.problem(format!(
                 "stamp refused: `{}` is not a composition any more",
                 cs.of
@@ -3018,7 +3064,9 @@ fn stamp_set(
         (0, t) => format!("{t} stamp(s)"),
         (c, t) => format!("{c} piece(s) and {t} stamp(s)"),
     };
-    state.status.note(format!("stamped {what} — click again stamps another"));
+    state
+        .status
+        .note(format!("stamped {what} — click again stamps another"));
 }
 
 /// **The cell fine placement is confined to** — captured when the platform modifier goes down.
@@ -3143,7 +3191,16 @@ fn spawn_range(
         let (Some(d), Some(&y)) = (project.library.get(&p.descriptor), ys.get(i)) else {
             continue;
         };
-        if let Some(e) = spawn_piece(commands, assets, d, p.at, p.yaw, p.tip, project.map.origin, y) {
+        if let Some(e) = spawn_piece(
+            commands,
+            assets,
+            d,
+            p.at,
+            p.yaw,
+            p.tip,
+            project.map.origin,
+            y,
+        ) {
             commands.entity(e).insert(Placement(p.id.clone()));
         }
     }
@@ -3196,6 +3253,9 @@ fn drive_removal(
     mut project: ResMut<Project>,
     mut state: ResMut<EditorState>,
     picture: Res<StampPicture>,
+    // The removal box had no idea a grid existed; `J` is what sets which one.
+    keyboard: Res<ButtonInput<KeyCode>>,
+    rung: Res<Rung>,
 ) {
     // Read, never write, unless something actually happened: `state` is watched by
     // `rebuild_palette`, so an unconditional deref here rebuilds the palette every frame.
@@ -3217,7 +3277,12 @@ fn drive_removal(
     let (cam, cam_tf) = *camera;
     // A cursor over the panel is not a cursor over the map, and a marker under the palette is a
     // promise about a click that will never reach the world — the same rule the ghost follows.
-    let hit = cursor_ground(pointer.0, cam, cam_tf).filter(|_| !hovered_ui.iter().any(|h| h.0));
+    //
+    // **Unless a box is already being dragged**, in which case the pointer is captured and the panel
+    // has no claim on it — see `drive_place`'s note, and the same keyboard report. A removal box
+    // swept across the palette used to vanish and then discard itself on release.
+    let blocked = ui_blocks_gesture(hovered_ui.iter().any(|h| h.0), drag.from.is_some());
+    let hit = cursor_ground(pointer.0, cam, cam_tf).filter(|_| !blocked);
     let Some(hit) = hit else {
         // **A release ends the drag wherever it happens.** This used to return before the
         // `just_released` branch, so letting go over a panel or off the map left `drag.from` set —
@@ -3240,17 +3305,15 @@ fn drive_removal(
 
     // What the marker covers: the box being dragged, or — before a drag starts — the footprint of
     // the piece that a click would take, which is what makes "this one" a claim rather than a guess.
+    let pitch = snap_level(&keyboard, rung.0).pitch(project.policy.snap_divisor);
     let rect = match drag.from {
-        Some(from) => Some((
-            from.0.min(at.0),
-            from.1.min(at.1),
-            from.0.max(at.0),
-            from.1.max(at.1),
-        )),
+        // **Locked to the live rung** — see `removal_box`. The marker and the deletion below read
+        // the one expression, so what the red box covers is what goes.
+        Some(from) => Some(removal_box(from, at, pitch)),
         None => pick_at(&project, at).and_then(|i| {
             let p = project.map.placements.get(i)?;
             let d = project.library.get(&p.descriptor)?;
-            let (w, depth) = crate::fill::cell_extents(d, p.yaw);
+            let (w, depth) = crate::fill::cell_extents(d, p.yaw, p.tip);
             Some((
                 p.at.0 - w * 0.5,
                 p.at.1 - depth * 0.5,
@@ -3271,7 +3334,11 @@ fn drive_removal(
                 )
                 .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
                 // A floor of a few centimetres so a zero-area box is still visible as a box.
-                .with_scale(Vec3::new((x1 - x0).max(0.05), (z1 - z0).max(0.05), 1.0));
+                .with_scale(Vec3::new(
+                    (x1 - x0).max(0.05),
+                    (z1 - z0).max(0.05),
+                    1.0,
+                ));
             }
             None => *vis = Visibility::Hidden,
         }
@@ -3298,8 +3365,7 @@ fn drive_removal(
         return;
     }
 
-    let (x0, z0) = (from.0.min(at.0), from.1.min(at.1));
-    let (x1, z1) = (from.0.max(at.0), from.1.max(at.1));
+    let (x0, z0, x1, z1) = removal_box(from, at, pitch);
     // **Each group the box touches goes whole**, the same rule the single delete follows: a rider
     // whose host is inside the box but which is itself a few centimetres outside it would otherwise
     // be left pointing at a placement that no longer exists, and `resolve_y` refuses the whole map for
@@ -3403,7 +3469,9 @@ fn delete_stamp(id: &str, project: &mut Project, state: &mut EditorState) {
     let Some(index) = project.map.stamps.iter().position(|s| s.id == id) else {
         // Not an error worth a banner: the author clicked something that has since gone, which undo
         // and a second click can both produce.
-        state.status.note(format!("`{id}` is not on this map any more"));
+        state
+            .status
+            .note(format!("`{id}` is not on this map any more"));
         return;
     };
     let removed = project.map.stamps.remove(index);
@@ -3464,7 +3532,16 @@ fn spawn_existing(
             continue;
         };
         let Some(&y) = ys.get(i) else { continue };
-        if let Some(e) = spawn_piece(&mut commands, &assets, d, p.at, p.yaw, p.tip, project.map.origin, y) {
+        if let Some(e) = spawn_piece(
+            &mut commands,
+            &assets,
+            d,
+            p.at,
+            p.yaw,
+            p.tip,
+            project.map.origin,
+            y,
+        ) {
             commands.entity(e).insert(Placement(p.id.clone()));
         }
     }
@@ -3517,7 +3594,7 @@ fn drive_place(
     // A click on a control is not a click on the world. Without this, arming a piece from the palette
     // also dropped one wherever the panel happened to be over.
     let over_ui = hovered_ui.iter().any(|h| h.0);
-    let Some(hit) = cursor_ground(pointer.0, cam, cam_tf).filter(|_| !over_ui) else {
+    let Some(hit) = cursor_ground(pointer.0, cam, cam_tf) else {
         // **A release ends the drag wherever it happens** — the defect `drive_removal` records: a
         // release over a panel used to leave `from` set, and the box then followed the cursor with no
         // button held, claiming an edit nobody was making.
@@ -3526,6 +3603,21 @@ fn drive_place(
         }
         return;
     };
+    // **A drag that started on the world owns the pointer until it is let go.**
+    //
+    // The panel test used to run every frame, so sweeping a fill box across the palette tore the
+    // gesture in half: the preview vanished, and letting go over a panel threw the whole box away.
+    // Reported at the keyboard, 2026-08-15: *"I should be able to drag behind the UI... without it
+    // interrupting my dragging."*
+    //
+    // So the gate belongs on the PRESS, not on the frame — which is what pointer capture means
+    // everywhere else it exists. Starting a gesture on a control is still a control click and still
+    // reaches nothing; a gesture already under way is the author's, and the panel it passes over has
+    // no claim on it. The ground point stays honest either way: `cursor_ground` answers about the
+    // ray, and a ray that happens to pass under a panel still lands where it lands.
+    if ui_blocks_gesture(over_ui, drag.from.is_some()) {
+        return;
+    }
 
     // **Nothing armed places nothing** — and takes no drag with it, so a press-and-sweep over the map
     // with the palette cleared leaves no box hanging on screen waiting for a release.
@@ -3547,7 +3639,14 @@ fn drive_place(
             // `to_cell` would floor it into a cell it half covers. `Anchored` groups claim no tile
             // (`from_compositions` skips them by name as furniture), so they get the ladder.
             let (level, span) = stamp_snap(&project, &compose, &keyboard, rung.0);
-            let at = map_at(&project, hit, keys::alt_held(&keyboard), &anchor, level, span);
+            let at = map_at(
+                &project,
+                hit,
+                keys::alt_held(&keyboard),
+                &anchor,
+                level,
+                span,
+            );
             stamp_here(&mut project, &mut state, &mut compose, at);
         }
         return;
@@ -3564,7 +3663,16 @@ fn drive_place(
         return;
     };
     let free = keys::alt_held(&keyboard);
-    let at = brush_at(&project, &keyboard, rung.0, &anchor, hit, &d, state.brush_yaw);
+    let at = brush_at(
+        &project,
+        &keyboard,
+        rung.0,
+        &anchor,
+        hit,
+        &d,
+        state.brush_yaw,
+        state.brush_tip,
+    );
 
     if mouse.just_pressed(MouseButton::Left) {
         drag.from = Some(at);
@@ -3583,8 +3691,11 @@ fn drive_place(
             // **The ground the fill will cover, not the anchors it will place on** — see
             // `fill::covered_rect`, which carries the report this answers. The same `cell_extents`
             // the fill itself steps by, so the outline and the commit cannot disagree.
-            let (x0, z0, x1, z1) =
-                crate::fill::covered_rect(from, at, crate::fill::cell_extents(&d, state.brush_yaw));
+            let (x0, z0, x1, z1) = crate::fill::covered_rect(
+                from,
+                at,
+                crate::fill::cell_extents(&d, state.brush_yaw, state.brush_tip),
+            );
             gizmos.rect(
                 Isometry3d::new(
                     Vec3::new(
@@ -3674,8 +3785,6 @@ fn drive_place(
         return;
     }
 
-
-
     state.next_id += 1;
     let id = format!("{}@{}", short_id(&d.id), state.next_id);
 
@@ -3736,7 +3845,9 @@ fn stamp_here(
     };
     let comps = project.compositions.compositions.clone();
     if !comps.iter().any(|c| c.id == of) {
-        state.status.problem(format!("`{of}` is armed but the project no longer defines it"));
+        state.status.problem(format!(
+            "`{of}` is armed but the project no longer defines it"
+        ));
         compose.armed = None;
         return;
     }
@@ -3754,9 +3865,12 @@ fn stamp_here(
     // the real map holding a stamp that does not resolve.
     let mut trial = project.map.clone();
     trial.stamps.push(stamped.clone());
-    if let Err(e) = emerge_core::composition::expand(&trial, &trial.stamps, &comps, &project.library)
+    if let Err(e) =
+        emerge_core::composition::expand(&trial, &trial.stamps, &comps, &project.library)
     {
-        state.status.problem(format!("cannot stamp `{of}` here: {e}"));
+        state
+            .status
+            .problem(format!("cannot stamp `{of}` here: {e}"));
         return;
     }
     project.map.stamps.push(stamped);
@@ -3816,13 +3930,17 @@ fn redraw_stamps(
     // The expanded rows are not in `map.placements`, so their heights cannot come from the map's own
     // resolve. A scratch map carrying both answers the question `stack::resolve_y` was written for.
     let mut scratch = project.map.clone();
-    scratch.placements.extend(expanded.placements.iter().cloned());
+    scratch
+        .placements
+        .extend(expanded.placements.iter().cloned());
     // Loud. A silent return here is the failure mode this editor's own notes call the worst it had:
     // an empty patch of floor where a composition should be, with nothing anywhere saying why.
     let ys = match emerge_core::stack::resolve_y(&scratch, &project.library) {
         Ok(ys) => ys,
         Err(e) => {
-            state.status.problem(format!("stamped rows have no height: {e}"));
+            state
+                .status
+                .problem(format!("stamped rows have no height: {e}"));
             error!("emerge-mapper: {e}");
             return;
         }
@@ -3836,14 +3954,19 @@ fn redraw_stamps(
     let mut instances: std::collections::HashMap<&str, Entity> = std::collections::HashMap::new();
     for (k, p) in expanded.placements.iter().enumerate() {
         let Some(base) = project.library.get(&p.descriptor) else {
-            error!("emerge-mapper: stamped row `{}` names descriptor `{}`, which the library does not define", p.id, p.descriptor);
+            error!(
+                "emerge-mapper: stamped row `{}` names descriptor `{}`, which the library does not define",
+                p.id, p.descriptor
+            );
             continue;
         };
         let d = match &p.patch {
             Some(patch) => base.patched_with(patch),
             None => base.clone(),
         };
-        let Some(&y) = ys.get(first + k) else { continue };
+        let Some(&y) = ys.get(first + k) else {
+            continue;
+        };
         // **Provenance as structure.** `Expansion::from` is returned for exactly this, so that no
         // consumer splits `<stamp>/<member>` back apart — its own doc says so.
         let Some((stamp_id, _member)) = expanded.from.get(&p.id) else {
@@ -3876,7 +3999,10 @@ fn redraw_stamps(
                         .unwrap_or_default();
                     let parent = commands
                         .spawn((
-                            StampInstance { id: stamp_id.clone(), of },
+                            StampInstance {
+                                id: stamp_id.clone(),
+                                of,
+                            },
                             // A spatial node with nothing of its own to place: the children are
                             // already where they belong, and `Visibility` is required for them to
                             // inherit one.
@@ -3897,6 +4023,7 @@ fn redraw_stamps(
                 row: p.id.clone(),
                 at: p.at,
                 yaw: p.yaw,
+                tip: p.tip,
                 descriptor: p.descriptor.clone(),
             });
             drawn += 1;
@@ -3967,6 +4094,10 @@ pub struct StampRow {
     pub row: String,
     pub at: (f32, f32),
     pub yaw: f32,
+    /// Carried for the same reason [`StampRow::yaw`] is: the bounds this row contributes to a
+    /// clone marker are its **tipped** footprint, and a row that forgot how it was laid would
+    /// claim a standing box for a piece lying on its side.
+    pub tip: (u8, u8),
     pub descriptor: String,
 }
 
@@ -4076,7 +4207,9 @@ pub fn move_stamp_for_test(
     state: &mut EditorState,
 ) {
     let Some(st) = project.map.stamps.iter_mut().find(|s| s.id == id) else {
-        state.status.problem(format!("`{id}` is gone — nothing was moved"));
+        state
+            .status
+            .problem(format!("`{id}` is gone — nothing was moved"));
         return;
     };
     let from = st.at;
@@ -4085,7 +4218,10 @@ pub fn move_stamp_for_test(
     }
     st.at = to;
     project.dirty = true;
-    state.record(Undo::MovedStamp { id: id.to_owned(), from });
+    state.record(Undo::MovedStamp {
+        id: id.to_owned(),
+        from,
+    });
 }
 
 /// The other half of `Cmd`+remove, reachable from `tests/headless.rs`.
@@ -4155,9 +4291,11 @@ fn keys(
     // **The Tiles tab's state, as one param.** `EditTile` sends a piece over to be defined. A Bevy
     // system takes at most sixteen parameters and this one is full, so they travel as a tuple, which
     // counts as one.
-    mut tiles: (ResMut<crate::tiles::Mode>, ResMut<crate::tiles::ImportState>),
+    mut tiles: (
+        ResMut<crate::tiles::Mode>,
+        ResMut<crate::tiles::ImportState>,
+    ),
 ) {
-
     let (mode, import) = &mut tiles;
     let (move_drag, clone_drag, target, proposal, compose) = &mut tools;
     // One clock for every key that repeats while held — see `keys::repeating`.
@@ -4311,7 +4449,9 @@ fn keys(
         }
         if clone_drag.holding() {
             clone_drag.held = None;
-            state.status.note("set put away — the originals never moved".to_owned());
+            state
+                .status
+                .note("set put away — the originals never moved".to_owned());
             return;
         }
         if target.0.is_some() {
@@ -4340,7 +4480,9 @@ fn keys(
     if keys::just_pressed(&keyboard, *live, Action::GroupFromSet) {
         if clone_drag.holding() {
             state.grouping = Some(String::new());
-            state.status.note("name the composition — Enter to keep it, Esc to leave it alone");
+            state
+                .status
+                .note("name the composition — Enter to keep it, Esc to leave it alone");
         } else {
             state.status.note(format!(
                 "nothing in hand to keep. {} drags a box round what should go in the composition first.",
@@ -4357,9 +4499,7 @@ fn keys(
     // writes **both** files: this branch is the only call to `Project::save` in the crate, so a Tiles
     // tab that only committed the composition answered "saved" to an author who had twenty unsaved
     // Map edits behind them.
-    if keys::just_pressed(&keyboard, *live, Action::Save)
-        && live.0 != keys::Context::Tiles
-    {
+    if keys::just_pressed(&keyboard, *live, Action::Save) && live.0 != keys::Context::Tiles {
         match project.save() {
             Ok(()) => {
                 let path = project.map_path.display().to_string();
@@ -4421,9 +4561,7 @@ fn keys(
     }
 
     // **`H` targets the stack** — see `cycle_target`; the verbs below act on its pick.
-    if keys::just_pressed(&keyboard, *live, Action::CycleTarget)
-        && !on_ui
-    {
+    if keys::just_pressed(&keyboard, *live, Action::CycleTarget) && !on_ui {
         cycle_target(*pointer, camera, &project, &mut state, target.as_mut());
         return;
     }
@@ -4445,7 +4583,9 @@ fn keys(
                 tip.1 = (tip.1 + 1) % 4;
             }
             let (x, z) = *tip;
-            state.status.note(format!("brush tipped — x {x}, z {z} quarter(s)"));
+            state
+                .status
+                .note(format!("brush tipped — x {x}, z {z} quarter(s)"));
             return;
         }
         if !on_ui {
@@ -4467,9 +4607,7 @@ fn keys(
     // **The brackets lift** — one subgrid unit per press, held like the turn keys because a piece
     // three metres up is a long tap-tap-tap otherwise.
     for (action, sign) in [(Action::LiftUp, 1.0), (Action::LiftDown, -1.0)] {
-        if keys::repeating(&keyboard, *live, action, &mut repeat, dt)
-            && !on_ui
-        {
+        if keys::repeating(&keyboard, *live, action, &mut repeat, dt) && !on_ui {
             lift_under_cursor(
                 &mut commands,
                 &assets,
@@ -4672,7 +4810,9 @@ fn apply(
                     commands.entity(entity).despawn();
                 }
             }
-            state.status.note(format!("undid {} placement(s)", gone.len()));
+            state
+                .status
+                .note(format!("undid {} placement(s)", gone.len()));
             Undo::RemovedMany { items: taken }
         }
         Undo::Moved { moved } => {
@@ -4683,7 +4823,11 @@ fn apply(
                     .was
                     .iter()
                     .filter_map(|(i, _, _)| {
-                        project.map.placements.get(*i).map(|p| (*i, p.at, p.on.clone()))
+                        project
+                            .map
+                            .placements
+                            .get(*i)
+                            .map(|p| (*i, p.at, p.on.clone()))
                     })
                     .collect(),
             };
@@ -4723,7 +4867,9 @@ fn apply(
                     }
                 }
                 Err(e) => {
-                    state.status.problem(format!("put back, but cannot draw it: {e}"));
+                    state
+                        .status
+                        .problem(format!("put back, but cannot draw it: {e}"));
                     error!("{e}");
                     // `restore_moved` above ALREADY moved the rows, so the map has changed whatever
                     // happened to the drawing — skipping the shared dirty write at the tail here left
@@ -4734,7 +4880,9 @@ fn apply(
                     return None;
                 }
             }
-            state.status.note(format!("put back {} placement(s)", moved.was.len()));
+            state
+                .status
+                .note(format!("put back {} placement(s)", moved.was.len()));
             Undo::Moved { moved: now }
         }
         Undo::RemovedMany { items } => {
@@ -4761,16 +4909,25 @@ fn apply(
                         else {
                             continue;
                         };
-                        if let Some(e) =
-                            spawn_piece(commands, assets, &d, pat, pyaw, ptip, project.map.origin, y)
-                        {
+                        if let Some(e) = spawn_piece(
+                            commands,
+                            assets,
+                            &d,
+                            pat,
+                            pyaw,
+                            ptip,
+                            project.map.origin,
+                            y,
+                        ) {
                             commands.entity(e).insert(Placement(id));
                         }
                     }
                     state.status.problem(format!("restored {n} placement(s)"));
                 }
                 Err(e) => {
-                    state.status.problem(format!("restored {n} but cannot draw them: {e}"));
+                    state
+                        .status
+                        .problem(format!("restored {n} but cannot draw them: {e}"));
                     error!("{e}");
                 }
             }
@@ -4797,7 +4954,9 @@ fn apply(
                 items.push((*i, Box::new(removed)));
             }
             items.reverse();
-            state.status.note(format!("removed {} placement(s) again", items.len()));
+            state
+                .status
+                .note(format!("removed {} placement(s) again", items.len()));
             Undo::RemovedMany { items }
         }
         Undo::Turned { index, yaw } => {
@@ -4829,7 +4988,9 @@ fn apply(
                     state.status.problem(format!("{id} back to {yaw:.0} deg"));
                 }
                 Err(e) => {
-                    state.status.problem(format!("turned {id} back but cannot draw it: {e}"));
+                    state
+                        .status
+                        .problem(format!("turned {id} back but cannot draw it: {e}"));
                     error!("{e}");
                 }
             }
@@ -4853,7 +5014,9 @@ fn apply(
                     });
                 }
                 Err(e) => {
-                    state.status.problem(format!("lifted {id} back but cannot draw it: {e}"));
+                    state
+                        .status
+                        .problem(format!("lifted {id} back but cannot draw it: {e}"));
                     error!("{e}");
                 }
             }
@@ -4874,7 +5037,9 @@ fn apply(
                     });
                 }
                 Err(e) => {
-                    state.status.problem(format!("tipped {id} back but cannot draw it: {e}"));
+                    state
+                        .status
+                        .problem(format!("tipped {id} back but cannot draw it: {e}"));
                     error!("{e}");
                 }
             }
@@ -4914,7 +5079,9 @@ fn apply(
             if items.is_empty() {
                 return None;
             }
-            state.status.note(format!("took back {} stamp(s)", items.len()));
+            state
+                .status
+                .note(format!("took back {} stamp(s)", items.len()));
             Undo::UnstampedMany { items }
         }
         Undo::UnstampedMany { items } => {
@@ -4952,17 +5119,23 @@ fn apply(
                 return None;
             }
             items.reverse();
-            state.status.note(format!("took back {} stamp(s)", items.len()));
+            state
+                .status
+                .note(format!("took back {} stamp(s)", items.len()));
             Undo::UnstampedMany { items }
         }
         Undo::MovedStamp { id, from } => {
             let Some(st) = project.map.stamps.iter_mut().find(|s| s.id == id) else {
-                state.status.problem(format!("`{id}` is not on this map any more"));
+                state
+                    .status
+                    .problem(format!("`{id}` is not on this map any more"));
                 return None;
             };
             let now = st.at;
             st.at = from;
-            state.status.note(format!("`{id}` back at ({:.1}, {:.1})", from.0, from.1));
+            state
+                .status
+                .note(format!("`{id}` back at ({:.1}, {:.1})", from.0, from.1));
             // The entities are not touched: `redraw_stamps` rebuilds the whole stamped set from the
             // list, so there is one place that turns stamps into pictures — the same argument every
             // other stamp arm here makes.
@@ -5025,7 +5198,9 @@ fn toggle_pin(
     } else {
         let id = p.id.clone();
         state.pinning = Some((index, String::new()));
-        state.status.note(format!("why is {id} pinned? Enter to keep it, Esc to cancel"));
+        state.status.note(format!(
+            "why is {id} pinned? Enter to keep it, Esc to cancel"
+        ));
     }
 }
 
@@ -5072,8 +5247,14 @@ fn straighten_under_cursor(
     // One keypress, one entry — `Undo::Group` applies in order and inverts by reversing.
     state.record(Undo::Group {
         ops: vec![
-            Undo::Turned { index, yaw: was_yaw },
-            Undo::Tipped { index, tip: was_tip },
+            Undo::Turned {
+                index,
+                yaw: was_yaw,
+            },
+            Undo::Tipped {
+                index,
+                tip: was_tip,
+            },
         ],
     });
     // The shared redraw, so a piece standing on this one keeps the height it had — the same call
@@ -5081,7 +5262,9 @@ fn straighten_under_cursor(
     match redraw_placements(commands, assets, project, placed, &[index]) {
         Ok(()) => state.status.note(format!("{id} straight again")),
         Err(e) => {
-            state.status.problem(format!("straightened {id} but cannot draw it: {e}"));
+            state
+                .status
+                .problem(format!("straightened {id} but cannot draw it: {e}"));
             error!("{e}");
         }
     }
@@ -5123,14 +5306,19 @@ fn turn_under_cursor(
     // Redrawn from the finished map, so a piece standing on this one keeps the height it had.
     match heights(project) {
         Ok(ys) => {
-            if let (Some(d), Some(&y)) = (project.library.get(&descriptor).cloned(), ys.get(index)) {
-                if let Some(e) = spawn_piece(commands, assets, &d, at, yaw, tip, project.map.origin, y) {
+            if let (Some(d), Some(&y)) = (project.library.get(&descriptor).cloned(), ys.get(index))
+            {
+                if let Some(e) =
+                    spawn_piece(commands, assets, &d, at, yaw, tip, project.map.origin, y)
+                {
                     commands.entity(e).insert(Placement(id.clone()));
                 }
             }
         }
         Err(e) => {
-            state.status.problem(format!("turned {id} but cannot draw it: {e}"));
+            state
+                .status
+                .problem(format!("turned {id} but cannot draw it: {e}"));
             error!("{e}");
             return;
         }
@@ -5165,9 +5353,16 @@ fn redraw_placements(
         let (Some(d), Some(&y)) = (project.library.get(&p.descriptor), ys.get(i)) else {
             continue;
         };
-        if let Some(e) =
-            spawn_piece(commands, assets, d, p.at, p.yaw, p.tip, project.map.origin, y)
-        {
+        if let Some(e) = spawn_piece(
+            commands,
+            assets,
+            d,
+            p.at,
+            p.yaw,
+            p.tip,
+            project.map.origin,
+            y,
+        ) {
             commands.entity(e).insert(Placement(p.id.clone()));
         }
     }
@@ -5266,9 +5461,11 @@ pub fn composition_from_set(
     // filesystem and the schema disagree about.
     let id = emerge_core::naming::to_snake_case(id);
     if id.is_empty() {
-        return Err("a group needs a name. Names are snake_case — letters, digits, single \
+        return Err(
+            "a group needs a name. Names are snake_case — letters, digits, single \
                     underscores, starting with a letter."
-            .to_owned());
+                .to_owned(),
+        );
     }
     if set.pieces.is_empty() && set.stamps.is_empty() {
         return Err("that box held nothing, so there is no composition to make".to_owned());
@@ -5285,7 +5482,11 @@ pub fn composition_from_set(
             let short = short_id(&p.descriptor);
             let n = seen.entry(short).or_insert(0);
             *n += 1;
-            if *n == 1 { short.to_owned() } else { format!("{short}_{n}") }
+            if *n == 1 {
+                short.to_owned()
+            } else {
+                format!("{short}_{n}")
+            }
         })
         .collect();
 
@@ -5314,14 +5515,17 @@ pub fn composition_from_set(
         let on = match piece.on {
             CloneHost::Layer => None,
             CloneHost::InSet(host) => Some(member_ids.get(host).cloned().ok_or_else(|| {
-                format!("`{}` rests on a piece the set does not hold", piece.descriptor)
+                format!(
+                    "`{}` rests on a piece the set does not hold",
+                    piece.descriptor
+                )
             })?),
             CloneHost::Outside => {
                 return Err(format!(
                     "`{}` rests on something outside the box. Draw the box round its host too, or \
                      leave it out — a group cannot carry a piece whose support stayed behind.",
                     piece.descriptor
-                ))
+                ));
             }
         };
         members.push(Member {
@@ -5367,7 +5571,11 @@ pub fn composition_from_set(
         let short = short_id(&cs.of);
         let n = seen.entry(short).or_insert(0);
         *n += 1;
-        let id = if *n == 1 { short.to_owned() } else { format!("{short}_{n}") };
+        let id = if *n == 1 {
+            short.to_owned()
+        } else {
+            format!("{short}_{n}")
+        };
         members.push(Member {
             paint: 0,
             id,
@@ -5408,10 +5616,13 @@ pub fn composition_from_set(
 
 /// Does this piece's height depend on the ceiling — i.e. on the very bounds being derived?
 fn mounts_against_the_ceiling(d: &emerge_core::descriptor::Descriptor) -> bool {
-    use emerge_core::descriptor::{Mount, DecalHost};
+    use emerge_core::descriptor::{DecalHost, Mount};
     matches!(
         d.mount,
-        Some(Mount::OnCeiling) | Some(Mount::Decal { on: DecalHost::Ceiling })
+        Some(Mount::OnCeiling)
+            | Some(Mount::Decal {
+                on: DecalHost::Ceiling
+            })
     )
 }
 
@@ -5479,7 +5690,7 @@ fn envelope_size(
                 return Err(format!(
                     "`{id}` is anchored, so it claims no space and a group cannot take its size \
                      from it. Give it a bounded envelope first."
-                ))
+                ));
             }
         }
     }
@@ -5505,18 +5716,31 @@ mod capture_tests {
         Descriptor {
             id: id.to_owned(),
             mesh: Some(format!("pack/{id}.glb")),
-            extent: Extent { footprint: Some((w, d)), height: Some(h) },
+            extent: Extent {
+                footprint: Some((w, d)),
+                height: Some(h),
+            },
             mount: Some(Mount::OnFloor),
             ..Descriptor::default()
         }
     }
 
     fn lib(ds: Vec<Descriptor>) -> Library {
-        Library { version: emerge_core::library::LIBRARY_VERSION, note: None, descriptors: ds }
+        Library {
+            version: emerge_core::library::LIBRARY_VERSION,
+            note: None,
+            descriptors: ds,
+        }
     }
 
     fn held(pieces: Vec<ClonePiece>, centre_off: (f32, f32), half: (f32, f32)) -> CloneSet {
-        CloneSet { pieces, stamps: Vec::new(), centre_off, half, yaw: 0.0 }
+        CloneSet {
+            pieces,
+            stamps: Vec::new(),
+            centre_off,
+            half,
+            yaw: 0.0,
+        }
     }
 
     /// No compositions — the capture tests are about loose pieces, and a nested member is covered
@@ -5616,7 +5840,11 @@ mod capture_tests {
             set.yaw = (set.yaw + 90.0).rem_euclid(360.0);
         }
         let (at, yaw) = set.placed(&piece, (10.0, 10.0));
-        assert_eq!((at, yaw), ((12.0, 10.0), 0.0), "four quarter turns must be identity");
+        assert_eq!(
+            (at, yaw),
+            ((12.0, 10.0), 0.0),
+            "four quarter turns must be identity"
+        );
 
         // The outline is the turned set's BOUNDS: a 2x1 box turned 90 degrees is 1x2.
         set.yaw = 90.0;
@@ -5645,7 +5873,10 @@ mod capture_tests {
     /// **The shape of a captured group**: bounded, centred, sorted, and hosts repointed to members.
     #[test]
     fn a_captured_set_becomes_a_bounded_group_centred_on_itself() {
-        let library = lib(vec![piece_desc("table", 1.0, 0.8, 1.0), piece_desc("lamp", 0.2, 0.4, 0.2)]);
+        let library = lib(vec![
+            piece_desc("table", 1.0, 0.8, 1.0),
+            piece_desc("lamp", 0.2, 0.4, 0.2),
+        ]);
         // A lamp riding the table, and the pair's centre one metre along X from the drag anchor.
         let set = held(
             vec![
@@ -5655,20 +5886,34 @@ mod capture_tests {
             (1.0, 0.0),
             (0.5, 0.5),
         );
-        let c = composition_from_set(&set, "Break Table", &library, &no_compositions()).expect("captures");
+        let c = composition_from_set(&set, "Break Table", &library, &no_compositions())
+            .expect("captures");
 
-        assert_eq!(c.id, "break_table", "the name is FORCED into snake_case, not checked");
-        assert!(matches!(c.envelope, Envelope::Bounded { .. }), "capture is always bounded");
+        assert_eq!(
+            c.id, "break_table",
+            "the name is FORCED into snake_case, not checked"
+        );
+        assert!(
+            matches!(c.envelope, Envelope::Bounded { .. }),
+            "capture is always bounded"
+        );
         // Sorted by id — the schema's rule, so one group has one encoding.
         let ids: Vec<&str> = c.members.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["lamp", "table"]);
         // Positions are relative to the composition's own centre, not the drag anchor.
         for m in &c.members {
-            assert!(m.at.0.abs() < 1e-6 && m.at.1.abs() < 1e-6, "`{}` at {:?}", m.id, m.at);
+            assert!(
+                m.at.0.abs() < 1e-6 && m.at.1.abs() < 1e-6,
+                "`{}` at {:?}",
+                m.id,
+                m.at
+            );
         }
         // The lamp's host is the MEMBER id, not a map placement id.
         let lamp = c.members.iter().find(|m| m.id == "lamp").expect("lamp");
-        let Body::Descriptor { on, .. } = &lamp.body else { panic!("not a descriptor member") };
+        let Body::Descriptor { on, .. } = &lamp.body else {
+            panic!("not a descriptor member")
+        };
         assert_eq!(on.as_deref(), Some("table"));
         // Unrecorded is not stale: nothing has measured what these present yet.
         assert!(c.members.iter().all(|m| m.of_fingerprint.is_none()));
@@ -5679,7 +5924,9 @@ mod capture_tests {
     #[test]
     fn the_envelope_is_the_drawn_box_and_the_tallest_resolved_top() {
         let mut lamp = piece_desc("lamp", 0.2, 0.4, 0.2);
-        lamp.mount = Some(Mount::OnSurface { class: "worktop".to_owned() });
+        lamp.mount = Some(Mount::OnSurface {
+            class: "worktop".to_owned(),
+        });
         let mut table = piece_desc("table", 1.0, 0.8, 1.0);
         table.offers.surfaces = vec!["worktop".to_owned()];
         let library = lib(vec![table, lamp]);
@@ -5692,11 +5939,25 @@ mod capture_tests {
             (1.0, 1.5),
         );
         let c = composition_from_set(&set, "desk", &library, &no_compositions()).expect("captures");
-        let Envelope::Bounded { size } = c.envelope else { panic!("not bounded") };
-        assert!((size.0 - 2.0).abs() < 1e-5, "width is the drag's, doubled: {}", size.0);
-        assert!((size.2 - 3.0).abs() < 1e-5, "depth is the drag's, doubled: {}", size.2);
+        let Envelope::Bounded { size } = c.envelope else {
+            panic!("not bounded")
+        };
+        assert!(
+            (size.0 - 2.0).abs() < 1e-5,
+            "width is the drag's, doubled: {}",
+            size.0
+        );
+        assert!(
+            (size.2 - 3.0).abs() < 1e-5,
+            "depth is the drag's, doubled: {}",
+            size.2
+        );
         // 0.8 table + 0.4 lamp on top of it — not 0.8, and not 0.4.
-        assert!((size.1 - 1.2).abs() < 1e-5, "height must resolve the stack: {}", size.1);
+        assert!(
+            (size.1 - 1.2).abs() < 1e-5,
+            "height must resolve the stack: {}",
+            size.1
+        );
     }
 
     /// **Three refusals, each naming the piece.** The tool does not guess — the human has final say,
@@ -5710,23 +5971,46 @@ mod capture_tests {
         ceiling.mount = Some(Mount::OnCeiling);
         let library = lib(vec![measured, unmeasured, ceiling]);
 
-        let outside = held(vec![at("crate", (0.0, 0.0), CloneHost::Outside)], (0.0, 0.0), (0.5, 0.5));
-        let e = composition_from_set(&outside, "g", &library, &no_compositions()).expect_err("must refuse");
+        let outside = held(
+            vec![at("crate", (0.0, 0.0), CloneHost::Outside)],
+            (0.0, 0.0),
+            (0.5, 0.5),
+        );
+        let e = composition_from_set(&outside, "g", &library, &no_compositions())
+            .expect_err("must refuse");
         assert!(e.contains("crate") && e.contains("outside"), "{e}");
 
-        let unmeasured = held(vec![at("mystery", (0.0, 0.0), CloneHost::Layer)], (0.0, 0.0), (0.5, 0.5));
-        let e = composition_from_set(&unmeasured, "g", &library, &no_compositions()).expect_err("must refuse");
+        let unmeasured = held(
+            vec![at("mystery", (0.0, 0.0), CloneHost::Layer)],
+            (0.0, 0.0),
+            (0.5, 0.5),
+        );
+        let e = composition_from_set(&unmeasured, "g", &library, &no_compositions())
+            .expect_err("must refuse");
         assert!(e.contains("mystery") && e.contains("unmeasured"), "{e}");
 
-        let hanging = held(vec![at("lamp", (0.0, 0.0), CloneHost::Layer)], (0.0, 0.0), (0.5, 0.5));
-        let e = composition_from_set(&hanging, "g", &library, &no_compositions()).expect_err("must refuse");
+        let hanging = held(
+            vec![at("lamp", (0.0, 0.0), CloneHost::Layer)],
+            (0.0, 0.0),
+            (0.5, 0.5),
+        );
+        let e = composition_from_set(&hanging, "g", &library, &no_compositions())
+            .expect_err("must refuse");
         assert!(e.contains("lamp") && e.contains("ceiling"), "{e}");
 
         let empty = held(Vec::new(), (0.0, 0.0), (0.5, 0.5));
-        assert!(composition_from_set(&empty, "g", &library, &no_compositions()).is_err(), "an empty box is nothing to keep");
+        assert!(
+            composition_from_set(&empty, "g", &library, &no_compositions()).is_err(),
+            "an empty box is nothing to keep"
+        );
 
-        let named = held(vec![at("crate", (0.0, 0.0), CloneHost::Layer)], (0.0, 0.0), (0.5, 0.5));
-        let e = composition_from_set(&named, "!!!", &library, &no_compositions()).expect_err("must refuse");
+        let named = held(
+            vec![at("crate", (0.0, 0.0), CloneHost::Layer)],
+            (0.0, 0.0),
+            (0.5, 0.5),
+        );
+        let e = composition_from_set(&named, "!!!", &library, &no_compositions())
+            .expect_err("must refuse");
         assert!(e.contains("snake_case"), "{e}");
     }
 
@@ -5743,7 +6027,8 @@ mod capture_tests {
             (0.0, 0.0),
             (1.0, 1.0),
         );
-        let c = composition_from_set(&set, "chairs", &library, &no_compositions()).expect("captures");
+        let c =
+            composition_from_set(&set, "chairs", &library, &no_compositions()).expect("captures");
         let ids: Vec<&str> = c.members.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["chair", "chair_2", "chair_3"]);
     }
@@ -5833,7 +6118,9 @@ fn lift_under_cursor(
             });
         }
         Err(e) => {
-            state.status.problem(format!("lifted {id} but cannot draw it: {e}"));
+            state
+                .status
+                .problem(format!("lifted {id} but cannot draw it: {e}"));
             error!("{e}");
         }
     }
@@ -5909,7 +6196,9 @@ fn tip_under_cursor(
             });
         }
         Err(e) => {
-            state.status.problem(format!("tipped {id} but cannot draw it: {e}"));
+            state
+                .status
+                .problem(format!("tipped {id} but cannot draw it: {e}"));
             error!("{e}");
         }
     }
@@ -6055,7 +6344,9 @@ fn send_to_tiles(
     // A placement naming a descriptor the library does not have is a map/library mismatch, and
     // switching tabs to show an empty pane would report it as nothing happening.
     if project.library.get(&id).is_none() {
-        state.status.problem(format!("`{id}` is not in this library, so there is nothing to edit"));
+        state.status.problem(format!(
+            "`{id}` is not in this library, so there is nothing to edit"
+        ));
         return;
     }
     // `selected_library_id` is the discriminant `ImportState::editing` follows, so setting it is the
@@ -6067,7 +6358,9 @@ fn send_to_tiles(
     // they just did.
     import.status.note(format!("editing `{id}`"));
     *mode = crate::tiles::Mode::Meshes;
-    state.status.note(format!("`{id}` — opened on the tiles tab"));
+    state
+        .status
+        .note(format!("`{id}` — opened on the tiles tab"));
 }
 
 /// **Pick a piece up, and put it down** — the whole of [`Tool::Move`].
@@ -6084,6 +6377,51 @@ fn send_to_tiles(
 /// regression that would make placing feel broken.
 pub(crate) fn cursor_is_clear(tool: Tool, brush: Option<usize>, composition_armed: bool) -> bool {
     tool == Tool::Place && brush.is_none() && !composition_armed
+}
+
+/// **The removal box, locked to the live grid rung.**
+///
+/// Both corners snap to the lattice `J` is showing, so the red box lands on the same lines a piece
+/// lands on — asked for at the keyboard, 2026-08-15: *"when I hit x and drag, the deletion selection
+/// [should] lock to whatever level of the grid is set depending upon the j toggle."* It followed the
+/// cursor continuously before, which made "did that corner include the crate or not" a question the
+/// picture could not answer.
+///
+/// Rounding, not flooring, because that is what `grid::snap_corner` does for a placement: a box
+/// edge and a piece edge decided by different rules would disagree about the same cell.
+///
+/// Returns `(x0, z0, x1, z1)`, min corner first.
+pub(crate) fn removal_box(from: (f32, f32), at: (f32, f32), pitch: f32) -> (f32, f32, f32, f32) {
+    if !(pitch.is_finite() && pitch > 0.0) {
+        // No usable rung is no snapping — the raw box, rather than a division by zero.
+        return (
+            from.0.min(at.0),
+            from.1.min(at.1),
+            from.0.max(at.0),
+            from.1.max(at.1),
+        );
+    }
+    let snap = |v: f32| (v / pitch).round() * pitch;
+    (
+        snap(from.0.min(at.0)),
+        snap(from.1.min(at.1)),
+        snap(from.0.max(at.0)),
+        snap(from.1.max(at.1)),
+    )
+}
+
+/// **Does a panel under the cursor stop this gesture?** Only if the gesture has not started.
+///
+/// Pointer capture, in one expression. A press on a control is a control click and must not reach
+/// the world; a drag already under way belongs to the author, and a panel it sweeps across has no
+/// claim on it. Both `drive_place` and `drive_removal` ask this, so the two boxes cannot disagree
+/// about when the interface is in the way.
+///
+/// Before this, the test ran every frame: dragging a fill box over the palette tore the gesture in
+/// half — the preview vanished mid-sweep and letting go over a panel discarded the whole box.
+/// Reported at the keyboard, 2026-08-15.
+pub(crate) fn ui_blocks_gesture(over_ui: bool, dragging: bool) -> bool {
+    over_ui && !dragging
 }
 
 /// **Is there a ghost on screen — the thing the rotate cluster steers?**
@@ -6174,7 +6512,9 @@ fn drive_move(
                 Held::Piece(id) => id.clone(),
                 Held::Stamp(id) => format!("`{id}`, whole"),
             };
-            state.status.note(format!("{what} in hand — click to put it down, Esc to put it back"));
+            state.status.note(format!(
+                "{what} in hand — click to put it down, Esc to put it back"
+            ));
             drag.held = Some(held);
         }
         // **Drop.** Snapped like a placement, and free with the modifier held, so a move lands on the
@@ -6183,11 +6523,20 @@ fn drive_move(
         // `redraw_stamps` puts them where the new `at` says. FVS-R-14's move arm.
         Some(Held::Stamp(id)) => {
             let free = keys::alt_held(&keyboard);
-            let at = map_at(&project, hit, free, &anchor, snap_level(&keyboard, rung.0), held_span(&project, &drag));
+            let at = map_at(
+                &project,
+                hit,
+                free,
+                &anchor,
+                snap_level(&keyboard, rung.0),
+                held_span(&project, &drag),
+            );
             // Resolved now, not at grab — the list can have moved under it, exactly as for a piece.
             let Some(st) = project.map.stamps.iter_mut().find(|s| s.id == id) else {
                 drag.held = None;
-                state.status.problem(format!("`{id}` is gone — nothing was moved"));
+                state
+                    .status
+                    .problem(format!("`{id}` is gone — nothing was moved"));
                 return;
             };
             let from = st.at;
@@ -6201,32 +6550,39 @@ fn drive_move(
             st.at = at;
             drag.held = None;
             project.dirty = true;
-            state.record(Undo::MovedStamp { id: id.clone(), from });
+            state.record(Undo::MovedStamp {
+                id: id.clone(),
+                from,
+            });
             let how = if free { " free" } else { "" };
-            state.status.note(format!(
-                "moved `{id}` to ({:.1}, {:.1}){how}",
-                at.0, at.1
-            ));
+            state
+                .status
+                .note(format!("moved `{id}` to ({:.1}, {:.1}){how}", at.0, at.1));
         }
         Some(Held::Piece(id)) => {
             // Resolved now, not at grab: an undo or a fill between the two clicks may have moved this
             // row, and it may have removed it outright.
             let Some(index) = project.map.placements.iter().position(|p| p.id == id) else {
                 drag.held = None;
-                state.status.problem(format!("`{id}` is gone — nothing was moved"));
+                state
+                    .status
+                    .problem(format!("`{id}` is gone — nothing was moved"));
                 return;
             };
             let free = keys::alt_held(&keyboard);
-            let at = map_at(&project, hit, free, &anchor, snap_level(&keyboard, rung.0), held_span(&project, &drag));
+            let at = map_at(
+                &project,
+                hit,
+                free,
+                &anchor,
+                snap_level(&keyboard, rung.0),
+                held_span(&project, &drag),
+            );
             // One `deref_mut`, then two disjoint field borrows. `ResMut`'s `Deref` cannot split them
             // for us, so `(&mut project.map, &project.library)` is a double borrow of the resource.
             let p = &mut *project;
-            let moved = match emerge_core::stack::move_placement(
-                &mut p.map,
-                &p.library,
-                index,
-                at,
-            ) {
+            let moved = match emerge_core::stack::move_placement(&mut p.map, &p.library, index, at)
+            {
                 Ok(moved) => moved,
                 // **Refused, and still in hand.** Dropping it anyway is the behaviour this exists to
                 // avoid: the piece would land somewhere its mount does not hold and read as an
@@ -6265,15 +6621,24 @@ fn drive_move(
                         else {
                             continue;
                         };
-                        if let Some(e) =
-                            spawn_piece(&mut commands, &assets, &d, at, yaw, tip, project.map.origin, y)
-                        {
+                        if let Some(e) = spawn_piece(
+                            &mut commands,
+                            &assets,
+                            &d,
+                            at,
+                            yaw,
+                            tip,
+                            project.map.origin,
+                            y,
+                        ) {
                             commands.entity(e).insert(Placement(id));
                         }
                     }
                 }
                 Err(e) => {
-                    state.status.problem(format!("moved, but cannot draw it: {e}"));
+                    state
+                        .status
+                        .problem(format!("moved, but cannot draw it: {e}"));
                     error!("{e}");
                     state.record(Undo::Moved { moved });
                     return;
@@ -6344,7 +6709,7 @@ pub fn pick_at(project: &Project, probe: (f32, f32)) -> Option<usize> {
         let reach = project
             .library
             .get(&p.descriptor)
-            .map(|d| crate::fill::cell_extents(d, p.yaw))
+            .map(|d| crate::fill::cell_extents(d, p.yaw, p.tip))
             .map_or(crate::fill::MIN_CELL, |(x, z)| x.max(z));
         let d2 = (p.at.0 - probe.0).powi(2) + (p.at.1 - probe.1).powi(2);
         if d2 > reach * reach {
@@ -6379,7 +6744,116 @@ pub fn pick_at(project: &Project, probe: (f32, f32)) -> Option<usize> {
 /// The second pass of `pick_at` — nearest centre within its own reach — deliberately does **not**
 /// extend to stamps. That pass is a grab assist for a piece too small to hit; a stamp is a tile-sized
 /// region and an author pointing near one but not at it is pointing at the floor.
-pub fn pick_subject(project: &Project, picture: &StampPicture, probe: (f32, f32)) -> Option<Subject> {
+/// **Where a ray enters an axis-aligned box, if it does** — the slab method, in world metres.
+///
+/// Returns the distance along `dir` to the near face, and `None` when the ray misses or the box is
+/// entirely behind the camera. A hit that *starts* inside the box returns `0.0`, which is the honest
+/// answer for a camera sitting inside something.
+///
+/// Pure arithmetic on purpose: it is the half of mesh picking that can be tested without a window,
+/// and every interesting case (edge-on, behind, grazing a face) is a number rather than a screenshot.
+pub fn ray_box_t(origin: Vec3, dir: Vec3, centre: Vec3, half: Vec3) -> Option<f32> {
+    let (mut near, mut far) = (f32::NEG_INFINITY, f32::INFINITY);
+    for axis in 0..3 {
+        let (o, d) = (origin[axis] - centre[axis], dir[axis]);
+        let h = half[axis].abs();
+        if d.abs() < 1e-6 {
+            // Parallel to this pair of faces: a miss unless the ray already lies between them.
+            if o.abs() > h {
+                return None;
+            }
+            continue;
+        }
+        let (t1, t2) = ((-h - o) / d, (h - o) / d);
+        let (lo, hi) = if t1 <= t2 { (t1, t2) } else { (t2, t1) };
+        near = near.max(lo);
+        far = far.min(hi);
+        if near > far {
+            return None;
+        }
+    }
+    // Behind the camera entirely.
+    (far >= 0.0).then(|| near.max(0.0))
+}
+
+/// **Which placement the cursor's ray runs into first** — picking by the piece's own volume.
+///
+/// # The second of two questions, not a second answer to one
+///
+/// This editor asks the pointer two different things and must not confuse them. *"Which cell am I
+/// pointing at?"* is [`crate::view::cursor_ground`] — a ray against the ground plane — and it owns
+/// placing, box fill and stamping, where the answer wanted is a **place**. *"Which piece am I
+/// pointing at?"* is this, and it owns picking up, removing and stack targeting, where the answer
+/// wanted is a **thing**. Plan-space `stack::covers` answered the second question with the first
+/// one's geometry, so a click landed on whatever stood on the ground *behind* a tall piece: the top
+/// half of a wall belonged to the floor it was standing on. Reported at the keyboard, 2026-08-15 —
+/// *"I should be able to click on a mesh anywhere to pick it up, not strictly the toe underneath."*
+///
+/// The two are orchestrated by what is armed, which is a rule this editor already has: a clear
+/// cursor asks about a thing ([`cursor_is_clear`]), an armed brush asks about a place
+/// ([`ghost_is_armed`]).
+///
+/// # Boxes, not meshes
+///
+/// The pieces are GLB scenes with no colliders, so a true mesh ray would mean making every one of
+/// them pickable — which the editor rejected before, because it also makes every one of them eat
+/// the click that places the next piece. Their **boxes** are already known to this crate: the
+/// footprint `brush_span` turns with the yaw, the height the descriptor declares, and the base `y`
+/// that `stack::resolve_y` computes for the whole map. That is the same box `covers` tests in plan
+/// and `blocking` reserves in space, so picking cannot drift from placing.
+///
+/// `ys` is `stack::resolve_y`'s answer, indexed with the placements; a placement with no entry is
+/// skipped rather than guessed at.
+pub fn ray_pick(project: &Project, ys: &[f32], origin: Vec3, dir: Vec3) -> Option<usize> {
+    let mut best: Option<(usize, f32, &str)> = None;
+    for (i, p) in project.map.placements.iter().enumerate() {
+        let (Some(d), Some(&y)) = (project.library.get(&p.descriptor), ys.get(i)) else {
+            continue;
+        };
+        let (w, depth) = brush_span(d, p.yaw, p.tip);
+        // **The box as the piece is LYING.** `brush_span` turns the floor two; the third turns with
+        // them, because a tip is one permutation of all three — a 2.40 m wall on its side is 2.40 m
+        // of floor and a hand's breadth tall, and reading the authored height here would leave two
+        // and a half metres of invisible hitbox standing over it. Same `tipped_extents`
+        // `stack::covers` reserves with, so what you can click is what the piece occupies.
+        //
+        // A piece with no declared height is not invisible to a click — it gets the floor's own
+        // thinness, so a decal or a flat tile is still a thing you can point at.
+        let height = emerge_core::descriptor::tipped_extents(d, p.tip)
+            .map_or_else(|| d.extent.height.unwrap_or(0.02), |(_, h, _)| h)
+            .max(0.02);
+        let centre = Vec3::new(
+            project.map.origin.0 + p.at.0,
+            y + height * 0.5,
+            project.map.origin.2 + p.at.1,
+        );
+        let Some(t) = ray_box_t(
+            origin,
+            dir,
+            centre,
+            Vec3::new(w * 0.5, height * 0.5, depth * 0.5),
+        ) else {
+            continue;
+        };
+        // **Nearest wins, and the id breaks a tie.** Two pieces at the same distance is a coincident
+        // pair, and picking by declaration order would make the answer depend on insertion history —
+        // the determinism rule this repo holds every query to.
+        let better = match &best {
+            None => true,
+            Some((_, best_t, best_id)) => (t, p.id.as_str()) < (*best_t, *best_id),
+        };
+        if better {
+            best = Some((i, t, p.id.as_str()));
+        }
+    }
+    best.map(|(i, _, _)| i)
+}
+
+pub fn pick_subject(
+    project: &Project,
+    picture: &StampPicture,
+    probe: (f32, f32),
+) -> Option<Subject> {
     let mut best: Option<(Subject, f32, &str)> = None;
     for (i, p) in project.map.placements.iter().enumerate() {
         let Some(d) = project.library.get(&p.descriptor) else {
@@ -6530,14 +7004,26 @@ fn under_cursor_target(
     let hit = cursor_ground(pointer.0, cam, cam_tf)?;
     let at = project.map.to_map_space((hit.x, hit.z));
     if let Some((id, cell)) = &lock.0 {
-        if (snap_point(project, at.0, SnapLevel::Tile), snap_point(project, at.1, SnapLevel::Tile)) == *cell {
+        if (
+            snap_point(project, at.0, SnapLevel::Tile),
+            snap_point(project, at.1, SnapLevel::Tile),
+        ) == *cell
+        {
             if let Some(i) = project.map.placements.iter().position(|p| &p.id == id) {
                 return Some(i);
             }
         }
         lock.0 = None;
     }
-    pick_at(project, at)
+    // **The piece the ray runs into, by its own volume** — see [`ray_pick`] for why this question
+    // is not the ground one. The heights come from the finished map, the same call the ghost and
+    // every redraw make, so what a click grabs is what is drawn.
+    //
+    // A map whose heights do not resolve has a bigger problem than a pick, and answering `None` is
+    // the honest thing: the verbs above say "nothing here" rather than acting on a guess.
+    let ys = emerge_core::stack::resolve_y(&project.map, &project.library).ok()?;
+    let (origin, dir) = crate::view::cursor_ray(pointer.0, cam, cam_tf)?;
+    ray_pick(project, &ys, origin, dir)
 }
 
 /// **`H`: step the target through the stack under the cursor**, bottom to top, wrapping.
@@ -6557,7 +7043,9 @@ fn cycle_target(
     };
     let (cam, cam_tf) = *camera;
     let Some(hit) = cursor_ground(pointer.0, cam, cam_tf) else {
-        state.status.note("nothing under the cursor to target".to_owned());
+        state
+            .status
+            .note("nothing under the cursor to target".to_owned());
         return;
     };
     let at = project.map.to_map_space((hit.x, hit.z));
@@ -6588,7 +7076,11 @@ fn cycle_target(
     stack.sort_by(|a, b| {
         a.1.partial_cmp(&b.1)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| project.map.placements[a.0].id.cmp(&project.map.placements[b.0].id))
+            .then_with(|| {
+                project.map.placements[a.0]
+                    .id
+                    .cmp(&project.map.placements[b.0].id)
+            })
     });
     // A press over the held cell steps up the stack; a press anywhere fresh starts at the bottom.
     let next = match &lock.0 {
@@ -6620,7 +7112,7 @@ fn drive_target_marker(
     let footprint = lock.0.as_ref().and_then(|(id, _)| {
         let p = project.map.placements.iter().find(|p| &p.id == id)?;
         let d = project.library.get(&p.descriptor)?;
-        let (w, depth) = crate::fill::cell_extents(d, p.yaw);
+        let (w, depth) = crate::fill::cell_extents(d, p.yaw, p.tip);
         Some((p.at, w, depth))
     });
     if lock.0.is_some() && footprint.is_none() {
@@ -6691,7 +7183,9 @@ fn leaving_a_tab_puts_the_name_prompt_down(
     state.grouping = None;
     // An unconfirmed replace is a question about a name that is no longer being asked.
     state.replacing = None;
-    state.status.note("not named — the set is still in hand".to_owned());
+    state
+        .status
+        .note("not named — the set is still in hand".to_owned());
 }
 
 fn group_name_keys(
@@ -6715,10 +7209,14 @@ fn group_name_keys(
             Key::Enter => {
                 // **Peeked, not taken.** An unconfirmed replace has to leave the field open, or the
                 // second press would have nothing to confirm.
-                let Some(raw) = state.grouping.clone() else { return };
+                let Some(raw) = state.grouping.clone() else {
+                    return;
+                };
                 let Some(set) = clone_drag.held.as_ref() else {
                     state.grouping = None;
-                    state.status.problem("the set was put down before the name was finished");
+                    state
+                        .status
+                        .problem("the set was put down before the name was finished");
                     return;
                 };
                 let confirmed = state.replacing.is_some();
@@ -6775,19 +7273,19 @@ fn group_name_keys(
                 if let Some(raw) = state.grouping.as_mut() {
                     raw.pop();
                     state.replacing = None;
-            }
+                }
             }
             Key::Character(text) => {
                 if let Some(raw) = state.grouping.as_mut() {
                     raw.push_str(text);
                     state.replacing = None;
-            }
+                }
             }
             Key::Space => {
                 if let Some(raw) = state.grouping.as_mut() {
                     raw.push(' ');
                     state.replacing = None;
-            }
+                }
             }
             _ => {}
         }
@@ -6839,7 +7337,11 @@ pub fn keep_as_group(
 ) -> Result<Kept, String> {
     let comp = composition_from_set(set, raw, &project.library, &project.compositions)?;
     let id = comp.id.clone();
-    let at = project.compositions.compositions.iter().position(|c| c.id == id);
+    let at = project
+        .compositions
+        .compositions
+        .iter()
+        .position(|c| c.id == id);
 
     let stamps = project.map.stamps.iter().filter(|s| s.of == id).count();
     if let Some(_existing) = at {
@@ -6899,7 +7401,9 @@ fn pin_reason_keys(
                 };
                 let reason = reason.trim().to_owned();
                 if reason.is_empty() {
-                    state.status.note("a pin needs a reason; nothing was pinned".to_owned());
+                    state
+                        .status
+                        .note("a pin needs a reason; nothing was pinned".to_owned());
                     return;
                 }
                 // Unpinned is what it was — this field only opens for a piece being pinned.
@@ -6964,11 +7468,7 @@ enum Source {
     Composed,
 }
 
-fn generate(
-    project: &Project,
-    state: &mut EditorState,
-    proposal: &mut Proposal,
-) {
+fn generate(project: &Project, state: &mut EditorState, proposal: &mut Proposal) {
     generate_from(project, state, proposal, Source::Learned);
 }
 
@@ -6989,7 +7489,11 @@ fn generate_from(
     // `from_compositions` derives them, and `solve_constrained` needs them to know which face of a
     // tile presents a wall — so an enclosure wish is expressible for the composition source and for
     // no other. `learn` and `declared` carry an empty list rather than a different shape.
-    type Built = (emerge_core::grammar::Grammar, Vec<String>, Vec<Option<emerge_core::composition::Interface>>);
+    type Built = (
+        emerge_core::grammar::Grammar,
+        Vec<String>,
+        Vec<Option<emerge_core::composition::Interface>>,
+    );
     let built: Result<Built, String> = match source {
         Source::Learned => {
             emerge_core::grammar::learn(&project.map, CELL).map(|g| (g, Vec::new(), Vec::new()))
@@ -7045,7 +7549,9 @@ fn generate_from(
             Ok(e) => scratch.placements.extend(e.placements),
             Err(e) => {
                 error!("emerge-mapper: cannot generate around the stamps: {e}");
-                state.status.problem(format!("cannot generate around the stamps: {e}"));
+                state
+                    .status
+                    .problem(format!("cannot generate around the stamps: {e}"));
                 return;
             }
         }
@@ -7324,7 +7830,9 @@ fn flood_from_cursor(
         .and_then(|ix| project.library.descriptors.get(ix))
         .cloned()
     else {
-        state.status.note("nothing armed to fill with — pick a piece from the palette".to_owned());
+        state
+            .status
+            .note("nothing armed to fill with — pick a piece from the palette".to_owned());
         return;
     };
 
@@ -7336,6 +7844,7 @@ fn flood_from_cursor(
         &brush,
         project.map.to_map_space((hit.x, hit.z)),
         state.brush_yaw,
+        state.brush_tip,
         pitch,
         || {
             n += 1;
@@ -7371,7 +7880,9 @@ fn flood_from_cursor(
             crate::fill::MAX_CELLS
         ));
     } else {
-        state.status.note(format!("filled {count} with {}", brush.id));
+        state
+            .status
+            .note(format!("filled {count} with {}", brush.id));
     }
 }
 
@@ -7433,33 +7944,52 @@ fn drive_ghost(
     //
     // It keeps the carried piece's own yaw, not `brush_yaw`: a move changes where a thing is, and
     // silently re-aiming it would be a second edit the author did not ask for.
-    let subject = match state.tool {
-        Tool::Remove => None,
+    // **A piece in hand previews as itself, however it was picked up.**
+    //
+    // This was keyed on `Tool::Move`, which was the only way to carry something — until a clear
+    // cursor started carrying too (`cursor_is_clear`). The carry worked and the preview did not,
+    // because under Place with no brush the arm below answers `None`: the piece vanished from the
+    // map (`hide_carried` is tool-independent and always was) and nothing appeared under the
+    // cursor. Reported from the keyboard, 2026-08-15: *"it should pop that mesh off and then select
+    // that mesh as a preview on my cursor."*
+    //
+    // Asked FIRST, and of `MoveDrag` rather than of the tool, because "what is in my hand" outranks
+    // "which tool is armed" for the question this system answers — what will the next click do.
+    //
+    // A carried STAMP is still `None`: its rows stay drawn while it is in hand and the drop moves
+    // them, so a ghost would be a second subject for one click.
+    let carried = held
+        .held
+        .as_ref()
+        .and_then(|h| match h {
+            Held::Piece(id) => Some(id),
+            Held::Stamp(_) => None,
+        })
+        .and_then(|id| project.map.placements.iter().find(|p| &p.id == id))
+        .and_then(|p| {
+            project
+                .library
+                .descriptors
+                .iter()
+                .position(|d| d.id == p.descriptor)
+                // Its own yaw and tip, not `brush_yaw`/`brush_tip`: a move changes where a thing is,
+                // and silently re-aiming or righting it would be a second edit the author did not
+                // ask for.
+                .map(|ix| (ix, p.yaw, p.tip))
+        });
+    let subject = match (carried, state.tool) {
+        (Some(carried), _) => Some(carried),
+        (None, Tool::Remove) => None,
         // The clone tool draws its own marker — the set's bounds riding the cursor — and a brush
         // ghost beside it would be a second preview for a click that stamps, not places.
-        Tool::Clone => None,
-        // A carried STAMP previews as itself — its rows stay drawn while it is in hand and the
-        // drop moves them — so the brush ghost has nothing to add and would be a second subject.
-        Tool::Move => held
-            .held
-            .as_ref()
-            .and_then(|h| match h {
-                Held::Piece(id) => Some(id),
-                Held::Stamp(_) => None,
-            })
-            .and_then(|id| project.map.placements.iter().find(|p| &p.id == id))
-            .and_then(|p| {
-                project
-                    .library
-                    .descriptors
-                    .iter()
-                    .position(|d| d.id == p.descriptor)
-                    .map(|ix| (ix, p.yaw))
-            }),
+        (None, Tool::Clone) => None,
+        // Move armed with nothing picked up: the honest preview of "click to pick something up" is
+        // no ghost.
+        (None, Tool::Move) => None,
         // Nothing armed is a real answer: no ghost, because no click is going to place anything.
-        Tool::Place => state.brush.map(|ix| (ix, state.brush_yaw)),
+        (None, Tool::Place) => state.brush.map(|ix| (ix, state.brush_yaw, state.brush_tip)),
     };
-    let Some((brush_ix, want_yaw)) = subject else {
+    let Some((brush_ix, want_yaw, want_tip)) = subject else {
         clear(&mut commands);
         return;
     };
@@ -7471,7 +8001,9 @@ fn drive_ghost(
     // **The same expression the commit asks** — see [`brush_at`], which exists because this call site
     // and `drive_place`'s disagreed. `want_yaw` is the authored yaw for both tools: `state.brush_yaw`
     // under Place, the held piece's own under Move, which is exactly what `held_span` snaps by.
-    let at = brush_at(&project, &keyboard, rung.0, &anchor, hit, d, want_yaw);
+    let at = brush_at(
+        &project, &keyboard, rung.0, &anchor, hit, d, want_yaw, want_tip,
+    );
     let yaw = emerge_bevy::draw_yaw(d, want_yaw);
 
     // **The ghost asks the question the drop will ask** — against a map the carried group is NOT in.
@@ -7482,8 +8014,12 @@ fn drive_ghost(
     // would preview a landing the drop then computes differently. The drop probes with the composition
     // removed; so must the preview, or it is a promise about something that is not going to happen —
     // the one thing this editor's previews are held to.
-    let probe_map = match (state.tool, held.held.as_ref()) {
-        (Tool::Move, Some(Held::Piece(id))) => {
+    // Keyed on what is in hand, not on the tool — for the same reason `subject` is, and with a
+    // sharper consequence: under a clear-cursor carry this used to keep the carried piece in the
+    // probe map, so a carried table could find its own hidden mug and the ghost would preview a
+    // seating the drop then computes differently.
+    let probe_map = match held.held.as_ref() {
+        Some(Held::Piece(id)) => {
             let mut reduced = project.map.clone();
             if let Some(ix) = reduced.placements.iter().position(|p| &p.id == id) {
                 let mut group = emerge_core::stack::group_of(&reduced, ix);
@@ -7823,12 +8359,11 @@ fn drive_clone_ghost(
             (0.0, 0.0, 0.0),
             piece.lift,
         ) {
-            commands
-                .entity(e)
-                .insert((Ghost, ChildOf(parent)))
-                .insert(Transform::from_translation(local).with_rotation(Quat::from_rotation_y(
+            commands.entity(e).insert((Ghost, ChildOf(parent))).insert(
+                Transform::from_translation(local).with_rotation(Quat::from_rotation_y(
                     emerge_bevy::draw_yaw(d, piece.yaw).to_radians(),
-                )));
+                )),
+            );
             drawn += 1;
         }
     }
@@ -7911,7 +8446,15 @@ fn brighten_held(
                         alpha: was.alpha,
                     };
                     let handle = materials.add(lit);
-                    commands.entity(e).insert((MeshMaterial3d(handle), Brightened));
+                    // **`try_insert`, because the thing being marked is rebuilt underneath us.**
+                    // The staged tile is despawned and respawned wholesale on every `Build` change,
+                    // so an entity read this frame can be gone by the time the command applies —
+                    // and a plain `insert` on a despawned entity is a hard panic in Bevy 0.19, which
+                    // is exactly how this crashed the editor on launch. The lift is cosmetic; a
+                    // piece that stopped existing does not need one.
+                    commands
+                        .entity(e)
+                        .try_insert((MeshMaterial3d(handle), Brightened));
                 }
             }
             if let Ok(kids) = children.get(e) {
@@ -7938,7 +8481,10 @@ fn fade_ghost(
                     let a = faded.base_color.alpha() * GHOST_ALPHA;
                     faded.base_color.set_alpha(a);
                     let handle = materials.add(faded);
-                    commands.entity(e).insert((
+                    // Same hazard as `brighten_held`, and the same answer: ghosts are despawned and
+                    // respawned by the systems that own them, so this races the same way. It had
+                    // simply not lost the race yet.
+                    commands.entity(e).try_insert((
                         MeshMaterial3d(handle),
                         Ghosted,
                         bevy::light::NotShadowCaster,
@@ -7956,8 +8502,190 @@ fn fade_ghost(
 mod tests {
     use super::*;
     use emerge_core::descriptor::{Descriptor, Extent};
-    use emerge_core::library::{Library, LIBRARY_VERSION};
+    use emerge_core::library::{LIBRARY_VERSION, Library};
     use emerge_core::map::{Map, Placed};
+
+    /// **The deletion box lands on the grid `J` is showing.**
+    ///
+    /// Asked for at the keyboard, 2026-08-15. It followed the cursor continuously before, so
+    /// "does that corner include the crate" was a question the picture could not answer.
+    #[test]
+    fn the_removal_box_locks_to_the_live_rung() {
+        // A 1 m rung: both corners land on whole metres, nearest line.
+        assert_eq!(
+            removal_box((0.4, 0.4), (2.6, 3.1), 1.0),
+            (0.0, 0.0, 3.0, 3.0)
+        );
+        // Corners arrive in any order and come back min-first.
+        assert_eq!(
+            removal_box((2.6, 3.1), (0.4, 0.4), 1.0),
+            (0.0, 0.0, 3.0, 3.0)
+        );
+        // A finer rung keeps finer edges — this is the whole point of the `J` toggle.
+        let (x0, _, x1, _) = removal_box((0.4, 0.0), (2.6, 0.0), 1.0 / 3.0);
+        assert!(
+            (x0 - 0.3333).abs() < 1e-3 && (x1 - 2.6667).abs() < 1e-3,
+            "{x0} .. {x1}"
+        );
+        // **A sliver inside one cell collapses**, and that is the honest answer: nothing whole was
+        // swept, so nothing is claimed. `CLICK_EPS` already treats a tiny drag as a click.
+        assert_eq!(
+            removal_box((0.1, 0.1), (0.3, 0.3), 1.0),
+            (0.0, 0.0, 0.0, 0.0)
+        );
+        // A nonsense pitch snaps nothing rather than dividing by zero.
+        assert_eq!(
+            removal_box((0.4, 0.4), (2.6, 3.1), 0.0),
+            (0.4, 0.4, 2.6, 3.1)
+        );
+    }
+
+    /// **A panel stops a gesture from starting, never one already under way.** Pointer capture, all
+    /// four corners. Asked for at the keyboard, 2026-08-15: *"I should be able to drag behind the
+    /// UI... without it interrupting my dragging."*
+    #[test]
+    fn the_interface_blocks_a_press_but_not_a_drag_in_flight() {
+        assert!(
+            ui_blocks_gesture(true, false),
+            "a press on a panel is a panel click"
+        );
+        assert!(
+            !ui_blocks_gesture(true, true),
+            "a drag already under way owns the pointer, whatever it sweeps across"
+        );
+        assert!(
+            !ui_blocks_gesture(false, false),
+            "over the world, nothing is in the way"
+        );
+        assert!(!ui_blocks_gesture(false, true));
+    }
+
+    /// **The slab test, including the cases that are easy to get wrong.**
+    #[test]
+    fn a_ray_finds_the_near_face_of_a_box_and_misses_what_it_should() {
+        let unit = Vec3::splat(0.5);
+        // Straight down the -Z axis at a box two metres ahead: the near face is at 1.5.
+        let t = ray_box_t(Vec3::ZERO, -Vec3::Z, Vec3::new(0.0, 0.0, -2.0), unit);
+        assert!(t.is_some_and(|t| (t - 1.5).abs() < 1e-4), "{t:?}");
+        // Aimed past it.
+        assert_eq!(
+            ray_box_t(Vec3::ZERO, -Vec3::Z, Vec3::new(3.0, 0.0, -2.0), unit),
+            None
+        );
+        // **Behind the camera is a miss, not a negative hit** — the sign error that would make a
+        // click grab whatever is directly behind the viewpoint.
+        assert_eq!(
+            ray_box_t(Vec3::ZERO, -Vec3::Z, Vec3::new(0.0, 0.0, 2.0), unit),
+            None
+        );
+        // Starting inside answers zero rather than a negative distance.
+        assert_eq!(ray_box_t(Vec3::ZERO, -Vec3::Z, Vec3::ZERO, unit), Some(0.0));
+        // Parallel to a face pair and outside them: still a miss, and no division blow-up.
+        assert_eq!(
+            ray_box_t(
+                Vec3::new(0.0, 9.0, 0.0),
+                -Vec3::Z,
+                Vec3::new(0.0, 0.0, -2.0),
+                unit
+            ),
+            None
+        );
+        // Parallel and between them: a hit, because the other two axes decide it.
+        assert!(
+            ray_box_t(
+                Vec3::new(0.0, 0.2, 0.0),
+                -Vec3::Z,
+                Vec3::new(0.0, 0.0, -2.0),
+                unit
+            )
+            .is_some()
+        );
+    }
+
+    /// **Clicking a tall piece anywhere on its body picks THAT piece** — the defect this replaced.
+    ///
+    /// Reported at the keyboard, 2026-08-15: *"I should be able to click on a mesh anywhere and to
+    /// pick it up, not strictly the toe underneath."* Plan-space picking asked where the ray met
+    /// the **ground**, so aiming at the upper half of a two-metre wall answered with whatever floor
+    /// tile stood behind it. The ray asks where it meets the **piece**.
+    #[test]
+    fn a_ray_picks_the_tall_piece_it_hits_not_the_floor_behind_it() {
+        let mut wall = piece("wall", 1.0, 0.2);
+        wall.extent.height = Some(2.0);
+        let mut floor = piece("floor", 1.0, 1.0);
+        floor.extent.height = Some(0.05);
+        let project = project(
+            vec![wall.clone(), floor.clone()],
+            vec![
+                at("wall@1", "wall", (0.0, 0.0)),
+                at("floor@1", "floor", (0.0, 2.0)),
+            ],
+        );
+        // Both sit on the ground; the wall rises 2 m out of it.
+        let ys = [0.0, 0.0];
+
+        // A ray from above and in front, aimed at the wall's UPPER half (y = 1.6) and travelling
+        // on past it to the floor tile behind. Plan-space picking answered "floor" for this.
+        let origin = Vec3::new(0.0, 1.6, -6.0);
+        let dir = Vec3::new(0.0, -0.10, 1.0).normalize();
+        assert_eq!(
+            ray_pick(&project, &ys, origin, dir),
+            Some(0),
+            "the ray meets the wall first, so the wall is what a click grabs"
+        );
+
+        // Aimed straight down at the floor tile, well clear of the wall, it finds the floor — the
+        // pick is about where the ray goes, not a preference for tall things. (Straight down rather
+        // than a shallow arc over the wall's top: the first version of this used a slope and
+        // clipped the wall's back corner, which is the sort of arithmetic a test should not also be
+        // asserting.)
+        let over = Vec3::new(0.0, 5.0, 2.0);
+        let down = -Vec3::Y;
+        assert_eq!(
+            ray_pick(&project, &ys, over, down),
+            Some(1),
+            "clear of the wall, it finds the floor"
+        );
+
+        // Aimed at neither.
+        let aside = Vec3::new(40.0, 1.6, -6.0);
+        assert_eq!(
+            ray_pick(&project, &ys, aside, dir),
+            None,
+            "empty space picks nothing"
+        );
+    }
+
+    /// **A piece lifted off the floor is picked where it actually is.** The plan-space test could
+    /// not see height at all, so a sconce at 1.8 m and the floor under it were the same click.
+    #[test]
+    fn the_ray_pick_respects_the_height_a_piece_resolved_to() {
+        let mut plate = piece("plate", 0.4, 0.4);
+        plate.extent.height = Some(0.1);
+        let project = project(
+            vec![plate.clone()],
+            vec![at("plate@1", "plate", (0.0, 0.0))],
+        );
+        // The same piece, once on the floor and once high on a wall.
+        let straight_in = |y: f32| (Vec3::new(0.0, y, -4.0), Vec3::Z);
+        let (o, d) = straight_in(0.05);
+        assert_eq!(
+            ray_pick(&project, &[0.0], o, d),
+            Some(0),
+            "on the floor, a low ray finds it"
+        );
+        assert_eq!(
+            ray_pick(&project, &[1.8], o, d),
+            None,
+            "lifted, the same low ray passes under it"
+        );
+        let (o, d) = straight_in(1.85);
+        assert_eq!(
+            ray_pick(&project, &[1.8], o, d),
+            Some(0),
+            "and a ray at its height finds it"
+        );
+    }
 
     /// **The click-to-move gate, all four corners.** Asked for at the keyboard, 2026-08-14: a bare
     /// click picks a piece up only when nothing else has a claim on the click — the truth table a
@@ -7965,7 +8693,10 @@ mod tests {
     /// a click that does two things is worse than a click that does the wrong one).
     #[test]
     fn a_cursor_is_clear_only_when_nothing_is_armed() {
-        assert!(cursor_is_clear(Tool::Place, None, false), "nothing armed: the click moves");
+        assert!(
+            cursor_is_clear(Tool::Place, None, false),
+            "nothing armed: the click moves"
+        );
         assert!(
             !cursor_is_clear(Tool::Place, Some(3), false),
             "a brush is armed: the click places, never grabs"
@@ -7986,8 +8717,14 @@ mod tests {
     /// author is steering.
     #[test]
     fn the_rotate_cluster_addresses_the_ghost_only_when_one_is_armed() {
-        assert!(ghost_is_armed(Tool::Place, Some(3), false), "a brush is a ghost to steer");
-        assert!(ghost_is_armed(Tool::Place, None, true), "so is an armed composition");
+        assert!(
+            ghost_is_armed(Tool::Place, Some(3), false),
+            "a brush is a ghost to steer"
+        );
+        assert!(
+            ghost_is_armed(Tool::Place, None, true),
+            "so is an armed composition"
+        );
         assert!(
             !ghost_is_armed(Tool::Place, None, false),
             "a clear cursor has no ghost: the keys turn what is under it"
@@ -8093,7 +8830,11 @@ mod tests {
             vec![at("c1", "crate", (0.0, 0.0))],
         );
         assert_eq!(pick_at(&p, (0.0, 0.0)), Some(0), "dead centre");
-        assert_eq!(pick_at(&p, (0.6, 0.0)), Some(0), "just outside, still its cell");
+        assert_eq!(
+            pick_at(&p, (0.6, 0.0)),
+            Some(0),
+            "just outside, still its cell"
+        );
         assert_eq!(pick_at(&p, (9.0, 9.0)), None, "across the room is nothing");
     }
 
@@ -8110,7 +8851,8 @@ mod tests {
             vec![at("a", "crate", (-2.0, 0.0)), at("b", "crate", (2.0, 0.0))],
         );
         let id = |p: &Project, i: Option<usize>| {
-            i.and_then(|i| p.map.placements.get(i)).map(|q| q.id.clone())
+            i.and_then(|i| p.map.placements.get(i))
+                .map(|q| q.id.clone())
         };
         // Equidistant from the origin, so only the id can break it — and it breaks the same way
         // whichever order the file lists them in.
@@ -8158,11 +8900,25 @@ mod snap_tests {
         let p = project_at((0.0, 0.0, 0.0));
         let tile = (grid::TILE, grid::TILE);
         assert_eq!(
-            map_at(&p, Vec3::new(0.24, 0.0, 0.76), false, &FineAnchor::default(), SnapLevel::Tile, tile),
+            map_at(
+                &p,
+                Vec3::new(0.24, 0.0, 0.76),
+                false,
+                &FineAnchor::default(),
+                SnapLevel::Tile,
+                tile
+            ),
             (0.5, 0.5)
         );
         assert_eq!(
-            map_at(&p, Vec3::new(1.26, 0.0, -0.24), false, &FineAnchor::default(), SnapLevel::Tile, tile),
+            map_at(
+                &p,
+                Vec3::new(1.26, 0.0, -0.24),
+                false,
+                &FineAnchor::default(),
+                SnapLevel::Tile,
+                tile
+            ),
             (1.5, -0.5)
         );
     }
@@ -8193,14 +8949,35 @@ mod snap_tests {
 
         // A 1 m tile fills the cell the cursor is in, rather than centring on the corner of four.
         let tile = tests::piece("floor", 1.0, 1.0);
-        near(brush_at(&p, &keys_up, SnapLevel::Tile, &anchor, aim, &tile, 0.0), (0.5, 0.5));
+        near(
+            brush_at(
+                &p,
+                &keys_up,
+                SnapLevel::Tile,
+                &anchor,
+                aim,
+                &tile,
+                0.0,
+                (0, 0),
+            ),
+            (0.5, 0.5),
+        );
 
         // The old ghost's answer, for contrast: a zero span rounds the centre onto the lattice, so
         // the preview straddled four cells while the click filled one.
         let centre_snapped = map_at(&p, aim, false, &anchor, SnapLevel::Tile, (0.0, 0.0));
         near(centre_snapped, (0.0, 1.0));
         assert_ne!(
-            brush_at(&p, &keys_up, SnapLevel::Tile, &anchor, aim, &tile, 0.0),
+            brush_at(
+                &p,
+                &keys_up,
+                SnapLevel::Tile,
+                &anchor,
+                aim,
+                &tile,
+                0.0,
+                (0, 0)
+            ),
             centre_snapped,
             "if these agree the span is being ignored again"
         );
@@ -8208,10 +8985,34 @@ mod snap_tests {
         // A wall is thin on one axis and a whole cell on the other, so it is the case where the two
         // lattices differ on BOTH axes at once — and by different amounts.
         let wall = tests::piece("wall", 0.1, 1.0);
-        near(brush_at(&p, &keys_up, SnapLevel::Tile, &anchor, aim, &wall, 0.0), (0.05, 0.5));
+        near(
+            brush_at(
+                &p,
+                &keys_up,
+                SnapLevel::Tile,
+                &anchor,
+                aim,
+                &wall,
+                0.0,
+                (0, 0),
+            ),
+            (0.05, 0.5),
+        );
 
         // Turned a quarter, the footprint swaps and so must the phase.
-        near(brush_at(&p, &keys_up, SnapLevel::Tile, &anchor, aim, &wall, 90.0), (0.5, 1.05));
+        near(
+            brush_at(
+                &p,
+                &keys_up,
+                SnapLevel::Tile,
+                &anchor,
+                aim,
+                &wall,
+                90.0,
+                (0, 0),
+            ),
+            (0.5, 1.05),
+        );
     }
 
     /// **One ladder: across, up, and inside a tile are the same distance.**
@@ -8229,7 +9030,11 @@ mod snap_tests {
         let p = project_at((0.0, 0.0, 0.0));
         for level in [SnapLevel::Tile, SnapLevel::Fine, SnapLevel::Finer] {
             let rung = level.pitch(p.policy.snap_divisor);
-            assert_eq!(lift_step(&p, level), rung, "{level:?}: a lift left the ladder");
+            assert_eq!(
+                lift_step(&p, level),
+                rung,
+                "{level:?}: a lift left the ladder"
+            );
             assert_eq!(
                 crate::compose::seat_step(&p, level),
                 rung,
@@ -8257,7 +9062,9 @@ mod snap_tests {
         let mut p = tests::project(Vec::new(), Vec::new());
         p.compositions.compositions = vec![Composition {
             id: "site/tile_wall_n".into(),
-            envelope: Envelope::Bounded { size: (1.0, 2.4, 1.0) },
+            envelope: Envelope::Bounded {
+                size: (1.0, 2.4, 1.0),
+            },
             ..Default::default()
         }];
         let compose = crate::compose::ComposeState {
@@ -8271,11 +9078,23 @@ mod snap_tests {
 
         let (level, span) = stamp_snap(&p, &compose, &held, SnapLevel::Tile);
         let place = |aim: f32| {
-            map_at(&p, Vec3::new(aim, 0.0, 0.4), false, &FineAnchor::default(), level, span).0
+            map_at(
+                &p,
+                Vec3::new(aim, 0.0, 0.4),
+                false,
+                &FineAnchor::default(),
+                level,
+                span,
+            )
+            .0
         };
         let got: Vec<f32> = [0.2f32, 1.7, 2.95].iter().map(|a| place(*a)).collect();
 
-        assert_eq!(got, vec![0.5, 1.5, 2.5], "three careless aims must land in three adjacent cells");
+        assert_eq!(
+            got,
+            vec![0.5, 1.5, 2.5],
+            "three careless aims must land in three adjacent cells"
+        );
         for w in got.windows(2) {
             assert!(
                 (w[1] - w[0] - grid::TILE).abs() < 1e-5,
@@ -8302,7 +9121,9 @@ mod snap_tests {
         p.compositions.compositions = vec![
             Composition {
                 id: "tile_a".into(),
-                envelope: Envelope::Bounded { size: (1.0, 1.0, 1.0) },
+                envelope: Envelope::Bounded {
+                    size: (1.0, 1.0, 1.0),
+                },
                 ..Default::default()
             },
             Composition {
@@ -8315,7 +9136,11 @@ mod snap_tests {
         let mut shifted = ButtonInput::<KeyCode>::default();
         shifted.press(keys::SHIFT_KEYS[0]);
         shifted.press(keys::MOD_KEYS[0]);
-        assert_eq!(snap_level(&shifted, SnapLevel::Tile), SnapLevel::Finer, "the modifiers really do ask for the finest rung");
+        assert_eq!(
+            snap_level(&shifted, SnapLevel::Tile),
+            SnapLevel::Finer,
+            "the modifiers really do ask for the finest rung"
+        );
 
         let armed = |id: &str| crate::compose::ComposeState {
             armed: Some(id.to_owned()),
@@ -8323,14 +9148,31 @@ mod snap_tests {
         };
 
         let (level, span) = stamp_snap(&p, &armed("tile_a"), &shifted, SnapLevel::Tile);
-        assert_eq!(level, SnapLevel::Tile, "a Bounded composition must ignore the ladder");
-        assert_eq!(span, (1.0, 1.0), "and snap by its own envelope, so its corner lands on a cell");
+        assert_eq!(
+            level,
+            SnapLevel::Tile,
+            "a Bounded composition must ignore the ladder"
+        );
+        assert_eq!(
+            span,
+            (1.0, 1.0),
+            "and snap by its own envelope, so its corner lands on a cell"
+        );
 
         let (level, _) = stamp_snap(&p, &armed("loose_a"), &shifted, SnapLevel::Tile);
-        assert_eq!(level, SnapLevel::Finer, "an Anchored group claims no tile, so it is dressing");
+        assert_eq!(
+            level,
+            SnapLevel::Finer,
+            "an Anchored group claims no tile, so it is dressing"
+        );
 
         // Nothing armed, or an id the kit no longer has: the ladder, and no invented footprint.
-        let (level, span) = stamp_snap(&p, &crate::compose::ComposeState::default(), &shifted, SnapLevel::Tile);
+        let (level, span) = stamp_snap(
+            &p,
+            &crate::compose::ComposeState::default(),
+            &shifted,
+            SnapLevel::Tile,
+        );
         assert_eq!((level, span), (SnapLevel::Finer, (0.0, 0.0)));
     }
 
@@ -8342,7 +9184,11 @@ mod snap_tests {
         let hit = Vec3::new(0.62, 0.0, 0.41);
         let point = (0.0, 0.0);
         let at = |lvl| map_at(&p, hit, false, &FineAnchor::default(), lvl, point);
-        let (tile, fine, finer) = (at(SnapLevel::Tile), at(SnapLevel::Fine), at(SnapLevel::Finer));
+        let (tile, fine, finer) = (
+            at(SnapLevel::Tile),
+            at(SnapLevel::Fine),
+            at(SnapLevel::Finer),
+        );
         let err = |v: (f32, f32)| (v.0 - 0.62).abs().max((v.1 - 0.41).abs());
         assert!(
             err(finer) < err(fine) && err(fine) < err(tile),
@@ -8371,11 +9217,28 @@ mod snap_tests {
     fn the_modifier_places_where_the_cursor_actually_is() {
         let p = project_at((0.0, 0.0, 0.0));
         let hit = Vec3::new(0.24, 0.0, 0.76);
-        let free = map_at(&p, hit, true, &FineAnchor::default(), SnapLevel::Tile, (0.0, 0.0));
-        assert!((free.0 - 0.24).abs() < 1e-6 && (free.1 - 0.76).abs() < 1e-6, "{free:?}");
+        let free = map_at(
+            &p,
+            hit,
+            true,
+            &FineAnchor::default(),
+            SnapLevel::Tile,
+            (0.0, 0.0),
+        );
+        assert!(
+            (free.0 - 0.24).abs() < 1e-6 && (free.1 - 0.76).abs() < 1e-6,
+            "{free:?}"
+        );
         assert_ne!(
             free,
-            map_at(&p, hit, false, &FineAnchor::default(), SnapLevel::Tile, (0.0, 0.0)),
+            map_at(
+                &p,
+                hit,
+                false,
+                &FineAnchor::default(),
+                SnapLevel::Tile,
+                (0.0, 0.0)
+            ),
             "free placement must differ from snapped"
         );
     }
@@ -8387,11 +9250,25 @@ mod snap_tests {
         let p = project_at((10.0, 0.0, -4.0));
         let hit = Vec3::new(12.3, 0.0, -1.7);
         assert_eq!(
-            map_at(&p, hit, true, &FineAnchor::default(), SnapLevel::Tile, (0.0, 0.0)),
+            map_at(
+                &p,
+                hit,
+                true,
+                &FineAnchor::default(),
+                SnapLevel::Tile,
+                (0.0, 0.0)
+            ),
             p.map.to_map_space((hit.x, hit.z))
         );
         // And the snapped path lands on the grid in MAP space, not in world space.
-        let (sx, sz) = map_at(&p, hit, false, &FineAnchor::default(), SnapLevel::Tile, (0.0, 0.0));
+        let (sx, sz) = map_at(
+            &p,
+            hit,
+            false,
+            &FineAnchor::default(),
+            SnapLevel::Tile,
+            (0.0, 0.0),
+        );
         let pitch = SnapLevel::Tile.pitch(p.policy.snap_divisor);
         assert!(
             (sx / pitch).fract().abs() < 1e-4 && (sz / pitch).fract().abs() < 1e-4,

@@ -34,8 +34,8 @@
 //!   (OVAL-Prompt, Tong et al. 2024 — F 0.39 without retry, 0.71 with). Bounded at one retry:
 //!   same endpoint, same schema, same gate, and the gate's second verdict is final.
 
-use emerge_core::descriptor::{mount_label, mount_options, Face, Mount, DecalHost};
-use emerge_core::vocab::{nearest, Vocabularies, Vocabulary};
+use emerge_core::descriptor::{DecalHost, Face, Mount, mount_label, mount_options};
+use emerge_core::vocab::{Vocabularies, Vocabulary, nearest};
 
 /// Where and what to ask. Endpoint, model and key are environment config so the bmb tunnel and
 /// Ollama Cloud are the same code path with different values.
@@ -130,7 +130,12 @@ impl VlmConfig {
         let timeout_secs = get("EMERGE_VLM_TIMEOUT_SECS")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(120);
-        Ok(VlmConfig { url, model, key, timeout_secs })
+        Ok(VlmConfig {
+            url,
+            model,
+            key,
+            timeout_secs,
+        })
     }
 
     /// A config pointed at a test stub — visible to tests only.
@@ -245,7 +250,24 @@ pub struct PromptCtx {
 /// One axis section of the system prompt: every token with its authored note. Generated LIVE from
 /// the vocabulary, so a vocab edit changes the prompt with no code change.
 fn axis_lines(title: &str, hint: &str, v: &Vocabulary) -> String {
-    let mut out = format!("{title} - {hint} (use any that apply):\n");
+    // **"Use any that apply" invites a guess; most axes apply to almost nothing.**
+    //
+    // A barrel came back tagged `uses-electricity`. The token's own note already said "stops
+    // working when the power does", so the model was not missing the definition — it was filling a
+    // field because a field was offered. Reported from the keyboard, 2026-08-15.
+    //
+    // `effects` is the axis this bites hardest: it is a *functional consequence in the game*, and
+    // the shipped vocabulary is four narrow behaviours. Nearly every prop has none. The general
+    // "prefer an empty list over a guess" line is already in the system prompt and was not enough,
+    // because it reads as advice about uncertainty rather than about the common case.
+    let expectation = if title == "effects" {
+        "MOST OBJECTS HAVE NONE - a barrel, a crate, a chair, a table do nothing to the world. \
+         Leave this EMPTY unless the object plainly has the described behaviour. Do not infer it \
+         from what the object is made of, what it might contain, or where it might be plugged in"
+    } else {
+        "use any that apply, and none is a normal answer"
+    };
+    let mut out = format!("{title} - {hint} ({expectation}):\n");
     for t in &v.tokens {
         out.push_str(&format!("- {}: {}\n", t.name, t.note));
     }
@@ -272,29 +294,106 @@ pub fn mount_token(m: &Mount) -> &'static str {
         Mount::OnCeiling => "ceiling",
         Mount::Tiled => "tiled",
         Mount::InOpening { .. } => "opening",
-        Mount::Decal { on: DecalHost::Floor } => "decal_floor",
-        Mount::Decal { on: DecalHost::Wall { .. } } => "decal_wall",
-        Mount::Decal { on: DecalHost::Ceiling } => "decal_ceiling",
+        Mount::Decal {
+            on: DecalHost::Floor,
+        } => "decal_floor",
+        Mount::Decal {
+            on: DecalHost::Wall { .. },
+        } => "decal_wall",
+        Mount::Decal {
+            on: DecalHost::Ceiling,
+        } => "decal_ceiling",
     }
 }
 
 /// The mount options as JSON discriminants, generated from the same table the editor's `M` key
 /// cycles — every offered mount is one the schema can express, named by [`mount_token`].
+/// **What each mount token MEANS**, in the model's terms rather than the editor's.
+///
+/// The tokens stay short — they are parsed by literal, and a small model copies a short word more
+/// reliably than a phrase — but short words carry no meaning on their own, and the wrong one was
+/// being chosen for a reason that is obvious in hindsight: **every asset is photographed standing
+/// on a neutral floor**, so "on floor" describes the picture of nearly everything. Reported from the
+/// keyboard, 2026-08-15: *"we have the labels on floor and on top of the floor, but that seems to
+/// confuse the VLM because most things are on top of the floor."*
+///
+/// So each line says what the mount is FOR — whether the piece needs a host, and which — rather
+/// than where it happens to be resting in the render. The question the model has to answer is about
+/// the object's nature in a real room, not about the photograph.
+fn mount_meaning(m: &Mount) -> &'static str {
+    match m {
+        Mount::OnFloor => {
+            "stands on the ground by itself in a real room - furniture, crates, \
+                           machines, appliances. Do NOT choose this merely because the photo shows \
+                           it on a floor; everything is photographed that way"
+        }
+        Mount::OnSurface { .. } => {
+            "too small or unstable to stand on the ground - it belongs ON \
+                                    TOP OF another piece of furniture (a mug, a lamp, a keyboard, \
+                                    a book, a tray)"
+        }
+        Mount::OnFace { .. } => {
+            "fixed flat against the vertical face of another piece - not \
+                                 resting on anything"
+        }
+        Mount::OnWall { .. } => {
+            "fixed to a room wall at a height, carrying no weight below it - a \
+                                 sconce, a sign, a switch, a screen"
+        }
+        Mount::OnCeiling => "hangs from above - a pendant lamp, a duct, a fan",
+        Mount::Tiled => {
+            "a repeating surface piece that covers ground or wall in a grid - floor \
+                         panels, wall panels"
+        }
+        Mount::InOpening { .. } => "fills a hole cut in a wall - a door leaf, a window, a grille",
+        Mount::Decal {
+            on: DecalHost::Floor,
+        } => {
+            "a flat marking painted ON the floor with no \
+                                                  thickness - a line, an arrow, a stain"
+        }
+        Mount::Decal {
+            on: DecalHost::Wall { .. },
+        } => {
+            "a flat marking painted ON a wall with no \
+                                                       thickness - a sign, a stencil, a poster"
+        }
+        Mount::Decal {
+            on: DecalHost::Ceiling,
+        } => {
+            "a flat marking painted ON the ceiling with no \
+                                                    thickness"
+        }
+    }
+}
+
 fn mount_lines(surfaces: &[String]) -> String {
     let mut out = String::from(
-        "mount - where THIS asset is placed (exactly one object, or null when unclear):\n",
+        "mount - what kind of support THIS asset needs (exactly one object, or null when unclear).\n\
+         Every asset is photographed standing on a plain floor, so the photo cannot tell you this: \
+         judge it by what the object IS.\n",
     );
     for m in mount_options(surfaces) {
         let token = mount_token(&m);
         // Only the shape of the EXTRA fields is per-variant now; the name comes from one table.
         let json = match &m {
             Mount::OnSurface { class } => format!(r#"{{"on": "{token}", "class": "{class}"}}"#),
-            Mount::OnWall { .. } | Mount::Decal { on: DecalHost::Wall { .. } } => {
+            Mount::OnWall { .. }
+            | Mount::Decal {
+                on: DecalHost::Wall { .. },
+            } => {
                 format!(r#"{{"on": "{token}", "height_m": 1.8}}"#)
             }
             _ => format!(r#"{{"on": "{token}"}}"#),
         };
-        out.push_str(&format!("- {json} - {}\n", mount_label(Some(&m))));
+        // The editor's own terse label AND what it means — the first is what the author sees in
+        // the panel, the second is what the model needs to choose between two words that describe
+        // the same photograph.
+        out.push_str(&format!(
+            "- {json} - {}: {}\n",
+            mount_label(Some(&m)),
+            mount_meaning(&m)
+        ));
     }
     out
 }
@@ -334,8 +433,12 @@ fn front_measured_line(measured: Option<Option<Face>>) -> String {
 
 /// Build the `(system, user)` prompt pair.
 pub fn build_prompt(vocab: &Vocabularies, ctx: &PromptCtx) -> (String, String) {
-    let surface_names: Vec<String> =
-        vocab.surfaces.tokens.iter().map(|t| t.name.clone()).collect();
+    let surface_names: Vec<String> = vocab
+        .surfaces
+        .tokens
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
     let schema = SCHEMA_EXAMPLE;
     let system = format!(
         "You label ONE 3D game asset for a level-placement library. You are given two renders of \
@@ -563,14 +666,19 @@ fn valid_mount(raw: &RawMount, surfaces: &Vocabulary) -> Result<Mount, String> {
     let wall_height = |h: Option<f32>| -> Result<f32, String> {
         let h = h.ok_or("mount on `wall` needs `height_m`")?;
         if !WALL_HEIGHT_RANGE.contains(&h) {
-            return Err(format!("wall height {h} m is outside {WALL_HEIGHT_RANGE:?}"));
+            return Err(format!(
+                "wall height {h} m is outside {WALL_HEIGHT_RANGE:?}"
+            ));
         }
         Ok(h)
     };
     match raw.on.as_str() {
         "floor" => Ok(Mount::OnFloor),
         "surface" => {
-            let class = raw.class.clone().ok_or("mount on `surface` needs `class`")?;
+            let class = raw
+                .class
+                .clone()
+                .ok_or("mount on `surface` needs `class`")?;
             if !surfaces.contains(&class) {
                 let hint = nearest(surfaces, &class)
                     .map(|n| format!(" (did you mean `{n}`?)"))
@@ -590,25 +698,42 @@ fn valid_mount(raw: &RawMount, surfaces: &Vocabulary) -> Result<Mount, String> {
                 let hint = nearest(surfaces, &class)
                     .map(|n| format!(" (did you mean `{n}`?)"))
                     .unwrap_or_default();
-                return Err(format!("mount class `{class}` is not a `surfaces` token{hint}"));
+                return Err(format!(
+                    "mount class `{class}` is not a `surfaces` token{hint}"
+                ));
             }
-            Ok(Mount::OnFace { class, height: wall_height(raw.height_m)? })
+            Ok(Mount::OnFace {
+                class,
+                height: wall_height(raw.height_m)?,
+            })
         }
-        "wall" => Ok(Mount::OnWall { height: wall_height(raw.height_m)? }),
+        "wall" => Ok(Mount::OnWall {
+            height: wall_height(raw.height_m)?,
+        }),
         "ceiling" => Ok(Mount::OnCeiling),
         "tiled" => Ok(Mount::Tiled),
         "opening" => Ok(Mount::InOpening { clear: None }),
-        "decal_floor" => Ok(Mount::Decal { on: DecalHost::Floor }),
-        "decal_wall" => Ok(Mount::Decal {
-            on: DecalHost::Wall { height: wall_height(raw.height_m)? },
+        "decal_floor" => Ok(Mount::Decal {
+            on: DecalHost::Floor,
         }),
-        "decal_ceiling" => Ok(Mount::Decal { on: DecalHost::Ceiling }),
+        "decal_wall" => Ok(Mount::Decal {
+            on: DecalHost::Wall {
+                height: wall_height(raw.height_m)?,
+            },
+        }),
+        "decal_ceiling" => Ok(Mount::Decal {
+            on: DecalHost::Ceiling,
+        }),
         // **Listed from the same table the prompt offers**, so a refusal can never name a set the
         // model was not shown — which is how a reprompt turns into an argument about a word.
         other => Err(format!(
             "`{other}` is not a mount; the options are {}",
             mount_options(
-                &surfaces.tokens.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
+                &surfaces
+                    .tokens
+                    .iter()
+                    .map(|t| t.name.clone())
+                    .collect::<Vec<_>>()
             )
             .iter()
             .map(mount_token)
@@ -655,7 +780,10 @@ pub fn validate(raw: RawSuggestion, vocab: &Vocabularies) -> Result<Suggestion, 
     let needs_turn = match &raw.needs_turn {
         None => None,
         Some(t) => match t.axis.as_str() {
-            "x" | "z" => Some(NeedsTurn { axis: t.axis.clone(), why: t.why.clone() }),
+            "x" | "z" => Some(NeedsTurn {
+                axis: t.axis.clone(),
+                why: t.why.clone(),
+            }),
             other => {
                 return Err(format!(
                     "`{other}` is not a righting axis; needs_turn.axis is \"x\" or \"z\" — a \
@@ -717,7 +845,10 @@ pub fn validate(raw: RawSuggestion, vocab: &Vocabularies) -> Result<Suggestion, 
         mount,
         front,
         needs_turn,
-        note: raw.note.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty()),
+        note: raw
+            .note
+            .map(|n| n.trim().to_owned())
+            .filter(|n| !n.is_empty()),
         rooms,
         group,
         confidence,
@@ -804,6 +935,77 @@ pub fn request_labels(
     Ok(text)
 }
 
+/// **Is anybody home, and are they ready?**
+///
+/// Three answers, because two of the failures want opposite responses from the caller and lumping
+/// them together is what made a batch of 778 meshes fail 778 times in a row:
+///
+/// - [`Reach::Ready`] — the socket answered.
+/// - [`Reach::Warming`] — something is listening but not serving yet. `llama-swap` hot-swaps models
+///   on one GPU and a cold model takes tens of seconds to load, so this is an ordinary state on the
+///   first request of a session, not a fault. The caller waits; it does not cancel.
+/// - [`Reach::Unreachable`] — nothing is listening. Almost always the SSH tunnel, and the remedy is
+///   one line, so the remedy travels with the verdict rather than being left for the reader to
+///   remember.
+///
+/// **A TCP connect, not a chat request.** The question is whether the endpoint exists, and asking it
+/// with a real inference costs a model load and up to `timeout_secs` to learn something a refused
+/// socket says instantly.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Reach {
+    Ready,
+    Warming(String),
+    Unreachable(String),
+}
+
+/// The host and port a URL dials, for the connect probe. `None` when the URL is not one this can
+/// take apart — in which case the caller should just try the request rather than refuse on a guess.
+pub fn host_port(url: &str) -> Option<(String, u16)> {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let authority = rest.split(['/', '?']).next().unwrap_or(rest);
+    let https = url.starts_with("https://");
+    // Strip any userinfo, then split host from port. IPv6 literals are not dialled by this tool.
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    match authority.rsplit_once(':') {
+        Some((host, port)) => port.parse().ok().map(|p| (host.to_owned(), p)),
+        None => Some((authority.to_owned(), if https { 443 } else { 80 })),
+    }
+}
+
+/// **The preflight.** Cheap, synchronous, and run before a batch commits to a queue.
+pub fn probe(cfg: &VlmConfig) -> Reach {
+    let Some((host, port)) = host_port(&cfg.url) else {
+        // An address this cannot parse is not evidence of anything; let the real request judge it.
+        return Reach::Ready;
+    };
+    // A remote endpoint (Ollama Cloud) is not worth a connect probe — DNS and TLS make a refusal
+    // mean several different things, and the request's own error is the better message.
+    if !(host == "localhost" || host.starts_with("127.") || host == "::1") {
+        return Reach::Ready;
+    }
+    use std::net::ToSocketAddrs;
+    let Ok(mut addrs) = (host.as_str(), port).to_socket_addrs() else {
+        return Reach::Unreachable(format!("`{host}` does not resolve"));
+    };
+    let Some(addr) = addrs.next() else {
+        return Reach::Unreachable(format!("`{host}` resolves to nothing"));
+    };
+    match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(400)) {
+        Ok(_) => Reach::Ready,
+        // **Refused is the tunnel, and it is the one worth spelling out** — the local endpoint is an
+        // SSH forward to another machine, and the fix is a command rather than a setting.
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => Reach::Unreachable(format!(
+            "nothing is listening on {host}:{port} — the model runs on `bmb` behind an SSH              forward. Bring it up with `ssh -fN -L {port}:127.0.0.1:{port} bmb`, then try again"
+        )),
+        // Reachable-but-not-answering. A host that is up with a model still loading times out here,
+        // and that is a wait rather than a fault.
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Reach::Warming(format!(
+            "{host}:{port} is slow to answer — the model may still be loading"
+        )),
+        Err(e) => Reach::Unreachable(format!("{host}:{port} cannot be reached: {e}")),
+    }
+}
+
 /// **The whole exchange**: prompt, request, parse, gate — with ONE automatic reprompt when the
 /// gate rejects. OVAL-Prompt (Tong et al. 2024) measured reprompt-on-failure as the difference
 /// between unusable (F 0.39) and competitive (0.71) affordance judgment; one retry, fixed, is a
@@ -822,7 +1024,11 @@ pub fn label_with_retry(
     match parse_reply(&reply).and_then(|raw| validate(raw, vocab)) {
         Ok(s) => Ok((
             s,
-            Provenance { model: cfg.model.clone(), date, attempts: 1 },
+            Provenance {
+                model: cfg.model.clone(),
+                date,
+                attempts: 1,
+            },
         )),
         Err(rejection) => {
             let body = request_labels(
@@ -830,15 +1036,99 @@ pub fn label_with_retry(
                 pngs,
                 &system,
                 &user,
-                Some(RetryTurn { prior_reply: &reply, rejection: &rejection }),
+                Some(RetryTurn {
+                    prior_reply: &reply,
+                    rejection: &rejection,
+                }),
             )?;
             let reply = extract_content(&body)?;
             let s = parse_reply(&reply).and_then(|raw| validate(raw, vocab))?;
             Ok((
                 s,
-                Provenance { model: cfg.model.clone(), date, attempts: 2 },
+                Provenance {
+                    model: cfg.model.clone(),
+                    date,
+                    attempts: 2,
+                },
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod reach_tests {
+    use super::*;
+
+    /// **The address the probe dials**, including the shapes that made a naive split wrong.
+    #[test]
+    fn a_url_yields_the_host_and_port_it_dials() {
+        assert_eq!(
+            host_port("http://127.0.0.1:9292/v1/chat/completions"),
+            Some(("127.0.0.1".to_owned(), 9292))
+        );
+        // No port: the scheme decides, which is the case Ollama Cloud takes.
+        assert_eq!(
+            host_port("https://ollama.com/v1/chat/completions"),
+            Some(("ollama.com".to_owned(), 443))
+        );
+        assert_eq!(
+            host_port("http://example.test/v1"),
+            Some(("example.test".to_owned(), 80))
+        );
+        // A path containing a colon must not be read as a port.
+        assert_eq!(
+            host_port("http://localhost:9292/a:b"),
+            Some(("localhost".to_owned(), 9292))
+        );
+    }
+
+    /// **Nothing listening on a local port is a REFUSAL with a remedy**, not a mystery.
+    ///
+    /// The batch reported the same transport failure once per queued mesh — 778 of them — because
+    /// it only ever asked whether the VLM was *configured*. Port 1 is reserved and never listening,
+    /// which is a refusal every platform agrees on.
+    #[test]
+    fn a_dead_local_port_is_unreachable_and_says_how_to_fix_it() {
+        let cfg = VlmConfig::for_stub("http://127.0.0.1:1/v1/chat/completions".to_owned(), 5);
+        match probe(&cfg) {
+            Reach::Unreachable(why) => {
+                assert!(
+                    why.contains("ssh -fN -L"),
+                    "the remedy travels with the verdict: {why}"
+                );
+                assert!(
+                    why.contains("bmb"),
+                    "and names the machine the model is on: {why}"
+                );
+            }
+            other => panic!("a dead port must refuse, got {other:?}"),
+        }
+    }
+
+    /// **A remote endpoint is not probed by connecting.** DNS and TLS make a refusal mean several
+    /// different things there, and the request's own error is the better message — so the batch is
+    /// never blocked by a probe that cannot be trusted.
+    #[test]
+    fn a_remote_endpoint_is_left_to_the_request_itself() {
+        let cfg = VlmConfig::for_stub("https://ollama.com/v1/chat/completions".to_owned(), 5);
+        assert_eq!(
+            probe(&cfg),
+            Reach::Ready,
+            "no connect probe for a remote host"
+        );
+    }
+
+    /// **A listening socket is ready**, whatever it later says about the model.
+    #[test]
+    fn something_listening_reads_as_ready() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap_or_else(|e| panic!("cannot bind a local test socket: {e}"));
+        let port = listener
+            .local_addr()
+            .unwrap_or_else(|e| panic!("no local addr: {e}"))
+            .port();
+        let cfg = VlmConfig::for_stub(format!("http://127.0.0.1:{port}/v1/chat/completions"), 5);
+        assert_eq!(probe(&cfg), Reach::Ready);
     }
 }
 
@@ -869,7 +1159,10 @@ mod tests {
 
     /// [`ctx`] with a stated measurement, so the front cases read as one line each.
     fn ctx_with_front(front_measured: Option<Option<Face>>) -> PromptCtx {
-        PromptCtx { front_measured, ..ctx() }
+        PromptCtx {
+            front_measured,
+            ..ctx()
+        }
     }
 
     fn ctx() -> PromptCtx {
@@ -886,7 +1179,7 @@ mod tests {
             note_now: None,
             rooms_in_use: vec!["kitchen".to_owned(), "office".to_owned()],
             groups_in_use: vec!["desk_set".to_owned()],
-                    front_measured: None,
+            front_measured: None,
         }
     }
 
@@ -897,7 +1190,11 @@ mod tests {
         for axis in [&v.kind, &v.effects, &v.look, &v.surfaces] {
             for t in &axis.tokens {
                 assert!(system.contains(&t.name), "prompt lost token `{}`", t.name);
-                assert!(system.contains(&t.note), "prompt lost note for `{}`", t.name);
+                assert!(
+                    system.contains(&t.note),
+                    "prompt lost note for `{}`",
+                    t.name
+                );
             }
         }
         let surfaces: Vec<String> = v.surfaces.tokens.iter().map(|t| t.name.clone()).collect();
@@ -932,9 +1229,14 @@ mod tests {
             ("offers_surfaces", "surfaces"),
         ] {
             let json = format!(r#"{{"what": "a thing", "{field}": ["zzgobbledygook"]}}"#);
-            let e = validate(raw(&json), &v).err().unwrap_or_else(|| panic!("accepted {field}"));
+            let e = validate(raw(&json), &v)
+                .err()
+                .unwrap_or_else(|| panic!("accepted {field}"));
             assert!(e.contains(&format!("`{axis}` token")), "{field}: {e}");
-            assert!(e.contains("implements:"), "{field} rejection must list the axis: {e}");
+            assert!(
+                e.contains("implements:"),
+                "{field} rejection must list the axis: {e}"
+            );
         }
         // The did-you-mean rides along when the misspelling is close (nearest() is bounded at
         // len/3 edits, so `ligt` — one deletion — qualifies where a transposition would not).
@@ -959,7 +1261,10 @@ mod tests {
             serde_json::from_str("{}").expect("every field defaults, so an empty object parses");
         let as_json = serde_json::to_value(&complete).expect("serializes");
         let fields = as_json.as_object().expect("an object");
-        assert!(fields.len() >= 12, "sanity: the parser reads more than a couple of fields");
+        assert!(
+            fields.len() >= 12,
+            "sanity: the parser reads more than a couple of fields"
+        );
         for key in fields.keys() {
             assert!(
                 SCHEMA_EXAMPLE.contains(&format!("\"{key}\"")),
@@ -1040,14 +1345,19 @@ mod tests {
                 Mount::OnFace { class, .. } => {
                     format!(r#"{{"on": "{token}", "class": "{class}", "height_m": 1.8}}"#)
                 }
-                Mount::OnWall { .. } | Mount::Decal { on: DecalHost::Wall { .. } } => {
+                Mount::OnWall { .. }
+                | Mount::Decal {
+                    on: DecalHost::Wall { .. },
+                } => {
                     format!(r#"{{"on": "{token}", "height_m": 1.8}}"#)
                 }
                 _ => format!(r#"{{"on": "{token}"}}"#),
             };
             let full = format!(r#"{{"what": "a thing", "mount": {json}}}"#);
             let got = validate(raw(&full), &v)
-                .unwrap_or_else(|e| panic!("the prompt offers `{json}` and the parser refuses it: {e}"))
+                .unwrap_or_else(|e| {
+                    panic!("the prompt offers `{json}` and the parser refuses it: {e}")
+                })
                 .mount
                 .unwrap_or_else(|| panic!("`{json}` parsed to no mount at all"));
             assert_eq!(
@@ -1065,18 +1375,35 @@ mod tests {
             (r#"{"on": "floor"}"#, Mount::OnFloor),
             (
                 r#"{"on": "surface", "class": "worktop"}"#,
-                Mount::OnSurface { class: "worktop".to_owned() },
+                Mount::OnSurface {
+                    class: "worktop".to_owned(),
+                },
             ),
-            (r#"{"on": "wall", "height_m": 2.2}"#, Mount::OnWall { height: 2.2 }),
+            (
+                r#"{"on": "wall", "height_m": 2.2}"#,
+                Mount::OnWall { height: 2.2 },
+            ),
             (r#"{"on": "ceiling"}"#, Mount::OnCeiling),
             (r#"{"on": "tiled"}"#, Mount::Tiled),
             (r#"{"on": "opening"}"#, Mount::InOpening { clear: None }),
-            (r#"{"on": "decal_floor"}"#, Mount::Decal { on: DecalHost::Floor }),
+            (
+                r#"{"on": "decal_floor"}"#,
+                Mount::Decal {
+                    on: DecalHost::Floor,
+                },
+            ),
             (
                 r#"{"on": "decal_wall", "height_m": 1.5}"#,
-                Mount::Decal { on: DecalHost::Wall { height: 1.5 } },
+                Mount::Decal {
+                    on: DecalHost::Wall { height: 1.5 },
+                },
             ),
-            (r#"{"on": "decal_ceiling"}"#, Mount::Decal { on: DecalHost::Ceiling }),
+            (
+                r#"{"on": "decal_ceiling"}"#,
+                Mount::Decal {
+                    on: DecalHost::Ceiling,
+                },
+            ),
         ];
         for (json, want) in cases {
             let full = format!(r#"{{"what": "a thing", "mount": {json}}}"#);
@@ -1084,10 +1411,10 @@ mod tests {
             assert_eq!(got.mount, Some(want), "{json}");
         }
         for bad in [
-            r#"{"on": "roof"}"#,                          // not a mount
-            r#"{"on": "surface", "class": "shelf"}"#,     // unknown class
-            r#"{"on": "wall"}"#,                          // missing height
-            r#"{"on": "wall", "height_m": 18.0}"#,        // a sconce on a chimney
+            r#"{"on": "roof"}"#,                      // not a mount
+            r#"{"on": "surface", "class": "shelf"}"#, // unknown class
+            r#"{"on": "wall"}"#,                      // missing height
+            r#"{"on": "wall", "height_m": 18.0}"#,    // a sconce on a chimney
         ] {
             let full = format!(r#"{{"what": "a thing", "mount": {bad}}}"#);
             assert!(validate(raw(&full), &v).is_err(), "accepted {bad}");
@@ -1127,7 +1454,10 @@ mod tests {
         assert!(e.contains("front"), "the y rejection points at front: {e}");
         // The prompt explains the camera geometry the face answer depends on.
         let (system, _) = build_prompt(&v, &ctx());
-        assert!(system.contains("east (+X) and south (+Z)"), "camera geometry stated");
+        assert!(
+            system.contains("east (+X) and south (+Z)"),
+            "camera geometry stated"
+        );
     }
 
     #[test]
@@ -1153,12 +1483,10 @@ mod tests {
     fn proposals_for_existing_tokens_are_dropped_and_unknown_axes_reject() {
         let v = vocab();
         let got = validate(
-            raw(
-                r#"{"what": "a stove", "token_proposals": [
+            raw(r#"{"what": "a stove", "token_proposals": [
                     {"axis": "surfaces", "token": "worktop", "why": "already there"},
                     {"axis": "surfaces", "token": "hob", "why": "cooktops are not worktops"}
-                ]}"#,
-            ),
+                ]}"#),
             &v,
         )
         .unwrap_or_else(|e| panic!("{e}"));
@@ -1200,14 +1528,25 @@ mod tests {
         )
         .unwrap_or_else(|e| panic!("{e}"));
         let file = dotenv(&dir);
-        assert_eq!(file.get("EMERGE_VLM_KEY").map(String::as_str), Some("file-key"));
-        assert_eq!(file.get("EMERGE_VLM_MODEL").map(String::as_str), Some("file-model"));
-        assert_eq!(file.get("EMERGE_VLM_TIMEOUT_SECS").map(String::as_str), Some("7"));
+        assert_eq!(
+            file.get("EMERGE_VLM_KEY").map(String::as_str),
+            Some("file-key")
+        );
+        assert_eq!(
+            file.get("EMERGE_VLM_MODEL").map(String::as_str),
+            Some("file-model")
+        );
+        assert_eq!(
+            file.get("EMERGE_VLM_TIMEOUT_SECS").map(String::as_str),
+            Some("7")
+        );
         assert!(!file.contains_key("not a pair"));
         // Precedence, composed the way `load` composes it — without touching the real process
         // env (unsafe to mutate in edition 2024, racy under parallel tests).
         let process: std::collections::BTreeMap<&str, &str> =
-            [("EMERGE_VLM_MODEL", "process-model")].into_iter().collect();
+            [("EMERGE_VLM_MODEL", "process-model")]
+                .into_iter()
+                .collect();
         let cfg = VlmConfig::from_lookup(|name| {
             process
                 .get(name)
@@ -1216,14 +1555,19 @@ mod tests {
         })
         .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(cfg.model, "process-model", "the process env wins");
-        assert_eq!(cfg.timeout_secs, 7, "the file fills what the env leaves unset");
+        assert_eq!(
+            cfg.timeout_secs, 7,
+            "the file fills what the env leaves unset"
+        );
         // A missing file is simply empty config, not an error.
         assert!(dotenv(std::path::Path::new("/nonexistent-vlm-dotenv")).is_empty());
     }
 
     #[test]
     fn a_missing_key_errs_with_the_remedy() {
-        let e = VlmConfig::from_lookup(|_| None).err().unwrap_or_else(|| panic!("accepted"));
+        let e = VlmConfig::from_lookup(|_| None)
+            .err()
+            .unwrap_or_else(|| panic!("accepted"));
         assert!(e.contains("EMERGE_VLM_KEY") && e.contains(".env"), "{e}");
         let cfg = VlmConfig::from_lookup(|name| match name {
             "EMERGE_VLM_KEY" => Some("k".to_owned()),
@@ -1242,18 +1586,22 @@ mod tests {
     /// Serve `responses` in order on one listener, one HTTP/1.1 exchange each, then stop.
     fn stub(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
         use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap_or_else(|e| panic!("bind: {e}"));
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").unwrap_or_else(|e| panic!("bind: {e}"));
         let addr = listener.local_addr().unwrap_or_else(|e| panic!("{e}"));
         let handle = std::thread::spawn(move || {
             let mut seen = Vec::new();
             for body in responses {
-                let Ok((mut sock, _)) = listener.accept() else { break };
+                let Ok((mut sock, _)) = listener.accept() else {
+                    break;
+                };
                 // Read headers + declared body; enough HTTP for a test double.
                 let mut buf = Vec::new();
                 let mut tmp = [0u8; 4096];
                 let request = loop {
-                    let Ok(n) = sock.read(&mut tmp) else { break String::new() };
+                    let Ok(n) = sock.read(&mut tmp) else {
+                        break String::new();
+                    };
                     if n == 0 {
                         break String::from_utf8_lossy(&buf).into_owned();
                     }
@@ -1306,7 +1654,10 @@ mod tests {
         assert_eq!(seen.len(), 2);
         // The reprompt carries the gate's verdict and the model's own prior reply.
         assert!(seen[1].contains("rejected"), "no rejection fed back");
-        assert!(seen[1].contains("sconce"), "the reprompt lost the prior reply");
+        assert!(
+            seen[1].contains("sconce"),
+            "the reprompt lost the prior reply"
+        );
         // The auth header and both images went out; the key is in the header ONLY.
         assert!(seen[0].contains("Bearer stub-key"));
         assert!(seen[0].matches("data:image/png;base64,").count() == 2);
@@ -1342,7 +1693,9 @@ mod tests {
     fn endpoint_errors_surface_verbatim() {
         // An error envelope (llama-swap's model-load failure, Ollama's auth complaint) is shown,
         // not swallowed.
-        let (url, _h) = stub(vec![r#"{"error": {"message": "model not found"}}"#.to_owned()]);
+        let (url, _h) = stub(vec![
+            r#"{"error": {"message": "model not found"}}"#.to_owned(),
+        ]);
         let cfg = VlmConfig::for_stub(url, 5);
         let e = label_with_retry(
             &cfg,

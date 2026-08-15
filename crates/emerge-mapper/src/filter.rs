@@ -54,6 +54,30 @@ impl Filters {
         }
     }
 
+    /// Which box owns the keyboard, if any — the read half of [`Filters::take_focus`], so a test
+    /// can assert who is typing without the field being public to every writer in the crate.
+    pub fn focus_pane(&self) -> Option<Pane> {
+        self.focus
+    }
+
+    /// **Put the keyboard in this box**, and start the search fresh — the same two writes
+    /// `on_click` makes, so the `F` key and the mouse leave the filter in one state rather than two.
+    ///
+    /// A method rather than a public field: `focus` is read by `editor::not_typing` to decide
+    /// whether every other key in the editor fires, and a field anything could set is a field that
+    /// gets set from somewhere that has not thought about that.
+    pub fn take_focus(&mut self, pane: Pane) {
+        self.text_mut(pane).clear();
+        self.focus = Some(pane);
+    }
+
+    /// Type one character into a box, for tests — the real path is `keys`, which reads the
+    /// message stream and cannot be driven without an `App`.
+    #[cfg(test)]
+    pub fn push_for_test(&mut self, pane: Pane, c: char) {
+        self.text_mut(pane).push(c);
+    }
+
     fn text_mut(&mut self, pane: Pane) -> &mut String {
         match pane {
             Pane::Palette => &mut self.palette,
@@ -83,7 +107,10 @@ impl Filters {
     /// predictable filter is one you can trust to have shown you everything.
     pub fn keeps(&self, pane: Pane, id: &str) -> bool {
         let needle = self.text(pane);
-        needle.is_empty() || id.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())
+        needle.is_empty()
+            || id
+                .to_ascii_lowercase()
+                .contains(&needle.to_ascii_lowercase())
     }
 }
 
@@ -122,11 +149,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands, pane: Pane) {
 
 /// Click to focus. Clicking the box that is already focused clears it, which is the fastest way back
 /// to the whole list and needs no second control.
-pub fn on_click(
-    activate: On<Activate>,
-    boxes: Query<&FilterBox>,
-    mut filters: ResMut<Filters>,
-) {
+pub fn on_click(activate: On<Activate>, boxes: Query<&FilterBox>, mut filters: ResMut<Filters>) {
     let Ok(b) = boxes.get(activate.entity) else {
         return;
     };

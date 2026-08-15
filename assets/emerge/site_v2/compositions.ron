@@ -1,0 +1,5 @@
+(
+    version: 1,
+    note: Some("Deliberately EMPTY. Tiles assembled on the Tiles tab land here. See library.ron beside this for why the blank slate is its own kit rather than a cleared assets/emerge/site/."),
+    compositions: [],
+)

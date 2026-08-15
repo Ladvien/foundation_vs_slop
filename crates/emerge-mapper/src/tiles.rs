@@ -26,7 +26,7 @@ use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, Button as UiButton, ScrollArea};
-use emerge_core::descriptor::{mount_label, mount_options, Descriptor};
+use emerge_core::descriptor::{Descriptor, mount_label, mount_options};
 use emerge_core::import::{self, Candidate, Severity};
 
 use crate::chrome::{ACCENT, DANGER, DIM, HEADER_BG, LABEL, PANEL_BG, ROW_BG, ROW_SELECTED, TEXT};
@@ -70,8 +70,13 @@ impl Mode {
     /// The mode was the giveaway: every other level already had a tab and only that one carried two.
     /// A tab strip is a mode nobody can forget, so the split retired the indicator along with the
     /// mode (FVS-R-21).
-    pub const ALL: [Mode; 5] =
-        [Mode::Map, Mode::Meshes, Mode::Tiles, Mode::Compose, Mode::Anim];
+    pub const ALL: [Mode; 5] = [
+        Mode::Map,
+        Mode::Meshes,
+        Mode::Tiles,
+        Mode::Compose,
+        Mode::Anim,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -194,7 +199,6 @@ impl ImportState {
     }
 }
 
-
 /// **Where a tile is examined, far from the map.**
 ///
 /// The tiles tab is about ONE piece, and the map behind it was noise — worse than noise, because a
@@ -234,8 +238,7 @@ fn stage_camera(
     let want_lift = state.placed(&project).map(stage_lift).unwrap_or(0.0);
     let lift_moved = *mode == Mode::Meshes && (staged.0 - want_lift).abs() > 1e-4;
     // A preset cycle is a discrete event on the Anim tab, exactly like a lift on the Tiles tab.
-    let preset_moved =
-        *mode == Mode::Anim && preset.as_ref().is_some_and(|p| p.is_changed());
+    let preset_moved = *mode == Mode::Anim && preset.as_ref().is_some_and(|p| p.is_changed());
     // And a re-laid strip is one on the Compose tab. `StagedCarousel` is written only when the strip
     // actually changes — a carousel step, a group added, an envelope resized — so this is the same
     // discrete-event shape and not a per-frame write that would take panning away.
@@ -276,12 +279,8 @@ fn stage_camera(
                     elevation: rig.elevation,
                 });
             }
-            let (focus_y, height, elevation, yaw_snap) = preset
-                .as_deref()
-                .copied()
-                .unwrap_or_default()
-                .0
-                .framing();
+            let (focus_y, height, elevation, yaw_snap) =
+                preset.as_deref().copied().unwrap_or_default().0.framing();
             rig.focus = crate::anim_stage::BENCH_STAGE + Vec3::Y * focus_y;
             rig.height = height;
             rig.elevation = elevation;
@@ -319,8 +318,7 @@ fn stage_camera(
             // **Focused halfway up, not on the floor.** The groups rise from the ground plane, so
             // aiming at it put a 2.4 m tile in the top half of the frame with the bottom empty —
             // seen in a captured frame, and the same correction the Tiles arm makes with `want_lift`.
-            rig.focus =
-                crate::compose::COMPOSE_STAGE + Vec3::Y * carousel.0.tallest * 0.5;
+            rig.focus = crate::compose::COMPOSE_STAGE + Vec3::Y * carousel.0.tallest * 0.5;
             rig.height = crate::compose::framing_height(carousel.0.extent, carousel.0.tallest)
                 .min(crate::view::MAX_ZOOM);
             rig.elevation = crate::view::ISO_ELEVATION;
@@ -531,7 +529,9 @@ fn on_note_click(
         return;
     };
     edit.active = Some((target, now));
-    state.status.note("describe it — Enter to keep it, Esc to leave it".to_owned());
+    state
+        .status
+        .note("describe it — Enter to keep it, Esc to leave it".to_owned());
 }
 
 /// Typing a description. Free text, so unlike an id nothing is forced as you type.
@@ -549,12 +549,16 @@ fn note_keys(
         }
         match &event.logical_key {
             Key::Enter => {
-                let Some((target, raw)) = edit.active.take() else { return };
+                let Some((target, raw)) = edit.active.take() else {
+                    return;
+                };
                 let text = raw.trim().to_owned();
                 // The piece this field was opened on, not whatever has the focus now.
                 let before = state.snapshot(&project);
                 let Some((d, where_to)) = state.at_target(&target, &mut project.measured) else {
-                    state.status.problem("the description was not kept — that tile is gone".to_owned());
+                    state
+                        .status
+                        .problem("the description was not kept — that tile is gone".to_owned());
                     return;
                 };
                 // Empty clears, the same rule the edge and anchor tokens follow — one keystroke path
@@ -566,7 +570,7 @@ fn note_keys(
                 } else {
                     format!("described: {text}")
                 };
-    state.status.say(persist(&mut project, where_to, said));
+                state.status.say(persist(&mut project, where_to, said));
             }
             Key::Escape => {
                 edit.active = None;
@@ -656,7 +660,9 @@ fn bake_width(d: &mut Descriptor, want: f32) -> Result<f32, String> {
         return Err("it has no measured footprint, so a width has nothing to resize".to_owned());
     };
     if !w.is_finite() || w <= 0.0 {
-        return Err(format!("it measures {w} m wide, so no resize reaches {want} m"));
+        return Err(format!(
+            "it measures {w} m wide, so no resize reaches {want} m"
+        ));
     }
     // The ratio against the PLACED width — which is the number on screen, so typing it back is a
     // no-op by construction and nothing compounds.
@@ -746,17 +752,23 @@ fn scale_keys(
                 };
                 let text = raw.trim().to_owned();
                 if text.is_empty() {
-                    state.status.note("width unchanged — nothing typed".to_owned());
+                    state
+                        .status
+                        .note("width unchanged — nothing typed".to_owned());
                     return;
                 }
                 let Ok(want) = text.parse::<f32>() else {
-                    state.status.problem(format!("`{text}` is not a number of metres"));
+                    state
+                        .status
+                        .problem(format!("`{text}` is not a number of metres"));
                     return;
                 };
                 // Taken before the write, which is the only moment the old value still exists.
                 let before = state.snapshot(&project);
                 let Some((d, where_to)) = state.at_target(&target, &mut project.measured) else {
-                    state.status.problem("the width was not kept — that tile is gone".to_owned());
+                    state
+                        .status
+                        .problem("the width was not kept — that tile is gone".to_owned());
                     return;
                 };
                 let id = d.id.clone();
@@ -771,7 +783,9 @@ fn scale_keys(
                 };
                 // The width it already stands at: nothing changed, so nothing to record or write.
                 if r == 1.0 {
-                    state.status.note(format!("{id} already stands {want:.2} m wide"));
+                    state
+                        .status
+                        .note(format!("{id} already stands {want:.2} m wide"));
                     return;
                 }
                 let (w, dep) = d.extent.footprint.unwrap_or((want, 0.0));
@@ -796,7 +810,8 @@ fn scale_keys(
                     for c in ch.chars() {
                         // One point, and never as the first character — `.5` parses, but a field that
                         // shows a leading point invites `..5`, which does not.
-                        let ok = c.is_ascii_digit() || (c == '.' && !raw.contains('.') && !raw.is_empty());
+                        let ok = c.is_ascii_digit()
+                            || (c == '.' && !raw.contains('.') && !raw.is_empty());
                         if ok && raw.len() < 6 {
                             raw.push(c);
                         }
@@ -859,7 +874,9 @@ fn on_mount_height_click(
     // Starts empty, the same call `on_size_field_click` and `on_scale_click` make — seeding it means
     // the first digit appends to the number already there.
     edit.active = Some((target, String::new()));
-    state.status.note("height: type the metres up the wall, Enter to keep it, Esc to leave it alone".to_owned());
+    state.status.note(
+        "height: type the metres up the wall, Enter to keep it, Esc to leave it alone".to_owned(),
+    );
 }
 
 /// Digits and a single point, filtered at the keystroke — the rule `size_edit_keys` states.
@@ -881,43 +898,58 @@ fn mount_height_keys(
                 };
                 let text = raw.trim().to_owned();
                 if text.is_empty() {
-                    state.status.note("height unchanged — nothing typed".to_owned());
+                    state
+                        .status
+                        .note("height unchanged — nothing typed".to_owned());
                     return;
                 }
                 let Ok(want) = text.parse::<f32>() else {
-                    state.status.problem(format!("`{text}` is not a number of metres"));
+                    state
+                        .status
+                        .problem(format!("`{text}` is not a number of metres"));
                     return;
                 };
                 // **Zero is legal, below the floor is not.** A wall marking at skirting height is a
                 // real thing to author; a negative one is under the floor, where no wall is.
                 if !want.is_finite() || want < 0.0 {
-                    state.status.problem(format!("a wall mount cannot sit at {text} m"));
+                    state
+                        .status
+                        .problem(format!("a wall mount cannot sit at {text} m"));
                     return;
                 }
-                let found = state
-                    .at_target(&target, &mut project.measured)
-                    .and_then(|(d, where_to)| {
-                        d.mount.as_ref().map(|m| (d.id.clone(), m.clone(), where_to))
-                    });
+                let found =
+                    state
+                        .at_target(&target, &mut project.measured)
+                        .and_then(|(d, where_to)| {
+                            d.mount
+                                .as_ref()
+                                .map(|m| (d.id.clone(), m.clone(), where_to))
+                        });
                 let Some((id, mount, where_to)) = found else {
-                    state.status.problem("the height was not kept — that tile is gone".to_owned());
+                    state
+                        .status
+                        .problem("the height was not kept — that tile is gone".to_owned());
                     return;
                 };
                 // Refused by name rather than silently ignored: the field is only drawn for mounts
                 // that carry a height, so reaching here means the mount changed under an open field.
                 let Some(next) = emerge_core::descriptor::with_mount_height(&mount, want) else {
-                    state.status.problem(format!("`{id}` is not on a wall, so it has no height to set"));
+                    state.status.problem(format!(
+                        "`{id}` is not on a wall, so it has no height to set"
+                    ));
                     return;
                 };
                 let before = state.snapshot(&project);
                 let Some((d, _)) = state.at_target(&target, &mut project.measured) else {
-                    state.status.problem("the height was not kept — that tile is gone".to_owned());
+                    state
+                        .status
+                        .problem("the height was not kept — that tile is gone".to_owned());
                     return;
                 };
                 d.mount = Some(next);
                 state.record(before);
                 let said = format!("{id} — {want:.2} m up the wall");
-    state.status.say(persist(&mut project, where_to, said));
+                state.status.say(persist(&mut project, where_to, said));
             }
             Key::Escape => {
                 edit.active = None;
@@ -965,7 +997,11 @@ fn tile_history_keys(
         return;
     }
     let verb = if back { "undo" } else { "redo" };
-    let taken = if back { state.undo.pop() } else { state.redo.pop() };
+    let taken = if back {
+        state.undo.pop()
+    } else {
+        state.redo.pop()
+    };
     let Some(want) = taken else {
         state.status.note(format!("nothing to {verb} on this tab"));
         return;
@@ -1131,12 +1167,7 @@ fn on_cell_verb(
 /// Split out of the observer so the keyboard is not a second implementation of the same four verbs —
 /// `docs/ui.md` §4.2 requires everything reachable by mouse to be reachable by keyboard, and the way
 /// that requirement usually gets met is by writing it twice and letting the two drift.
-fn apply_verb(
-    verb: CellVerb,
-    edit: &mut CellEdit,
-    project: &mut Project,
-    state: &mut ImportState,
-) {
+fn apply_verb(verb: CellVerb, edit: &mut CellEdit, project: &mut Project, state: &mut ImportState) {
     let Some(at) = edit.at else {
         state.status.note("pick a cell first".to_owned());
         return;
@@ -1204,13 +1235,20 @@ impl RotateAxis {
 /// Returns whether the piece actually turned — the labeler's apply chains a re-photograph on a
 /// successful righting turn, and a refusal (the authored-cells guard, an unopenable GLB) must
 /// not trigger one.
-fn rotate_mesh(axis: RotateAxis, force: bool, project: &mut Project, state: &mut ImportState) -> bool {
+fn rotate_mesh(
+    axis: RotateAxis,
+    force: bool,
+    project: &mut Project,
+    state: &mut ImportState,
+) -> bool {
     let Some(d) = state.editing(&project.measured) else {
         state.status.note("no tile is selected".to_owned());
         return false;
     };
     let Some(mesh) = d.mesh.clone() else {
-        state.status.problem(format!("`{}` has no mesh to turn", d.id));
+        state
+            .status
+            .problem(format!("`{}` has no mesh to turn", d.id));
         return false;
     };
     let authored_cells = d.subgrid.as_ref().map_or(0, |g| g.cells.len());
@@ -1373,7 +1411,9 @@ fn scan_mesh(project: &mut Project, state: &mut ImportState) -> Option<Derived> 
         return None;
     };
     let Some(mesh) = d.mesh.clone() else {
-        state.status.problem(format!("`{}` has no mesh to scan", d.id));
+        state
+            .status
+            .problem(format!("`{}` has no mesh to scan", d.id));
         return None;
     };
     // **The rotation the divisions were derived with.** `div` comes from the piece's `extent`, which
@@ -1424,14 +1464,14 @@ fn scan_mesh(project: &mut Project, state: &mut ImportState) -> Option<Derived> 
         .map(|g| emerge_core::adjacency::derive_edges(g, div))
         .unwrap_or_default();
     let id = d.id.clone();
-    let said = format!(
-        "scanned {mesh}: {} of {total} cells solid",
-        cells.len()
-    );
+    let said = format!("scanned {mesh}: {} of {total} cells solid", cells.len());
     state.record(history_before);
     state.status.say(persist(project, where_to, said));
 
-    Some(Derived { id, cells: proposal })
+    Some(Derived {
+        id,
+        cells: proposal,
+    })
 }
 
 /// **Write derived tokens onto a descriptor's lattice**, returning how many cells actually moved.
@@ -1440,7 +1480,10 @@ fn scan_mesh(project: &mut Project, state: &mut ImportState) -> Option<Derived> 
 /// result is loadable, and once on the real descriptor when it is. Two spellings of "apply the
 /// proposal" would be two things to keep in step, and the whole point of the candidate is that it is
 /// the *same* edit.
-fn apply_edges(d: &mut emerge_core::descriptor::Descriptor, cells: &[((u32, u32, u32), &'static str)]) -> usize {
+fn apply_edges(
+    d: &mut emerge_core::descriptor::Descriptor,
+    cells: &[((u32, u32, u32), &'static str)],
+) -> usize {
     let grid = d.lattice_mut();
     let mut written = 0usize;
     for (at, token) in cells {
@@ -1664,8 +1707,8 @@ fn apply_verb_to(
     match verb {
         CellVerb::Solid => {
             // Taken before the write — the only moment the old value still exists.
-    let history_before = state.snapshot(&project);
-    let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
+            let history_before = state.snapshot(&project);
+            let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
                 return;
             };
             // **A span is set, not toggled.** Toggling many cells at once flips a mixed row into its
@@ -1684,13 +1727,13 @@ fn apply_verb_to(
                 }
             };
             d.settle_lattice();
-    state.record(history_before);
-    state.status.say(persist(project, where_to, said));
+            state.record(history_before);
+            state.status.say(persist(project, where_to, said));
         }
         CellVerb::Clear => {
             // Taken before the write — the only moment the old value still exists.
-    let history_before = state.snapshot(&project);
-    let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
+            let history_before = state.snapshot(&project);
+            let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
                 return;
             };
             if let Some(grid) = d.subgrid.as_mut() {
@@ -1704,8 +1747,8 @@ fn apply_verb_to(
             } else {
                 format!("cell {},{},{} cleared", first.0, first.1, first.2)
             };
-    state.record(history_before);
-    state.status.say(persist(project, where_to, said));
+            state.record(history_before);
+            state.status.say(persist(project, where_to, said));
         }
         CellVerb::Edge => {
             // Starts empty, and Enter on an empty field CLEARS the token — one keystroke path for
@@ -1778,7 +1821,9 @@ fn stage_box(state: &ImportState, project: &Project) -> Option<(Vec3, Vec3, (u32
     // the author clicks one cell and writes another.
     let (w, dep) = emerge_core::descriptor::placed_footprint(d)?;
     // The same floor `draw_subgrid` gives a flat piece, so a decal can still be picked.
-    let h = emerge_core::descriptor::placed_height(d).unwrap_or(0.0).max(0.05);
+    let h = emerge_core::descriptor::placed_height(d)
+        .unwrap_or(0.0)
+        .max(0.05);
     // **Lifted with the mesh.** The picker turns a click into a cell by dividing this box by `div`,
     // so a box left on the floor under a mesh drawn 1.8 m up would hand every click the wrong cell —
     // or no cell, since the ray would miss it entirely.
@@ -1921,22 +1966,22 @@ fn lattice_keys(
     // one too — and it goes through the same `scan_mesh` the chip calls, not a second copy.
     if pressed(Action::ScanMesh) {
         // **Only the asked-for scan stages a proposal** — see `scan_mesh`'s note on why the automatic
-    // one must not.
-    if let Some(proposal) = scan_mesh(&mut project, &mut state) {
-        let count = proposal.cells.len();
-        let (changed, same) = proposal.delta(
-            state
-                .editing(&project.measured)
-                .and_then(|d| d.subgrid.as_ref()),
-        );
-        *derived = DerivedEdges(Some(proposal));
-        state.status.note(format!(
+        // one must not.
+        if let Some(proposal) = scan_mesh(&mut project, &mut state) {
+            let count = proposal.cells.len();
+            let (changed, same) = proposal.delta(
+                state
+                    .editing(&project.measured)
+                    .and_then(|d| d.subgrid.as_ref()),
+            );
+            *derived = DerivedEdges(Some(proposal));
+            state.status.note(format!(
             "{count} boundary cell(s) read from the mesh — {changed} would change, {same} already \
              match. {} keeps them, {} throws them away",
             crate::keys::chord(crate::keys::Action::AcceptEdges),
             crate::keys::chord(crate::keys::Action::Cancel),
         ));
-    }
+        }
         return;
     }
     for (action, axis) in [
@@ -2029,11 +2074,15 @@ fn cell_keys(
                 // target was never opened by a verb, so there is nothing it could mean; that is a
                 // bug rather than an author error, and it says so instead of guessing at a cell.
                 let Some(targets) = edit.pending.take() else {
-                    state.status.problem(format!("`{raw}` was not kept — this field was opened without a cell."));
+                    state.status.problem(format!(
+                        "`{raw}` was not kept — this field was opened without a cell."
+                    ));
                     return;
                 };
                 let Some(target) = edit.target.take() else {
-                    state.status.problem(format!("`{raw}` was not kept — this field was opened without a tile."));
+                    state.status.problem(format!(
+                        "`{raw}` was not kept — this field was opened without a tile."
+                    ));
                     return;
                 };
                 let token = emerge_core::naming::to_snake_case(&raw);
@@ -2056,7 +2105,9 @@ fn cell_keys(
                 // destroyed it along with whichever edit the snapshot actually belonged to.
                 let history_before = state.snapshot(&project);
                 let Some((d, where_to)) = state.at_target(&target, &mut project.measured) else {
-                    state.status.problem(format!("`{raw}` was not kept — that tile is gone."));
+                    state
+                        .status
+                        .problem(format!("`{raw}` was not kept — that tile is gone."));
                     return;
                 };
                 let mut wrote = 0usize;
@@ -2125,7 +2176,9 @@ fn on_fill_header(
     };
     let y = header.layer;
     let cells: Vec<(u32, u32, u32)> = match header.span {
-        Span::Layer => (0..dz).flat_map(|z| (0..dx).map(move |x| (x, y, z))).collect(),
+        Span::Layer => (0..dz)
+            .flat_map(|z| (0..dx).map(move |x| (x, y, z)))
+            .collect(),
         Span::Column(x) => (0..dz).map(|z| (x, y, z)).collect(),
         Span::Row(z) => (0..dx).map(|x| (x, y, z)).collect(),
     };
@@ -2156,12 +2209,53 @@ fn refresh_cells(
     note_edit: Res<NoteEdit>,
     scale_edit: Res<ScaleEdit>,
     mut cells: Query<(&CellButton, &CellLayer, &mut BackgroundColor)>,
-    mut glyphs: Query<(&CellGlyph, &CellLayer, &mut Text, &mut TextColor), (Without<SelectedCellLine>, Without<NoteReadout>, Without<ScaleReadout>)>,
-    mut lines: Query<(&mut Text, &mut TextColor), (With<SelectedCellLine>, Without<CellGlyph>, Without<NoteReadout>, Without<ScaleReadout>)>,
-    mut notes: Query<(&mut Text, &mut TextColor), (With<NoteReadout>, Without<CellGlyph>, Without<SelectedCellLine>, Without<ScaleReadout>)>,
-    mut widths: Query<(&mut Text, &mut TextColor), (With<ScaleReadout>, Without<CellGlyph>, Without<SelectedCellLine>, Without<NoteReadout>, Without<MountHeightReadout>)>,
+    mut glyphs: Query<
+        (&CellGlyph, &CellLayer, &mut Text, &mut TextColor),
+        (
+            Without<SelectedCellLine>,
+            Without<NoteReadout>,
+            Without<ScaleReadout>,
+        ),
+    >,
+    mut lines: Query<
+        (&mut Text, &mut TextColor),
+        (
+            With<SelectedCellLine>,
+            Without<CellGlyph>,
+            Without<NoteReadout>,
+            Without<ScaleReadout>,
+        ),
+    >,
+    mut notes: Query<
+        (&mut Text, &mut TextColor),
+        (
+            With<NoteReadout>,
+            Without<CellGlyph>,
+            Without<SelectedCellLine>,
+            Without<ScaleReadout>,
+        ),
+    >,
+    mut widths: Query<
+        (&mut Text, &mut TextColor),
+        (
+            With<ScaleReadout>,
+            Without<CellGlyph>,
+            Without<SelectedCellLine>,
+            Without<NoteReadout>,
+            Without<MountHeightReadout>,
+        ),
+    >,
     height_edit: Res<HeightEdit>,
-    mut heights: Query<(&mut Text, &mut TextColor), (With<MountHeightReadout>, Without<CellGlyph>, Without<SelectedCellLine>, Without<NoteReadout>, Without<ScaleReadout>)>,
+    mut heights: Query<
+        (&mut Text, &mut TextColor),
+        (
+            With<MountHeightReadout>,
+            Without<CellGlyph>,
+            Without<SelectedCellLine>,
+            Without<NoteReadout>,
+            Without<ScaleReadout>,
+        ),
+    >,
 ) {
     // As placed, so the cells shown are the cells that exist. See [`ImportState::placed`].
     let Some(d) = state.placed(&project) else {
@@ -2199,7 +2293,9 @@ fn refresh_cells(
                 at.0,
                 at.1,
                 at.2,
-                grid.at(at).map(describe_cell).unwrap_or_else(|| "open".to_owned())
+                grid.at(at)
+                    .map(describe_cell)
+                    .unwrap_or_else(|| "open".to_owned())
             ),
         },
         None => "no cell picked".to_owned(),
@@ -2208,7 +2304,11 @@ fn refresh_cells(
         if text.0 != detail {
             text.0 = detail.clone();
         }
-        let tint = if cell_edit.active.is_some() { ACCENT } else { DIM };
+        let tint = if cell_edit.active.is_some() {
+            ACCENT
+        } else {
+            DIM
+        };
         if colour.0 != tint {
             colour.0 = tint;
         }
@@ -2319,7 +2419,10 @@ impl ImportState {
     /// so it must show the measurements: displaying a wall stretched to this facility's 2.40 m while
     /// writing the mesh's authored height back is the "preview that lies" this crate keeps being
     /// written to avoid.
-    pub fn editing<'a>(&'a self, library: &'a emerge_core::library::Library) -> Option<&'a Descriptor> {
+    pub fn editing<'a>(
+        &'a self,
+        library: &'a emerge_core::library::Library,
+    ) -> Option<&'a Descriptor> {
         match &self.selected_library_id {
             Some(id) => library.get(id),
             None => self.current().map(|c| &c.proposed),
@@ -2375,7 +2478,9 @@ impl ImportState {
     pub fn target(&self) -> Option<EditTarget> {
         match &self.selected_library_id {
             Some(id) => Some(EditTarget::Library(id.clone())),
-            None => self.current().map(|c| EditTarget::Candidate(c.mesh.clone())),
+            None => self
+                .current()
+                .map(|c| EditTarget::Candidate(c.mesh.clone())),
         }
     }
 
@@ -2486,7 +2591,9 @@ fn commit_measured(
     // library replacing it is now standing on screen in a form the project no longer describes.
     // Derived here rather than declared by the fifteen edit paths that reach this door — see
     // `Project::touched`.
-    project.touched.extend(changed_ids(&project.library, &library));
+    project
+        .touched
+        .extend(changed_ids(&project.library, &library));
 
     project.measured = measured;
     project.library = library;
@@ -2500,7 +2607,10 @@ fn commit_measured(
 /// `Descriptor` derives `PartialEq`, so this is the whole of "did this piece change". An id that
 /// only exists in `old` is a removal, and a removed descriptor has no placements left to redraw —
 /// `commit_measured` refuses a removal the map still uses.
-fn changed_ids(old: &emerge_core::library::Library, new: &emerge_core::library::Library) -> Vec<String> {
+fn changed_ids(
+    old: &emerge_core::library::Library,
+    new: &emerge_core::library::Library,
+) -> Vec<String> {
     new.descriptors
         .iter()
         .filter(|d| old.get(&d.id) != Some(*d))
@@ -2515,11 +2625,18 @@ mod changed_ids_tests {
     use emerge_core::library::Library;
 
     fn lib(ds: Vec<Descriptor>) -> Library {
-        Library { version: 1, note: None, descriptors: ds }
+        Library {
+            version: 1,
+            note: None,
+            descriptors: ds,
+        }
     }
 
     fn piece(id: &str, y_offset: Option<f32>) -> Descriptor {
-        let mut d = Descriptor { id: id.to_owned(), ..Descriptor::default() };
+        let mut d = Descriptor {
+            id: id.to_owned(),
+            ..Descriptor::default()
+        };
         d.align.y_offset = y_offset;
         d
     }
@@ -2649,7 +2766,10 @@ impl Axis {
             Axis::Surfaces => "OFFERS",
         }
     }
-    fn tokens<'a>(self, v: &'a emerge_core::vocab::Vocabularies) -> &'a emerge_core::vocab::Vocabulary {
+    fn tokens<'a>(
+        self,
+        v: &'a emerge_core::vocab::Vocabularies,
+    ) -> &'a emerge_core::vocab::Vocabulary {
         match self {
             Axis::Kind => &v.kind,
             Axis::Effects => &v.effects,
@@ -2822,7 +2942,10 @@ impl Plugin for TilesPlugin {
                     suggestion_keys.in_set(crate::keys::Phase::Act),
                     commit_candidate.in_set(crate::keys::Phase::Act),
                     remove_tile.in_set(crate::keys::Phase::Act),
-                    tab_shortcuts.in_set(crate::keys::Phase::Act),
+                    (
+                        tab_shortcuts.in_set(crate::keys::Phase::Act),
+                        focus_filter.in_set(crate::keys::Phase::Act),
+                    ),
                     apply_mode,
                     stage_camera,
                     // **The text fields, last.** `cell_keys` and `commit_candidate` both take
@@ -2830,8 +2953,11 @@ impl Plugin for TilesPlugin {
                     // run the field first, clear its own typing flag, and let the same `Enter` fall
                     // through to "add to library". Six descriptors arrived in `library.ron` that way.
                     rename_candidate.in_set(crate::keys::Phase::Text),
-                    cell_keys.in_set(crate::keys::Phase::Text),
-                    style_tabs,
+                    (
+                        cell_keys.in_set(crate::keys::Phase::Text),
+                        crate::build::naming_keys.in_set(crate::keys::Phase::Text),
+                    ),
+                    (style_tabs, paint_label_progress, auto_apply_batch),
                     rebuild_candidates.run_if(
                         resource_changed::<ImportState>
                             .or_else(resource_changed::<crate::filter::Filters>)
@@ -2980,7 +3106,13 @@ fn on_tab_click(
 /// cannot read is a tab you do not know is there.
 fn style_tabs(
     mode: Res<Mode>,
-    mut tabs: Query<(&Tab, &Hovered, &mut BackgroundColor, &mut BorderColor, &Children)>,
+    mut tabs: Query<(
+        &Tab,
+        &Hovered,
+        &mut BackgroundColor,
+        &mut BorderColor,
+        &Children,
+    )>,
     mut names: Query<&mut TextColor, (With<TabLabel>, Without<TabKey>)>,
     mut chords: Query<&mut TextColor, (With<TabKey>, Without<TabLabel>)>,
 ) {
@@ -3015,6 +3147,30 @@ fn style_tabs(
                 }
             }
         }
+    }
+}
+
+/// **`F` puts the cursor in the filter box** — the keyboard half of a control that had only a
+/// mouse half.
+///
+/// `docs/ui.md` §4.2 is the rule this satisfies: everything reachable by mouse is reachable by
+/// keyboard and vice versa. The box was the standing exception — `filter::on_click` was its only
+/// writer — on the tab whose whole argument is that keystrokes are faster than reaching for the
+/// mouse, and with a 45-piece library to narrow.
+///
+/// **Leaving is already owned by `filter::keys`**, which runs in `Phase::Text`: `Enter` blurs and
+/// `Esc` blurs and clears. That ordering is also what stops this from being the `xseam` bug again —
+/// while the box holds focus the context is `Typing`, so the `Enter` that leaves it cannot also
+/// reach `BuildDrop` in the same frame, and by the next frame it is no longer `just_pressed`.
+fn focus_filter(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<crate::keys::Live>,
+    mut filters: ResMut<crate::filter::Filters>,
+) {
+    if crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::FocusFilter) {
+        // The pane this tab's list is filtered by — the same one `rebuild_candidates` reads, so the
+        // box that takes the keys is the box above the rows they narrow.
+        filters.take_focus(crate::filter::Pane::Candidates);
     }
 }
 
@@ -3138,10 +3294,60 @@ fn spawn_tiles_panel(mut commands: Commands) {
     // "NOT YET IMPORTED (317)") with live counts, and a static one above them said the same thing
     // twice and disagreed with the first section.
     .with_children(|p| {
+        // **The batch, while it runs** — above the list it is filling. See `paint_label_progress`.
+        p.spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(crate::chrome::GAP_TIGHT),
+                margin: UiRect::bottom(Val::Px(crate::chrome::GAP_ROW)),
+                display: Display::None,
+                ..default()
+            },
+            LabelProgress,
+        ))
+        .with_children(|b| {
+            b.spawn((
+                Text::new(""),
+                TextColor(ACCENT),
+                TextFont::from_font_size(10.0),
+                LabelProgressText,
+            ));
+            // The bar: a dim trough with a bright fill whose WIDTH is the fraction. Two nodes,
+            // because a bar is the one readout where the number is not the point — the eye reads
+            // "how much is left" without reading anything.
+            b.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    height: Val::Px(4.0),
+                    ..default()
+                },
+                BackgroundColor(crate::chrome::SLOT_BG),
+            ))
+            .with_children(|trough| {
+                trough.spawn((
+                    Node {
+                        width: Val::Percent(0.0),
+                        height: Val::Percent(100.0),
+                        ..default()
+                    },
+                    BackgroundColor(ACCENT),
+                    LabelProgressBar,
+                ));
+            });
+            b.spawn((
+                Text::new(""),
+                TextColor(DIM),
+                TextFont::from_font_size(9.0),
+                LabelProgressNow,
+            ));
+        });
         crate::filter::spawn(p, crate::filter::Pane::Candidates);
         // The strip sits OUTSIDE the scroll container, so it cannot scroll away — see [`ListHeader`].
         p.spawn((
-            Node { flex_direction: FlexDirection::Column, ..default() },
+            Node {
+                flex_direction: FlexDirection::Column,
+                ..default()
+            },
             ListHeader,
         ));
         crate::chrome::scroll_list(p, CandidateList);
@@ -3204,7 +3410,12 @@ fn packs_the_map_builds_from(
         &project.library,
     ) {
         Ok(expansion) => {
-            used.extend(expansion.placements.iter().filter_map(|p| dir_of(&p.descriptor)));
+            used.extend(
+                expansion
+                    .placements
+                    .iter()
+                    .filter_map(|p| dir_of(&p.descriptor)),
+            );
         }
         Err(e) => state.status.problem(format!(
             "the stamped groups do not resolve, so the packs behind them are not counted as in \
@@ -3239,7 +3450,11 @@ mod pack_fold_tests {
         let measured = Library {
             version: emerge_core::library::LIBRARY_VERSION,
             note: None,
-            descriptors: vec![piece("wall", "alpha"), piece("crate", "beta"), piece("lamp", "beta")],
+            descriptors: vec![
+                piece("wall", "alpha"),
+                piece("crate", "beta"),
+                piece("lamp", "beta"),
+            ],
         };
         Project {
             root: std::path::PathBuf::from("/nonexistent"),
@@ -3278,7 +3493,10 @@ mod pack_fold_tests {
         let mut state = ImportState::default();
         let used = packs_the_map_builds_from(&project_placing(&["crate"]), &mut state);
         assert!(used.contains("beta"), "`beta` holds the placed piece");
-        assert!(!used.contains("alpha"), "`alpha` is in the library but this map never places it");
+        assert!(
+            !used.contains("alpha"),
+            "`alpha` is in the library but this map never places it"
+        );
     }
 
     /// A map that places nothing draws on no pack — the state a fresh map opens into.
@@ -3337,7 +3555,10 @@ pub(crate) fn scan(project: &Project, state: &mut ImportState) {
             // the first one opens to provide it — a tab must never open with its selection hidden.
             state.selected = 0;
             let grouped = packs(&state.candidates);
-            match grouped.iter().find(|(pack, _)| !state.folded_packs.contains(pack)) {
+            match grouped
+                .iter()
+                .find(|(pack, _)| !state.folded_packs.contains(pack))
+            {
                 Some((_, members)) => state.selected = members.first().copied().unwrap_or(0),
                 None => {
                     if let Some((pack, members)) = grouped.first() {
@@ -3377,7 +3598,9 @@ fn rename_candidate(
                     mesh,
                     raw: String::new(),
                 });
-                state.status.note("type an id — Enter to keep it, Esc to leave it alone".to_owned());
+                state
+                    .status
+                    .note("type an id — Enter to keep it, Esc to leave it alone".to_owned());
             }
         }
         // **Drain before leaving**, so the `I` that opened the field is not still waiting to be read
@@ -3397,18 +3620,16 @@ fn rename_candidate(
                 };
                 let id = emerge_core::naming::to_snake_case(&rename.raw);
                 if id.is_empty() {
-                    state.status.note("an id cannot be empty; nothing was changed".to_owned());
+                    state
+                        .status
+                        .note("an id cannot be empty; nothing was changed".to_owned());
                 } else {
                     // The candidate this field was opened on, found by the mesh it names rather than
                     // by wherever the selection has since moved to.
                     // Recorded like every other candidate edit — the snapshot history carries the
                     // candidate list precisely so pre-Accept work is not outside it.
                     let history_before = state.snapshot(&project);
-                    match state
-                        .candidates
-                        .iter_mut()
-                        .find(|c| c.mesh == rename.mesh)
-                    {
+                    match state.candidates.iter_mut().find(|c| c.mesh == rename.mesh) {
                         Some(c) => {
                             c.proposed.id = id.clone();
                             state.record(history_before);
@@ -3416,12 +3637,10 @@ fn rename_candidate(
                         }
                         // Only reachable if a rescan dropped the mesh mid-rename, which is a real
                         // thing `R` can do. Saying so beats renaming whatever is selected now.
-                        None => {
-                            state.status.problem(format!(
-                                "`{id}` was not kept — `{}` is no longer in the scan.",
-                                rename.mesh
-                            )
-                        )}
+                        None => state.status.problem(format!(
+                            "`{id}` was not kept — `{}` is no longer in the scan.",
+                            rename.mesh
+                        )),
                     }
                 }
             }
@@ -3477,7 +3696,10 @@ fn cycle_mount(
     //
     // Matched on the *current* mount rather than the list's, so the carry happens only when there is
     // genuinely a height to carry: floor -> wall gets the list's default, wall -> wall keeps yours.
-    let had = d.mount.as_ref().and_then(emerge_core::descriptor::mount_height);
+    let had = d
+        .mount
+        .as_ref()
+        .and_then(emerge_core::descriptor::mount_height);
     // **Found by kind, not by value.** `Mount` compares its payload too, so once a height is
     // authorable this lookup stops matching the moment it is anything but the list's `1.8` — and a
     // miss here reads as `map_or(0, ..)`, which would silently reset the piece to `on floor`. Asking
@@ -3546,14 +3768,83 @@ fn suggestion_keys(
     if discard {
         if suggestions.remove(&target).is_some() {
             generation.0 = generation.0.wrapping_add(1);
-            state.status.note(format!("discarded the proposed labels for `{name}`"));
+            state
+                .status
+                .note(format!("discarded the proposed labels for `{name}`"));
         } else {
             state.status.note("no proposed labels here".to_owned());
         }
         return;
     }
+    apply_suggestion(
+        target,
+        &name,
+        &mut project,
+        &mut state,
+        &mut suggestions,
+        &mut generation,
+        &label_tasks,
+        &mut rig,
+    );
+}
+
+/// **A batch confirms what it proposes, one per frame.**
+///
+/// The commit door still exists and still guards the single `L`: one mesh is a decision an author
+/// is standing in front of. A walk of hundreds is a different act — asked for at the keyboard,
+/// 2026-08-15 — and the confirmation is the decision to start it. Everything downstream is the same
+/// path `U` takes, including the guards and the righting branch, so a batch cannot write something
+/// a keypress would have refused.
+///
+/// One per frame rather than draining: `apply_suggestion` may re-photograph a piece it had to right
+/// first, and a loop here would queue those shots faster than the booth can take them.
+fn auto_apply_batch(
+    queue: Res<crate::labels::LabelQueue>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<ImportState>,
+    mut suggestions: ResMut<crate::labels::Suggestions>,
+    mut generation: ResMut<crate::labels::LabelGeneration>,
+    label_tasks: Res<crate::labels::LabelTasks>,
+    mut rig: ResMut<crate::label_booth::ShotRig>,
+) {
+    if !queue.auto_apply() || queue.paused() {
+        return;
+    }
+    let Some(target) = suggestions.first_target() else {
+        return;
+    };
+    let name = crate::labels::name_of(&target).to_owned();
+    apply_suggestion(
+        target,
+        &name,
+        &mut project,
+        &mut state,
+        &mut suggestions,
+        &mut generation,
+        &label_tasks,
+        &mut rig,
+    );
+}
+
+/// **Apply one proposal, wherever the decision came from.**
+///
+/// `U` is one caller; a batch running with auto-confirm is the other. Extracted rather than
+/// duplicated because the interesting part is not the field copy — it is the two guards around it
+/// (the piece may have gone, the mesh may have changed under the proposal) and the righting branch,
+/// and a second copy of those is a second set of rules to keep in step.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_suggestion(
+    target: EditTarget,
+    name: &str,
+    project: &mut Project,
+    state: &mut ImportState,
+    suggestions: &mut crate::labels::Suggestions,
+    generation: &mut crate::labels::LabelGeneration,
+    label_tasks: &crate::labels::LabelTasks,
+    rig: &mut crate::label_booth::ShotRig,
+) {
     let Some(entry) = suggestions.get(&target).cloned() else {
-        state.status.note("no proposed labels here — L asks the model".to_owned());
+        state.status.note("no proposed labels here".to_owned());
         return;
     };
     // **A lying-down piece is righted FIRST, and the labels are re-asked** — the model judged a
@@ -3563,31 +3854,45 @@ fn suggestion_keys(
     // authored-cells guard — a refusal keeps the suggestion and says why), discards the stale
     // suggestion, and re-photographs the upright piece for fresh labels.
     if let Some(turn) = &entry.suggestion.needs_turn {
-        let axis = if turn.axis == "x" { RotateAxis::X } else { RotateAxis::Z };
-        if rotate_mesh(axis, false, &mut project, &mut state) {
+        let axis = if turn.axis == "x" {
+            RotateAxis::X
+        } else {
+            RotateAxis::Z
+        };
+        if rotate_mesh(axis, false, project, state) {
             suggestions.remove(&target);
             generation.0 = generation.0.wrapping_add(1);
             let Some(d) = state.placed_at_target(&target, &project).cloned() else {
                 return;
             };
-            let said = crate::labels::request_photos(target, &d, &label_tasks, &mut rig);
-            state.status.note(format!("righted about {} — {said}", turn.axis.to_uppercase()));
+            let said = crate::labels::request_photos(target, &d, label_tasks, rig);
+            state.status.note(format!(
+                "righted about {} — {said}",
+                turn.axis.to_uppercase()
+            ));
         }
         return;
     }
-    let project = &mut *project;
     let history_before = state.snapshot(project);
     let Some((d, where_to)) = state.at_target(&target, &mut project.measured) else {
-        state.status.problem("not applied — that piece is gone".to_owned());
+        state
+            .status
+            .problem("not applied — that piece is gone".to_owned());
         return;
     };
     if d.mesh.as_deref() != Some(entry.mesh.as_str()) {
-        state.status.problem("not applied — the mesh changed under the proposal".to_owned());
+        state
+            .status
+            .problem("not applied — the mesh changed under the proposal".to_owned());
         return;
     }
     crate::labels::apply_fields(d, &entry.suggestion);
     state.record(history_before);
-    let said = persist(project, where_to, format!("applied proposed labels to `{name}`"));
+    let said = persist(
+        project,
+        where_to,
+        format!("applied proposed labels to `{name}`"),
+    );
     // A refused write keeps the proposal staged for another try. This used to ask
     // `said.starts_with("NOT WRITTEN")` — a control-flow decision made by sniffing a message for a
     // prefix the function it came from was free to reword. `persist` returns a `Result` now, so the
@@ -3657,7 +3962,9 @@ fn commit_candidate(
         return;
     };
     if candidate.blocked() {
-        state.status.problem("this mesh cannot be measured, so there is nothing to add".to_owned());
+        state
+            .status
+            .problem("this mesh cannot be measured, so there is nothing to add".to_owned());
         return;
     }
     let descriptor = candidate.proposed.clone();
@@ -3734,7 +4041,9 @@ fn remove_tile(
         return;
     }
     let Some(id) = state.selected_library_id.clone() else {
-        state.status.note("select a library tile to remove it".to_owned());
+        state
+            .status
+            .note("select a library tile to remove it".to_owned());
         return;
     };
     let before = state.snapshot(&project);
@@ -3742,7 +4051,9 @@ fn remove_tile(
         Ok(path) => {
             state.selected_library_id = None;
             state.record(before);
-            state.status.note(format!("removed `{id}` from the library"));
+            state
+                .status
+                .note(format!("removed `{id}` from the library"));
             info!("removed `{id}` from {}", path.display());
         }
         Err(e) => state.status.problem(format!("not removed: {e}")),
@@ -3800,10 +4111,18 @@ fn take_out_of_library(id: &str, project: &mut Project) -> Result<std::path::Pat
             "`{id}` is a member of {}: {}. It cannot be sent back while they hold it — the project \
              would stop opening with `compositions.ron` naming a descriptor nothing defines. \
              {} edits it in place without removing it; sending it back means redefining {} first.",
-            if groups.len() == 1 { "the composition" } else { "the compositions" },
+            if groups.len() == 1 {
+                "the composition"
+            } else {
+                "the compositions"
+            },
             groups.join(", "),
             crate::keys::chord(crate::keys::Action::EditTile),
-            if groups.len() == 1 { "that composition" } else { "those compositions" },
+            if groups.len() == 1 {
+                "that composition"
+            } else {
+                "those compositions"
+            },
         ));
     }
     let Some(at) = project.measured.descriptors.iter().position(|d| d.id == id) else {
@@ -3862,10 +4181,18 @@ pub(crate) fn demote_blockers(id: &str, project: &Project) -> Result<String, Str
             "`{id}` is a member of {}: {}. It cannot be sent back while they hold it — the project \
              would stop opening with `compositions.ron` naming a descriptor nothing defines. \
              {} edits it in place without removing it; sending it back means redefining {} first.",
-            if groups.len() == 1 { "the composition" } else { "the compositions" },
+            if groups.len() == 1 {
+                "the composition"
+            } else {
+                "the compositions"
+            },
             groups.join(", "),
             crate::keys::chord(crate::keys::Action::EditTile),
-            if groups.len() == 1 { "that composition" } else { "those compositions" },
+            if groups.len() == 1 {
+                "that composition"
+            } else {
+                "those compositions"
+            },
         ));
     }
     Ok(mesh)
@@ -3901,7 +4228,9 @@ fn demote_tile(
         return;
     }
     let Some(id) = state.selected_library_id.clone() else {
-        state.status.note("select a library tile to send it back".to_owned());
+        state
+            .status
+            .note("select a library tile to send it back".to_owned());
         return;
     };
     if arm.0.as_deref() != Some(id.as_str()) {
@@ -3932,13 +4261,19 @@ fn demote_tile(
             state.selected_library_id = None;
             // Proposed labels under either identity judged the piece as it was configured —
             // stale by definition now.
-            let dropped = suggestions.remove(&EditTarget::Library(id.clone())).is_some()
-                | suggestions.remove(&EditTarget::Candidate(mesh.clone())).is_some();
+            let dropped = suggestions
+                .remove(&EditTarget::Library(id.clone()))
+                .is_some()
+                | suggestions
+                    .remove(&EditTarget::Candidate(mesh.clone()))
+                    .is_some();
             if dropped {
                 generation.0 = generation.0.wrapping_add(1);
             }
             state.record(before);
-            state.status.note(format!("sent `{id}` back to the candidates — measured fresh, stripped"));
+            state.status.note(format!(
+                "sent `{id}` back to the candidates — measured fresh, stripped"
+            ));
             info!("demoted `{id}` out of {}", path.display());
         }
         Err(e) => state.status.problem(format!("not sent back: {e}")),
@@ -3971,7 +4306,6 @@ fn holds_a_mesh(
         .map(|kids| kids.iter().any(|k| holds_a_mesh(k, children, meshes)))
         .unwrap_or(false)
 }
-
 
 /// Toggle one token on one axis.
 fn on_tag_chip(
@@ -4035,6 +4369,8 @@ fn move_selection(
     // The arrows walk what is on screen, which is what the filter decides.
     filters: Res<crate::filter::Filters>,
     mut state: ResMut<ImportState>,
+    // A mesh whose judgement is still a proposal is not composable — see `composable`.
+    suggestions: Res<crate::labels::Suggestions>,
 ) {
     // **Read the keys before touching the focus.** Clearing `selected_library_id` unconditionally
     // would steal the focus back on the very next frame after a library row was clicked — the system
@@ -4068,7 +4404,14 @@ fn move_selection(
         state.status.note("candidates".to_owned());
     }
     if to_library {
-        match library_ids(project.as_ref(), &filters).first() {
+        match library_ids(
+            project.as_ref(),
+            &filters,
+            live.0 == crate::keys::Context::Tiles,
+            Some(&suggestions),
+        )
+        .first()
+        {
             Some(first) => {
                 if state.selected_library_id.is_none() {
                     state.selected_library_id = Some(first.clone());
@@ -4087,7 +4430,14 @@ fn move_selection(
     // legal source and walking it here would move a focus the tile author cannot spend. This is one
     // path rather than two — the tab does not *prefer* the library, it is the only list it has.
     if live.0 == crate::keys::Context::Tiles && state.selected_library_id.is_none() {
-        match library_ids(project.as_ref(), &filters).first() {
+        match library_ids(
+            project.as_ref(),
+            &filters,
+            live.0 == crate::keys::Context::Tiles,
+            Some(&suggestions),
+        )
+        .first()
+        {
             Some(first) => state.selected_library_id = Some(first.clone()),
             None => {
                 state.status.problem(
@@ -4106,14 +4456,26 @@ fn move_selection(
     // pair nobody would remember, on a tab already carrying ten rows of its twelve.
     match state.selected_library_id.clone() {
         Some(id) => {
-            let ids = library_ids(project.as_ref(), &filters);
+            let ids = library_ids(
+                project.as_ref(),
+                &filters,
+                live.0 == crate::keys::Context::Tiles,
+                Some(&suggestions),
+            );
             let Some(at) = ids.iter().position(|d| *d == id) else {
                 return;
             };
-            let want = if down { at + stride } else { at.saturating_sub(stride) };
+            let want = if down {
+                at + stride
+            } else {
+                at.saturating_sub(stride)
+            };
             if let Some(next) = ids.get(want.min(ids.len().saturating_sub(1))) {
                 state.selected_library_id = Some(next.clone());
-                state.status.note(format!("`{next}` selected — {} removes it", keys::binding(Action::RemoveTile).chord));
+                state.status.note(format!(
+                    "`{next}` selected — {} removes it",
+                    keys::binding(Action::RemoveTile).chord
+                ));
             }
         }
         None => {
@@ -4134,7 +4496,11 @@ fn move_selection(
                     return;
                 }
             };
-            let want = if down { at + stride } else { at.saturating_sub(stride) };
+            let want = if down {
+                at + stride
+            } else {
+                at.saturating_sub(stride)
+            };
             if let Some(&next) = rows.get(want.min(rows.len().saturating_sub(1))) {
                 state.selected = next;
             }
@@ -4270,15 +4636,68 @@ fn keep_candidate_selection_visible(
 /// library meant the arrows stepped through rows that were not on screen — and `Delete` acts on the
 /// selection, so the key removed a tile the author never saw. The list and the keys have to agree
 /// about what "next" means or one of them is lying.
-pub(crate) fn library_ids(project: &Project, filters: &crate::filter::Filters) -> Vec<String> {
+/// The palette filter, for the test suite — `library_ids` itself stays `pub(crate)` so the panel
+/// and the keys remain its only callers.
+pub fn library_ids_for_test(
+    project: &Project,
+    filters: &crate::filter::Filters,
+    labeled_only: bool,
+    pending: Option<&crate::labels::Suggestions>,
+) -> Vec<String> {
+    library_ids(project, filters, labeled_only, pending)
+}
+
+pub(crate) fn library_ids(
+    project: &Project,
+    filters: &crate::filter::Filters,
+    // Composing asks only for judged meshes; the definition bench asks for all of them.
+    labeled_only: bool,
+    // Proposals waiting on a human — a mesh with one is not settled yet. See `composable`.
+    pending: Option<&crate::labels::Suggestions>,
+) -> Vec<String> {
     let pane = crate::filter::Pane::Candidates;
     project
         .library
         .descriptors
         .iter()
         .filter(|d| filters.keeps(pane, &d.id))
+        // **A tile is composed only from JUDGED meshes.** The two tabs share one list and ask
+        // different questions of it: the Meshes tab is the definition bench and shows everything,
+        // because an unjudged piece is precisely what it is for — and because un-labelling a piece
+        // (`Shift+Delete`, "back to candidates, stripped") has to be reachable somewhere. The Tiles
+        // tab composes, and a piece with no mount, no kind and no description has nothing to
+        // compose *with*: its footprint is a guess and the solver cannot place what it yields.
+        //
+        // Asked for at the keyboard, 2026-08-15: *"unlabeled meshes shouldn't show on the tiles
+        // tab."* `labels::needs_labels` is the same predicate the VLM batch picks its targets with,
+        // so "what the labeler still owes you" and "what you cannot build with yet" cannot drift.
+        .filter(|d| !labeled_only || composable(d, pending))
         .map(|d| d.id.clone())
         .collect()
+}
+
+/// **Settled enough to build with: labelled AND confirmed.**
+///
+/// Two conditions, and the second was missing. `needs_labels` answers *are the axes filled*, which
+/// a machine can satisfy on its own — but a suggestion the VLM has proposed and nobody has looked
+/// at is a **question**, not an answer, and the whole reason the labeler stages proposals behind a
+/// commit door (`U` applies, `Y` discards) is that a human decides. A mesh whose judgement is still
+/// a pending proposal has no business in the palette a tile is composed from.
+///
+/// Asked for at the keyboard, 2026-08-15: *"before any mesh shows up there, make sure its labels
+/// are completed and confirmed."*
+///
+/// Note what this does NOT require: provenance. Labels applied from a suggestion ARE confirmed —
+/// somebody pressed `U` — and hand-authored labels were never in doubt. The only unsettled state is
+/// a proposal still waiting, which is exactly what is tested.
+pub(crate) fn composable(
+    d: &emerge_core::descriptor::Descriptor,
+    pending: Option<&crate::labels::Suggestions>,
+) -> bool {
+    if crate::labels::needs_labels(d) {
+        return false;
+    }
+    pending.is_none_or(|s| s.get(&EditTarget::Library(d.id.clone())).is_none())
 }
 
 /// **Keep the library selection on a row that is showing.**
@@ -4290,8 +4709,11 @@ pub(crate) fn library_ids(project: &Project, filters: &crate::filter::Filters) -
 /// filter matches nothing.
 fn keep_library_selection_visible(
     filters: Res<crate::filter::Filters>,
+    suggestions: Res<crate::labels::Suggestions>,
     project: Res<Project>,
     mut state: ResMut<ImportState>,
+    // The Tiles palette hides unjudged meshes, so what counts as "still visible" differs by tab.
+    mode: Res<Mode>,
 ) {
     if !filters.is_changed() {
         return;
@@ -4299,7 +4721,7 @@ fn keep_library_selection_visible(
     let Some(id) = state.selected_library_id.clone() else {
         return;
     };
-    let visible = library_ids(&project, &filters);
+    let visible = library_ids(&project, &filters, *mode == Mode::Tiles, Some(&suggestions));
     if visible.iter().any(|v| *v == id) {
         return;
     }
@@ -4328,7 +4750,9 @@ fn on_library_click(
 ) {
     if let Ok(row) = rows.get(activate.entity) {
         state.selected_library_id = Some(row.0.clone());
-        state.status.note(format!("`{}` selected — Del removes it", row.0));
+        state
+            .status
+            .note(format!("`{}` selected — Del removes it", row.0));
     }
 }
 
@@ -4352,7 +4776,13 @@ fn apply_mode(
     // **One query with `Has`, not one per marker.** Three disjoint queries would each need `Without`
     // of both others, and a fourth tab would need three more — this asks each panel which tab it
     // belongs to instead.
-    mut panels: Query<(&mut Node, Has<MapRoot>, Has<TilesRoot>, Has<AnimRoot>, Has<ComposeRoot>)>,
+    mut panels: Query<(
+        &mut Node,
+        Has<MapRoot>,
+        Has<TilesRoot>,
+        Has<AnimRoot>,
+        Has<ComposeRoot>,
+    )>,
 ) {
     if !mode.is_changed() {
         return;
@@ -4499,7 +4929,9 @@ fn drive_preview(
         Err(e) => {
             if said.as_ref() != Some(&(mesh.clone(), "failed")) {
                 *said = Some((mesh.clone(), "failed"));
-                state.status.problem(format!("NOT DRAWN — {}: {e}", leaf(&mesh)));
+                state
+                    .status
+                    .problem(format!("NOT DRAWN — {}: {e}", leaf(&mesh)));
                 error!("preview of {mesh}: {e}");
             }
         }
@@ -4527,7 +4959,10 @@ fn drive_preview(
     // loss stays on the record, and gives up loudly after three attempts rather than looping.
     const HEAL_GRACE_FRAMES: u32 = 30;
     const HEAL_ATTEMPTS: u8 = 3;
-    let existing = previews.iter().find(|(_, of, _)| of.0 == mesh).map(|(e, _, _)| e);
+    let existing = previews
+        .iter()
+        .find(|(_, of, _)| of.0 == mesh)
+        .map(|(e, _, _)| e);
     if heal.as_ref().is_none_or(|(m, _, _, _)| *m != mesh) {
         *heal = Some((mesh.clone(), 0, 0, false));
     }
@@ -4762,7 +5197,10 @@ fn draw_preview_footprint(state: Res<ImportState>, project: Res<Project>, mut gi
             STAGE + up + Vec3::new(0.0, 0.01, 0.0),
             Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
         ),
-        Vec2::new(cx as f32 * emerge_core::grid::SNAP, cz as f32 * emerge_core::grid::SNAP),
+        Vec2::new(
+            cx as f32 * emerge_core::grid::SNAP,
+            cz as f32 * emerge_core::grid::SNAP,
+        ),
         CELLS,
     );
     // And the volume, so height is visible rather than only stated.
@@ -4827,10 +5265,16 @@ fn tab_strip(p: &mut ChildSpawnerCommands, on_kit: bool, kit: usize) {
             ));
         }
         row.spawn((
-            // `Esc`, not `left`: no `ArrowLeft` binding exists while browsing, and a hint naming a
-            // dead key is the exact lie the key census exists to prevent — this one slipped past it
-            // by being prose (found in the 2026-08-14 guided session prep).
-            Text::new(if on_kit { "  right reopens / Esc backs out" } else { "  right for the kit" }),
+            // **`left` is bound now, so the hint can say it again.** It originally read "left
+            // back" over an unbound key; the first fix reworded the hint to name `Esc`, which made
+            // the prose honest and left the author pressing a key that did nothing. The second fix
+            // was the binding (`Action::KitLeave`) — the strip promised the idiom before the tab
+            // implemented it, and the promise was the right one.
+            Text::new(if on_kit {
+                "  right reopens / left back"
+            } else {
+                "  right for the kit"
+            }),
             TextColor(DIM),
             TextFont::from_font_size(9.0),
         ));
@@ -4868,6 +5312,80 @@ fn kit_rows(p: &mut ChildSpawnerCommands, project: &Project, cursor: usize) {
     }
 }
 
+/// The batch readout's root, shown only while a walk exists.
+#[derive(Component)]
+struct LabelProgress;
+/// `LABELING 16/778`, or `HELD AT 16/778`.
+#[derive(Component)]
+struct LabelProgressText;
+/// The filled part of the bar; its width is the fraction done.
+#[derive(Component)]
+struct LabelProgressBar;
+/// The subject in hand right now.
+#[derive(Component)]
+struct LabelProgressNow;
+
+/// **What the batch is doing, where the work is landing.**
+///
+/// Asked for at the keyboard, 2026-08-15: *"I'd like some sort of progress bar to show how it's
+/// working through them... each one that's being defined has showed active."* The only readout was
+/// a status-line string that the next note overwrote, so a walk of several hundred meshes was
+/// indistinguishable from nothing happening — which is exactly how it was reported.
+fn paint_label_progress(
+    queue: Res<crate::labels::LabelQueue>,
+    mut roots: Query<&mut Node, (With<LabelProgress>, Without<LabelProgressBar>)>,
+    mut bars: Query<&mut Node, (With<LabelProgressBar>, Without<LabelProgress>)>,
+    mut heads: Query<&mut Text, (With<LabelProgressText>, Without<LabelProgressNow>)>,
+    mut nows: Query<&mut Text, (With<LabelProgressNow>, Without<LabelProgressText>)>,
+) {
+    if !queue.is_changed() {
+        return;
+    }
+    let running = queue.running();
+    let display = if running {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    for mut node in &mut roots {
+        if node.display != display {
+            node.display = display;
+        }
+    }
+    if !running {
+        return;
+    }
+    let (done, total) = queue.progress();
+    let fraction = if total == 0 {
+        0.0
+    } else {
+        done as f32 / total as f32 * 100.0
+    };
+    for mut bar in &mut bars {
+        let want = Val::Percent(fraction);
+        if bar.width != want {
+            bar.width = want;
+        }
+    }
+    for mut text in &mut heads {
+        let want = if queue.paused() {
+            format!("HELD AT {done}/{total}   Shift+L resumes")
+        } else {
+            format!("LABELING {done}/{total}   Shift+L holds")
+        };
+        if text.0 != want {
+            text.0 = want;
+        }
+    }
+    for mut text in &mut nows {
+        // The active subject, which is the half a bar cannot say.
+        let want = queue.current().unwrap_or("").to_owned();
+        if text.0 != want {
+            text.0 = want;
+        }
+    }
+}
+
 /// One row of the KIT list, by index into `project.compositions.compositions` — the same list
 /// `Build::browsing` indexes, which is what makes the scroll-follow able to find the cursor.
 #[derive(Component)]
@@ -4890,6 +5408,10 @@ fn rebuild_candidates(
     build: Res<crate::build::Build>,
     lists: Query<Entity, With<CandidateList>>,
     headers: Query<Entity, With<ListHeader>>,
+    // The panel serves two tabs and they ask different questions of the same list.
+    mode: Res<Mode>,
+    // A proposal waiting on a human keeps its mesh out of the composing palette — see `composable`.
+    suggestions: Res<crate::labels::Suggestions>,
 ) {
     // **The counts are of what is SHOWN.** A heading reading 318 above a filtered list of four is a
     // heading lying about the thing directly under it — and the count is the one number that says
@@ -4912,13 +5434,12 @@ fn rebuild_candidates(
     // competing for one panel, and the wrong panel. One list showing one of two things is the shape
     // a palette already has.
     let browsing = build.browsing;
+    // Which question this panel is being asked: compose (judged only) or define (everything).
+    let on_tiles = *mode == Mode::Tiles;
     // The census counts, not this panel -- `census_is_the_one_counter` forbids a panel
     // rendering `compositions.compositions.len()` itself.
-    let kit = emerge_core::census::of_catalog(
-        &project.library,
-        &project.compositions.compositions,
-    )
-    .compositions;
+    let kit = emerge_core::census::of_catalog(&project.library, &project.compositions.compositions)
+        .compositions;
 
     // The strip rides the header node, not the list — frozen above the scroll. See [`ListHeader`].
     for header in &headers {
@@ -4946,8 +5467,16 @@ fn rebuild_candidates(
                 .descriptors
                 .iter()
                 .filter(|d| filters.keeps(pane, &d.id))
+                // The Tiles palette composes, so it lists only judged meshes — see `library_ids`,
+                // which the arrows walk by. The two must agree or the keys step onto rows the eye
+                // cannot see.
+                .filter(|d| !on_tiles || composable(d, Some(&suggestions)))
             {
                 let selected = state.selected_library_id.as_deref() == Some(d.id.as_str());
+                // **Green when it has been judged, plain when it still owes an answer.** The one
+                // glance that says whether a mesh can build anything yet; on the Tiles tab every
+                // row is green by construction, which is the point of the split.
+                let judged = composable(d, Some(&suggestions));
                 p.spawn((
                     UiButton,
                     Hovered::default(),
@@ -4962,7 +5491,7 @@ fn rebuild_candidates(
                 .with_children(|row| {
                     row.spawn((
                         Text::new(d.id.clone()),
-                        TextColor(TEXT),
+                        TextColor(if judged { crate::chrome::LABELED } else { TEXT }),
                         TextFont::from_font_size(10.0),
                     ));
                 });
@@ -5060,58 +5589,58 @@ fn rebuild_candidates(
                     continue;
                 }
                 for ix in members {
-                let Some(c) = state.candidates.get(ix) else {
-                    continue;
-                };
-                p.spawn((
-                    UiButton,
-                    Hovered::default(),
-                    CandidateRow(ix),
-                    Node {
-                        width: Val::Percent(100.0),
-                        padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
-                        flex_direction: FlexDirection::Row,
-                        ..default()
-                    },
-                    BackgroundColor(if ix == state.selected {
-                        ROW_SELECTED
-                    } else {
-                        ROW_BG
-                    }),
-                ))
-                .with_children(|row| {
-                    // The severity mark first, so a list of 300 can be skimmed for the ones that
-                    // need attention rather than read.
-                    row.spawn((
+                    let Some(c) = state.candidates.get(ix) else {
+                        continue;
+                    };
+                    p.spawn((
+                        UiButton,
+                        Hovered::default(),
+                        CandidateRow(ix),
                         Node {
-                            width: Val::Px(14.0),
-                            flex_shrink: 0.0,
+                            width: Val::Percent(100.0),
+                            padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
+                            flex_direction: FlexDirection::Row,
                             ..default()
                         },
-                        Text::new(match c.worst() {
-                            Some(Severity::Blocking) => "x",
-                            Some(Severity::Warn) => "!",
-                            _ => "",
+                        BackgroundColor(if ix == state.selected {
+                            ROW_SELECTED
+                        } else {
+                            ROW_BG
                         }),
-                        TextColor(match c.worst() {
-                            Some(Severity::Blocking) => DANGER,
-                            Some(Severity::Warn) => ACCENT,
-                            _ => LABEL,
-                        }),
-                        TextFont::from_font_size(11.0),
-                    ));
-                    row.spawn((
-                        Node {
-                            flex_grow: 1.0,
-                            ..default()
-                        },
-                        // The file's own name, not the full path — the pack heading already said
-                        // where it came from, and repeating it on 145 rows is the same word 145 times.
-                        Text::new(leaf(&c.mesh)),
-                        TextColor(TEXT),
-                        TextFont::from_font_size(10.0),
-                    ));
-                });
+                    ))
+                    .with_children(|row| {
+                        // The severity mark first, so a list of 300 can be skimmed for the ones that
+                        // need attention rather than read.
+                        row.spawn((
+                            Node {
+                                width: Val::Px(14.0),
+                                flex_shrink: 0.0,
+                                ..default()
+                            },
+                            Text::new(match c.worst() {
+                                Some(Severity::Blocking) => "x",
+                                Some(Severity::Warn) => "!",
+                                _ => "",
+                            }),
+                            TextColor(match c.worst() {
+                                Some(Severity::Blocking) => DANGER,
+                                Some(Severity::Warn) => ACCENT,
+                                _ => LABEL,
+                            }),
+                            TextFont::from_font_size(11.0),
+                        ));
+                        row.spawn((
+                            Node {
+                                flex_grow: 1.0,
+                                ..default()
+                            },
+                            // The file's own name, not the full path — the pack heading already said
+                            // where it came from, and repeating it on 145 rows is the same word 145 times.
+                            Text::new(leaf(&c.mesh)),
+                            TextColor(TEXT),
+                            TextFont::from_font_size(10.0),
+                        ));
+                    });
                 }
             }
         });
@@ -5125,13 +5654,13 @@ fn rebuild_candidates(
 /// feedback half of Compton's grokloop, which Lai et al.'s second pillar asks to keep short — *"the
 /// speed of learning depends on how short the loop is."* A tile you cannot see is a loop with the
 /// feedback removed.
-fn build_detail(
-    p: &mut ChildSpawnerCommands,
-    build: &crate::build::Build,
-    project: &Project,
-) {
+fn build_detail(p: &mut ChildSpawnerCommands, build: &crate::build::Build, project: &Project) {
     let line = |p: &mut ChildSpawnerCommands, text: String, colour: Color, size: f32| {
-        p.spawn((Text::new(text), TextColor(colour), TextFont::from_font_size(size)));
+        p.spawn((
+            Text::new(text),
+            TextColor(colour),
+            TextFont::from_font_size(size),
+        ));
     };
 
     let Some(comp) = build.open.as_ref() else {
@@ -5189,7 +5718,11 @@ fn build_detail(
     // in thirds by `J` — so what an author reads here is steps between centre and flush, not cells
     // of a lattice the piece can land beside.
     crate::chrome::section(p, "GRID");
-    let n = project.policy.snap_divisor.saturating_pow(build.depth).max(1);
+    let n = project
+        .policy
+        .snap_divisor
+        .saturating_pow(build.depth)
+        .max(1);
     line(
         p,
         match build.depth {
@@ -5214,7 +5747,12 @@ fn build_detail(
             );
         }
         // The drop lands in the middle whatever the rung, so an empty tile can say exactly where.
-        None => line(p, "empty — the next drop lands centred".to_owned(), ACCENT, 10.0),
+        None => line(
+            p,
+            "empty — the next drop lands centred".to_owned(),
+            ACCENT,
+            10.0,
+        ),
     }
 
     crate::chrome::section(p, "MEMBERS");
@@ -5292,7 +5830,8 @@ fn rebuild_detail(
             // One guard for the pair. They are `Some` together or `None` together — the layered
             // library is derived from the measurements and `Policy::apply` patches entries without
             // renaming them — so a second `else` arm here would be a branch nothing can reach.
-            let (Some(d), Some(placed)) = (state.editing(&project.measured), state.placed(&project))
+            let (Some(d), Some(placed)) =
+                (state.editing(&project.measured), state.placed(&project))
             else {
                 return;
             };
@@ -5626,7 +6165,11 @@ fn rebuild_detail(
             // Drawn only when the mount carries a height — `mount_height` is the one place that
             // decides which those are, so this cannot drift from the schema. A dead field beside
             // `on floor` would be the panel asking a question with no answer.
-            if let Some(now) = d.mount.as_ref().and_then(emerge_core::descriptor::mount_height) {
+            if let Some(now) = d
+                .mount
+                .as_ref()
+                .and_then(emerge_core::descriptor::mount_height)
+            {
                 let (height_text, height_tint) = match &height_edit.active {
                     Some((_, raw)) => (format!("{raw}_"), ACCENT),
                     None => (format!("{now:.2}"), TEXT),
@@ -5769,11 +6312,21 @@ fn rebuild_detail(
                                 ..default()
                             })
                             .with_children(|row| {
-                                header_button(row, FillHeader { layer: y, span: Span::Layer }, "*");
+                                header_button(
+                                    row,
+                                    FillHeader {
+                                        layer: y,
+                                        span: Span::Layer,
+                                    },
+                                    "*",
+                                );
                                 for x in 0..dx {
                                     header_button(
                                         row,
-                                        FillHeader { layer: y, span: Span::Column(x) },
+                                        FillHeader {
+                                            layer: y,
+                                            span: Span::Column(x),
+                                        },
                                         "v",
                                     );
                                 }
@@ -5788,7 +6341,10 @@ fn rebuild_detail(
                                 .with_children(|row| {
                                     header_button(
                                         row,
-                                        FillHeader { layer: y, span: Span::Row(z) },
+                                        FillHeader {
+                                            layer: y,
+                                            span: Span::Row(z),
+                                        },
                                         ">",
                                     );
                                     for x in 0..dx {
@@ -5813,17 +6369,23 @@ fn rebuild_detail(
                                                 ROW_BG
                                             }),
                                         ))
-                                        .with_children(|b| {
-                                            b.spawn((
-                                                Text::new(cell_glyph(cell).to_owned()),
-                                                // A marked cell is brighter than an empty one —
-                                                // luminance, not hue, per `docs/ui.md` §1.3.
-                                                TextColor(if cell.is_some() { ACCENT } else { LABEL }),
-                                                TextFont::from_font_size(11.0),
-                                                CellGlyph(x, z),
-                                                CellLayer(y),
-                                            ));
-                                        });
+                                        .with_children(
+                                            |b| {
+                                                b.spawn((
+                                                    Text::new(cell_glyph(cell).to_owned()),
+                                                    // A marked cell is brighter than an empty one —
+                                                    // luminance, not hue, per `docs/ui.md` §1.3.
+                                                    TextColor(if cell.is_some() {
+                                                        ACCENT
+                                                    } else {
+                                                        LABEL
+                                                    }),
+                                                    TextFont::from_font_size(11.0),
+                                                    CellGlyph(x, z),
+                                                    CellLayer(y),
+                                                ));
+                                            },
+                                        );
                                     }
                                 });
                             }
@@ -5841,14 +6403,20 @@ fn rebuild_detail(
                         at.0,
                         at.1,
                         at.2,
-                        grid.at(at).map(describe_cell).unwrap_or_else(|| "open".to_owned())
+                        grid.at(at)
+                            .map(describe_cell)
+                            .unwrap_or_else(|| "open".to_owned())
                     ),
                 },
                 None => "no cell picked".to_owned(),
             };
             p.spawn((
                 Text::new(detail),
-                TextColor(if cell_edit.active.is_some() { ACCENT } else { DIM }),
+                TextColor(if cell_edit.active.is_some() {
+                    ACCENT
+                } else {
+                    DIM
+                }),
                 TextFont::from_font_size(9.0),
                 SelectedCellLine,
                 Node {
@@ -5884,7 +6452,11 @@ fn rebuild_detail(
                         .with_children(|chip| {
                             chip.spawn((
                                 Text::new(verb.label().to_owned()),
-                                TextColor(if verb == CellVerb::Clear { DANGER } else { TEXT }),
+                                TextColor(if verb == CellVerb::Clear {
+                                    DANGER
+                                } else {
+                                    TEXT
+                                }),
                                 TextFont::from_font_size(10.0),
                             ));
                         });
@@ -6160,7 +6732,7 @@ fn rebuild_detail(
 #[cfg(test)]
 mod mount_cycle_tests {
     use emerge_core::descriptor::{
-        mount_height, mount_options, with_mount_height, Mount, DecalHost,
+        DecalHost, Mount, mount_height, mount_options, with_mount_height,
     };
 
     /// The lookup `cycle_mount` performs, extracted so the rule can be tested without an `App`. It
@@ -6217,7 +6789,9 @@ mod mount_cycle_tests {
         for current in [
             Mount::OnFloor,
             Mount::OnCeiling,
-            Mount::OnSurface { class: "worktop".into() },
+            Mount::OnSurface {
+                class: "worktop".into(),
+            },
         ] {
             let at = position_of(&options, &current)
                 .unwrap_or_else(|| panic!("{current:?} is not in the offered list"));
@@ -6259,7 +6833,10 @@ mod scale_field_tests {
         // The field now shows 0.60. Committing that again must change nothing at all.
         let r = bake_width(&mut d, 0.6).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(r, 1.0);
-        assert_eq!(d, after, "committing the shown width must be a byte-level no-op");
+        assert_eq!(
+            d, after,
+            "committing the shown width must be a byte-level no-op"
+        );
     }
 
     /// **The resize is uniform and it is a bake**: every extent axis moves by the ratio, and the
@@ -6271,12 +6848,19 @@ mod scale_field_tests {
         d.align.y_offset = Some(0.06);
         bake_width(&mut d, 0.5).unwrap_or_else(|e| panic!("{e}"));
 
-        assert_eq!(d.extent.footprint, Some((0.5, 0.25)), "both axes, one ratio");
+        assert_eq!(
+            d.extent.footprint,
+            Some((0.5, 0.25)),
+            "both axes, one ratio"
+        );
         assert_eq!(d.extent.height, Some(1.0));
         // The mesh-geometry corrections are proportional to the mesh, so they resize with it.
         assert_eq!(d.align.pivot, Some((0.05, -0.1)));
         assert_eq!(d.align.y_offset, Some(0.03));
-        let s = d.align.scale.unwrap_or_else(|| panic!("a resized piece carries its render scale"));
+        let s = d
+            .align
+            .scale
+            .unwrap_or_else(|| panic!("a resized piece carries its render scale"));
         assert!((s - 0.5).abs() < 1e-6, "{s}");
     }
 
@@ -6304,7 +6888,10 @@ mod scale_field_tests {
         let mut d = piece(1.0, 0.5, 2.0, None);
         let before = d.clone();
         for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
-            assert!(bake_width(&mut d, bad).is_err(), "{bad} must be refused, not stored");
+            assert!(
+                bake_width(&mut d, bad).is_err(),
+                "{bad} must be refused, not stored"
+            );
             assert_eq!(d, before, "{bad} must not have touched the piece");
         }
         // And an unmeasurable mesh cannot be resized at all.
@@ -6331,7 +6918,7 @@ mod scale_field_tests {
 mod write_library_tests {
     use super::*;
     use emerge_core::descriptor::{Align, Descriptor, Extent};
-    use emerge_core::library::{Library, LIBRARY_VERSION};
+    use emerge_core::library::{LIBRARY_VERSION, Library};
     use emerge_core::policy::{Match, Patch, Policy};
 
     /// The mesh is authored at 1.00 m; this facility builds its walls to 2.40 m.
@@ -6421,15 +7008,14 @@ mod write_library_tests {
             "the policy must actually apply, or this test cannot fail"
         );
 
-        project
-            .measured
-            .descriptors[0]
+        project.measured.descriptors[0]
             .lattice_mut()
             .set_solid((0, 0, 0), (6, 2, 1))
             .unwrap_or_else(|| panic!("in range"));
         write_library(&mut project).unwrap_or_else(|e| panic!("{e}"));
 
-        let written = std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
+        let written =
+            std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
         let back = Library::parse(&written).unwrap_or_else(|e| panic!("{e}"));
         let wall = back.get("wall").unwrap_or_else(|| panic!("wall survives"));
         assert_eq!(
@@ -6487,7 +7073,10 @@ mod write_library_tests {
         );
         // And in both live layers, so the palette shows it without a reload.
         assert!(project.measured.get("crate_b").is_some(), "measured");
-        assert!(project.library.get("crate_b").is_some(), "the derived palette");
+        assert!(
+            project.library.get("crate_b").is_some(),
+            "the derived palette"
+        );
         // The piece it was added beside is untouched, and the policy still did not leak downward.
         assert_eq!(
             back.get("wall").and_then(|d| d.extent.height),
@@ -6545,7 +7134,8 @@ mod write_library_tests {
         let dir = temp_dir("refused");
         let mut project = project_in(&dir, stretching_policy());
         write_library(&mut project).unwrap_or_else(|e| panic!("{e}"));
-        let before = std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
+        let before =
+            std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
 
         // Removing `wall` strands the policy patch that names it.
         let mut trial = project.measured.clone();
@@ -6559,7 +7149,10 @@ mod write_library_tests {
             project.measured.get("wall").is_some(),
             "the refusal must not have taken the piece out of the live measurements"
         );
-        assert!(project.library.get("wall").is_some(), "nor out of the derived layer");
+        assert!(
+            project.library.get("wall").is_some(),
+            "nor out of the derived layer"
+        );
         assert_eq!(
             std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}")),
             before,
@@ -6585,9 +7178,13 @@ mod write_library_tests {
             "three writes must leave one stretch, not three"
         );
 
-        let written = std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
+        let written =
+            std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
         let back = Library::parse(&written).unwrap_or_else(|e| panic!("{e}"));
-        let reopened = project.policy.apply(&back).unwrap_or_else(|e| panic!("{e}"));
+        let reopened = project
+            .policy
+            .apply(&back)
+            .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
             reopened.get("wall").and_then(|d| d.align.stretch_y),
             Some(STRETCH),
@@ -6604,15 +7201,20 @@ mod write_library_tests {
         let dir = temp_dir("abort");
         let mut project = project_in(&dir, stretching_policy());
         write_library(&mut project).unwrap_or_else(|e| panic!("{e}"));
-        let before = std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
+        let before =
+            std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
 
         // The only `wall` is gone, so the rule about walls matches nothing.
         project.measured.descriptors.clear();
         let err = write_library(&mut project).err().unwrap_or_default();
         assert!(err.contains("matches no descriptor"), "{err}");
 
-        let after = std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(before, after, "a refused write must not have touched the file");
+        let after =
+            std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            before, after,
+            "a refused write must not have touched the file"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
