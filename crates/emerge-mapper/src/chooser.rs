@@ -925,6 +925,295 @@ mod screen_tests {
 }
 
 // ------------------------------------------------------------------------------------------------
+// One description of the screen
+// ------------------------------------------------------------------------------------------------
+
+/// **What a row means**, which is what decides its colour.
+///
+/// Named by role rather than by colour so the palette can move without every call site becoming a
+/// decision about hue — the same reason `chrome`'s constants are `ACCENT` and `LABEL` rather than
+/// `ORANGE` and `GREY`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    /// The row the arrows are on.
+    Selected,
+    /// A kit that has pieces in it — readable at a glance against a blank one.
+    Stocked,
+    /// A kit with nothing in it, or a map with nothing placed. Not an error.
+    Empty,
+    /// An ordinary unselected row.
+    Row,
+    /// A refusal, or a map that will not open.
+    Problem,
+}
+
+/// One line of one panel: a label, something aligned to its right, and what it means.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Row {
+    pub left: String,
+    pub right: String,
+    pub tone: Tone,
+}
+
+/// **The whole screen as data.**
+///
+/// Built once and rendered twice — as the widget tree an author looks at, and as the flat text the
+/// tests read. Two presentations of one description rather than two descriptions: a copy rule like
+/// §1.4's *"an unmet condition is an instruction"* is asserted against the same rows that are drawn,
+/// so the assertion cannot pass while the screen says something else.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Screen {
+    pub kits: Vec<Row>,
+    pub maps_header: String,
+    pub maps: Vec<Row>,
+    pub settings_header: String,
+    pub settings: Vec<Row>,
+    pub problem: Option<String>,
+    pub hint: String,
+}
+
+impl Chooser {
+    /// The screen this state describes.
+    pub fn screen(&self) -> Screen {
+        let kits = self
+            .catalog
+            .kits
+            .iter()
+            .enumerate()
+            .map(|(i, k)| {
+                let selected = self.focus == Focus::Kits && i == self.kit;
+                Row {
+                    left: if k.flag.is_none() {
+                        format!("{}   (default)", k.label)
+                    } else {
+                        k.label.clone()
+                    },
+                    right: format!("{} pieces", k.pieces),
+                    // **A blank kit reads as blank without being read.** This is the fact the screen
+                    // exists to carry: on 2026-08-15 an author could not tell `site` from `site_v2`
+                    // and relaunched three times. A count nobody looks at would not have helped.
+                    tone: match (selected, k.pieces) {
+                        (true, _) => Tone::Selected,
+                        (false, 0) => Tone::Empty,
+                        (false, _) => Tone::Stocked,
+                    },
+                }
+            })
+            .collect();
+
+        let kit = self.current_kit();
+        let maps_header =
+            kit.map_or_else(|| "MAPS".to_owned(), |k| format!("MAPS IN {}", k.label));
+        let maps = match kit {
+            // §1.4: an unmet condition is an instruction, never a report.
+            Some(k) if k.maps.is_empty() => vec![Row {
+                left: format!("no maps in {} yet — press N to make one", k.label),
+                right: String::new(),
+                tone: Tone::Empty,
+            }],
+            Some(k) => k
+                .maps
+                .iter()
+                .enumerate()
+                .map(|(i, m)| {
+                    let selected = self.focus == Focus::Maps && i == self.map;
+                    let (right, tone) = match &m.summary {
+                        MapSummary::Unreadable(why) => {
+                            (format!("will not open — {why}"), Tone::Problem)
+                        }
+                        MapSummary::Read {
+                            placements, stamps, ..
+                        } => {
+                            let text = match (placements, stamps) {
+                                (0, 0) => "empty".to_owned(),
+                                (p, 0) => format!("{p} piece(s)"),
+                                (0, t) => format!("{t} tile(s)"),
+                                (p, t) => format!("{p} piece(s), {t} tile(s)"),
+                            };
+                            let tone = if *placements == 0 && *stamps == 0 {
+                                Tone::Empty
+                            } else {
+                                Tone::Stocked
+                            };
+                            (text, tone)
+                        }
+                    };
+                    Row {
+                        left: m.name.clone(),
+                        right,
+                        tone: if selected { Tone::Selected } else { tone },
+                    }
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+
+        // **The settings are shown for whatever is in hand** — the draft while one is being made,
+        // and otherwise the selected map. The first version drew them only while creating, so `Tab`
+        // did nothing on an existing map and three of the four settings were unreachable.
+        let (settings_header, settings) = self.settings_rows();
+
+        Screen {
+            kits,
+            maps_header,
+            maps,
+            settings_header,
+            settings,
+            problem: self.problem.clone(),
+            hint: self.hint().to_owned(),
+        }
+    }
+
+    fn settings_rows(&self) -> (String, Vec<Row>) {
+        let (header, name, bounds, origin, note) = match (&self.creating, self.current_map()) {
+            (Some(d), _) => (
+                "NEW MAP".to_owned(),
+                d.name.clone(),
+                d.bounds,
+                d.origin,
+                d.note.clone(),
+            ),
+            (None, Some(m)) => match &m.summary {
+                MapSummary::Read { bounds, .. } => {
+                    // Origin and note are not in the summary — the row is about the file, and
+                    // reading every map's prose to fill a panel nobody has opened is work for a
+                    // list. Selecting one is what asks the question, so it is read here.
+                    let (origin, note) = read_origin_and_note(&m.path);
+                    (
+                        format!("SETTINGS — {}", m.name),
+                        m.name.clone(),
+                        *bounds,
+                        origin,
+                        note,
+                    )
+                }
+                MapSummary::Unreadable(_) => return ("SETTINGS".to_owned(), Vec::new()),
+            },
+            (None, None) => return ("SETTINGS".to_owned(), Vec::new()),
+        };
+
+        let live = |f: Field| self.focus == Focus::Field(f);
+        let value = |f: Field, settled: String| -> String {
+            if live(f) {
+                format!("{}_", self.raw)
+            } else {
+                settled
+            }
+        };
+        let rows = vec![
+            Row {
+                left: Field::Name.label().to_owned(),
+                right: value(
+                    Field::Name,
+                    if name.is_empty() {
+                        "(needs a name)".to_owned()
+                    } else {
+                        name
+                    },
+                ),
+                tone: tone_for(live(Field::Name), self.creating.is_some() && self.raw.is_empty()),
+            },
+            Row {
+                left: Field::Bounds.label().to_owned(),
+                right: value(Field::Bounds, triple(bounds)),
+                tone: tone_for(live(Field::Bounds), false),
+            },
+            Row {
+                left: Field::Origin.label().to_owned(),
+                right: value(Field::Origin, triple(origin)),
+                tone: tone_for(live(Field::Origin), false),
+            },
+            Row {
+                left: Field::Note.label().to_owned(),
+                // **Clipped to one line.** A map's note is prose — the shipped one is a full
+                // sentence with an absolute path in it — and at full length it wrapped, pushed its
+                // own label onto a second line and broke the alignment of every row above it. The
+                // whole note is still there in the file and still editable; this panel is a summary,
+                // and a summary that reflows the screen is not one.
+                right: value(Field::Note, clip(note.unwrap_or_default().as_str(), 46)),
+                tone: tone_for(live(Field::Note), false),
+            },
+        ];
+        (header, rows)
+    }
+
+    /// The verbs, and only the ones that would do something right now. `docs/ui.md` §3.5 caps
+    /// immediately-issuable choices at three or four; a key listed where it is dead is worse than a
+    /// key not listed, because it teaches something untrue.
+    pub fn hint(&self) -> &'static str {
+        match self.focus {
+            Focus::Field(_) => "type    Enter next field    Esc back",
+            _ if self.creating.is_some() => "Enter make it    Tab fields    Esc cancel",
+            Focus::Kits if self.current_kit().is_some_and(|k| k.maps.is_empty()) => {
+                "up/down kit    N new map    Esc quit"
+            }
+            Focus::Kits => "up/down kit    right maps    Enter open    N new map    Esc quit",
+            Focus::Maps => "up/down map    left kits    Enter open    Tab settings    N new map",
+        }
+    }
+}
+
+/// One line's worth, with an ellipsis when there was more. Counts **characters, not bytes**, so a
+/// note containing an em-dash cannot be cut through the middle of one.
+fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_owned();
+    }
+    let kept: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{}…", kept.trim_end())
+}
+
+fn tone_for(live: bool, unset: bool) -> Tone {
+    match (live, unset) {
+        (true, _) => Tone::Selected,
+        (_, true) => Tone::Empty,
+        _ => Tone::Row,
+    }
+}
+
+/// Origin and note, read from the map file when a row is selected. Failure is silent here on
+/// purpose: the row already carries `Unreadable` when the file cannot be parsed, and a second
+/// refusal in the settings panel would say the same thing twice.
+fn read_origin_and_note(path: &Path) -> ((f32, f32, f32), Option<String>) {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| Map::parse(&t).ok())
+        .map_or(((0.0, 0.0, 0.0), None), |m| (m.origin, m.note))
+}
+
+fn triple(t: (f32, f32, f32)) -> String {
+    format!("{} x {} x {}", t.0, t.1, t.2)
+}
+
+/// **The screen as flat text** — what the tests read, built from the same [`Screen`] the widgets are.
+pub fn render(c: &Chooser) -> String {
+    let s = c.screen();
+    let mut out = String::from("emerge-mapper\n\nKITS\n");
+    let line = |r: &Row| {
+        let mark = if r.tone == Tone::Selected { ">" } else { " " };
+        format!("{mark} {:<28}{}\n", r.left, r.right)
+    };
+    for r in &s.kits {
+        out.push_str(&line(r));
+    }
+    out.push_str(&format!("\n{}\n", s.maps_header));
+    for r in &s.maps {
+        out.push_str(&line(r));
+    }
+    if !s.settings.is_empty() {
+        out.push_str(&format!("\n{}\n", s.settings_header));
+        for r in &s.settings {
+            out.push_str(&line(r));
+        }
+    }
+    if let Some(p) = &s.problem {
+        out.push_str(&format!("\n{p}\n"));
+    }
+    out.push_str(&format!("\n{}", s.hint));
+    out
+}
+
+// ------------------------------------------------------------------------------------------------
 // The Bevy half
 // ------------------------------------------------------------------------------------------------
 
@@ -933,16 +1222,27 @@ use std::sync::{Arc, Mutex};
 
 /// **Where the chosen launch line comes back out.**
 ///
-/// `App::run()` consumes the world, so the choice cannot simply be read off a resource afterwards.
-/// The chooser writes here and then asks the app to exit; `main.rs` reads it once `run` returns and
-/// launches the editor. One value, written once, so a mutex is the whole synchronisation story.
+/// `App::run()` consumes the world, so the choice cannot be read off a resource afterwards. The
+/// chooser writes here and asks the app to exit; `main.rs` reads it once `run` returns.
 pub type Choice = Arc<Mutex<Option<Vec<String>>>>;
 
 #[derive(Resource, Clone)]
 struct ChoiceOut(Choice);
 
 #[derive(Component)]
-struct ChooserText;
+struct KitList;
+#[derive(Component)]
+struct MapList;
+#[derive(Component)]
+struct MapsHeader;
+#[derive(Component)]
+struct SettingsList;
+#[derive(Component)]
+struct SettingsHeader;
+#[derive(Component)]
+struct ProblemLine;
+#[derive(Component)]
+struct HintLine;
 
 /// The chooser's screen. **Not** part of `harness::add_editor_plugins` — it is the other half of the
 /// binary, and adding it there would put a second `Camera2d` in every editor `App`.
@@ -965,9 +1265,9 @@ impl Plugin for ChooserPlugin {
         })
         .insert_resource(ChoiceOut(self.out.clone()))
         .add_systems(Startup, spawn_screen)
-        // **Text before chords, exactly as `keys::Phase` orders them in the editor**: a field with
-        // the keyboard must consume a keystroke before anything else can read it as a verb, or
-        // typing `n` into a name starts a second new map.
+        // **Text before chords, as `keys::Phase` orders them in the editor**: a field with the
+        // keyboard consumes a keystroke before anything reads it as a verb, or typing `n` into a
+        // name starts a second new map.
         .add_systems(
             Update,
             (type_into_field, drive_chooser, paint_chooser).chain(),
@@ -975,23 +1275,204 @@ impl Plugin for ChooserPlugin {
     }
 }
 
-fn spawn_screen(mut commands: Commands) {
-    commands.spawn(Camera2d);
-    commands.spawn((
+/// One column's width. **Both lists get the same one**, and the settings panel below spans exactly
+/// two of them plus the gap — so the three panels share a grid instead of each sizing itself to its
+/// longest row, which is what made the first version read as unrelated blobs.
+const COL: f32 = 330.0;
+
+/// **The interface scale, and both halves of the binary read it from here.**
+///
+/// `UiScale` multiplies every `Val::Px` and every font size, so a window sized in raw pixels is a
+/// window that does not fit its own content — which is exactly what happened: a 672 px settings
+/// panel at 1.2 is 806, inside a 740 px window, and the values ran off the right edge.
+pub const UI_SCALE: f32 = 1.2;
+
+/// **How big the window has to be to hold this screen**, derived rather than guessed.
+///
+/// Two columns and the gap, plus the root's padding on both sides, times the scale. Returned so
+/// `main.rs` cannot fall out of step with `COL` — the previous version hard-coded a size and was
+/// wrong the moment the columns were given a fixed width.
+pub fn window_size() -> (f32, f32) {
+    let content = COL * 2.0 + crate::chrome::PAD;
+    let width = (content + crate::chrome::PAD * 3.0) * UI_SCALE;
+    // Title, the list row, the settings panel, the hint, and the gaps — measured off a capture
+    // rather than computed from font metrics, which would be a second layout engine. The slack is
+    // deliberate and small: a kit with several maps grows the list row, and a window that has to be
+    // resized to see the last map is worse than one with a little air at the bottom.
+    let height = 360.0 * UI_SCALE;
+    (width, height)
+}
+
+fn panel(width: f32) -> impl Bundle {
+    (
         Node {
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            padding: UiRect::all(Val::Px(crate::chrome::PAD * 2.0)),
+            flex_direction: FlexDirection::Column,
+            padding: UiRect::all(Val::Px(crate::chrome::PAD)),
+            row_gap: Val::Px(crate::chrome::GAP_ROW),
+            width: Val::Px(width),
             ..default()
         },
         BackgroundColor(crate::chrome::PANEL_BG),
-        children![(
-            Text::new(String::new()),
-            TextFont::from_font_size(15.0),
-            TextColor(crate::chrome::DIM),
-            ChooserText,
-        )],
-    ));
+    )
+}
+
+fn header(text: &str) -> impl Bundle {
+    (
+        Text::new(text.to_owned()),
+        TextFont::from_font_size(11.0),
+        TextColor(crate::chrome::LABEL),
+    )
+}
+
+fn spawn_screen(mut commands: Commands) {
+    commands.spawn(Camera2d);
+    commands
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(Val::Px(crate::chrome::PAD * 1.5)),
+                row_gap: Val::Px(crate::chrome::GAP_ROW * 2.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.035, 0.033, 0.030)),
+        ))
+        .with_children(|root| {
+            root.spawn((
+                Text::new("emerge-mapper"),
+                TextFont::from_font_size(13.0),
+                TextColor(crate::chrome::LABEL),
+            ));
+            // **The two lists side by side.** Stacked, they left the right half of the window empty
+            // and read as two unrelated blobs; a kit and its maps are one question.
+            root.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(crate::chrome::PAD),
+                ..default()
+            })
+            .with_children(|row| {
+                row.spawn(panel(COL)).with_children(|p| {
+                    p.spawn(header("KITS"));
+                    p.spawn((Node::default(), KitList));
+                });
+                row.spawn(panel(COL)).with_children(|p| {
+                    p.spawn((header("MAPS"), MapsHeader));
+                    p.spawn((Node::default(), MapList));
+                });
+            });
+            root.spawn(panel(COL * 2.0 + crate::chrome::PAD)).with_children(|p| {
+                p.spawn((header("SETTINGS"), SettingsHeader));
+                p.spawn((Node::default(), SettingsList));
+            });
+            root.spawn((
+                Text::new(String::new()),
+                TextFont::from_font_size(12.0),
+                TextColor(crate::chrome::DANGER),
+                ProblemLine,
+            ));
+            root.spawn((
+                Text::new(String::new()),
+                TextFont::from_font_size(11.0),
+                TextColor(crate::chrome::LABEL),
+                HintLine,
+            ));
+        });
+}
+
+fn colour(tone: Tone) -> Color {
+    match tone {
+        Tone::Selected => crate::chrome::ACCENT,
+        Tone::Stocked => crate::chrome::LABELED,
+        Tone::Empty => crate::chrome::LABEL,
+        Tone::Row => crate::chrome::DIM,
+        Tone::Problem => crate::chrome::DANGER,
+    }
+}
+
+/// Rebuild one list. The whole block is despawned and respawned together, which is what `compose.rs`
+/// does for the same reason: a row has no identity worth keeping across a change, and four rows is
+/// not work worth diffing.
+fn fill(commands: &mut Commands, at: Entity, rows: &[Row]) {
+    commands.entity(at).despawn_related::<Children>();
+    commands.entity(at).insert(Node {
+        flex_direction: FlexDirection::Column,
+        row_gap: Val::Px(crate::chrome::GAP_ROW * 0.6),
+        ..default()
+    });
+    for r in rows {
+        let c = colour(r.tone);
+        let mark = if r.tone == Tone::Selected { ">" } else { " " };
+        let left = format!("{mark} {}", r.left);
+        let right = r.right.clone();
+        commands.entity(at).with_children(|p| {
+            p.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(crate::chrome::PAD),
+                justify_content: JustifyContent::SpaceBetween,
+                width: Val::Percent(100.0),
+                ..default()
+            })
+            .with_children(|line| {
+                line.spawn((
+                    Text::new(left.clone()),
+                    TextFont::from_font_size(13.0),
+                    TextColor(c),
+                ));
+                if !right.is_empty() {
+                    line.spawn((
+                        Text::new(right.clone()),
+                        TextFont::from_font_size(13.0),
+                        TextColor(c),
+                    ));
+                }
+            });
+        });
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn paint_chooser(
+    mut commands: Commands,
+    chooser: Res<Chooser>,
+    lists: Query<(
+        Entity,
+        Option<&KitList>,
+        Option<&MapList>,
+        Option<&SettingsList>,
+    )>,
+    mut texts: Query<(
+        &mut Text,
+        Option<&MapsHeader>,
+        Option<&SettingsHeader>,
+        Option<&ProblemLine>,
+        Option<&HintLine>,
+    )>,
+) {
+    if !chooser.is_changed() {
+        return;
+    }
+    let s = chooser.screen();
+    for (e, kit, map, set) in &lists {
+        if kit.is_some() {
+            fill(&mut commands, e, &s.kits);
+        } else if map.is_some() {
+            fill(&mut commands, e, &s.maps);
+        } else if set.is_some() {
+            fill(&mut commands, e, &s.settings);
+        }
+    }
+    for (mut text, maps, settings, problem, hint) in &mut texts {
+        if maps.is_some() {
+            **text = s.maps_header.clone();
+        } else if settings.is_some() {
+            **text = s.settings_header.clone();
+        } else if problem.is_some() {
+            **text = s.problem.clone().unwrap_or_default();
+        } else if hint.is_some() {
+            **text = s.hint.clone();
+        }
+    }
 }
 
 /// **The field takes the keyboard first.** Mirrors `build.rs`'s name prompt, including the drain:
@@ -1017,7 +1498,7 @@ fn type_into_field(mut events: MessageReader<KeyboardInput>, mut chooser: ResMut
                 chooser.focus = if chooser.creating.is_some() {
                     Focus::Field(Field::Name)
                 } else {
-                    Focus::Kits
+                    Focus::Maps
                 };
                 return;
             }
@@ -1038,7 +1519,25 @@ fn type_into_field(mut events: MessageReader<KeyboardInput>, mut chooser: ResMut
 /// not parse leaves the old one alone and says why.
 fn commit_field(chooser: &mut Chooser, field: Field) {
     let raw = chooser.raw.trim().to_owned();
-    let mut draft = chooser.creating.clone().unwrap_or_default();
+    // Editing an existing map writes that file; making one fills in a draft first.
+    let existing = chooser.creating.is_none();
+    let mut draft = match (&chooser.creating, chooser.current_map()) {
+        (Some(d), _) => d.clone(),
+        (None, Some(m)) => match &m.summary {
+            MapSummary::Read { bounds, .. } => {
+                let (origin, note) = read_origin_and_note(&m.path);
+                Draft {
+                    name: m.name.clone(),
+                    bounds: *bounds,
+                    origin,
+                    note,
+                }
+            }
+            MapSummary::Unreadable(_) => return,
+        },
+        (None, None) => return,
+    };
+
     match field {
         Field::Name => {
             let name = naming::to_snake_case(&raw);
@@ -1050,29 +1549,97 @@ fn commit_field(chooser: &mut Chooser, field: Field) {
             draft.name = name;
         }
         Field::Bounds | Field::Origin => {
-            let Some(triple) = parse_triple(&raw) else {
+            let Some(t) = parse_triple(&raw) else {
                 chooser.problem = Some(format!(
                     "`{raw}` is not three numbers — type them like `32 4 32`"
                 ));
                 return;
             };
             if field == Field::Bounds {
-                if triple.0 <= 0.0 || triple.1 <= 0.0 || triple.2 <= 0.0 {
+                if t.0 <= 0.0 || t.1 <= 0.0 || t.2 <= 0.0 {
                     chooser.problem =
                         Some("a map's bounds must all be positive — it is a volume".to_owned());
                     return;
                 }
-                draft.bounds = triple;
+                draft.bounds = t;
             } else {
-                draft.origin = triple;
+                draft.origin = t;
             }
         }
         Field::Note => draft.note = (!raw.is_empty()).then_some(raw),
     }
-    chooser.creating = Some(draft);
+
+    if existing {
+        // **The one genuinely new write path**, and it goes through the same door `Project::save`
+        // uses: validate, then an atomic write. A map edited here and one saved from the editor
+        // cannot disagree about what a map is.
+        if let Err(e) = write_settings(chooser, &draft) {
+            chooser.problem = Some(e);
+            return;
+        }
+    } else {
+        chooser.creating = Some(draft);
+    }
     chooser.raw.clear();
     chooser.problem = None;
     chooser.focus = Focus::Field(field.next());
+}
+
+/// Apply edited settings to the map on disk, then rescan so the list describes the file rather than
+/// the edit.
+pub fn write_settings(chooser: &mut Chooser, draft: &Draft) -> Result<(), String> {
+    let Some(entry) = chooser.current_map() else {
+        return Err("nothing selected".to_owned());
+    };
+    let old_path = entry.path.clone();
+    let text = std::fs::read_to_string(&old_path)
+        .map_err(|e| format!("cannot read {}: {e}", old_path.display()))?;
+    let mut map = Map::parse(&text)?;
+    map.name = draft.name.clone();
+    map.bounds = draft.bounds;
+    map.origin = draft.origin;
+    map.note = draft.note.clone();
+    map.validate()?;
+
+    let dir = old_path
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let path = dir.join(naming::map_file_name(&map.name));
+    if path != old_path && path.exists() {
+        return Err(format!("`{}` already exists in this kit", map.name));
+    }
+    let out = ron::ser::to_string_pretty(&map, ron::ser::PrettyConfig::default())
+        .map_err(|e| format!("map: serialize: {e}"))?;
+    emerge_core::ron_surgery::save_atomic(&path, &out)?;
+    // Follow a rename, exactly as `Project::save` does — the file a map is in is the file its name
+    // says it is.
+    if path != old_path {
+        let _ = std::fs::remove_file(&old_path);
+    }
+    let name = map.name.clone();
+    rescan_keeping_place(chooser, Some(&name));
+    Ok(())
+}
+
+/// Rescan and land on a named map, so the list is always a description of disk.
+fn rescan_keeping_place(chooser: &mut Chooser, want: Option<&str>) {
+    let label = chooser.current_kit().map(|k| k.label.clone());
+    match Catalog::scan(&chooser.root.clone()) {
+        Err(e) => chooser.problem = Some(e),
+        Ok(catalog) => {
+            chooser.catalog = catalog;
+            chooser.kit = label
+                .and_then(|l| chooser.catalog.kits.iter().position(|k| k.label == l))
+                .unwrap_or(0);
+            chooser.map = want
+                .and_then(|w| {
+                    chooser
+                        .current_kit()
+                        .and_then(|k| k.maps.iter().position(|m| m.name == w))
+                })
+                .unwrap_or(0);
+        }
+    }
 }
 
 /// Three whitespace- or comma-separated numbers, or nothing. Refuses rather than filling in a
@@ -1116,7 +1683,11 @@ fn drive_chooser(
         chooser.problem = None;
         chooser.focus = Focus::Field(Field::Name);
     }
-    if keyboard.just_pressed(KeyCode::Tab) && chooser.creating.is_some() {
+    // **`Tab` edits whatever is in hand** — the draft, or the selected map. It did nothing at all on
+    // an existing map in the first version, which left three of the four settings unreachable.
+    if keyboard.just_pressed(KeyCode::Tab)
+        && (chooser.creating.is_some() || chooser.current_map().is_some())
+    {
         chooser.raw.clear();
         chooser.focus = Focus::Field(Field::Name);
     }
@@ -1129,7 +1700,6 @@ fn drive_chooser(
         }
     }
     if keyboard.just_pressed(KeyCode::Enter) {
-        // A draft in hand commits; otherwise the selected map opens.
         if let Some(draft) = chooser.creating.clone() {
             let Some(dir) = chooser.current_kit().map(|k| k.dir.clone()) else {
                 chooser.problem = Some("no kit selected".to_owned());
@@ -1144,25 +1714,10 @@ fn drive_chooser(
             ) {
                 Err(e) => chooser.problem = Some(e),
                 Ok(_) => {
-                    // Rescan rather than patching the list: one description of what is on disk.
-                    match Catalog::scan(&chooser.root.clone()) {
-                        Err(e) => chooser.problem = Some(e),
-                        Ok(catalog) => {
-                            let label = chooser.current_kit().map(|k| k.label.clone());
-                            chooser.catalog = catalog;
-                            chooser.kit = label
-                                .and_then(|l| {
-                                    chooser.catalog.kits.iter().position(|k| k.label == l)
-                                })
-                                .unwrap_or(0);
-                            chooser.map = chooser
-                                .current_kit()
-                                .and_then(|k| k.maps.iter().position(|m| m.name == draft.name))
-                                .unwrap_or(0);
-                            chooser.creating = None;
-                            chooser.focus = Focus::Maps;
-                        }
-                    }
+                    let name = draft.name.clone();
+                    chooser.creating = None;
+                    chooser.focus = Focus::Maps;
+                    rescan_keeping_place(&mut chooser, Some(&name));
                 }
             }
             return;
@@ -1179,108 +1734,6 @@ fn drive_chooser(
     }
 }
 
-fn paint_chooser(chooser: Res<Chooser>, mut text: Query<&mut Text, With<ChooserText>>) {
-    if !chooser.is_changed() {
-        return;
-    }
-    let Ok(mut text) = text.single_mut() else {
-        return;
-    };
-    **text = render(&chooser);
-}
-
-/// The screen as text. Pure, so a test can read what an author would.
-pub fn render(c: &Chooser) -> String {
-    let mut s = String::from("emerge-mapper\n\n");
-    let arrow = |on: bool| if on { ">" } else { " " };
-
-    s.push_str("KITS\n");
-    for (i, k) in c.catalog.kits.iter().enumerate() {
-        let tail = if k.flag.is_none() {
-            "   (the default kit)"
-        } else {
-            ""
-        };
-        s.push_str(&format!(
-            "{} {:<16} {:>3} pieces{tail}\n",
-            arrow(c.focus == Focus::Kits && i == c.kit),
-            k.label,
-            k.pieces
-        ));
-    }
-
-    let label = c.current_kit().map_or("", |k| k.label.as_str());
-    s.push_str(&format!("\nMAPS IN {label}\n"));
-    match c.current_kit() {
-        Some(k) if k.maps.is_empty() => {
-            // §1.4: an unmet condition is an instruction.
-            s.push_str(&format!("  no maps in {label} yet — press N to make one\n"));
-        }
-        Some(k) => {
-            for (i, m) in k.maps.iter().enumerate() {
-                let about = match &m.summary {
-                    MapSummary::Read {
-                        placements, stamps, ..
-                    } => match (placements, stamps) {
-                        (0, 0) => "empty".to_owned(),
-                        (p, 0) => format!("{p} placement(s)"),
-                        (0, t) => format!("{t} tile(s)"),
-                        (p, t) => format!("{p} placement(s), {t} tile(s)"),
-                    },
-                    MapSummary::Unreadable(why) => format!("WILL NOT OPEN — {why}"),
-                };
-                s.push_str(&format!(
-                    "{} {:<16} {about}\n",
-                    arrow(c.focus == Focus::Maps && i == c.map),
-                    m.name
-                ));
-            }
-        }
-        None => {}
-    }
-
-    if let Some(d) = &c.creating {
-        s.push_str("\nNEW MAP\n");
-        for f in Field::ALL {
-            let live = c.focus == Focus::Field(f);
-            let value = match f {
-                Field::Name => {
-                    if live {
-                        c.raw.clone()
-                    } else if d.name.is_empty() {
-                        "(needs a name)".to_owned()
-                    } else {
-                        d.name.clone()
-                    }
-                }
-                Field::Bounds => triple(d.bounds),
-                Field::Origin => triple(d.origin),
-                Field::Note => d.note.clone().unwrap_or_default(),
-            };
-            let shown = if live && f != Field::Name {
-                c.raw.clone()
-            } else {
-                value
-            };
-            s.push_str(&format!("{} {:<8} {shown}\n", arrow(live), f.label()));
-        }
-    }
-
-    if let Some(p) = &c.problem {
-        s.push_str(&format!("\n{p}\n"));
-    }
-
-    s.push_str(match c.focus {
-        Focus::Field(_) => "\ntype      Enter next field      Esc back",
-        _ if c.creating.is_some() => "\nEnter make it      Tab edit fields      Esc cancel",
-        _ => "\n^v choose      -> maps      Enter open      N new map      Esc quit",
-    });
-    s
-}
-
-fn triple(t: (f32, f32, f32)) -> String {
-    format!("{} x {} x {}", t.0, t.1, t.2)
-}
 
 #[cfg(test)]
 mod render_tests {
@@ -1325,7 +1778,7 @@ mod render_tests {
     #[test]
     fn the_root_kit_says_it_is_the_default() {
         let c = chooser_with(vec![kit(None, "emerge", 75, vec![])]);
-        assert!(render(&c).contains("the default kit"), "{}", render(&c));
+        assert!(render(&c).contains("(default)"), "{}", render(&c));
     }
 
     /// **An unmet condition is an instruction** (`docs/ui.md` §1.4). An empty kit does not report
@@ -1357,21 +1810,49 @@ mod render_tests {
         )]);
         let screen = render(&c);
         assert!(screen.contains("broken"), "{screen}");
-        assert!(screen.contains("WILL NOT OPEN"), "{screen}");
+        assert!(screen.contains("will not open"), "{screen}");
     }
 
     /// **The verb keys are on screen from the first frame**, which is what ExposeHK's rehearsal goal
     /// asks for: the novice path is the expert path, so using the screen teaches the keys rather
     /// than teaching pointing. Four verbs, against §3.5's 3–4 immediate-choice budget.
+    ///
+    /// **And a key that would do nothing is not listed.** Offering `Enter open` on a kit with no
+    /// maps teaches something untrue, which is worse than teaching nothing — the rule `keys.rs`
+    /// already states about a status line naming dead keys.
     #[test]
-    fn the_verbs_are_shown_and_there_are_four_of_them() {
-        let c = chooser_with(vec![kit(Some("site"), "site", 1, vec![])]);
-        let screen = render(&c);
+    fn the_verbs_are_shown_and_a_dead_one_is_not() {
+        let stocked = chooser_with(vec![kit(
+            Some("site"),
+            "site",
+            1,
+            vec![MapEntry {
+                name: "hall".into(),
+                path: PathBuf::from("hall.map.ron"),
+                summary: MapSummary::Read {
+                    placements: 0,
+                    stamps: 0,
+                    bounds: (4.0, 3.0, 4.0),
+                },
+            }],
+        )]);
+        let screen = render(&stocked);
         for verb in ["Enter open", "N new map", "Esc quit"] {
             assert!(
                 screen.contains(verb),
                 "`{verb}` is not on screen:\n{screen}"
             );
         }
+
+        let empty = chooser_with(vec![kit(Some("site_v2"), "site_v2", 0, vec![])]);
+        let screen = render(&empty);
+        assert!(
+            !screen.contains("Enter open"),
+            "there is nothing to open, so offering the key teaches a lie:\n{screen}"
+        );
+        assert!(
+            screen.contains("N new map"),
+            "and the live verb is still there:\n{screen}"
+        );
     }
 }
