@@ -197,6 +197,9 @@ impl Plugin for GuidePlugin {
         let meshes_tab = app.register_system(|_: In<Value>, live: Res<Live>| {
             live.0 == keys::Context::Meshes
         });
+        let compose_tab = app.register_system(|_: In<Value>, live: Res<Live>| {
+            live.0 == keys::Context::Compose
+        });
         // **By id, so a script can send the author to a named mesh** and know they arrived — the
         // selection is what `B` derives for and what `Enter` imports.
         let selected_mesh = app.register_system(
@@ -211,6 +214,16 @@ impl Plugin for GuidePlugin {
         // re-satisfy a step that asks for new rows.
         let map_placements = app.register_system(move |args: In<Value>, project: Res<Project>| {
             project.map.placements.len() as u64 >= arg_u64(&args.0, "n", 1)
+        });
+        // **Stamps, which `map_placements` deliberately cannot see.** A stamped tile is a reference
+        // in `Map::stamps`, never rows in `Map::placements` — that is the whole of "editing a
+        // composition changes every map that stamped it" — so a script that walks an author through
+        // building a room *out of tiles* has no observable state in the placement count, and every
+        // step of it would have to be a judgement call. Counted separately rather than folded into
+        // `map_placements`, because "I placed five pieces" and "I placed five tiles" are different
+        // claims and a script that meant one should not pass on the other.
+        let map_tiles = app.register_system(move |args: In<Value>, project: Res<Project>| {
+            project.map.stamps.len() as u64 >= arg_u64(&args.0, "n", 1)
         });
         // **Kept, not merely gone.** A discarded proposal also answers `is_none`, so the keep half
         // of the door is the pair: no proposal waiting AND the map carrying at least `n` solver
@@ -266,6 +279,8 @@ impl Plugin for GuidePlugin {
         checkpoints.register("the Meshes tab is open", meshes_tab);
         checkpoints.register("the selected mesh is", selected_mesh);
         checkpoints.register("the map has placements", map_placements);
+        checkpoints.register("the map has tiles on it", map_tiles);
+        checkpoints.register("the Compose tab is open", compose_tab);
         checkpoints.register("the proposal was kept", proposal_kept);
         checkpoints.register("the map is saved", map_saved);
         checkpoints.register("the mesh declares an edge", mesh_declares_edge);

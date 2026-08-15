@@ -7890,3 +7890,215 @@ fn the_palette_rows_live_in_a_scroll_container() {
         "a palette row must have a scrolling ancestor for the follow to move"
     );
 }
+
+/// One tile member, spelled out — `composition::Member` has no `Default`, deliberately: every field
+/// of it is a decision somebody made about where a piece sits.
+#[cfg(feature = "debugger")]
+fn member(row: &str, descriptor: &str, yaw: f32) -> emerge_core::composition::Member {
+    emerge_core::composition::Member {
+        id: row.to_owned(),
+        body: emerge_core::composition::Body::Descriptor {
+            id: descriptor.to_owned(),
+            tip: (0, 0),
+            on: None,
+            patch: None,
+        },
+        at: (0.0, 0.0),
+        yaw,
+        lift: 0.0,
+        paint: 0,
+        of_fingerprint: None,
+        note: None,
+    }
+}
+
+/// **The room script, driven — `guides/build_a_room.json`.**
+///
+/// Same contract the other drive tests hold: walk the steps in order, put the editor into the state
+/// the card's `do` describes, and assert each checkpoint goes **false to true at its own step**. A
+/// card whose checkpoint is already true when the step begins teaches nothing, and one that never
+/// becomes true strands the author — this catches both.
+///
+/// # What is stood in for, and why
+///
+/// The room half is stamped with the **mouse**, and a click cannot be injected here — `view::Pointer`
+/// is the agent path and FVS-R-25 is the open defect — so those steps write the `Stamped` rows a
+/// click would write, exactly as `the_map_script_can_actually_be_followed` writes the placements its
+/// own click step would. What is pinned either way is the **checkpoint arithmetic**: that the counts
+/// the card asks for are the counts the described work actually produces.
+///
+/// The tile half is real key presses.
+///
+/// The count arguments are the fragile part and the reason this exists. `the tile has turns` counts
+/// **distinct quarter-turns**, so a corner is `n: 2` — floor and first wall at 0, the turned wall at
+/// 1 — and the `n: 1` first written here would have passed on any non-empty tile at all. A
+/// checkpoint that cannot fail reads as a guarantee, which is worse than no checkpoint.
+#[cfg(feature = "debugger")]
+#[test]
+fn the_room_script_can_actually_be_followed() {
+    use emerge_mapper::build::Build;
+    use emerge_mapper::keys::Action;
+    use emerge_mapper::project::Project;
+
+    let root = Fixture::new("room-script")
+        .descriptor("floor", "site")
+        .descriptor("wall", "site")
+        .descriptor("wall_doorway", "site")
+        .build("m");
+    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let key = |a| emerge_mapper::keys::binding(a).key;
+    let press = |app: &mut App, chord: Vec<KeyCode>| {
+        app.add_systems(
+            Update,
+            IntoScheduleConfigs::before(
+                move |mut keys: ResMut<bevy::input::ButtonInput<KeyCode>>,
+                      mut done: Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        for k in &chord {
+                            keys.press(*k);
+                        }
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    };
+    let file = "build_a_room.json";
+    let settle = |app: &mut App| {
+        for _ in 0..2 {
+            app.update();
+        }
+    };
+
+    // Step 1 — the tab. The editor boots on Map, so this genuinely starts false.
+    let (name, with) = guide_step(file, "open the Tiles tab");
+    assert!(!checkpoint(&mut app, &name, with.clone()), "boots on Map");
+    press(&mut app, vec![key(Action::TilesTab)]);
+    settle(&mut app);
+    assert!(checkpoint(&mut app, &name, with), "3 opens the Tiles tab");
+
+    // **The corner.** Two walls, the second turned a quarter — which is what makes it a corner and
+    // not a doubled wall, and is exactly what `the tile has turns` is counting.
+    let (turns, with) = guide_step(file, "floor it, then stand two walls at right angles");
+    // **The count is the assertion, not a detail of it.** `the tile has turns` counts DISTINCT
+    // quarter-turns, so a corner is two — floor and first wall at 0, the turned wall at 1. Asking
+    // for one would be satisfied by any tile with a single piece in it, and the false-then-true
+    // walk below would still pass, because a *blank* tile has none. That is a checkpoint which
+    // cannot fail dressed as one that can, so it is pinned by value here.
+    assert_eq!(
+        with.get("n").and_then(|v| v.as_u64()),
+        Some(2),
+        "the corner step must ask for TWO distinct quarter-turns; `n: 1` passes on any tile with a \
+         piece in it and would wave through a doubled wall as a corner"
+    );
+    assert!(
+        !checkpoint(&mut app, &turns, with.clone()),
+        "a blank tile has no quarter-turns, so the corner step starts false"
+    );
+    {
+        // The members the card's three Enters and one R produce. Written rather than key-driven
+        // because the card's own wording ("walk to site/floor") depends on list order, which is a
+        // property of the corpus and not of the editor.
+        let mut build = app.world_mut().resource_mut::<Build>();
+        if let Some(open) = build.open.as_mut() {
+            for (id, yaw) in [("site/floor", 0.0), ("site/wall", 0.0), ("site/wall", 90.0)] {
+                open.members.push(member(
+                    &format!("{}_{}", id.replace('/', "_"), open.members.len()),
+                    id,
+                    yaw,
+                ));
+            }
+        }
+    }
+    settle(&mut app);
+    assert!(
+        checkpoint(&mut app, &turns, with),
+        "floor and wall at 0 plus a wall turned a quarter is TWO distinct quarter-turns — if this \
+         fails, the card is asking for a corner the editor does not produce"
+    );
+
+    // **The wall tile and the door tile** ask `the tile contains` by id, which is the check that
+    // stops the card sending an author to a piece the kit does not have under that name.
+    for (label, id) in [
+        ("floor it and flush ONE wall to one side", "site/wall"),
+        (
+            "floor it and flush the doorway to one side",
+            "site/wall_doorway",
+        ),
+    ] {
+        let (name, with) = guide_step(file, label);
+        assert_eq!(
+            with.get("ids").and_then(|v| v.as_array()).map(|a| a.len()),
+            Some(1),
+            "`{label}` should name exactly one piece"
+        );
+        {
+            let mut build = app.world_mut().resource_mut::<Build>();
+            if let Some(open) = build.open.as_mut() {
+                open.members.clear();
+                open.members.push(member("the_piece", id, 0.0));
+            }
+        }
+        settle(&mut app);
+        assert!(
+            checkpoint(&mut app, &name, with),
+            "`{label}` asks for {id}, and a tile holding exactly that did not satisfy it"
+        );
+    }
+
+    // **The room.** Nine stamps: four wall runs, four corners, one door — the counts the card asks
+    // for at its three stamping steps, checked as the monotonic ladder they are.
+    let steps = [
+        ("lay the four walls", 4usize),
+        ("close the four corners", 8),
+        ("put the door in", 9),
+    ];
+    for (label, want) in steps {
+        let (name, with) = guide_step(file, label);
+        assert_eq!(
+            with.get("n").and_then(|v| v.as_u64()),
+            Some(want as u64),
+            "`{label}` should ask for {want} tiles on the map"
+        );
+        assert!(
+            !checkpoint(&mut app, &name, with.clone()),
+            "`{label}` must start false — it asks for more tiles than are down"
+        );
+        {
+            let mut project = app.world_mut().resource_mut::<Project>();
+            while project.map.stamps.len() < want {
+                let n = project.map.stamps.len();
+                project.map.stamps.push(emerge_core::composition::Stamped {
+                    id: format!("stamp@{n}"),
+                    of: "tile".to_owned(),
+                    at: (n as f32, 0.0),
+                    ..Default::default()
+                });
+            }
+        }
+        settle(&mut app);
+        assert!(
+            checkpoint(&mut app, &name, with),
+            "`{label}` wants {want} stamped tiles and {want} did not satisfy it. Note this counts \
+             `Map::stamps`, NOT placements: a room built from tiles writes references, and the \
+             placement count stays at zero throughout"
+        );
+    }
+
+    // And the placement count really does stay at zero — the reason `the map has tiles on it` had to
+    // exist rather than reusing `the map has placements`.
+    let project = app.world().resource::<Project>();
+    assert!(
+        project.map.placements.is_empty(),
+        "nine tiles were stamped and {} loose placements appeared; if a stamp ever expands into \
+         rows on the map, this card's counts stop meaning what they say",
+        project.map.placements.len()
+    );
+}

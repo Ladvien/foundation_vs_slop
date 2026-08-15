@@ -1,0 +1,137 @@
+{
+  "steps": [
+    {
+      "label": "open the Tiles tab",
+      "goal": "everything in the first half happens there, and the key list changes with the tab. The tab opens a blank tile for you",
+      "do": ["press 3"],
+      "checkpoint": "the Tiles tab is open",
+      "recovery": "if a text field has the keyboard the number types into it: press Escape first"
+    },
+    {
+      "label": "bring a floor in",
+      "goal": "a tile with nothing in it has no size and no edges, so the floor comes first",
+      "do": [
+        "walk the list with up and down -- Shift strides five",
+        "press Enter on site/floor"
+      ],
+      "checkpoint": "the tile has a piece in it",
+      "recovery": "if the list looks wrong, press F, clear the filter with Backspace, then Enter to hand the keyboard back"
+    },
+    {
+      "label": "bring a wall in as well",
+      "goal": "two pieces is where a tile stops being a mesh with extra steps -- and the arrows will not walk the list while a piece is in hand",
+      "do": [
+        "press Escape to put the floor down",
+        "walk to site/wall",
+        "press Enter"
+      ],
+      "checkpoint": "the tile has two pieces",
+      "recovery": "if the arrows move the piece instead of the list, Escape did not land -- the panel says which of the two states the tab is in"
+    },
+    {
+      "label": "push the wall with EVERY arrow",
+      "goal": "this is the fix this session is really asking about. All four arrows used to be claimed and only some moved the piece. Press each one several times and watch whether the wall answers every press, in the direction the key names",
+      "do": [
+        "press up, then down, then left, then right -- several of each",
+        "watch the wall, not the list"
+      ],
+      "checkpoint": null,
+      "recovery": "if an arrow does nothing, say which one and what the tile had in it -- that is the report"
+    },
+    {
+      "label": "does the wall reach its own centre",
+      "goal": "J deepens the step ladder and wraps. A nudge is supposed to land ON a rung, so the tile's centre and its flush edge are both exactly reachable rather than straddled",
+      "do": [
+        "press J to change the step, then walk the wall with the arrows",
+        "try to land it dead centre, and then flush against a side",
+        "press J again -- three depths, then it wraps"
+      ],
+      "checkpoint": null,
+      "recovery": "if centre or flush is unreachable at any depth, that is the report -- say which depth and which target"
+    },
+    {
+      "label": "start a new tile and name it",
+      "goal": "naming became explicit this session: N opens a name PROMPT rather than silently inheriting the kit's name. What you type is what the tile is called",
+      "do": [
+        "press N",
+        "type a name",
+        "press Enter"
+      ],
+      "checkpoint": "the open tile is unsaved",
+      "recovery": "Escape closes the prompt without starting the tile. If the keystrokes went to the map instead of the box, that is the report"
+    },
+    {
+      "label": "put a floor and a wall in this one and save it",
+      "goal": "a saved tile is what the Map can stamp, and saving is where an editor-named tile asks before it takes a name it chose for you",
+      "do": [
+        "Enter on site/floor, Escape, Enter on site/wall",
+        "press Cmd+S"
+      ],
+      "checkpoint": "the tile is saved",
+      "recovery": "if a prompt appears asking about the name, that is deliberate -- answer it and say whether the question made sense"
+    },
+    {
+      "label": "reopen it from the KIT list",
+      "goal": "the kit is a tab on the list now, reached with right. Reopening used to land you looking at a tile you could not immediately edit",
+      "do": [
+        "press right to enter the KIT list",
+        "walk to the tile you just named",
+        "press Enter to reopen it",
+        "now press an arrow"
+      ],
+      "checkpoint": "a tile is open",
+      "recovery": "press left to come back out of the KIT list. If the arrow did nothing on the reopened tile, that is the report"
+    },
+    {
+      "label": "go to the Map and place a few pieces",
+      "goal": "the Map is the job -- the other tabs exist so this one can place things",
+      "do": [
+        "press 1",
+        "arm a piece from the palette and click the ground a few times"
+      ],
+      "checkpoint": "the map has placements",
+      "recovery": "if nothing arms, the palette selection is empty -- walk it with the arrows first"
+    },
+    {
+      "label": "which way are you facing",
+      "goal": "the nav gizmo is new. It exists so that after orbiting the camera you can still answer 'which way is the wall facing' without guessing",
+      "do": [
+        "orbit the camera around",
+        "look at the gizmo and say which way you think you are facing",
+        "then check it against a piece you know the orientation of"
+      ],
+      "checkpoint": null,
+      "recovery": "if the gizmo is unreadable, or disagrees with the scene, say so -- and say where on the screen you expected it"
+    },
+    {
+      "label": "tip the brush over and fill a box with it",
+      "goal": "fixed this session and never walked by a person: a fill used to lay every row UPRIGHT however the brush was tipped, and stepped on the standing footprint so the rows overlapped. Both should now match what a single click of the same brush does",
+      "do": [
+        "arm a wall",
+        "press Y a couple of times to tip it over (U tips the other axis)",
+        "click once on open ground to place one -- note how it lies",
+        "now drag a box out with the same brush and let go"
+      ],
+      "checkpoint": "the map has placements",
+      "recovery": "the two things to look at: are the filled pieces lying the same way as the one you clicked, and are the rows spaced so they do not intersect. Either being wrong is the report"
+    },
+    {
+      "label": "take some of it back",
+      "goal": "the removal box is locked to the same grid the fill lays on, so what the red box covers should be exactly what goes",
+      "do": [
+        "press X to arm removal",
+        "drag a box over part of what you filled",
+        "let go"
+      ],
+      "checkpoint": null,
+      "recovery": "if the box took more or less than it outlined, say which -- and roughly how much"
+    },
+    {
+      "label": "save the map",
+      "goal": "the end of the loop: what you built is on disk in a form the game reads",
+      "do": ["press Cmd+S"],
+      "checkpoint": "the map is saved",
+      "recovery": "if it refuses, the message names what it objected to -- that message is the report"
+    }
+  ]
+}

@@ -179,6 +179,39 @@ killed the editor mid-session.
 
 ---
 
+## 5b. Two new guide cards, for the next feedback session
+
+`guides/` gained two, both on **`--kit site`** (the restored kit) and both accepted by the two
+ratchets — every checkpoint they name is registered and runs, every piece they name ships.
+
+- **`branch_verbs.json`** — walks what this branch added and no person has yet used: all four arrows
+  on a held member, the `J` rung ladder, explicit naming through `N`, reopening from the KIT list,
+  the nav gizmo, the grid-locked removal box, and a **tipped box fill**. Half its steps are
+  `checkpoint: null` on purpose — "did every arrow answer", "is the gizmo readable" are the questions
+  a machine cannot answer and the reason a person is being asked.
+- **`build_a_room.json`** — authors a corner tile (two walls, the second turned), a wall tile and a
+  door tile (`site/wall_doorway`), then stamps a room out of them: four runs, four corners, one
+  door. Held by `the_room_script_can_actually_be_followed`.
+
+**Two things this needed that did not exist.** `the map has tiles on it` counts `Map::stamps`, which
+`the map has placements` deliberately cannot see — a stamped tile is a *reference*, so a room built
+from tiles leaves the placement count at zero and every step of the second half would have had to be
+a judgement call. And `the Compose tab is open`, since arming a tile (tab `4`, walk, `Enter`) is the
+step an author is least likely to guess and there was no way to confirm they had arrived.
+
+**Read the key census before writing a card, do not recall it.** Writing these from memory would have
+put four wrong keys in: on the **Map** tab `N` is `RenameMap` and `F` is `Fill`, while `F` is
+`FocusFilter` only on **Tiles**; on **Meshes** `F` is `CellLeft`. Printing `keys::in_context` is two
+minutes and is how all four were caught — the same "print the assembled thing" lesson §3 records for
+the VLM prompt.
+
+**And check what a checkpoint's argument actually counts.** `the tile has turns` counts **distinct**
+quarter-turns, so a corner is `n: 2`. It was first written `n: 1`, which passes on any tile with one
+piece in it — a checkpoint that cannot fail, reading as a guarantee. The drive test now pins that
+count by value, and was checked against the defect put back.
+
+---
+
 ## 6. Next, in the order I would take it
 
 1. **Apply-all for staged proposals.** The single `L` still stages, and there is no bulk verb. Only
