@@ -194,6 +194,60 @@ impl Plugin for GuidePlugin {
         let has_a_piece = app.register_system(|_: In<Value>, build: Res<Build>| members(&build) >= 1);
         let has_two_pieces = app.register_system(|_: In<Value>, build: Res<Build>| members(&build) >= 2);
 
+        let meshes_tab = app.register_system(|_: In<Value>, live: Res<Live>| {
+            live.0 == keys::Context::Meshes
+        });
+        // **By id, so a script can send the author to a named mesh** and know they arrived — the
+        // selection is what `B` derives for and what `Enter` imports.
+        let selected_mesh = app.register_system(
+            |args: In<Value>, state: Res<crate::tiles::ImportState>| {
+                args.0
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|want| state.selected_library_id.as_deref() == Some(want))
+            },
+        );
+        // The Map's count, on `kit_tiles`' argument: monotonic, so revisiting old work cannot
+        // re-satisfy a step that asks for new rows.
+        let map_placements = app.register_system(move |args: In<Value>, project: Res<Project>| {
+            project.map.placements.len() as u64 >= arg_u64(&args.0, "n", 1)
+        });
+        // **Kept, not merely gone.** A discarded proposal also answers `is_none`, so the keep half
+        // of the door is the pair: no proposal waiting AND the map carrying at least `n` solver
+        // rows — stamps for a composed grammar, placements for a learned one, so both are counted.
+        let proposal_kept = app.register_system(
+            move |args: In<Value>,
+                  proposal: Res<crate::editor::Proposal>,
+                  project: Res<Project>| {
+                proposal.0.is_none()
+                    && (project.map.stamps.len() + project.map.placements.len()) as u64
+                        >= arg_u64(&args.0, "n", 1)
+            },
+        );
+        let map_saved =
+            app.register_system(|_: In<Value>, project: Res<Project>| !project.dirty);
+        // **On the measured lattice, which is what accepting a derivation writes** — so this is
+        // "the tokens landed", never "a proposal exists"; `edges are staged` is that one.
+        let mesh_declares_edge = app.register_system(
+            |args: In<Value>, state: Res<crate::tiles::ImportState>, project: Res<Project>| {
+                let id = args
+                    .0
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| state.selected_library_id.clone());
+                id.is_some_and(|id| {
+                    project
+                        .measured
+                        .descriptors
+                        .iter()
+                        .find(|d| d.id == id)
+                        .and_then(|d| d.subgrid.as_ref())
+                        .is_some_and(|g| g.cells.iter().any(|c| c.edge.is_some()))
+                })
+            },
+        );
+
         let mut checkpoints = app.world_mut().resource_mut::<Checkpoints>();
         checkpoints.register("the Tiles tab is open", tiles_tab);
         checkpoints.register("the Map tab is open", map_tab);
@@ -209,6 +263,12 @@ impl Plugin for GuidePlugin {
         checkpoints.register("the open tile is unsaved", unsaved);
         checkpoints.register("edges are staged", edges_staged);
         checkpoints.register("a proposal is on the map", proposal_on_the_map);
+        checkpoints.register("the Meshes tab is open", meshes_tab);
+        checkpoints.register("the selected mesh is", selected_mesh);
+        checkpoints.register("the map has placements", map_placements);
+        checkpoints.register("the proposal was kept", proposal_kept);
+        checkpoints.register("the map is saved", map_saved);
+        checkpoints.register("the mesh declares an edge", mesh_declares_edge);
     }
 }
 

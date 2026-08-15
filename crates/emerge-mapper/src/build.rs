@@ -20,16 +20,15 @@
 //! `no_context_carries_more_than_a_learnable_vocabulary`, and Liapis's **user fatigue**, one of whose
 //! named causes is *"when there are too many options"*.
 //!
-//! # The grid is the tile's own, and it is the project's
+//! # The grid is the piece's own span, deepened in thirds
 //!
-//! Cells are [`SnapLevel`] rungs over `policy.snap_divisor` — **the same ladder the Map places on**,
-//! at a smaller scale. That is what makes a tile authored today abut a tile authored last month, and
-//! it is Códices et al.'s conformity argument (`10.1109/access.2022.3168832`): a designer can *"define
-//! a passage as n pins wide or tall, keeping consistency in the design of the layout of the individual
-//! pieces being made separately."*
-//!
-//! The bare rung is the whole tile — one cell, which is the degenerate case — so building happens a
-//! rung down by default.
+//! The stops a plain arrow walks are **not** the Map's lattice: they divide the span between the
+//! tile's centre and the focused piece's flush position — [`aligned`]'s own arithmetic — so flush
+//! and centre are exactly reachable at every depth, which no lattice of the tile's own can say
+//! (`site/wall` sits flush at 0.45, on no rung of any divisor). `J` deepens the ladder by
+//! `policy.snap_divisor` (thirds) and wraps. Asked for at the keyboard, 2026-08-14: *"it starts in
+//! the center, left moves it flush left ... press J once, then Left, then it moves between flush
+//! (outer grid line) and center."*
 //!
 //! # Flush falls out; it is not a verb
 //!
@@ -43,7 +42,6 @@
 use bevy::prelude::*;
 
 use emerge_core::composition::{Body, Composition, Envelope, Member};
-use emerge_core::grid::SnapLevel;
 use emerge_core::stack;
 
 /// **The tile being assembled**, and where the cursor is in it.
@@ -74,7 +72,8 @@ pub struct Build {
     /// tile's minimum corner while its one writer measured it in signed rungs from the centre. What
     /// the panel shows now is the focused member itself.
     pub focus: usize,
-    /// The rung the arrows step, **latched**.
+    /// **How deep the arrow ladder is**, latched. `0` walks centre → flush in one press; each level
+    /// down divides every interval by `policy.snap_divisor`; `J` wraps past [`DEPTHS`].
     ///
     /// Bier's snap-dragging changes gravity modes with keyboard commands and holds nothing; of its 44
     /// commands the modal ones are all latched. StickyLines says why holding costs: its designers
@@ -83,9 +82,9 @@ pub struct Build {
     /// Holding Shift is right for one nudge and wrong for a dressing session, and a dressing session
     /// is what building a tile is.
     ///
-    /// Safe to latch because it is **visible**: the drawn grid redraws at the active rung, so this is
-    /// not a mode anyone can forget they are in.
-    pub rung: SnapLevel,
+    /// Safe to latch because it is **visible**: the drawn grid redraws at the active depth, so this
+    /// is not a mode anyone can forget they are in.
+    pub depth: u32,
     /// **How many times a different tile has been opened.**
     ///
     /// A document boundary, as data rather than as a call. `TileHistory` watches the tile rather than
@@ -102,12 +101,18 @@ pub struct Build {
     pub browsing: Option<usize>,
 }
 
-/// The rung a tile is built on before anyone changes it.
+/// The ladder depth a tile opens at: the span itself, so the first press from centre lands flush.
+pub const DEFAULT_DEPTH: u32 = 0;
+
+/// How many depths `J` cycles before wrapping — the span, thirds of it, ninths of it.
 ///
-/// Not [`SnapLevel::Tile`]: that rung is the whole tile, one cell, and a grid with one square in it
-/// cannot position anything. The first rung down is the author's "units", which is what
-/// `policy.snap_divisor` names.
-pub const DEFAULT_RUNG: SnapLevel = SnapLevel::Fine;
+/// Asked for at the keyboard, 2026-08-14: *"press J once for smaller grid, then press J again for
+/// even smaller grid, and a third press would reset to original."*
+pub const DEPTHS: u32 = 3;
+
+/// A position within this of a ladder stop **is** that stop — the millimetre `touching` already
+/// uses, and for the same reason: authored numbers come out of a DCC, not out of arithmetic.
+pub const ON_STOP: f32 = 1e-4;
 
 /// An empty tile of the standard size, ready to take members.
 ///
@@ -145,12 +150,24 @@ pub fn aligned(
 ) -> (f32, f32) {
     let mut out = at;
     if dir.0 != 0 {
-        out.0 = (size.0 * 0.5 - span.0 * 0.5) * dir.0 as f32;
+        out.0 = flush_reach(size.0, span.0) * dir.0 as f32;
     }
     if dir.1 != 0 {
-        out.1 = (size.2 * 0.5 - span.1 * 0.5) * dir.1 as f32;
+        out.1 = flush_reach(size.2, span.1) * dir.1 as f32;
     }
     out
+}
+
+/// **How far a piece's centre can travel from the tile's centre before it is flush** — half the
+/// free space on that axis.
+///
+/// The one expression [`aligned`] and the arrow ladder both read, so the flush verb and the
+/// ladder's outermost stop are the same number **by construction** rather than by two float
+/// expressions that happen to agree — `size*0.5 - span*0.5` and `(size - span)*0.5` are not the
+/// same rounding in f32, and a piece flush by one verb and a ULP off by the other would put the
+/// "already at the flush stop" answer a press away from the truth.
+pub fn flush_reach(size_axis: f32, span_axis: f32) -> f32 {
+    size_axis * 0.5 - span_axis * 0.5
 }
 
 /// **The envelope that holds what is in the tile** — whole cells, centred, never smaller than one.
@@ -622,9 +639,50 @@ pub fn save(build: &Build, project: &mut crate::project::Project) -> Result<Stri
     })
 }
 
-/// The rung pitch the cursor is walking, in metres.
-pub fn pitch(build: &Build, project: &crate::project::Project) -> f32 {
-    build.rung.pitch(project.policy.snap_divisor)
+/// **The stop a plain arrow reaches next** on one axis of the span ladder.
+///
+/// The ladder divides the span between the tile's centre and the flush position [`aligned`] computes
+/// — `f = (size - span) / 2` — into `divisor^depth` steps per side, so **flush and centre are stops
+/// at every depth**; no lattice of the tile's own can say that (`site/wall` sits flush at 0.45, on
+/// no rung of any divisor). An off-ladder start lands ON the ladder first, which is what keeps a
+/// hand-edited or reopened tile walkable rather than stranded a millimetre beside every stop. The
+/// ladder ends at flush: a press outward there returns the position unchanged, and the caller says
+/// so instead of looking like a dead key.
+///
+/// The terminal stops return `±f` **exactly** rather than `n * (f / n)`, because the whole point of
+/// the ladder is that its outer stop and [`aligned`]'s answer are the same number, not the same
+/// number up to float rounding.
+///
+/// Asked for at the keyboard, 2026-08-14: *"it starts in the center, left moves it flush left ...
+/// press J once, then Left, then it moves between flush (outer grid line) and center."*
+pub fn ladder_step(pos: f32, f: f32, divisor: u32, depth: u32, dir: i32) -> f32 {
+    if f <= ON_STOP || dir == 0 {
+        return pos;
+    }
+    let n = divisor.saturating_pow(depth).max(1) as f32;
+    let step = f / n;
+    let k = pos / step;
+    let k = if (pos - k.round() * step).abs() < ON_STOP {
+        k.round() + dir as f32
+    } else if dir > 0 {
+        k.ceil()
+    } else {
+        k.floor()
+    };
+    let k = k.clamp(-n, n);
+    if k == n {
+        f
+    } else if k == -n {
+        -f
+    } else {
+        k * step
+    }
+}
+
+/// The lift step at this depth, in metres — sub-cell from the start (a third, a ninth, a
+/// twenty-seventh of a cell), because "up one whole tile" is a storey, not an adjustment.
+pub fn lift_pitch(divisor: u32, depth: u32) -> f32 {
+    emerge_core::grid::TILE / divisor.saturating_pow(depth + 1).max(1) as f32
 }
 
 /// **Resize the tile to whatever is in it, and keep the cursor inside.**
@@ -1051,9 +1109,11 @@ pub fn build_keys(
             state.selected_library_id = Some(first);
         }
         let id = build.open.as_ref().map(|c| c.id.clone()).unwrap_or_default();
+        // Named keys only if they are live on this tab — `T F G H` stood here for two commits after
+        // the tab split moved them to the Meshes lattice, which is a status line teaching dead keys.
         state
             .status
-            .note(format!("building `{id}` — T F G H walk, Enter drops, Cmd+S saves"));
+            .note(format!("building `{id}` — up/down walk the library, Enter drops, Cmd+S saves"));
         return;
     }
 
@@ -1063,7 +1123,6 @@ pub fn build_keys(
     }) else {
         return;
     };
-    let step = pitch(&build, &project);
 
     // **Take the piece, or put it back.** The door between the arrows walking the library list and
     // the arrows walking the tile — the author's *"a key to start the placement so the arrows don't
@@ -1280,52 +1339,77 @@ pub fn build_keys(
         }
         let (dx, dz) = if wish == Vec2::ZERO { (0, 0) } else { step_in_view(wish, rig.yaw) };
         let focus = build.focus;
+        // **The ladder is the piece's own**: its stops divide the span between the tile's centre
+        // and the flush position [`aligned`] reaches, so both are exactly reachable at every depth
+        // — the two verbs land on the same outermost stop by construction. A hole has no width, so
+        // its ladder spans the whole tile; its boundary stop is the one place the door refuses, by
+        // name, which is the honest answer for a slot that must sit strictly inside.
+        let span = build
+            .open
+            .as_ref()
+            .and_then(|c| c.members.get(focus))
+            .map(|m| match &m.body {
+                Body::Descriptor { id, .. } => project
+                    .library
+                    .get(id)
+                    .map(|d| crate::editor::brush_span(d, m.yaw))
+                    .unwrap_or((0.0, 0.0)),
+                _ => (0.0, 0.0),
+            })
+            .unwrap_or((0.0, 0.0));
+        let f = (flush_reach(size.0, span.0).max(0.0), flush_reach(size.2, span.1).max(0.0));
+        // **A piece that fills the tile on the pressed axis has no travel there** — guidance, not a
+        // refusal, the same door-manners as the flush no-op. The floor is the usual case: a
+        // one-cell piece in a one-cell tile has nowhere to go that would not grow the tile.
+        let travel = (dx != 0 && f.0 > ON_STOP) || (dz != 0 && f.1 > ON_STOP);
+        if !travel && lift_by == 0 {
+            state.status.note(
+                "this piece fills the tile on that axis — [ and ] move layers instead".to_owned(),
+            );
+            return;
+        }
+        let divisor = project.policy.snap_divisor;
+        let depth = build.depth;
+        let was =
+            build.open.as_ref().and_then(|c| c.members.get(focus)).map(|m| (m.at, m.lift));
         let moved = edit(&mut build, &project.library, |comp| {
             let Some(m) = comp.members.get_mut(focus) else {
                 return Err("the focused member went away".to_owned());
             };
-            // **Snapped to the rung, measured from the tile's centre.** The nudge used to be purely
-            // relative, so a piece kept whatever phase it started on -- and `shift`+arrow flushes to
-            // an absolute edge, 0.40 for a 0.2 m piece in a 1 m tile, from which every 333 mm step
-            // lands on 0.067 or 0.733. The centre became unreachable the moment you flushed once,
-            // permanently, which is what the author found: *"the movements of a mesh should include
-            // a centre placement too"*.
-            //
-            // `snap_centre` rather than `snap_corner` because a member's `at` is relative to the
-            // tile's ANCHOR, which is its centre — so the lattice has to run through zero. The map
-            // uses `snap_corner` for the mirror-image reason: its origin is a cell corner, so a 1 m
-            // piece fills a cell only when its near edge is on the lattice. Both mean "aligned to
-            // the cell", measured from different zeros, and swapping either one breaks the other's
-            // tests immediately.
-            //
-            // Edge contact remains `shift`+arrow's job and ignores the rung entirely.
-            m.at.0 = emerge_core::grid::snap_centre(m.at.0 + dx as f32 * step, step);
-            m.at.1 = emerge_core::grid::snap_centre(m.at.1 + dz as f32 * step, step);
+            // **The next stop on the ladder, not a fixed pitch** — [`ladder_step`] carries the
+            // rationale and the keyboard report that asked for it.
+            m.at.0 = ladder_step(m.at.0, f.0, divisor, depth, dx);
+            m.at.1 = ladder_step(m.at.1, f.1, divisor, depth, dz);
             // The floor is the floor: a member cannot be nudged under the tile it is in.
-            m.lift = (m.lift + lift_by as f32 * step).max(0.0);
+            m.lift = (m.lift + lift_by as f32 * lift_pitch(divisor, depth)).max(0.0);
             Ok((m.at, m.lift))
         });
         match moved {
-            Ok((at, lift)) => state
-                .status
-                .note(format!("({:+.3}, {:+.3}) at {:.3} m", at.0, at.1, lift)),
+            // The terminal stop: the ladder ends where the piece meets the tile, so a press outward
+            // there moves nothing — said, because it is indistinguishable from a dead key otherwise.
+            Ok(now) if was == Some(now) => state.status.note(
+                "already at the flush stop — the ladder ends where the piece meets the tile"
+                    .to_owned(),
+            ),
+            Ok(((x, z), lift)) => {
+                state.status.note(format!("({:+.3}, {:+.3}) at {:.3} m", x, z, lift));
+            }
             Err(e) => state.status.problem(e),
         }
         return;
     }
 
-    // **The rung, latched.** Two rungs below the tile, because the tile itself is one cell and a grid
-    // with one square positions nothing.
+    // **The depth, latched and cycling.** Coarse is the span itself — centre and flush are the only
+    // stops, so the first press from centre lands flush — then thirds of it, then ninths, then round
+    // again. Asked for at the keyboard: *"press J once for smaller grid ... a third press would
+    // reset to original."*
     if pressed(Action::BuildRung) {
-        build.rung = match build.rung {
-            SnapLevel::Tile | SnapLevel::Finer => SnapLevel::Fine,
-            SnapLevel::Fine => SnapLevel::Finer,
-        };
-        let now = pitch(&build, &project);
-        let (nx, ny, nz) = cells(size, now);
-        state
-            .status
-            .note(format!("rung {:.3} m — {nx} x {ny} x {nz} cells", now));
+        build.depth = (build.depth + 1) % DEPTHS;
+        let n = project.policy.snap_divisor.saturating_pow(build.depth).max(1);
+        state.status.note(match build.depth {
+            0 => "grid: centre and flush — one press spans the tile".to_owned(),
+            _ => format!("grid: centre to flush in {n} steps — J deepens, and wraps"),
+        });
         return;
     }
 
@@ -1530,7 +1614,7 @@ pub fn build_keys(
 /// answer rather than two that drift.
 fn open_blank(build: &mut Build, project: &crate::project::Project) {
     let comp = blank(&next_tile_id(project), project.map.bounds.1);
-    build.rung = DEFAULT_RUNG;
+    build.depth = DEFAULT_DEPTH;
     build.open = Some(comp);
     build.focus = 0;
     // The one place a different tile becomes the open one, so the one place the boundary is marked.
@@ -1547,7 +1631,7 @@ fn open_blank(build: &mut Build, project: &crate::project::Project) {
 /// document by exactly the argument that field carries: an undo that crossed the boundary would
 /// write one tile's members under another's name.
 pub fn open_saved(build: &mut Build, comp: Composition) {
-    build.rung = DEFAULT_RUNG;
+    build.depth = DEFAULT_DEPTH;
     build.open = Some(comp);
     build.focus = 0;
     // **Reopening a tile IS holding it**, and the first version of this said the opposite: "the
@@ -1655,7 +1739,14 @@ pub fn drive_build_preview(
     // **And it previews only what `Enter` will accept.** `ImportState::editing` falls back to the
     // focused *candidate*, which the drop branch refuses by name — so ghosting it stood a piece in
     // the tile that the very next keystroke would not put there. A preview is a promise.
-    if build.placing
+    //
+    // **While choosing, not only while placing.** This was gated on `build.placing`, which showed
+    // the ghost after a piece was taken and never while one was being picked — exactly backwards:
+    // asked for at the keyboard, 2026-08-14: *"when I select a mesh, but haven't yet hit enter ...
+    // there should be a semitransparent rendering of the mesh selected. Like a preview."* The one
+    // stance it stays out of is Browsing — the kit list selects a tile, not a mesh, and a mesh
+    // ghost under a tile cursor would be previewing the wrong kind of thing.
+    if build.browsing.is_none()
         && let Some(d) = state
             .editing(&project.library)
             .filter(|d| project.library.get(&d.id).is_some())
@@ -1743,6 +1834,15 @@ pub fn drive_build_preview(
             None => base.clone(),
         };
         let Some(&y) = ys.get(k) else { continue };
+        // **The row this member expanded into** — `expand` mints rows `"{stamp}/{member_path}"`
+        // and the stamp here is `"build"`, so the focused member `wall_low` is the row
+        // `build/wall_low` and every leaf of a nested group under it shares the prefix.
+        let held = build.placing
+            && comp.members.get(build.focus).is_some_and(|m| {
+                p.id.strip_prefix("build/").is_some_and(|path| {
+                    path == m.id || path.starts_with(&format!("{}/", m.id))
+                })
+            });
         if let Some(e) = crate::editor::spawn_piece(
             &mut commands,
             &assets,
@@ -1754,6 +1854,9 @@ pub fn drive_build_preview(
             y,
         ) {
             commands.entity(e).insert(StagedTile);
+            if held {
+                commands.entity(e).insert(crate::editor::HeldPiece);
+            }
         }
     }
 }
@@ -1784,46 +1887,90 @@ pub fn draw_build_grid(
         crate::chrome::DIM,
     );
 
-    // The floor grid at the live rung, so the squares drawn are the squares the cursor walks. Bounded
-    // by a cell count rather than a plane, so it stops at the tile.
-    let pitch = pitch(&build, &project);
-    let (nx, _, nz) = cells(size, pitch);
-    gizmos.grid(
-        Isometry3d::new(stage, Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
-        UVec2::new(nx, nz),
-        Vec2::splat(pitch),
-        crate::editor::GRID_LINE,
-    );
+    // A third of a cell — the old unit rung, kept as the orientation grid and as the box drawn for
+    // a thing with no mesh of its own.
+    let unit = emerge_core::grid::TILE / project.policy.snap_divisor.max(1) as f32;
 
-    // **The focused member**, boxed in the accent colour — the one thing on the stage that answers
-    // "what do the arrows move". It used to be a cursor cell, and there is no cursor now: the member
-    // *is* the selection, so drawing a separate square would be drawing a second answer.
+    // **The focused member and the stops its arrows walk.** The ladder is per axis and per piece —
+    // a wall's travel is wider across than along — so the drawn lines ARE the reachable positions,
+    // which is the whole complaint the span ladder answers: a grid the piece lands beside is a grid
+    // that lies.
     let focus = build.focus;
-    if let Some(m) = build.open.as_ref().and_then(|c| c.members.get(focus)) {
+    let member = build.open.as_ref().and_then(|c| c.members.get(focus));
+    if let Some(m) = member {
         let span = match &m.body {
             Body::Descriptor { id, .. } => project
                 .library
                 .get(id)
                 .map(|d| crate::editor::brush_span(d, m.yaw))
-                .unwrap_or((pitch, pitch)),
-            // A hole has no mesh, so its box is one cell of the live rung — the size of the thing
-            // that would fill it, near enough to aim by.
-            _ => (pitch, pitch),
+                // A hole has no width, so its ladder spans the whole tile.
+                .unwrap_or((0.0, 0.0)),
+            _ => (0.0, 0.0),
         };
+        if build.placing {
+            let n = project.policy.snap_divisor.saturating_pow(build.depth).max(1) as i32;
+            let f = (flush_reach(size.0, span.0).max(0.0), flush_reach(size.2, span.1).max(0.0));
+            for k in -n..=n {
+                // Skip an axis the piece fills: 2n+1 lines drawn on top of each other read as one
+                // line claiming travel that does not exist.
+                if f.0 > ON_STOP {
+                    let x = if k == n {
+                        f.0
+                    } else if k == -n {
+                        -f.0
+                    } else {
+                        k as f32 * f.0 / n as f32
+                    };
+                    gizmos.line(
+                        stage + Vec3::new(x, 0.0, -size.2 * 0.5),
+                        stage + Vec3::new(x, 0.0, size.2 * 0.5),
+                        crate::editor::GRID_LINE,
+                    );
+                }
+                if f.1 > ON_STOP {
+                    let z = if k == n {
+                        f.1
+                    } else if k == -n {
+                        -f.1
+                    } else {
+                        k as f32 * f.1 / n as f32
+                    };
+                    gizmos.line(
+                        stage + Vec3::new(-size.0 * 0.5, 0.0, z),
+                        stage + Vec3::new(size.0 * 0.5, 0.0, z),
+                        crate::editor::GRID_LINE,
+                    );
+                }
+            }
+        }
+        let span = if span == (0.0, 0.0) { (unit, unit) } else { span };
         let height = match &m.body {
             Body::Descriptor { id, .. } => project
                 .library
                 .get(id)
                 .and_then(|d| d.extent.height)
-                .unwrap_or(pitch),
-            _ => pitch,
+                .unwrap_or(unit),
+            _ => unit,
         };
+        // **The focused member**, boxed in the accent colour — the one thing on the stage that
+        // answers "what do the arrows move". There is no cursor: the member *is* the selection.
         gizmos.cube(
             Transform::from_translation(
                 stage + Vec3::new(m.at.0, m.lift + height * 0.5, m.at.1),
             )
             .with_scale(Vec3::new(span.0, height, span.1)),
             crate::chrome::ACCENT,
+        );
+    }
+    // Nothing in hand: the unit lattice for orientation, bounded by a cell count so it stops at
+    // the tile — the squares tiles abut on, not stops any arrow claims to walk.
+    if member.is_none() || !build.placing {
+        let (nx, _, nz) = cells(size, unit);
+        gizmos.grid(
+            Isometry3d::new(stage, Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+            UVec2::new(nx, nz),
+            Vec2::splat(unit),
+            crate::editor::GRID_LINE,
         );
     }
 }
@@ -1846,7 +1993,7 @@ mod tests {
 
     /// A tile in hand, ready for the verbs below.
     fn open(id: &str) -> Build {
-        Build { open: Some(blank(id, 2.4)), rung: DEFAULT_RUNG, ..Default::default() }
+        Build { open: Some(blank(id, 2.4)), depth: DEFAULT_DEPTH, ..Default::default() }
     }
 
     /// The drop, through the same door `build_keys` presses `Enter` into.

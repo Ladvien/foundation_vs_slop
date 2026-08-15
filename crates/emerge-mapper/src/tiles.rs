@@ -2811,7 +2811,11 @@ impl Plugin for TilesPlugin {
                         // live can hide the selected row there too — and on that tab the selection is
                         // what `Enter` drops. Gated on the panel, not on one of the two tabs in it.
                         keep_library_selection_visible.run_if(in_tiles_panel),
-                        keep_selection_on_screen.run_if(in_meshes_mode),
+                        // The same argument, and it was missed here: gated `in_meshes_mode`, the
+                        // list followed the arrows on one of the two tabs sharing it — reported
+                        // from the keyboard 2026-08-14: "the view doesn't follow my selection, it
+                        // moves off screen."
+                        keep_selection_on_screen.run_if(in_tiles_panel),
                         keep_candidate_selection_visible.run_if(in_meshes_mode),
                     ),
                     cycle_mount.in_set(crate::keys::Phase::Act),
@@ -3135,6 +3139,11 @@ fn spawn_tiles_panel(mut commands: Commands) {
     // twice and disagreed with the first section.
     .with_children(|p| {
         crate::filter::spawn(p, crate::filter::Pane::Candidates);
+        // The strip sits OUTSIDE the scroll container, so it cannot scroll away — see [`ListHeader`].
+        p.spawn((
+            Node { flex_direction: FlexDirection::Column, ..default() },
+            ListHeader,
+        ));
         crate::chrome::scroll_list(p, CandidateList);
     });
 }
@@ -4172,11 +4181,18 @@ fn candidate_rows(state: &ImportState, filters: &crate::filter::Filters) -> Vec<
 /// distinction once already. `inverse_scale_factor` is the conversion, taken from the list itself.
 fn keep_selection_on_screen(
     state: Res<ImportState>,
+    build: Res<crate::build::Build>,
     rows: Query<(&CandidateRow, &ComputedNode, &UiGlobalTransform)>,
     library_rows: Query<(&LibraryRow, &ComputedNode, &UiGlobalTransform)>,
+    kit_rows: Query<(&KitRow, &ComputedNode, &UiGlobalTransform)>,
     mut lists: Query<
         (&ComputedNode, &UiGlobalTransform, &mut ScrollPosition),
-        (With<CandidateList>, Without<CandidateRow>, Without<LibraryRow>),
+        (
+            With<CandidateList>,
+            Without<CandidateRow>,
+            Without<LibraryRow>,
+            Without<KitRow>,
+        ),
     >,
     mut pending: Local<bool>,
 ) {
@@ -4187,7 +4203,9 @@ fn keep_selection_on_screen(
     // scrolls to where the row used to be, with no later frame to correct it (`is_changed` is false
     // by then). So the change arms a flag and the correction runs next frame, against the layout the
     // rebuild actually produced.
-    if state.is_changed() {
+    // `Build` too: the kit walk lives there (`Build::browsing`), and `rebuild_candidates` rebuilds
+    // this list on the same change.
+    if state.is_changed() || build.is_changed() {
         *pending = true;
         return;
     }
@@ -4196,12 +4214,18 @@ fn keep_selection_on_screen(
     }
     *pending = false;
     // A UI node's transform is its CENTRE, so the edges are the half-size either side.
-    let selected = match &state.selected_library_id {
-        Some(id) => library_rows
+    // The kit cursor outranks the library selection: while browsing, the kit rows are what is on
+    // screen, and the library selection still exists underneath them.
+    let selected = match (build.browsing, &state.selected_library_id) {
+        (Some(row), _) => kit_rows
+            .iter()
+            .find(|(r, _, _)| r.0 == row)
+            .map(|(_, n, t)| (t.translation.y, n.size.y * 0.5)),
+        (None, Some(id)) => library_rows
             .iter()
             .find(|(r, _, _)| &r.0 == id)
             .map(|(_, n, t)| (t.translation.y, n.size.y * 0.5)),
-        None => rows
+        (None, None) => rows
             .iter()
             .find(|(r, _, _)| r.0 == state.selected)
             .map(|(_, n, t)| (t.translation.y, n.size.y * 0.5)),
@@ -4211,21 +4235,12 @@ fn keep_selection_on_screen(
     };
 
     for (list, list_tf, mut scroll) in &mut lists {
-        let (list_mid, list_half) = (list_tf.translation.y, list.size.y * 0.5);
-        let (row_top, row_bottom) = (row_mid - row_half, row_mid + row_half);
-        let (top, bottom) = (list_mid - list_half, list_mid + list_half);
-
-        // Above the fold, or below it. Never both — a row taller than the list scrolls to its top,
-        // which is the half you read first.
-        let delta = if row_top < top {
-            row_top - top
-        } else if row_bottom > bottom {
-            row_bottom - bottom
-        } else {
-            continue;
-        };
-        let want = (scroll.0.y + delta * list.inverse_scale_factor).max(0.0);
-        if (scroll.0.y - want).abs() > 0.5 {
+        if let Some(want) = crate::chrome::scroll_to_reveal(
+            (row_mid, row_half),
+            (list_tf.translation.y, list.size.y * 0.5),
+            scroll.0.y,
+            list.inverse_scale_factor,
+        ) {
             scroll.0.y = want;
         }
     }
@@ -4812,7 +4827,10 @@ fn tab_strip(p: &mut ChildSpawnerCommands, on_kit: bool, kit: usize) {
             ));
         }
         row.spawn((
-            Text::new(if on_kit { "  right reopens / left back" } else { "  right for the kit" }),
+            // `Esc`, not `left`: no `ArrowLeft` binding exists while browsing, and a hint naming a
+            // dead key is the exact lie the key census exists to prevent — this one slipped past it
+            // by being prose (found in the 2026-08-14 guided session prep).
+            Text::new(if on_kit { "  right reopens / Esc backs out" } else { "  right for the kit" }),
             TextColor(DIM),
             TextFont::from_font_size(9.0),
         ));
@@ -4835,6 +4853,9 @@ fn kit_rows(p: &mut ChildSpawnerCommands, project: &Project, cursor: usize) {
     for (i, c) in project.compositions.compositions.iter().enumerate() {
         let here = i == cursor;
         p.spawn((
+            // Marked by row index so `keep_selection_on_screen` can follow the kit walk the way it
+            // follows the library's — the same defect class, one list over.
+            KitRow(i),
             Text::new(format!(
                 "{} {}  {} member(s)",
                 if here { ">" } else { " " },
@@ -4847,6 +4868,18 @@ fn kit_rows(p: &mut ChildSpawnerCommands, project: &Project, cursor: usize) {
     }
 }
 
+/// One row of the KIT list, by index into `project.compositions.compositions` — the same list
+/// `Build::browsing` indexes, which is what makes the scroll-follow able to find the cursor.
+#[derive(Component)]
+struct KitRow(usize);
+
+/// **The frozen strip above the scrolling list** — `MESHES | KIT (n)` must stay put while the rows
+/// scroll under it. It lived as the first child *inside* the scroll container, so it scrolled away
+/// with the list; reported from the keyboard 2026-08-14. Rebuilt by `rebuild_candidates` alongside
+/// the rows, because the strip's state (which list, the kit count) changes with them.
+#[derive(Component)]
+struct ListHeader;
+
 /// Wholesale rather than diffed: it changes on a rescan and on nothing else, and a diffing rebuild of
 /// a list this long would be more code than the thing it saves.
 fn rebuild_candidates(
@@ -4856,6 +4889,7 @@ fn rebuild_candidates(
     filters: Res<crate::filter::Filters>,
     build: Res<crate::build::Build>,
     lists: Query<Entity, With<CandidateList>>,
+    headers: Query<Entity, With<ListHeader>>,
 ) {
     // **The counts are of what is SHOWN.** A heading reading 318 above a filtered list of four is a
     // heading lying about the thing directly under it — and the count is the one number that says
@@ -4886,10 +4920,16 @@ fn rebuild_candidates(
     )
     .compositions;
 
+    // The strip rides the header node, not the list — frozen above the scroll. See [`ListHeader`].
+    for header in &headers {
+        commands.entity(header).despawn_related::<Children>();
+        commands.entity(header).with_children(|p| {
+            tab_strip(p, browsing.is_some(), kit);
+        });
+    }
     for list in &lists {
         commands.entity(list).despawn_related::<Children>();
         commands.entity(list).with_children(|p| {
-            tab_strip(p, browsing.is_some(), kit);
             if let Some(row) = browsing {
                 kit_rows(p, &project, row);
                 return;
@@ -5145,14 +5185,17 @@ fn build_detail(
         }
     }
 
-    // **The grid, and where you are on it.** The cell counts come from the rung rather than being
-    // stated, so the number an author reads is the number of squares they will walk.
-    let pitch = crate::build::pitch(build, project);
-    let (nx, ny, nz) = crate::build::cells(size, pitch);
+    // **The grid, and where you are on it.** The ladder is the focused piece's own span, deepened
+    // in thirds by `J` — so what an author reads here is steps between centre and flush, not cells
+    // of a lattice the piece can land beside.
     crate::chrome::section(p, "GRID");
+    let n = project.policy.snap_divisor.saturating_pow(build.depth).max(1);
     line(
         p,
-        format!("{nx} x {ny} x {nz} cells of {:.0} mm", pitch * 1000.0),
+        match build.depth {
+            0 => "centre and flush — J for thirds".to_owned(),
+            _ => format!("centre to flush in {n} steps — J deepens, and wraps"),
+        },
         TEXT,
         10.0,
     );

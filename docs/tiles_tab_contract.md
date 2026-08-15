@@ -17,7 +17,7 @@ that acted on it, and no way to move it.
 | **a member** | a piece inside it, positioned relative to the tile's centre |
 | **the focus** | `Build::focus` — the member the verbs act on, drawn in amber |
 | **the library row** | `ImportState::selected_library_id` — what the next drop brings in |
-| **the rung** | `Build::rung` — the lattice the arrows step, latched, drawn |
+| **the ladder** | `Build::depth` — the stops the arrows walk, dividing the span between the tile's centre and the focused piece's flush position; latched, drawn |
 
 ## The two states
 
@@ -42,16 +42,17 @@ never be walked again. `Placing` means *there is a piece and you are placing it*
 | `Enter` | bring the selected row in, focus it, and enter Placing |
 | `Shift+Enter` | leave a declared hole instead |
 | `N` | open a **new** tile — a different document, with its own history |
-| `J` | step the rung |
+| `J` | deepen the ladder by thirds; a third press wraps back to the span |
+| `right` | show the KIT tab; `up`/`down` walk it, `right` reopens, `Esc` backs out |
 | `Cmd+Z` / `Shift+Cmd+Z` | step this tile's history |
 
 ### Placing
 
 | key | promise |
 |---|---|
-| `up` / `down` | move the focused member one rung, in screen axes |
-| `left` / `right` | **step to the previous / next member** |
-| `Shift`+arrows | put the focused member flush against that side |
+| all four arrows | move the focused member one ladder stop, in screen axes — centre and flush are stops at every depth; a piece filling an axis has no travel there and says so |
+| `,` / `.` | **step to the previous / next member** |
+| `Shift`+arrows | put the focused member flush against that side — the same outermost stop the plain arrows end at |
 | `[` / `]` | move it a layer |
 | `R` | turn it a quarter |
 | `Delete` | remove it |
@@ -85,8 +86,8 @@ it can be — and silence there is indistinguishable from a dead key.
 
 ## Deliberately absent
 
-- **`left`/`right` do nothing while Choosing.** There is one list on this tab, so there is nothing to
-  switch between; the census does not offer them, and invariant 1 is about what it *does* offer.
+- **`left` does nothing while Choosing.** `right` opens the KIT tab of the list; backing out is
+  `Esc`, the census does not offer `left`, and invariant 1 is about what it *does* offer.
 - **No verb sets the tile's size.** The envelope is read off the contents — a size authored
   separately from the members it contains is a second source of truth, and the two drift.
 - **No `paint` writer.** Decal ordering is unauthorable; FVS-R-22.

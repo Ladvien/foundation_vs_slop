@@ -177,9 +177,14 @@ pub enum Action {
     /// Open the Tiles tab on the descriptor of the piece under the cursor.
     EditTile,
     // ── Map ──────────────────────────────────────────────────────────────────
-    AimLeft,
-    AimRight,
-    /// Turn the placement under the cursor, as opposed to the brush.
+    /// **Turn the thing being steered** — the ghost while a brush or a composition is armed, the
+    /// placement under the cursor when the cursor is clear.
+    ///
+    /// One cluster, not two. `Z`/`C` used to aim the brush while these turned what was underneath,
+    /// and the split was reported from the keyboard 2026-08-14: *"it felt weird to have a mesh
+    /// selected and use R and T to rotate not my ghosted selection, but the mesh underneath it."*
+    /// The subject now follows what is armed, the same rule `editor::cursor_is_clear` gives the
+    /// click.
     TurnPieceLeft,
     TurnPieceRight,
     /// Cycle which piece of the stack under the cursor the piece-verbs act on — coincident
@@ -209,8 +214,9 @@ pub enum Action {
     /// Arm the move tool: click a piece to pick it up, click again to put it down.
     MoveMode,
     RenameMap,
-    /// Put the brush back to the rotation it was authored at.
-    AimReset,
+    /// Put the steered thing back to the rotation and tip it was authored at — same subject as
+    /// [`Action::TurnPieceLeft`].
+    Straighten,
     /// Leave the removal mode without removing anything.
     Cancel,
     OwnToggle,
@@ -541,11 +547,6 @@ pub const BINDINGS: &[Binding] = &[
     // One ROW, deliberately: a shared `does` collapses the pair the way `W, A, S, D` collapses, and
     // the Map context is at its twelve-row ceiling (see the vocabulary test) with the removal mode's
     // `Esc` now in it. The label carries the direction so nothing is lost by sharing the line.
-    // One row for all three aim keys — the shared `does` collapse that bought the target row
-    // below inside the twelve-row ceiling.
-    b(Action::AimLeft, KeyCode::KeyZ, false, Context::Map, "Z", "aim left / aim right / straight again"),
-    b(Action::AimRight, KeyCode::KeyC, false, Context::Map, "C", "aim left / aim right / straight again"),
-    b(Action::AimReset, KeyCode::KeyV, false, Context::Map, "V", "aim left / aim right / straight again"),
     // **`H` picks WHICH piece of a stack the piece-verbs mean.** A floor tile, a wall and its
     // header legally share a cell (different layers), and "the placement under the cursor" cannot
     // name one of three. Each press steps up the stack, the status names the target, and the
@@ -567,10 +568,11 @@ pub const BINDINGS: &[Binding] = &[
     // they always did, `Y U` tip it over — a quarter turn about X and about Z per press
     // (`Placed::tip`). Sharing a `does` collapses them the way `W, A, S, D` collapses, which is what
     // buys the lift row below inside the twelve-row ceiling.
-    b(Action::TurnPieceLeft, KeyCode::KeyR, false, Context::Map, "R", "turn left / turn right / tip x / tip z"),
-    b(Action::TurnPieceRight, KeyCode::KeyT, false, Context::Map, "T", "turn left / turn right / tip x / tip z"),
-    b(Action::TipX, KeyCode::KeyY, false, Context::Map, "Y", "turn left / turn right / tip x / tip z"),
-    b(Action::TipZ, KeyCode::KeyU, false, Context::Map, "U", "turn left / turn right / tip x / tip z"),
+    b(Action::TurnPieceLeft, KeyCode::KeyR, false, Context::Map, "R", "turn left / turn right / tip x / tip z / straight again"),
+    b(Action::TurnPieceRight, KeyCode::KeyT, false, Context::Map, "T", "turn left / turn right / tip x / tip z / straight again"),
+    b(Action::TipX, KeyCode::KeyY, false, Context::Map, "Y", "turn left / turn right / tip x / tip z / straight again"),
+    b(Action::TipZ, KeyCode::KeyU, false, Context::Map, "U", "turn left / turn right / tip x / tip z / straight again"),
+    b(Action::Straighten, KeyCode::KeyV, false, Context::Map, "V", "turn left / turn right / tip x / tip z / straight again"),
     // **The brackets lift.** Free in this context (the Tiles tab's layer pair is never live with
     // the Map), and vertically suggestive in a way no letter is. One subgrid unit per press, held
     // repeat for a long ride up; the authored offset is `Placed::lift`, the one amendment to
@@ -771,7 +773,7 @@ pub const BINDINGS: &[Binding] = &[
     // argument: Bier's snap-dragging latches every one of its modal commands, and StickyLines'
     // designers avoid held modifiers because menus and modifiers *"make them lose focus"*. Safe to
     // latch because the drawn grid shows which rung is live.
-    b(Action::BuildRung, KeyCode::KeyJ, false, Context::Tiles, "J", "rung: unit / subunit"),
+    b(Action::BuildRung, KeyCode::KeyJ, false, Context::Tiles, "J", "grid deeper by thirds, wrapping"),
 
     // **Both stated with `bs`.** A bare `b` is *indifferent* to Shift by design, so it would swallow
     // the shifted chord rather than sit beside it — the same pair `RemoveTile`/`DemoteTile` makes.
@@ -895,7 +897,7 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::PlayPause, KeyCode::Space, false, Context::Anim, "Space", "play / scrub"),
     b(Action::CheckAllRigs, KeyCode::KeyC, false, Context::Anim, "C", "check all rigs"),
     // G is the Map tab's Generate and a Tiles cell-cursor key — the same legal cross-context
-    // share as the arrows above. V is the Map tab's AimReset and a Tiles lattice key.
+    // share as the arrows above. V is the Map tab's Straighten and a Tiles lattice key.
     b(Action::ToggleGhost, KeyCode::KeyG, false, Context::Anim, "G", "ghost: measured over declared"),
     b(Action::CycleCamPreset, KeyCode::KeyV, false, Context::Anim, "V", "view: figure / feet / side / ground"),
 ];
@@ -1344,7 +1346,7 @@ mod tests {
             Action::ComposeMemberPrev, Action::ComposeMemberNext,
             Action::CarouselPrev, Action::CarouselNext,
             Action::Save, Action::Undo, Action::Redo, Action::Shortcuts, Action::EditTile,
-            Action::AimLeft, Action::AimRight, Action::AimReset, Action::Cancel,
+            Action::Straighten, Action::Cancel,
             Action::Fill, Action::Remove, Action::MoveMode, Action::CloneMode, Action::RenameMap,
             Action::OwnToggle, Action::Generate, Action::GenerateDeclared, Action::GenerateComposed,
             Action::CycleGrid,
@@ -1552,13 +1554,15 @@ mod tests {
     }
 
     /// The legal collisions, asserted directly so nobody "fixes" them: `S` pans the map and the
-    /// modified `S` saves; `Z` aims the brush left and the modified `Z` undoes. Different chords
-    /// rather than clashes — and the second pair is the one that makes `Z` safe to bind at all.
+    /// modified `S` saves; `Z` marks a lattice cell solid on the Meshes tab and the modified `Z`
+    /// undoes. Different chords rather than clashes — and the second pair is what makes `Z` safe to
+    /// bind at all. (It read `AimLeft` until the aim keys retired into the turn cluster, 2026-08-14;
+    /// the rule it guards is the same.)
     #[test]
     fn a_bare_key_and_its_modified_chord_are_different_bindings() {
         for (bare, modified) in [
             (Action::PanBack, Action::Save),
-            (Action::AimLeft, Action::Undo),
+            (Action::CellSolid, Action::Undo),
         ] {
             let bare = binding(bare);
             let modified = binding(modified);
@@ -1821,12 +1825,20 @@ mod tests {
             .unwrap_or_else(|| panic!("no turn row"));
         assert_eq!(turn.chord, "Q, E");
 
-        // All three aim keys on one row — the merge that bought the target-lock row its slot.
-        let aim = map
+        // **The whole rotate cluster on one row.** It was two rows and two subjects — `Z, C, V`
+        // aimed the brush while `R, T, Y, U` turned what was under the cursor — until the split was
+        // reported from the keyboard (2026-08-14). One row now, because it is one idea: turn the
+        // thing you are steering. Five chords, five phrases, which
+        // `a_collapsed_row_names_each_of_its_chords` is what enforces.
+        let turn_piece = map
             .iter()
-            .find(|r| r.does == "aim left / aim right / straight again")
-            .unwrap_or_else(|| panic!("no aim row"));
-        assert_eq!(aim.chord, "Z, C, V");
+            .find(|r| r.does == "turn left / turn right / tip x / tip z / straight again")
+            .unwrap_or_else(|| panic!("no turn row"));
+        assert_eq!(turn_piece.chord, "R, T, Y, U, V");
+        assert!(
+            !map.iter().any(|r| r.does.starts_with("aim ")),
+            "the aim row retired into the turn cluster; two rows would be two subjects again"
+        );
 
         // The lattice cursor is its own cluster, and must not be the camera's — an author reaches
         // for `W A S D` to move the view on every tab. The layer keys share its row: one idea,
@@ -2005,10 +2017,14 @@ mod tests {
 
     /// **The chord that made undo look broken.** `Cmd+Z` on a Mac had been checked against Ctrl, so
     /// it did nothing at all — a flood fill could not be taken back and the undo stack looked empty.
-    /// Both halves of the `Z` pair are asserted because binding the bare letter to aim is what makes
-    /// getting this wrong silent rather than loud.
+    ///
+    /// Both halves of the `Z` pair are still asserted, on the Meshes tab, which is where the bare
+    /// letter now lives: `Z` marks a lattice cell solid and `Cmd+Z` steps that tab's history. On the
+    /// Map the bare letter is free — it aimed the brush until the aim keys retired into the turn
+    /// cluster (2026-08-14) — and a modifier check that is wrong there is exactly as silent as it
+    /// ever was, which is why the Map half is asserted too.
     #[test]
-    fn the_platform_modifier_undoes_and_the_bare_key_aims() {
+    fn the_platform_modifier_undoes_and_the_bare_key_does_not() {
         let mut input = ButtonInput::<KeyCode>::default();
         input.press(MOD_KEYS[0]);
         input.press(KeyCode::KeyZ);
@@ -2017,15 +2033,15 @@ mod tests {
             "{MOD_NAME}+Z must undo"
         );
         assert!(
-            !just_pressed(&input, Live(Context::Map, Stance::Idle), Action::AimLeft),
-            "{MOD_NAME}+Z must not also turn the brush"
+            !just_pressed(&input, Live(Context::Meshes, Stance::Idle), Action::CellSolid),
+            "{MOD_NAME}+Z must not also mark a cell solid"
         );
 
         let mut input = ButtonInput::<KeyCode>::default();
         input.press(KeyCode::KeyZ);
         assert!(
-            just_pressed(&input, Live(Context::Map, Stance::Idle), Action::AimLeft),
-            "bare Z must aim left"
+            just_pressed(&input, Live(Context::Meshes, Stance::Idle), Action::CellSolid),
+            "bare Z must mark the lattice cell solid"
         );
         assert!(
             !just_pressed(&input, Live(Context::Map, Stance::Idle), Action::Undo),
@@ -2127,30 +2143,30 @@ mod tests {
     fn a_press_fires_at_once_and_then_waits() {
         let mut input = ButtonInput::<KeyCode>::default();
         let mut repeat = Repeat::default();
-        input.press(binding(Action::AimRight).key);
+        input.press(binding(Action::TurnPieceRight).key);
 
         assert!(
-            repeating(&input, Live(Context::Map, Stance::Idle), Action::AimRight, &mut repeat, 0.0),
+            repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceRight, &mut repeat, 0.0),
             "the press itself must fire without waiting on a timer"
         );
 
         // Held, but `just_pressed` no longer reports it — this is what a second frame looks like.
         input.clear();
-        input.press(binding(Action::AimRight).key);
-        input.clear_just_pressed(binding(Action::AimRight).key);
+        input.press(binding(Action::TurnPieceRight).key);
+        input.clear_just_pressed(binding(Action::TurnPieceRight).key);
         // Just under the interval, in ten equal steps: nothing more may fire.
         let step = REPEAT_SECS / 10.0;
         let mut fired = 0;
         for _ in 0..9 {
-            if repeating(&input, Live(Context::Map, Stance::Idle), Action::AimRight, &mut repeat, step) {
+            if repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceRight, &mut repeat, step) {
                 fired += 1;
             }
         }
         assert_eq!(fired, 0, "9/10 of the {REPEAT_SECS} s interval must not fire");
 
         // Crossing it fires exactly once.
-        assert!(repeating(&input, Live(Context::Map, Stance::Idle), Action::AimRight, &mut repeat, step * 2.0));
-        assert!(!repeating(&input, Live(Context::Map, Stance::Idle), Action::AimRight, &mut repeat, 0.0));
+        assert!(repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceRight, &mut repeat, step * 2.0));
+        assert!(!repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceRight, &mut repeat, 0.0));
     }
 
     /// Holding for a second yields the presses the interval promises, rather than one per frame.
@@ -2158,13 +2174,13 @@ mod tests {
     fn holding_repeats_at_the_stated_cadence() {
         let mut input = ButtonInput::<KeyCode>::default();
         let mut repeat = Repeat::default();
-        input.press(binding(Action::AimLeft).key);
-        let mut fired = usize::from(repeating(&input, Live(Context::Map, Stance::Idle), Action::AimLeft, &mut repeat, 0.0));
+        input.press(binding(Action::TurnPieceLeft).key);
+        let mut fired = usize::from(repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceLeft, &mut repeat, 0.0));
 
-        input.clear_just_pressed(binding(Action::AimLeft).key);
+        input.clear_just_pressed(binding(Action::TurnPieceLeft).key);
         // One second at 60 fps.
         for _ in 0..60 {
-            if repeating(&input, Live(Context::Map, Stance::Idle), Action::AimLeft, &mut repeat, 1.0 / 60.0) {
+            if repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceLeft, &mut repeat, 1.0 / 60.0) {
                 fired += 1;
             }
         }
@@ -2182,20 +2198,20 @@ mod tests {
     fn releasing_resets_the_countdown() {
         let mut input = ButtonInput::<KeyCode>::default();
         let mut repeat = Repeat::default();
-        let key = binding(Action::AimRight).key;
+        let key = binding(Action::TurnPieceRight).key;
 
         input.press(key);
-        assert!(repeating(&input, Live(Context::Map, Stance::Idle), Action::AimRight, &mut repeat, 0.0));
+        assert!(repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceRight, &mut repeat, 0.0));
         input.clear_just_pressed(key);
         // Part of the way to the next repeat, then let go.
-        repeating(&input, Live(Context::Map, Stance::Idle), Action::AimRight, &mut repeat, REPEAT_SECS * 0.8);
+        repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceRight, &mut repeat, REPEAT_SECS * 0.8);
         input.release(key);
-        assert!(!repeating(&input, Live(Context::Map, Stance::Idle), Action::AimRight, &mut repeat, 0.0));
+        assert!(!repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceRight, &mut repeat, 0.0));
 
         input.clear();
         input.press(key);
         assert!(
-            repeating(&input, Live(Context::Map, Stance::Idle), Action::AimRight, &mut repeat, 0.0),
+            repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceRight, &mut repeat, 0.0),
             "a fresh press fires at once, not after the remainder of an interval"
         );
     }
@@ -2207,16 +2223,16 @@ mod tests {
     fn a_key_held_into_a_new_context_waits_for_a_fresh_press() {
         let mut input = ButtonInput::<KeyCode>::default();
         let mut repeat = Repeat::default();
-        let key = binding(Action::AimRight).key;
+        let key = binding(Action::TurnPieceRight).key;
 
         // Held down while the Tiles tab owns the keyboard: nothing accrues.
         input.press(key);
         input.clear_just_pressed(key);
-        assert!(!repeating(&input, Live(Context::Meshes, Stance::Idle), Action::AimRight, &mut repeat, 5.0));
+        assert!(!repeating(&input, Live(Context::Meshes, Stance::Idle), Action::TurnPieceRight, &mut repeat, 5.0));
 
         // Now the Map tab is live and the key is still down, but was never pressed here.
         assert!(
-            !repeating(&input, Live(Context::Map, Stance::Idle), Action::AimRight, &mut repeat, 5.0),
+            !repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceRight, &mut repeat, 5.0),
             "a key that was already down must not start repeating on a context change"
         );
     }
