@@ -825,6 +825,63 @@ mod tests {
         );
     }
 
+    /// **Naming a kit makes it, and leaves you standing on it.**
+    ///
+    /// Asked for at the keyboard: *"once you hit enter, select the kit in the kit area."* A kit has
+    /// one field, so a separate commit key guarded nothing — and the guarded step was the one an
+    /// author had to be told about.
+    #[test]
+    fn naming_a_kit_makes_it_and_lands_on_it() {
+        let root = Root::new("kit-by-enter");
+        root.kit(None, 2);
+        root.kit(Some("site"), 5);
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
+
+        c.focus = Focus::Kits;
+        c.start_new();
+        assert!(c.editing, "straight into the name");
+        c.raw = "scratch".to_owned();
+        keep_field(&mut c, Field::Name);
+
+        assert_eq!(c.problem, None, "nothing to refuse");
+        assert!(c.creating.is_none(), "one Enter finishes a kit");
+        assert!(
+            root.0
+                .join(EMERGE_DIR)
+                .join("scratch")
+                .join(LIBRARY_FILE)
+                .exists(),
+            "and it is on disk"
+        );
+        assert_eq!(c.focus, Focus::Kits, "the keyboard comes back to the list");
+        assert_eq!(
+            c.current_kit().map(|k| k.label.clone()),
+            Some("scratch".to_owned()),
+            "standing on the kit just made, so the column beside it is already its own"
+        );
+        assert!(!c.editing, "and no longer typing");
+    }
+
+    /// **A kit with no name is refused, and the refusal keeps you in the field.** The one thing
+    /// `Enter`-makes-it must not do is create something nobody named.
+    #[test]
+    fn enter_on_an_empty_kit_name_makes_nothing() {
+        let root = Root::new("kit-unnamed");
+        root.kit(Some("site"), 1);
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
+
+        c.focus = Focus::Kits;
+        c.start_new();
+        c.raw = "   ".to_owned();
+        keep_field(&mut c, Field::Name);
+
+        assert!(c.problem.is_some(), "it says why");
+        assert!(matches!(c.creating, Some(New::Kit(_))), "still making one");
+        assert!(c.editing, "and still in the field");
+    }
+
     /// `N` makes a new one of whatever the column lists — a kit on the kit list, a map on the map
     /// list. One rule, which is what makes it guessable.
     #[test]
@@ -2157,7 +2214,17 @@ impl Chooser {
 
     fn hint_when_nothing_is_asked(&self) -> &'static str {
         match self.focus {
+            // A kit's name is its only field, so `Enter` here finishes it rather than merely
+            // keeping it — and the line has to say so, or the key that makes a kit is invisible.
+            _ if self.editing && matches!(self.creating, Some(New::Kit(_))) => {
+                "type    Enter makes the kit    Esc cancel"
+            }
             _ if self.editing => "type    Enter keep    Esc leave the field",
+            // Reached by leaving the name field with Esc while still making a kit. `Ctrl+Enter` is
+            // deliberately absent: a kit is made by naming it, and there is no second way.
+            Focus::Settings if matches!(self.creating, Some(New::Kit(_))) => {
+                "Enter name it    Esc cancel"
+            }
             Focus::Settings if self.creating.is_some() => {
                 "up/down field    Enter edit    Tab panel    Ctrl+Enter make it    Esc cancel"
             }
@@ -2777,9 +2844,7 @@ fn type_into_field(
             // between fields is the arrows now, and a commit that also moved would be the same key
             // doing two jobs, which is what this screen's `Tab` was just corrected for.
             Key::Enter => {
-                if commit_field(&mut chooser, field) {
-                    chooser.editing = false;
-                }
+                keep_field(&mut chooser, field);
                 chooser.swallowed = true;
                 return;
             }
@@ -2803,6 +2868,29 @@ fn type_into_field(
             }
             _ => {}
         }
+    }
+}
+
+/// **Keep what was typed — and for a kit, keeping the name is the whole act.**
+///
+/// Asked for at the keyboard: *"I create a new kit, I hit enter to confirm the name… once you hit
+/// enter, select the kit in the kit area."* It did not; the name was kept and the kit was made by a
+/// second, different key.
+///
+/// A kit has **one** field, so a commit door standing between "the name is right" and "make it"
+/// guards nothing — there is no second value that could still be wrong. A map has four, and its
+/// bounds are exactly the setting that was previously reachable only by editing source, so that one
+/// keeps `Ctrl+Enter`. The rule is the field count, not the kind of thing.
+///
+/// `make_it` already lands the selection on what was just made, so the keyboard comes back to the
+/// kit list with the new kit under it.
+fn keep_field(chooser: &mut Chooser, field: Field) {
+    if !commit_field(chooser, field) {
+        return;
+    }
+    chooser.editing = false;
+    if let Some(new @ New::Kit(_)) = chooser.creating.clone() {
+        chooser.problem = make_it(chooser, &new).err();
     }
 }
 
@@ -3094,16 +3182,20 @@ fn drive_chooser(
         }
     }
     if keyboard.just_pressed(KeyCode::Enter) {
-        // **`Ctrl+Enter` makes the map**, because plain `Enter` in this panel now means "edit this
-        // row". Two verbs on one panel need two keys; overloading `Enter` by whether the name
-        // happens to be filled in is the kind of state-decides-the-verb rule this screen just lost.
+        // **`Ctrl+Enter` makes the MAP, and only the map**, because plain `Enter` in this panel
+        // means "edit this row" and a map has four rows that could still be wrong. Two verbs on one
+        // panel need two keys.
+        //
+        // A kit is not in this branch: it has one field, so `Enter` on its name finishes it (see
+        // [`keep_field`]). Leaving `Ctrl+Enter` working for kits as well would be two ways to make
+        // one thing, and the second would be the one nobody found.
         let commit_new = keyboard.any_pressed([
             KeyCode::ControlLeft,
             KeyCode::ControlRight,
             KeyCode::SuperLeft,
             KeyCode::SuperRight,
         ]);
-        if let Some(new) = chooser.creating.clone()
+        if let Some(new @ New::Map(_)) = chooser.creating.clone()
             && commit_new
         {
             chooser.problem = make_it(&mut chooser, &new).err();
