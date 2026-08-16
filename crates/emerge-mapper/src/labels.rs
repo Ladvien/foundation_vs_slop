@@ -782,8 +782,15 @@ pub(crate) fn suggest_all(
             targets.push(EditTarget::Library(d.id.clone()));
         }
     }
+    // **A mesh this kit excludes is not a target.** The batch spent its tenth call of 778 describing
+    // `characters/cipher_field` — a character rig that could not be a tile under any circumstances —
+    // and each call is a GPU slot that serialises. See `Policy::exclude`.
     for c in &state.candidates {
-        if !c.blocked() && needs_labels(&c.proposed) && filters.keeps(pane, &c.mesh) {
+        if !c.blocked()
+            && !project.policy.excludes(&c.mesh)
+            && needs_labels(&c.proposed)
+            && filters.keeps(pane, &c.mesh)
+        {
             targets.push(EditTarget::Candidate(c.mesh.clone()));
         }
     }

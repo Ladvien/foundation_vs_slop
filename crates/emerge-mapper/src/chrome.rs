@@ -47,6 +47,14 @@ pub const LABEL: Color = Color::srgb(0.46, 0.44, 0.42);
 /// A refusal, a blocking finding, an expensive number.
 pub const DANGER: Color = Color::srgb(0.86, 0.36, 0.30);
 
+/// **Present but switched off** — dimmer than [`LABEL`], which is already the quietest thing that
+/// still asks to be read.
+///
+/// For a row that exists on purpose and is deliberately not participating: a pack this kit excludes.
+/// It has to stay visible, because a mesh that has silently vanished looks identical to one that was
+/// never scanned — but it must not compete with rows an author can actually act on.
+pub const MUTED: Color = Color::srgb(0.34, 0.32, 0.31);
+
 /// **The problem banner's fill.** Deeper and more saturated than [`DANGER`], which is a text colour —
 /// red text at [`DANGER`] on [`PANEL_BG`] is legible and quiet, and quiet is the failure being fixed
 /// here. A filled block is read before it is parsed, which a line of coloured prose is not.

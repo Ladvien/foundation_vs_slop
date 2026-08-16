@@ -29,7 +29,9 @@ use bevy::ui_widgets::{Activate, Button as UiButton, ScrollArea};
 use emerge_core::descriptor::{Descriptor, mount_label, mount_options};
 use emerge_core::import::{self, Candidate, Severity};
 
-use crate::chrome::{ACCENT, DANGER, DIM, HEADER_BG, LABEL, PANEL_BG, ROW_BG, ROW_SELECTED, TEXT};
+use crate::chrome::{
+    ACCENT, DANGER, DIM, HEADER_BG, LABEL, MUTED, PANEL_BG, ROW_BG, ROW_SELECTED, TEXT,
+};
 use crate::keys::{self, Action};
 use crate::project::Project;
 
@@ -2997,6 +2999,7 @@ impl Plugin for TilesPlugin {
                     mount_height_keys.in_set(crate::keys::Phase::Text),
                     tile_history_keys.in_set(crate::keys::Phase::Act),
                     demote_tile.in_set(crate::keys::Phase::Act),
+                    exclude_pack.in_set(crate::keys::Phase::Act),
                     disarm_demote.run_if(resource_changed::<ImportState>),
                     refresh_cells,
                 ),
@@ -3374,6 +3377,62 @@ fn toggle_mode(
 
     if want_scan {
         scan(&project, &mut state);
+    }
+}
+
+/// **`Shift+R` — this pack is not what the kit is built from, or it is again.**
+///
+/// One key, both directions: the row already says which state it is in, and a separate restore verb
+/// would be a second way to say the same thing. Written to the kit's `project.ron` through
+/// `policy::rewrite_exclude`, which splices the one field and leaves the file's prose alone.
+pub fn exclude_pack(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<keys::Live>,
+    mode: Res<Mode>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<ImportState>,
+) {
+    if *mode != Mode::Meshes || !keys::just_pressed(&keyboard, *live, Action::ExcludePack) {
+        return;
+    }
+    // The pack of whatever is highlighted — the same directory `packs()` groups by.
+    let Some(pack) = state
+        .candidates
+        .get(state.selected)
+        .map(|c| c.mesh.rsplit_once('/').map_or(".", |(d, _)| d).to_owned())
+    else {
+        state
+            .status
+            .problem("nothing selected — highlight a mesh in the pack first".to_owned());
+        return;
+    };
+
+    let mut exclude = project.policy.exclude.clone();
+    let had = exclude.iter().any(|e| e.trim_end_matches('/') == pack);
+    if had {
+        exclude.retain(|e| e.trim_end_matches('/') != pack);
+    } else {
+        exclude.push(pack.clone());
+        exclude.sort();
+    }
+
+    let path = project.emerge_dir.join(emerge_core::policy::POLICY_FILE);
+    let written = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))
+        .and_then(|text| emerge_core::policy::rewrite_exclude(&text, &exclude))
+        .and_then(|out| emerge_core::ron_surgery::save_atomic(&path, &out));
+    match written {
+        Err(e) => state.status.problem(format!("not excluded: {e}")),
+        Ok(()) => {
+            // **The file is the truth, so the resource follows it** rather than being written
+            // alongside — one description of what this kit excludes, not two.
+            project.policy.exclude = exclude;
+            state.status.note(if had {
+                format!("`{pack}` is back — it can be imported and labelled again")
+            } else {
+                format!("`{pack}` excluded from this kit — it will not be offered or labelled")
+            });
+        }
     }
 }
 
@@ -5537,7 +5596,12 @@ fn rebuild_candidates(
                 if members.is_empty() {
                     continue;
                 }
-                let folded = state.folded_packs.contains(&pack);
+                // **An excluded pack is always collapsed, and says so.** It stays in the list
+                // rather than vanishing, because a mesh that has silently disappeared looks
+                // identical to one that was never scanned — and there would then be no way back
+                // except hand-editing `project.ron`. See `Policy::exclude`.
+                let excluded = project.policy.excludes(&pack);
+                let folded = excluded || state.folded_packs.contains(&pack);
                 p.spawn((
                     UiButton,
                     Hovered::default(),
@@ -5569,19 +5633,26 @@ fn rebuild_candidates(
                             ..default()
                         },
                         Text::new(pack.clone()),
-                        TextColor(LABEL),
+                        TextColor(if excluded { MUTED } else { LABEL }),
                         TextFont::from_font_size(10.0),
                     ));
                     // A folded pack says what it is hiding. A bare count on a thin row reads as
                     // absence when 145 rows just left the screen — the word is what makes "folded"
                     // and "gone" impossible to confuse.
                     row.spawn((
-                        Text::new(if folded {
+                        Text::new(if excluded {
+                            // Names the state and the way out of it, per `docs/ui.md` §1.4.
+                            format!(
+                                "excluded ({}) — {} restores",
+                                members.len(),
+                                keys::chord(Action::ExcludePack)
+                            )
+                        } else if folded {
                             format!("{} hidden — click to open", members.len())
                         } else {
                             format!("{}", members.len())
                         }),
-                        TextColor(LABEL),
+                        TextColor(if excluded { MUTED } else { LABEL }),
                         TextFont::from_font_size(10.0),
                     ));
                 });

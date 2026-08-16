@@ -360,6 +360,10 @@ pub enum Action {
     SuggestLabels,
     /// Walk every piece missing judgement fields through the labeler — or cancel a running walk.
     SuggestAll,
+    /// **Exclude the highlighted pack from this kit, or put it back.** One key, one concept — a
+    /// separate restore verb would be a second way to say the same thing, and the row already says
+    /// which state it is in.
+    ExcludePack,
     /// Apply the pending suggestion to the focused piece, through the ordinary edit path.
     ApplySuggestion,
     /// Drop the pending suggestion.
@@ -1052,13 +1056,27 @@ pub const BINDINGS: &[Binding] = &[
         "Enter",
         "keep the derived edges / Esc throws them away",
     ),
-    b(
+    // **One row, one idea: what this list offers.** `R` looks at the folders again; `Shift+R` says
+    // a folder is not what this kit is built from. The shifted form for the wider act, the same
+    // shape `L`/`Shift+L` uses one row down — and sharing the row is what keeps the Meshes tab
+    // inside its twelve, which `no_context_carries_more_than_a_learnable_vocabulary` polices.
+    bs(
         Action::Rescan,
         KeyCode::KeyR,
         false,
+        false,
         Context::Meshes,
         "R",
-        "rescan",
+        "rescan / exclude this pack",
+    ),
+    bs(
+        Action::ExcludePack,
+        KeyCode::KeyR,
+        false,
+        true,
+        Context::Meshes,
+        "Shift+R",
+        "rescan / exclude this pack",
     ),
     // The Cmd+Z shape again: one key, the shifted form for the reversible-but-destructive sibling.
     // Shift+Delete DEMOTES — back to the candidates, stripped — where bare Delete removes outright.
@@ -1582,6 +1600,7 @@ pub const BINDINGS: &[Binding] = &[
         "L",
         "labels: suggest / all-or-hold / apply / discard / clear all",
     ),
+
     b(
         Action::ApplySuggestion,
         KeyCode::KeyU,
@@ -2326,6 +2345,7 @@ mod tests {
             Action::CopyInfo,
             Action::SuggestLabels,
             Action::SuggestAll,
+            Action::ExcludePack,
             Action::ApplySuggestion,
             Action::DiscardSuggestion,
             Action::DiscardAllSuggestions,
@@ -2762,10 +2782,19 @@ mod tests {
             // costs no *row* — the four region-fills are `Stance::Idle` and this is
             // `Stance::Proposed`, so the two never share a list. See [`Stance::Proposed`].
             (Context::Map, 26),
+            // 31 -> 32: `ExcludePack`. The importer scans every `.glb` under `assets/`, which is
+            // right for finding art and wrong for offering it — a labelling batch spent its tenth
+            // call of 778 describing `characters/cipher_field`, a character rig that could not be
+            // a tile under any circumstances. `Shift+R` says a folder is not what this kit is
+            // built from; `Policy::exclude` remembers it.
+            //
+            // **Costs no row**: it shares `Rescan`'s, which is the same idea one step wider —
+            // what this list offers. That sharing is what keeps this tab inside its twelve.
+            //
             // 30 -> 31: `AcceptEdges`, the door on the geometric socket derivation (FVS-R-26).
             // Costs no row — `Accept` is `Stance::Idle` and this is `Stance::Proposed`, so the
             // two never share a list.
-            (Context::Meshes, 31),
+            (Context::Meshes, 32),
             // 21 -> 22: `ClearTile`. `MemberPrev`/`MemberNext` replace the X nudge rather than
             // adding to it, so the walk costs nothing here.
             // 22 -> 26: the KIT list (FVS: the tab could author tiles and never show them).
