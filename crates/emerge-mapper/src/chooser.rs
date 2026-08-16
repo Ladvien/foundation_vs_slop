@@ -647,6 +647,41 @@ mod tests {
         );
     }
 
+    /// **The settings are not a third list, and the screen must not imply they are.**
+    ///
+    /// The first two columns are containment — a kit *contains* maps, and picking one opens the
+    /// next. The third is attribution: a map *has* a name and bounds, which are not things inside
+    /// it. Three identical columns taught the containment rule and then broke it, which is why the
+    /// hierarchy read as three lists. This pins the structural half of the difference; the visual
+    /// half is `PanelKind`.
+    #[test]
+    fn nothing_opens_from_the_settings_panel() {
+        let root = Root::new("inspector");
+        let kit = root.kit(Some("site"), 1);
+        create_map(&kit, "hall", (4.0, 3.0, 4.0), (0.0, 0.0, 0.0), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
+        c.section(1);
+        c.section(1);
+        assert_eq!(c.focus, Focus::Settings);
+
+        let s = c.screen();
+        assert!(
+            !s.settings.iter().any(|r| r.left.starts_with("+ new")),
+            "a `+ new` row would make it a list of things, and it is a set of properties"
+        );
+        assert!(
+            !c.on_new_row(),
+            "no row here makes anything, whichever one the arrows are on"
+        );
+        assert_eq!(
+            s.settings.len(),
+            Field::ALL.len(),
+            "exactly the four properties — a fixed set, not a list that grows"
+        );
+    }
+
     /// `N` makes a new one of whatever the column lists — a kit on the kit list, a map on the map
     /// list. One rule, which is what makes it guessable.
     #[test]
@@ -2062,7 +2097,7 @@ pub fn window_size() -> (f32, f32) {
     (width, height)
 }
 
-fn panel(width: f32) -> impl Bundle {
+fn panel(width: f32, kind: PanelKind) -> impl Bundle {
     (
         Node {
             flex_direction: FlexDirection::Column,
@@ -2071,15 +2106,27 @@ fn panel(width: f32) -> impl Bundle {
             width: Val::Px(width),
             ..default()
         },
-        BackgroundColor(crate::chrome::PANEL_BG),
+        // **A different surface for a different kind of thing.** The inspector sits on the lighter
+        // ground the editor already uses for a slot, so it does not read as a third list — see
+        // [`PanelKind`] for why looking the same was the whole problem.
+        BackgroundColor(match kind {
+            PanelKind::List => crate::chrome::PANEL_BG,
+            PanelKind::Inspector => crate::chrome::SLOT_BG,
+        }),
     )
 }
 
+/// **The words carrying the relationship, and they were the faintest thing on screen.**
+///
+/// `MAPS IN emerge` and `SETTINGS FOR untitled_map` are the only text stating what belongs to what,
+/// and they were drawn in `LABEL` — the dimmest colour in the palette. An author asked to read the
+/// hierarchy off this screen had to hunt for the one sentence that explains it. `docs/ui.md` §1.3:
+/// the encoding is the message.
 fn header(text: &str) -> impl Bundle {
     (
         Text::new(text.to_owned()),
         TextFont::from_font_size(11.0),
-        TextColor(crate::chrome::LABEL),
+        TextColor(crate::chrome::KEY),
     )
 }
 
@@ -2120,15 +2167,15 @@ fn spawn_screen(mut commands: Commands) {
                 ..default()
             })
             .with_children(|row| {
-                row.spawn(panel(COL)).with_children(|p| {
+                row.spawn(panel(COL, PanelKind::List)).with_children(|p| {
                     p.spawn(header("KITS"));
                     p.spawn((Node::default(), KitList));
                 });
-                row.spawn(panel(COL)).with_children(|p| {
+                row.spawn(panel(COL, PanelKind::List)).with_children(|p| {
                     p.spawn((header("MAPS"), MapsHeader));
                     p.spawn((Node::default(), MapList));
                 });
-                row.spawn(panel(COL)).with_children(|p| {
+                row.spawn(panel(COL, PanelKind::Inspector)).with_children(|p| {
                     p.spawn((header("SETTINGS"), SettingsHeader));
                     p.spawn((Node::default(), SettingsList));
                 });
@@ -2161,7 +2208,31 @@ fn colour(tone: Tone) -> Color {
 /// Rebuild one list. The whole block is despawned and respawned together, which is what `compose.rs`
 /// does for the same reason: a row has no identity worth keeping across a change, and four rows is
 /// not work worth diffing.
-fn fill(commands: &mut Commands, at: Entity, rows: &[Row]) {
+/// **What a panel is**, which decides how its rows are drawn.
+///
+/// The correction behind this: *"can we make it clearer that the settings refer to a map? the
+/// hierarchy of the data structure isn't clear"* — answered first with three identical columns,
+/// which did not work, and the reason it did not is that **the three columns are not the same
+/// relationship**:
+///
+/// | | |
+/// |---|---|
+/// | kits → maps | **containment** — a kit *contains* map files |
+/// | map → settings | **attribution** — a map *has* a name and bounds; they are not inside it |
+///
+/// Miller columns work because every column is the same relation all the way down: you learn the
+/// rule once and it holds. Three identical panels taught that rule in the first step and broke it in
+/// the second. So a list looks like a list, and the inspector does not.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PanelKind {
+    /// A list you walk, whose selection opens the column to its right. Carries the chevron that says
+    /// so — the affordance Finder puts on exactly this.
+    List,
+    /// Properties of whatever is selected to the left. No chevron: nothing opens from here.
+    Inspector,
+}
+
+fn fill(commands: &mut Commands, at: Entity, rows: &[Row], kind: PanelKind) {
     commands.entity(at).despawn_related::<Children>();
     commands.entity(at).insert(Node {
         flex_direction: FlexDirection::Column,
@@ -2170,7 +2241,13 @@ fn fill(commands: &mut Commands, at: Entity, rows: &[Row]) {
     });
     for r in rows {
         let c = colour(r.tone);
-        let mark = if r.tone == Tone::Selected { ">" } else { " " };
+        // **The chevron points into the column this row opens.** Only a list has one; a settings row
+        // opens nothing, and giving it the same mark would restate the confusion this is fixing.
+        let mark = match (kind, r.tone == Tone::Selected) {
+            (PanelKind::List, true) => "\u{203a}",
+            (PanelKind::Inspector, true) => "\u{2022}",
+            _ => " ",
+        };
         let left = format!("{mark} {}", r.left);
         let right = r.right.clone();
         commands.entity(at).with_children(|p| {
@@ -2223,11 +2300,11 @@ fn paint_chooser(
     let s = chooser.screen();
     for (e, kit, map, set) in &lists {
         if kit.is_some() {
-            fill(&mut commands, e, &s.kits);
+            fill(&mut commands, e, &s.kits, PanelKind::List);
         } else if map.is_some() {
-            fill(&mut commands, e, &s.maps);
+            fill(&mut commands, e, &s.maps, PanelKind::List);
         } else if set.is_some() {
-            fill(&mut commands, e, &s.settings);
+            fill(&mut commands, e, &s.settings, PanelKind::Inspector);
         }
     }
     for (mut text, maps, settings, problem, hint) in &mut texts {
