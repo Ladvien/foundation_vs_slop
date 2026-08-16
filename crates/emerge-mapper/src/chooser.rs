@@ -216,6 +216,55 @@ fn read_maps(dir: &Path) -> Result<Vec<MapEntry>, String> {
     Ok(out)
 }
 
+/// **Make a new, empty kit** — a directory the editor will accept as one.
+///
+/// A kit is four decisions and two files: a `library.ron` saying it has no pieces yet, and a
+/// `project.ron` saying how finely its tiles divide. Both are written empty and **say so in their
+/// own `note:`**, because an empty kit and a broken one look identical on disk otherwise — that is
+/// the confusion `assets/emerge/site_v2` was created out of, and its files carry the same kind of
+/// note for the same reason.
+///
+/// No `compositions.ron`: `policy::layered_library` treats its absence and an empty one as the same
+/// state, deliberately, so writing one would be a file that means nothing. The editor makes it when
+/// the first tile is saved.
+///
+/// No map either. The maps column will read *"no maps in <kit> yet — the `+ new map` row is the only one there"*, which is
+/// the instruction rather than a report (`docs/ui.md` §1.4) and is exactly what to do next.
+pub fn create_kit(root: &Path, raw_name: &str) -> Result<PathBuf, String> {
+    let name = naming::to_snake_case(raw_name);
+    if name.is_empty() {
+        return Err(format!(
+            "`{raw_name}` leaves nothing usable as a name. Kits are snake_case — lowercase \
+             letters, digits and single underscores, starting with a letter."
+        ));
+    }
+    let dir = root.join(EMERGE_DIR).join(&name);
+    if dir.exists() {
+        return Err(format!(
+            "`{name}` already exists under {EMERGE_DIR}. Pick another name, or open the one that \
+             is there."
+        ));
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot make {}: {e}", dir.display()))?;
+
+    let library = format!(
+        "(\n    version: 1,\n    note: Some(\"Empty on purpose — `{name}` is a new kit. Import \
+         meshes on the Meshes tab; they land here.\"),\n    descriptors: [],\n)\n"
+    );
+    emerge_core::ron_surgery::save_atomic(&dir.join(LIBRARY_FILE), &library)?;
+
+    // `face_bands: 1` — a subunit is `grid::SNAP` itself, the half-metre grid these kits are
+    // authored on. Raising it refines every piece by the same factor, which is what keeps two faces
+    // comparable, so it is a decision about the whole kit and belongs in this file from the start.
+    let policy = format!(
+        "(\n    version: 1,\n    note: Some(\"The policy layer for `{name}`. No patches yet: \
+         `Project::open` refuses a rule that matches nothing, so one cannot be added before the \
+         pieces it names exist.\"),\n    face_bands: 1,\n)\n"
+    );
+    emerge_core::ron_surgery::save_atomic(&dir.join(emerge_core::policy::POLICY_FILE), &policy)?;
+    Ok(dir)
+}
+
 /// **Write a new, empty map into a kit** — the chooser's one creating verb.
 ///
 /// # The name is not defaulted
@@ -521,7 +570,7 @@ mod tests {
         root.kit(Some("site"), 1);
         let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
         let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
-        c.creating = Some(Draft::default());
+        c.creating = Some(New::Map(Draft::default()));
 
         // What `drive_chooser` does with a draft in hand.
         c.creating = None;
@@ -556,6 +605,130 @@ mod tests {
         let hint = c.hint();
         assert!(hint.contains('Y') && hint.contains("Esc"), "same two answers: {hint}");
         assert!(!hint.contains("Enter"), "{hint}");
+    }
+
+    /// **Every list opens with a `+ new …` row, and it is a row you can be on.**
+    ///
+    /// Asked for at the keyboard: *"a text entry at the very top of maps and kits that says new map,
+    /// new kit... if I hit enter on that, it lets me create a new entry respective to the area."*
+    /// A row you can see beats a key you have to know, and the row carries `N` beside it so using
+    /// the visible path teaches the fast one.
+    #[test]
+    fn every_list_opens_with_a_row_that_makes_a_new_one() {
+        let root = Root::new("new-rows");
+        let kit = root.kit(Some("site"), 2);
+        create_map(&kit, "hall", (4.0, 3.0, 4.0), (0.0, 0.0, 0.0), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
+
+        let s = c.screen();
+        assert_eq!(s.kits.first().map(|r| r.left.as_str()), Some("+ new kit"));
+        assert_eq!(s.kits.first().map(|r| r.right.as_str()), Some("N"), "the key rides the row");
+        assert_eq!(s.maps.first().map(|r| r.left.as_str()), Some("+ new map"));
+
+        // **It opens on a real kit, not on the `+ new` row** — landing there would greet an author
+        // with two empty columns beside it.
+        assert_eq!(c.kit, 1);
+        assert_eq!(c.current_kit().map(|k| k.label.as_str()), Some("site"));
+        assert!(!c.on_new_row());
+
+        // Walking up reaches the row, and then there is genuinely nothing selected.
+        c.step(-1);
+        assert!(c.on_new_row());
+        assert!(
+            c.current_kit().is_none(),
+            "nothing is selected, so the columns to the right must show nothing rather than the \
+             last kit's contents — which would be a lie about what Enter is about to do"
+        );
+        assert!(
+            c.launch_args().is_err(),
+            "and Enter cannot open a map from a row that makes one"
+        );
+    }
+
+    /// `N` makes a new one of whatever the column lists — a kit on the kit list, a map on the map
+    /// list. One rule, which is what makes it guessable.
+    #[test]
+    fn n_makes_a_new_one_of_whatever_this_column_lists() {
+        let root = Root::new("n-per-panel");
+        let kit = root.kit(Some("site"), 1);
+        create_map(&kit, "hall", (4.0, 3.0, 4.0), (0.0, 0.0, 0.0), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
+
+        assert_eq!(c.focus, Focus::Kits);
+        c.start_new();
+        assert!(matches!(c.creating, Some(New::Kit(_))), "on the kit list, a kit");
+        assert!(c.editing, "and straight into the name — neither can be made without one");
+        assert!(
+            render(&c).contains("NEW KIT"),
+            "the settings column says which:\n{}",
+            render(&c)
+        );
+
+        c.creating = None;
+        c.focus = Focus::Maps;
+        c.start_new();
+        assert!(matches!(c.creating, Some(New::Map(_))), "on the map list, a map");
+        assert!(render(&c).contains("NEW MAP IN site"), "and names its kit:\n{}", render(&c));
+    }
+
+    /// **A new kit is one the editor will actually open**, which is the only thing that makes it a
+    /// kit: `Catalog::scan` and `Project::open` both test for `library.ron`, so writing the
+    /// directory without it would produce something the chooser lists and the editor then refuses.
+    #[test]
+    fn a_new_kit_is_one_the_scanner_accepts() {
+        let root = Root::new("new-kit");
+        root.kit(Some("site"), 3);
+
+        let dir = create_kit(&root.0, "Site V3").unwrap_or_else(|e| panic!("{e}"));
+        assert!(dir.ends_with("site_v3"), "forced to snake_case: {}", dir.display());
+        assert!(dir.join(LIBRARY_FILE).is_file(), "a kit is its library");
+        assert!(
+            dir.join(emerge_core::policy::POLICY_FILE).is_file(),
+            "and its policy — `Project::open` reads both"
+        );
+        // No compositions.ron: absence and empty are the same state to `layered_library`, so a file
+        // saying nothing would be a file that means nothing.
+        assert!(!dir.join("compositions.ron").exists());
+
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let made = catalog
+            .kits
+            .iter()
+            .find(|k| k.label == "site_v3")
+            .unwrap_or_else(|| panic!("the new kit did not scan"));
+        assert_eq!(made.pieces, 0, "it starts empty");
+        assert!(made.maps.is_empty(), "and with no maps");
+        assert_eq!(made.flag.as_deref(), Some("site_v3"), "reachable as --kit site_v3");
+    }
+
+    /// An unusable name is refused by name, and a taken one is refused rather than merged into
+    /// somebody else's kit.
+    #[test]
+    fn a_kit_name_that_cannot_work_is_refused() {
+        let root = Root::new("kit-names");
+        root.kit(Some("site"), 1);
+
+        for raw in ["", "   ", "!!!"] {
+            let e = create_kit(&root.0, raw)
+                .err()
+                .unwrap_or_else(|| panic!("`{raw}` must be refused"));
+            assert!(e.contains("snake_case"), "the refusal names the rule: {e}");
+        }
+        let e = create_kit(&root.0, "site")
+            .err()
+            .unwrap_or_else(|| panic!("a taken name must be refused"));
+        assert!(e.contains("already exists"), "{e}");
+        // And the kit that was there is untouched.
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            catalog.kits.iter().find(|k| k.label == "site").map(|k| k.pieces),
+            Some(1),
+            "refusing must not have emptied the existing kit"
+        );
     }
 
     /// **Asking to delete deletes nothing.** The whole point of the confirmation: the file is still
@@ -791,8 +964,8 @@ pub struct Chooser {
     pub raw: String,
     /// A refusal, shown until the next keystroke. Never a substituted value.
     pub problem: Option<String>,
-    /// Set when a new map is being named — there is no map row to edit yet.
-    pub creating: Option<Draft>,
+    /// Set while something is being made — see [`New`].
+    pub creating: Option<New>,
     /// **A question the screen has asked and is waiting on.** See [`Ask`].
     pub ask: Option<Ask>,
     /// **Set by the text handler when it consumed a key this frame.**
@@ -835,6 +1008,27 @@ pub struct Pending {
     pub path: PathBuf,
 }
 
+/// **What is being made**, which is decided by the panel the arrows were in.
+#[derive(Clone, Debug, PartialEq)]
+pub enum New {
+    /// A kit — a directory the editor will accept. Only a name is asked for; everything else about
+    /// a kit is a decision its files record, and `create_kit` writes the defaults with their
+    /// reasons.
+    Kit(String),
+    /// A map, with the four settings.
+    Map(Draft),
+}
+
+impl New {
+    /// What has been typed as the name so far, whichever kind it is.
+    pub fn name(&self) -> &str {
+        match self {
+            New::Kit(name) => name,
+            New::Map(d) => &d.name,
+        }
+    }
+}
+
 /// The map being made, before it exists on disk.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Draft {
@@ -863,6 +1057,8 @@ impl Chooser {
     pub fn new(root: PathBuf, catalog: Catalog, preselect: Option<&str>) -> Chooser {
         // **A `--kit` on the command line has already answered half the question this screen asks**,
         // so it selects rather than being discarded.
+        // `+ 1` past the `+ new kit` row. Opening ON that row would blank the two columns to its
+        // right and greet an author with three empty panels.
         let kit = preselect
             .and_then(|want| {
                 catalog
@@ -870,12 +1066,16 @@ impl Chooser {
                     .iter()
                     .position(|k| k.flag.as_deref() == Some(want))
             })
-            .unwrap_or(0);
+            .map_or_else(|| Chooser::first_real(catalog.kits.len()), |i| i + 1);
+        let map = catalog
+            .kits
+            .get(kit.saturating_sub(1))
+            .map_or(0, |k| Chooser::first_real(k.maps.len()));
         Chooser {
             root,
             catalog,
             kit,
-            map: 0,
+            map,
             focus: Focus::Kits,
             field: Field::Name,
             editing: false,
@@ -887,12 +1087,39 @@ impl Chooser {
         }
     }
 
+    /// **Row 0 of every list is `+ new …`, so the selection is offset by one.**
+    ///
+    /// Asked for at the keyboard: *"a text entry at the very top of maps and kits that says new map,
+    /// new kit... if I hit enter on that, it lets me create a new entry respective to the area."*
+    /// A row you can see beats a key you have to know — and the row carries the key beside it, so
+    /// using the visible path rehearses the fast one (ExposeHK's goal 2, the same argument the hint
+    /// line rests on).
+    ///
+    /// `None` while the `+ new` row is highlighted, and the columns to the right show nothing: there
+    /// is genuinely no kit selected, and drawing the last one's contents would be a lie about what
+    /// `Enter` is about to do.
     pub fn current_kit(&self) -> Option<&Kit> {
-        self.catalog.kits.get(self.kit)
+        self.catalog.kits.get(self.kit.checked_sub(1)?)
     }
 
     pub fn current_map(&self) -> Option<&MapEntry> {
-        self.current_kit().and_then(|k| k.maps.get(self.map))
+        let kit = self.current_kit()?;
+        kit.maps.get(self.map.checked_sub(1)?)
+    }
+
+    /// Is the highlighted row the `+ new …` one?
+    pub fn on_new_row(&self) -> bool {
+        match self.focus {
+            Focus::Kits => self.kit == 0,
+            Focus::Maps => self.map == 0,
+            Focus::Settings => false,
+        }
+    }
+
+    /// The first row worth landing on in a list of `n` real items: the first item if there is one,
+    /// and otherwise the `+ new` row, which is then the only row there is.
+    fn first_real(n: usize) -> usize {
+        usize::from(n > 0)
     }
 
     /// Move within whichever column has the arrows. Clamped, not wrapped: a list that wraps makes
@@ -901,19 +1128,15 @@ impl Chooser {
         self.problem = None;
         match self.focus {
             Focus::Kits => {
-                let n = self.catalog.kits.len();
-                if n > 0 {
-                    self.kit = clamp_step(self.kit, delta, n);
-                    // A different kit means a different map list; landing on row 0 is the only
-                    // position guaranteed to exist.
-                    self.map = 0;
-                }
+                // `+ 1` for the `+ new kit` row, which is always there — even in a project whose
+                // every kit was deleted, where it is the only thing left to press.
+                self.kit = clamp_step(self.kit, delta, self.catalog.kits.len() + 1);
+                // A different kit means a different map list, so land on its first real row.
+                self.map = Chooser::first_real(self.current_kit().map_or(0, |k| k.maps.len()));
             }
             Focus::Maps => {
                 let n = self.current_kit().map_or(0, |k| k.maps.len());
-                if n > 0 {
-                    self.map = clamp_step(self.map, delta, n);
-                }
+                self.map = clamp_step(self.map, delta, n + 1);
             }
             // **The arrows walk the settings rows too**, which is the whole of the correction:
             // moving inside a panel is always the arrows, whichever panel it is.
@@ -963,6 +1186,25 @@ impl Chooser {
         }
     }
 
+    /// **Start making a new thing in whichever panel the arrows are in.**
+    ///
+    /// One rule: `N` — and `Enter` on the `+ new …` row — makes a new one of whatever this column
+    /// lists. Asked for at the keyboard: *"if I'm on the kits' menu area, then I press N, that
+    /// should create a new kit."*
+    pub fn start_new(&mut self) {
+        self.problem = None;
+        self.raw.clear();
+        self.field = Field::Name;
+        self.creating = Some(match self.focus {
+            // The settings belong to a map, so `N` there means the same as `N` on the map list.
+            Focus::Kits => New::Kit(String::new()),
+            Focus::Maps | Focus::Settings => New::Map(Draft::default()),
+        });
+        self.focus = Focus::Settings;
+        // Straight into the name: it is the one thing neither a kit nor a map can be made without.
+        self.editing = true;
+    }
+
     /// **Ask to delete the selected map.** Changes nothing on disk — see [`Pending`].
     ///
     /// The question captures the **path**, not the row index. A prompt that remembered "row 2"
@@ -1002,9 +1244,12 @@ impl Chooser {
         let kit = self
             .current_kit()
             .ok_or_else(|| "no kit selected".to_owned())?;
-        let map = self
-            .current_map()
-            .ok_or_else(|| format!("no maps in {} yet — press N to make one", kit.label))?;
+        if self.on_new_row() {
+            return Err("that row makes a new map — press Enter on it".to_owned());
+        }
+        let map = self.current_map().ok_or_else(|| {
+            format!("no maps in {} yet — press Enter on `+ new map`", kit.label)
+        })?;
         if let MapSummary::Unreadable(why) = &map.summary {
             return Err(format!("`{}` will not open: {why}", map.name));
         }
@@ -1110,12 +1355,14 @@ mod screen_tests {
     fn the_arrows_clamp_at_both_ends() {
         let mut c = chooser(None);
         c.step(-1);
-        assert_eq!(c.kit, 0, "up at the top stays");
-        c.step(1);
-        c.step(1);
-        c.step(1);
-        c.step(1);
-        assert_eq!(c.kit, 2, "down past the end stays on the last");
+        assert_eq!(c.kit, 0, "up at the top stays — and the top is the `+ new kit` row");
+        for _ in 0..6 {
+            c.step(1);
+        }
+        assert_eq!(
+            c.kit, 3,
+            "three kits sit at rows 1..=3, and walking past the end stays on the last"
+        );
     }
 
     /// Changing kit resets the map row, because row 4 of a two-map kit is not a row.
@@ -1124,12 +1371,12 @@ mod screen_tests {
         let mut c = chooser(Some("site"));
         c.section(1);
         c.step(1);
-        assert_eq!(c.map, 1, "walked to the second map");
+        assert_eq!(c.map, 2, "row 1 is the first map; row 0 makes a new one");
         c.section(-1);
         c.step(1); // -> site_v2, which has no maps at all
         assert_eq!(
             c.map, 0,
-            "a new kit starts at the only row guaranteed to exist"
+            "an empty kit leaves only the `+ new map` row to be on"
         );
     }
 
@@ -1209,8 +1456,8 @@ mod screen_tests {
             vec![".", "hall", "--kit", "site"]
         );
 
-        c.kit = 0; // the root kit
-        c.map = 0;
+        c.kit = 1; // the root kit — row 0 is `+ new kit`
+        c.map = 1;
         assert_eq!(
             c.launch_args().unwrap_or_else(|e| panic!("{e}")),
             vec![".", "untitled_map"],
@@ -1228,7 +1475,7 @@ mod screen_tests {
             .err()
             .unwrap_or_else(|| panic!("nothing to open"));
         assert!(
-            e.contains("press N"),
+            e.contains("+ new map"),
             "the refusal has to be an instruction: {e}"
         );
         assert!(e.contains("site_v2"), "and name the kit: {e}");
@@ -1384,13 +1631,22 @@ pub struct Screen {
 impl Chooser {
     /// The screen this state describes.
     pub fn screen(&self) -> Screen {
-        let kits = self
+        let mut kits = vec![Row {
+            left: "+ new kit".to_owned(),
+            right: "N".to_owned(),
+            tone: if self.focus == Focus::Kits && self.kit == 0 {
+                Tone::Selected
+            } else {
+                Tone::Row
+            },
+        }];
+        kits.extend(self
             .catalog
             .kits
             .iter()
             .enumerate()
             .map(|(i, k)| {
-                let selected = self.focus == Focus::Kits && i == self.kit;
+                let selected = self.focus == Focus::Kits && i + 1 == self.kit;
                 Row {
                     left: if k.flag.is_none() {
                         format!("{} (default)", k.label)
@@ -1407,24 +1663,34 @@ impl Chooser {
                         (false, _) => Tone::Stocked,
                     },
                 }
-            })
-            .collect();
+            }));
 
         let kit = self.current_kit();
-        let maps_header = kit.map_or_else(|| "MAPS".to_owned(), |k| format!("MAPS IN {}", k.label));
-        let maps = match kit {
-            // §1.4: an unmet condition is an instruction, never a report.
-            Some(k) if k.maps.is_empty() => vec![Row {
-                left: format!("no maps in {} yet — press N to make one", k.label),
-                right: String::new(),
-                tone: Tone::Empty,
-            }],
+        let maps_header = kit.map_or_else(
+            || "MAPS".to_owned(),
+            |k| format!("MAPS IN {}", k.label),
+        );
+        // **`+ new map` is the first row, and on an empty kit it is the only one** — which is
+        // §1.4's instruction-not-a-report, said by a row you can press rather than by a sentence.
+        let mut maps = Vec::new();
+        if kit.is_some() {
+            maps.push(Row {
+                left: "+ new map".to_owned(),
+                right: "N".to_owned(),
+                tone: if self.focus == Focus::Maps && self.map == 0 {
+                    Tone::Selected
+                } else {
+                    Tone::Row
+                },
+            });
+        }
+        maps.extend(match kit {
             Some(k) => k
                 .maps
                 .iter()
                 .enumerate()
                 .map(|(i, m)| {
-                    let selected = self.focus == Focus::Maps && i == self.map;
+                    let selected = self.focus == Focus::Maps && i + 1 == self.map;
                     let (right, tone) = match &m.summary {
                         MapSummary::Unreadable(why) => {
                             (format!("will not open — {why}"), Tone::Problem)
@@ -1452,9 +1718,9 @@ impl Chooser {
                         tone: if selected { Tone::Selected } else { tone },
                     }
                 })
-                .collect(),
+                .collect::<Vec<_>>(),
             None => Vec::new(),
-        };
+        });
 
         // **The settings are shown for whatever is in hand** — the draft while one is being made,
         // and otherwise the selected map. The first version drew them only while creating, so `Tab`
@@ -1485,8 +1751,28 @@ impl Chooser {
     }
 
     fn settings_rows(&self) -> (String, Vec<Row>) {
+        // **A kit is one field, not four.** Bounds and origin are a map's; showing them greyed for a
+        // kit would offer three rows that cannot do anything, which is the dead control this screen
+        // keeps removing.
+        if let Some(New::Kit(name)) = &self.creating {
+            let live = self.focus == Focus::Settings && self.field == Field::Name;
+            return (
+                "NEW KIT".to_owned(),
+                vec![Row {
+                    left: Field::Name.label().to_owned(),
+                    right: if live && self.editing {
+                        format!("{}_", self.raw)
+                    } else if name.is_empty() {
+                        "(needs a name)".to_owned()
+                    } else {
+                        clip(name, 18)
+                    },
+                    tone: tone_for(live, name.is_empty()),
+                }],
+            );
+        }
         let (header, name, bounds, origin, note) = match (&self.creating, self.current_map()) {
-            (Some(d), _) => (
+            (Some(New::Map(d)), _) => (
                 self.current_kit()
                     .map_or_else(|| "NEW MAP".to_owned(), |k| format!("NEW MAP IN {}", k.label)),
                 d.name.clone(),
@@ -1494,6 +1780,7 @@ impl Chooser {
                 d.origin,
                 d.note.clone(),
             ),
+            (Some(New::Kit(_)), _) => unreachable!("handled above"),
             (None, Some(m)) => match &m.summary {
                 MapSummary::Read { bounds, .. } => {
                     // Origin and note are not in the summary — the row is about the file, and
@@ -1583,12 +1870,20 @@ impl Chooser {
                 "up/down field    Enter edit    Tab panel    Ctrl+Enter make it    Esc cancel"
             }
             Focus::Settings => "up/down field    Enter edit    Tab panel    Esc quit",
-            Focus::Kits if self.current_kit().is_some_and(|k| k.maps.is_empty()) => {
-                "up/down kit    Tab panel    N new map    Esc quit"
+            // **Only verbs that would do something right now.** `Enter` opens a map — so it is
+            // not offered on a kit with none, nor on the `+ new` row where it makes instead.
+            Focus::Kits if self.kit == 0 => {
+                "up/down kit    Enter new kit    Tab panel    Esc quit"
             }
-            Focus::Kits => "up/down kit    Tab panel    Enter open    N new map    Esc quit",
+            Focus::Kits if self.current_kit().is_some_and(|k| k.maps.is_empty()) => {
+                "up/down kit    Tab panel    N new kit    Esc quit"
+            }
+            Focus::Kits => "up/down kit    Tab panel    Enter open    N new kit    Esc quit",
+            Focus::Maps if self.map == 0 => {
+                "up/down map    Enter new map    Tab panel    Esc quit"
+            }
             Focus::Maps => {
-                "up/down map    Tab panel    Enter open    Delete remove    N new    Esc quit"
+                "up/down map    Tab panel    Enter open    Delete remove    Esc quit"
             }
         }
     }
@@ -1999,10 +2294,24 @@ fn type_into_field(
 /// key you pressed. Choosing the destination in here made that one behaviour with three callers.
 fn commit_field(chooser: &mut Chooser, field: Field) -> bool {
     let raw = chooser.raw.trim().to_owned();
+    // A kit in hand has exactly one field, and it is this one.
+    if let Some(New::Kit(_)) = &chooser.creating {
+        let name = naming::to_snake_case(&raw);
+        if name.is_empty() {
+            chooser.problem =
+                Some("a kit needs a name — snake_case, starting with a letter".to_owned());
+            return false;
+        }
+        chooser.creating = Some(New::Kit(name));
+        chooser.raw.clear();
+        chooser.problem = None;
+        return true;
+    }
     // Editing an existing map writes that file; making one fills in a draft first.
     let existing = chooser.creating.is_none();
     let mut draft = match (&chooser.creating, chooser.current_map()) {
-        (Some(d), _) => d.clone(),
+        (Some(New::Map(d)), _) => d.clone(),
+        (Some(New::Kit(_)), _) => return false,
         (None, Some(m)) => match &m.summary {
             MapSummary::Read { bounds, .. } => {
                 let (origin, note) = read_origin_and_note(&m.path);
@@ -2058,7 +2367,7 @@ fn commit_field(chooser: &mut Chooser, field: Field) -> bool {
             return false;
         }
     } else {
-        chooser.creating = Some(draft);
+        chooser.creating = Some(New::Map(draft));
     }
     chooser.raw.clear();
     chooser.problem = None;
@@ -2102,6 +2411,43 @@ pub fn write_settings(chooser: &mut Chooser, draft: &Draft) -> Result<(), String
 }
 
 /// Rescan and land on a named map, so the list is always a description of disk.
+/// **Make what is in hand**, whichever kind it is, and land the selection on it.
+///
+/// One function so that "the draft becomes real" happens in exactly one place, whether the draft is
+/// a kit or a map — the two differ in which creator they call and nowhere else.
+fn make_it(chooser: &mut Chooser, new: &New) -> Result<(), String> {
+    match new {
+        New::Kit(name) => {
+            create_kit(&chooser.root.clone(), name)?;
+            chooser.creating = None;
+            rescan_keeping_place(chooser, None);
+            // Land on the kit that was just made, so the maps column beside it is already its own.
+            if let Some(i) = chooser
+                .catalog
+                .kits
+                .iter()
+                .position(|k| &k.label == name)
+            {
+                chooser.kit = i + 1;
+                chooser.map = Chooser::first_real(chooser.current_kit().map_or(0, |k| k.maps.len()));
+            }
+            chooser.focus = Focus::Kits;
+        }
+        New::Map(d) => {
+            let dir = chooser
+                .current_kit()
+                .map(|k| k.dir.clone())
+                .ok_or_else(|| "no kit selected".to_owned())?;
+            create_map(&dir, &d.name, d.bounds, d.origin, d.note.clone())?;
+            let name = d.name.clone();
+            chooser.creating = None;
+            rescan_keeping_place(chooser, Some(&name));
+            chooser.focus = Focus::Maps;
+        }
+    }
+    Ok(())
+}
+
 fn rescan_keeping_place(chooser: &mut Chooser, want: Option<&str>) {
     let label = chooser.current_kit().map(|k| k.label.clone());
     match Catalog::scan(&chooser.root.clone()) {
@@ -2110,14 +2456,17 @@ fn rescan_keeping_place(chooser: &mut Chooser, want: Option<&str>) {
             chooser.catalog = catalog;
             chooser.kit = label
                 .and_then(|l| chooser.catalog.kits.iter().position(|k| k.label == l))
-                .unwrap_or(0);
+                .map_or_else(|| Chooser::first_real(chooser.catalog.kits.len()), |i| i + 1);
             chooser.map = want
                 .and_then(|w| {
                     chooser
                         .current_kit()
                         .and_then(|k| k.maps.iter().position(|m| m.name == w))
+                        .map(|i| i + 1)
                 })
-                .unwrap_or(0);
+                .unwrap_or_else(|| {
+                    Chooser::first_real(chooser.current_kit().map_or(0, |k| k.maps.len()))
+                });
         }
     }
 }
@@ -2202,15 +2551,9 @@ fn drive_chooser(
     if keyboard.just_pressed(KeyCode::ArrowLeft) {
         chooser.section(-1);
     }
+    // **`N` makes a new one of whatever this column lists** — see `Chooser::start_new`.
     if keyboard.just_pressed(KeyCode::KeyN) {
-        chooser.creating = Some(Draft::default());
-        chooser.raw.clear();
-        chooser.problem = None;
-        chooser.field = Field::Name;
-        chooser.focus = Focus::Settings;
-        // Straight into the name, because a new map has nothing else worth looking at yet and the
-        // name is the one thing it cannot be saved without.
-        chooser.editing = true;
+        chooser.start_new();
     }
     // **Escape unwinds one layer at a time, and never destroys anything on the first press.**
     //
@@ -2241,28 +2584,10 @@ fn drive_chooser(
             KeyCode::SuperLeft,
             KeyCode::SuperRight,
         ]);
-        if let Some(draft) = chooser.creating.clone()
+        if let Some(new) = chooser.creating.clone()
             && commit_new
         {
-            let Some(dir) = chooser.current_kit().map(|k| k.dir.clone()) else {
-                chooser.problem = Some("no kit selected".to_owned());
-                return;
-            };
-            match create_map(
-                &dir,
-                &draft.name,
-                draft.bounds,
-                draft.origin,
-                draft.note.clone(),
-            ) {
-                Err(e) => chooser.problem = Some(e),
-                Ok(_) => {
-                    let name = draft.name.clone();
-                    chooser.creating = None;
-                    chooser.focus = Focus::Maps;
-                    rescan_keeping_place(&mut chooser, Some(&name));
-                }
-            }
+            chooser.problem = make_it(&mut chooser, &new).err();
             return;
         }
         // In the settings, `Enter` opens the highlighted row for typing.
@@ -2270,6 +2595,12 @@ fn drive_chooser(
             chooser.raw.clear();
             chooser.problem = None;
             chooser.editing = true;
+            return;
+        }
+        // **`Enter` on a `+ new …` row is the visible half of `N`** — the row an author can see,
+        // doing what the key beside it does.
+        if chooser.on_new_row() {
+            chooser.start_new();
             return;
         }
         match chooser.launch_args() {
@@ -2336,7 +2667,10 @@ mod render_tests {
     fn an_empty_kit_reads_as_an_instruction_not_a_report() {
         let c = chooser_with(vec![kit(Some("site_v2"), "site_v2", 0, vec![])]);
         let screen = render(&c);
-        assert!(screen.contains("press N to make one"), "{screen}");
+        assert!(
+            screen.contains("+ new map"),
+            "the instruction is a row you can press, not a sentence:\n{screen}"
+        );
         assert!(
             !screen.contains("not found") && !screen.contains("no maps found"),
             "a report where an instruction belongs:\n{screen}"
@@ -2386,7 +2720,7 @@ mod render_tests {
             }],
         )]);
         let screen = render(&stocked);
-        for verb in ["Enter open", "N new map", "Esc quit"] {
+        for verb in ["Enter open", "N new kit", "Esc quit"] {
             assert!(
                 screen.contains(verb),
                 "`{verb}` is not on screen:\n{screen}"
@@ -2400,8 +2734,13 @@ mod render_tests {
             "there is nothing to open, so offering the key teaches a lie:\n{screen}"
         );
         assert!(
-            screen.contains("N new map"),
+            screen.contains("N new kit"),
             "and the live verb is still there:\n{screen}"
+        );
+        // The maps column still offers its own way forward — a row, not a sentence.
+        assert!(
+            screen.contains("+ new map"),
+            "an empty kit still says what to do next:\n{screen}"
         );
     }
 
