@@ -23,6 +23,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -31,15 +32,20 @@
             effects: [
                 "emit",
             ],
-            look: [],
+            look: [
+                "plastic",
+                "clean",
+            ],
             placement: (
                 rooms: [
-                    "decor",
+                    "living",
+                    "office",
+                    "hall",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The asset is a lamp base designed to sit on a worktop, with a central pole and circular top for mounting a light fixture. The green color is not a valid look token, but the plastic material and clean appearance are noted."),
         ),
         (
             id: "wall_light",
@@ -50,7 +56,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.38, 0.2)),
@@ -62,23 +68,30 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
-                "light",
+                "container",
             ],
             effects: [
                 "emit",
             ],
-            look: [],
+            look: [
+                "brown",
+                "plastic",
+            ],
             placement: (
                 rooms: [
-                    "wall",
+                    "living",
+                    "hall",
+                    "bedroom",
+                    "office",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The asset is a wall-mounted light fixture with a rectangular, box-like shape. Its low poly design and plastic appearance suggest it is a decorative or functional lighting element. The height of 1.8 m indicates it is mounted at eye level, typical for wall lights."),
         ),
         (
             id: "bin",
@@ -95,25 +108,34 @@
                 footprint: Some((0.4, 0.4)),
                 height: Some(0.0),
             ),
-            mount: Some(Tiled),
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "bin",
             ],
             effects: [],
-            look: [],
+            look: [
+                "grey",
+                "plastic",
+            ],
             placement: (
                 rooms: [
-                    "decor",
+                    "bathroom",
+                    "kitchen",
+                    "office",
+                    "living",
+                    "hall",
+                    "dining",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The asset is a low-poly bin with a cylindrical shape and no visible lid. It is designed to stand on the floor and is intended for waste disposal."),
         ),
         (
             id: "globe",
@@ -124,7 +146,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.33, 0.28)),
@@ -136,21 +158,27 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "decor",
             ],
             effects: [],
-            look: [],
+            look: [
+                "brown",
+                "plastic",
+            ],
             placement: (
                 rooms: [
-                    "decor",
+                    "office",
+                    "living",
+                    "hall",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The globe is a decorative item with a low-poly design, featuring a blue and green sphere on a brown stand. It is intended to be placed on a surface such as a desk or shelf."),
         ),
         (
             id: "plant_a",
@@ -173,6 +201,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -210,21 +239,29 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
+                "decor",
                 "plant",
             ],
             effects: [],
-            look: [],
+            look: [
+                "brown",
+                "worn",
+            ],
             placement: (
                 rooms: [
+                    "living",
+                    "office",
+                    "hall",
                     "decor",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("low-poly cactus in a terracotta pot; suitable for indoor decoration"),
         ),
         (
             id: "lamp",
@@ -247,23 +284,30 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "light",
+                "prop",
             ],
             effects: [
                 "emit",
             ],
-            look: [],
+            look: [
+                "grey",
+                "metal",
+            ],
             placement: (
                 rooms: [
-                    "decor",
+                    "living",
+                    "office",
+                    "hall",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The lamp is designed to be placed on a worktop and emits light. Its hexagonal shade and metallic base give it a modern appearance."),
         ),
         (
             id: "bed_double",
@@ -274,7 +318,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.278)),
                 rotate: None,
-                front: None,
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((1.72, 2.22)),
@@ -283,14 +327,20 @@
             mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "bed",
             ],
             effects: [],
-            look: [],
+            look: [
+                "brown",
+                "clean",
+            ],
             placement: (
                 rooms: [
                     "bedroom",
@@ -298,7 +348,7 @@
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("the bed has a wooden frame and is made to look clean and simple, suitable for a bedroom setting"),
         ),
         (
             id: "sofa",
@@ -309,7 +359,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.058)),
                 rotate: None,
-                front: None,
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((2.08, 0.88)),
@@ -318,22 +368,30 @@
             mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "seating",
             ],
             effects: [],
-            look: [],
+            look: [
+                "plastic",
+                "clean",
+            ],
             placement: (
                 rooms: [
                     "living",
+                    "office",
+                    "hall",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The sofa has a low-poly aesthetic and appears to be a simple, clean design with no visible wear. It is intended for seating and has a wooden base that supports the cushions."),
         ),
         (
             id: "table",
@@ -357,22 +415,29 @@
                     "support",
                     "worktop",
                 ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "table",
             ],
             effects: [],
-            look: [],
+            look: [
+                "brown",
+                "clean",
+            ],
             placement: (
                 rooms: [
-                    "living",
                     "dining",
+                    "kitchen",
+                    "living",
+                    "office",
+                    "hall",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("a simple, clean table with no visible ornamentation or features"),
         ),
         (
             id: "chair",
@@ -383,7 +448,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.057)),
                 rotate: None,
-                front: None,
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((0.41, 0.51)),
@@ -392,22 +457,30 @@
             mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "seating",
             ],
             effects: [],
-            look: [],
+            look: [
+                "brown",
+            ],
             placement: (
                 rooms: [
+                    "living",
                     "dining",
+                    "office",
+                    "hall",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("simple low-poly chair model with a clean, unadorned design"),
         ),
         (
             id: "drawer",
@@ -418,7 +491,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, -0.141)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((1.55, 0.6)),
@@ -430,21 +503,27 @@
                 surfaces: [
                     "support",
                 ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "storage",
             ],
             effects: [],
-            look: [],
+            look: [
+                "brown",
+                "clean",
+            ],
             placement: (
                 rooms: [
                     "bedroom",
+                    "living",
+                    "office",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The asset is a dresser with a clean, smooth finish and no visible wear. It is designed to stand on the floor and provide storage space."),
         ),
         (
             id: "shelf",
@@ -455,7 +534,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((1.23, 0.38)),
@@ -464,22 +543,30 @@
             mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "storage",
             ],
             effects: [],
-            look: [],
+            look: [
+                "brown",
+                "clean",
+            ],
             placement: (
                 rooms: [
                     "living",
+                    "office",
+                    "hall",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The asset is a narrow bookshelf with a clean, brown appearance. It stands upright on the floor and provides support surfaces for items."),
         ),
         (
             id: "fridge",
@@ -490,7 +577,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((-0.157, -0.136)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.88, 0.61)),
@@ -500,13 +587,17 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "appliance",
             ],
             effects: [],
-            look: [],
+            look: [
+                "white",
+                "clean",
+            ],
             placement: (
                 rooms: [
                     "kitchen",
@@ -514,7 +605,7 @@
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The fridge is a standard kitchen appliance with a top freezer and a larger bottom compartment. It is designed to stand upright on the floor."),
         ),
         (
             id: "tv",
@@ -525,7 +616,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.88, 0.8)),
@@ -537,24 +628,33 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "appliance",
+                "decor",
+                "light",
             ],
             effects: [
                 "emit",
                 "screen",
+                "uses-electricity",
             ],
-            look: [],
+            look: [
+                "grey",
+                "plastic",
+            ],
             placement: (
                 rooms: [
                     "living",
+                    "office",
+                    "hall",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The TV is a low-poly model with a grey casing and a blue screen. It emits light and displays a screen, and it is designed to be placed on a support surface."),
         ),
         (
             id: "crt_large",
@@ -565,7 +665,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.88, 0.56)),
@@ -577,24 +677,33 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "appliance",
+                "decor",
+                "light",
             ],
             effects: [
                 "emit",
                 "screen",
             ],
-            look: [],
+            look: [
+                "white",
+                "plastic",
+                "worn",
+            ],
             placement: (
                 rooms: [
                     "living",
+                    "office",
+                    "decor",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The asset is a decorative television with a retro design, featuring a worn appearance and a lit screen. It is intended to be placed on a surface such as a table or shelf."),
         ),
         (
             id: "crt_a",
@@ -605,7 +714,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.89, 0.89)),
@@ -617,25 +726,32 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "appliance",
+                "decor",
+                "light",
             ],
             effects: [
                 "emit",
                 "screen",
+                "uses-electricity",
             ],
-            look: [],
+            look: [
+                "worn",
+            ],
             placement: (
                 rooms: [
                     "living",
                     "office",
+                    "decor",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("This is a decorative retro TV with a worn appearance, designed to emit light and display a screen. It is intended to be placed on a surface rather than standing on the floor."),
         ),
         (
             id: "crt_b",
@@ -646,7 +762,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.51, 0.47)),
@@ -658,25 +774,32 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "appliance",
+                "decor",
+                "light",
             ],
             effects: [
                 "emit",
                 "screen",
             ],
-            look: [],
+            look: [
+                "white",
+                "worn",
+            ],
             placement: (
                 rooms: [
-                    "bedroom",
+                    "living",
                     "office",
+                    "decor",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The asset is a small, vintage-style CRT television with a worn white casing and a blue screen. It emits light and displays a screen, making it both a functional and decorative object."),
         ),
         (
             id: "armchair",
@@ -687,7 +810,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((0.82, 0.74)),
@@ -696,22 +819,31 @@
             mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "seating",
             ],
             effects: [],
-            look: [],
+            look: [
+                "brown",
+                "orange",
+                "clean",
+            ],
             placement: (
                 rooms: [
                     "living",
+                    "bedroom",
+                    "office",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The armchair has a modern design with a blue fabric seat and back, wooden legs, and a decorative orange and white zigzag-patterned pillow."),
         ),
         (
             id: "loveseat",
@@ -722,7 +854,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((1.83, 0.75)),
@@ -731,22 +863,30 @@
             mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "seating",
             ],
             effects: [],
-            look: [],
+            look: [
+                "white",
+                "brown",
+                "orange",
+            ],
             placement: (
                 rooms: [
                     "living",
+                    "decor",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("a small two-seater sofa with decorative cushions, designed for seating in living areas"),
         ),
         (
             id: "dining_chair",
@@ -757,7 +897,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((0.62, 0.66)),
@@ -766,23 +906,31 @@
             mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "seating",
             ],
             effects: [],
-            look: [],
+            look: [
+                "brown",
+                "plastic",
+                "clean",
+            ],
             placement: (
                 rooms: [
                     "dining",
-                    "kitchen",
+                    "living",
+                    "office",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The chair has a modern design with a wooden frame and a cushioned seat with blue and yellow stripes."),
         ),
         (
             id: "pouffe",
@@ -799,25 +947,37 @@
                 footprint: Some((0.59, 0.6)),
                 height: Some(0.53),
             ),
-            mount: Some(Tiled),
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
+                "decor",
                 "seating",
             ],
             effects: [],
-            look: [],
+            look: [
+                "white",
+                "brown",
+                "orange",
+                "plastic",
+            ],
             placement: (
                 rooms: [
                     "living",
+                    "bedroom",
+                    "office",
+                    "hall",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The pouffe is symmetric and can be oriented in any direction. It is designed as a decorative seating option."),
         ),
         (
             id: "coffee_table",
@@ -839,22 +999,30 @@
             offers: (
                 surfaces: [
                     "support",
+                    "worktop",
                 ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
+                "prop",
                 "table",
             ],
             effects: [],
-            look: [],
+            look: [
+                "brown",
+                "plastic",
+                "clean",
+            ],
             placement: (
                 rooms: [
                     "living",
+                    "decor",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("the table has a symmetrical octagonal shape with no distinct front; the light blue top appears to be a smooth, non-reflective surface"),
         ),
         (
             id: "writing_desk",
@@ -878,6 +1046,7 @@
                     "support",
                     "worktop",
                 ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -894,7 +1063,7 @@
                 rooms: [
                     "office",
                     "living",
-                    "hall",
+                    "bedroom",
                 ],
                 group: None,
             ),
@@ -910,7 +1079,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.85, 0.59)),
@@ -922,22 +1091,27 @@
                 surfaces: [
                     "support",
                 ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
+                "decor",
                 "storage",
             ],
             effects: [],
-            look: [],
+            look: [
+                "brown",
+                "clean",
+            ],
             placement: (
                 rooms: [
-                    "office",
                     "living",
+                    "office",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The bookcase has a modern design with a mix of open shelves, closed compartments, and colorful drawers. It is intended for storage and display in living or office spaces."),
         ),
         (
             id: "dresser_tall",
@@ -948,7 +1122,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.52, 0.53)),
@@ -960,21 +1134,26 @@
                 surfaces: [
                     "support",
                 ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "storage",
             ],
             effects: [],
-            look: [],
+            look: [
+                "brown",
+                "clean",
+            ],
             placement: (
                 rooms: [
                     "bedroom",
+                    "living",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The dresser has a modern design with a light wood body and colorful drawers. It is intended for storage in a bedroom or living area."),
         ),
         (
             id: "dresser_stubby",
@@ -997,6 +1176,7 @@
                 surfaces: [
                     "support",
                 ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -1022,7 +1202,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.3, 0.78)),
@@ -1034,22 +1214,29 @@
                 surfaces: [
                     "support",
                 ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
+                "prop",
                 "storage",
             ],
             effects: [],
-            look: [],
+            look: [
+                "brown",
+                "metal",
+                "clean",
+            ],
             placement: (
                 rooms: [
+                    "kitchen",
                     "living",
                     "office",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The shelf is designed to stand on the floor and holds various items on its tiers. It is symmetrical along its vertical axis but has a clear front face (east) where items are displayed."),
         ),
         (
             id: "vanity",
@@ -1060,7 +1247,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((0.65, 0.68)),
@@ -1072,21 +1259,28 @@
                 surfaces: [
                     "worktop",
                 ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "appliance",
+                "container",
+                "table",
             ],
             effects: [],
-            look: [],
+            look: [
+                "brown",
+                "plastic",
+                "clean",
+            ],
             placement: (
                 rooms: [
                     "bathroom",
                 ],
-                group: None,
+                group: Some("bath"),
             ),
             subgrid: None,
-            note: None,
+            note: Some("The vanity includes a sink and a drawer, with a towel stored underneath. It is designed for bathroom use."),
         ),
         (
             id: "lavatory",
@@ -1097,7 +1291,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((0.39, 0.74)),
@@ -1107,21 +1301,26 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "appliance",
+                "fixture",
             ],
             effects: [],
-            look: [],
+            look: [
+                "white",
+                "clean",
+            ],
             placement: (
                 rooms: [
                     "bathroom",
                 ],
-                group: None,
+                group: Some("bath"),
             ),
             subgrid: None,
-            note: None,
+            note: Some("compact design with integrated tank; lid is open in the render"),
         ),
         (
             id: "desk_lamp_modern",
@@ -1132,7 +1331,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(North),
             ),
             extent: (
                 footprint: Some((0.25, 0.24)),
@@ -1144,6 +1343,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -1152,15 +1352,19 @@
             effects: [
                 "emit",
             ],
-            look: [],
+            look: [
+                "plastic",
+            ],
             placement: (
                 rooms: [
-                    "decor",
+                    "office",
+                    "living",
+                    "bedroom",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The lamp is designed to be placed on a worktop and emits light. Its flexible neck allows for directional lighting."),
         ),
         (
             id: "barrel_acid",
@@ -1177,26 +1381,31 @@
                 footprint: Some((0.56, 0.56)),
                 height: Some(0.86),
             ),
-            mount: Some(Tiled),
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "container",
+                "prop",
             ],
             effects: [],
-            look: [],
+            look: [
+                "brown",
+                "metal",
+                "worn",
+            ],
             placement: (
                 rooms: [
-                    "hall",
-                    "office",
+                    "decor",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("the barrel has a radioactive symbol and appears to be made of metal with a weathered surface"),
         ),
         (
             id: "barrel_acid_b",
@@ -1213,25 +1422,30 @@
                 footprint: Some((0.56, 0.56)),
                 height: Some(0.86),
             ),
-            mount: Some(Tiled),
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "container",
+                "prop",
             ],
             effects: [],
-            look: [],
+            look: [
+                "plastic",
+                "worn",
+            ],
             placement: (
                 rooms: [
-                    "hall",
+                    "decor",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The barrel is symmetric and has no defined front; the radioactive symbol is a decorative element."),
         ),
         (
             id: "barrel_metal",
@@ -1248,26 +1462,34 @@
                 footprint: Some((0.56, 0.56)),
                 height: Some(0.86),
             ),
-            mount: Some(Tiled),
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "container",
+                "prop",
             ],
             effects: [],
-            look: [],
+            look: [
+                "brown",
+                "metal",
+                "worn",
+            ],
             placement: (
                 rooms: [
+                    "decor",
                     "hall",
+                    "office",
                     "kitchen",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The barrel is symmetric and has no defined front; the hazard markings are decorative and do not indicate orientation."),
         ),
         (
             id: "barrel_rusty",
@@ -1284,26 +1506,34 @@
                 footprint: Some((0.56, 0.56)),
                 height: Some(0.86),
             ),
-            mount: Some(Tiled),
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "container",
+                "prop",
             ],
             effects: [],
-            look: [],
+            look: [
+                "brown",
+                "metal",
+                "worn",
+            ],
             placement: (
                 rooms: [
+                    "decor",
                     "hall",
                     "office",
+                    "kitchen",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The barrel is symmetric and has no defined front; the hazard labels are decorative and do not indicate a primary orientation."),
         ),
         (
             id: "floor_grate",
@@ -1324,22 +1554,29 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "decor",
+                "structure",
             ],
             effects: [],
-            look: [],
+            look: [
+                "grey",
+                "metal",
+            ],
             placement: (
                 rooms: [
                     "hall",
+                    "kitchen",
+                    "bathroom",
                     "office",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("a flat, grid-patterned floor grate designed to be placed as part of the floor surface"),
         ),
         (
             id: "floor_light",
@@ -1360,23 +1597,32 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
+                "decor",
                 "light",
             ],
             effects: [
                 "emit",
             ],
-            look: [],
+            look: [
+                "black",
+                "metal",
+                "clean",
+            ],
             placement: (
                 rooms: [
                     "hall",
+                    "living",
+                    "office",
+                    "dining",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("a flat, low-profile light fixture designed to be embedded in the floor, emitting light through glowing lines."),
         ),
         (
             id: "desk",
@@ -1387,7 +1633,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((-0.347, -0.126)),
                 rotate: None,
-                front: None,
+                front: Some(West),
             ),
             extent: (
                 footprint: Some((1.897, 0.895)),
@@ -1400,21 +1646,29 @@
                     "support",
                     "worktop",
                 ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
+                "storage",
                 "table",
             ],
             effects: [],
-            look: [],
+            look: [
+                "brown",
+                "clean",
+            ],
             placement: (
                 rooms: [
                     "office",
+                    "living",
+                    "bedroom",
+                    "dining",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("a simple wooden desk with drawers, suitable for office or study use"),
         ),
         (
             id: "toilet",
@@ -1425,7 +1679,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((-0.029, 0.124)),
                 rotate: None,
-                front: None,
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((0.592, 0.765)),
@@ -1435,13 +1689,18 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
                 "fixture",
             ],
             effects: [],
-            look: [],
+            look: [
+                "white",
+                "brown",
+                "clean",
+            ],
             placement: (
                 rooms: [
                     "bathroom",
@@ -1449,7 +1708,7 @@
                 group: Some("bath"),
             ),
             subgrid: None,
-            note: None,
+            note: Some("the toilet has a closed lid and a visible tank with a flush mechanism"),
         ),
         (
             id: "sink",
@@ -1460,7 +1719,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((-0.006, 0.09)),
                 rotate: None,
-                front: None,
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((0.444, 0.29)),
@@ -1469,14 +1728,21 @@
             mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "worktop",
+                ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
+                "container",
                 "fixture",
             ],
             effects: [],
-            look: [],
+            look: [
+                "white",
+                "clean",
+            ],
             placement: (
                 rooms: [
                     "bathroom",
@@ -1484,7 +1750,7 @@
                 group: Some("bath"),
             ),
             subgrid: None,
-            note: None,
+            note: Some("The sink is a freestanding pedestal model with a basin and faucet. The height is measured as 0.00 m, which is likely a placeholder; the actual height is implied by the geometry."),
         ),
         (
             id: "bath",
@@ -1495,7 +1761,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.545, 0.004)),
                 rotate: None,
-                front: None,
+                front: Some(North),
             ),
             extent: (
                 footprint: Some((1.412, 0.781)),
@@ -1504,22 +1770,29 @@
             mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
+                "container",
                 "fixture",
             ],
             effects: [],
-            look: [],
+            look: [
+                "white",
+                "clean",
+            ],
             placement: (
                 rooms: [
                     "bathroom",
                 ],
-                group: None,
+                group: Some("bath"),
             ),
             subgrid: None,
-            note: None,
+            note: Some("The bathtub is a container with a flat top surface that can support objects. It is mounted on the floor and has no height, indicating it is a low-poly representation."),
         ),
         (
             id: "wall_low",
@@ -1530,23 +1803,38 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.20000003, 0.99999845)),
                 height: Some(2.0),
             ),
-            mount: None,
+            mount: Some(OnWall(
+                height: 1.8,
+            )),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "decor",
+                "structure",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "grey",
+                "metal",
+                "glass",
+                "clean",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "living",
+                    "hall",
+                    "office",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -1593,7 +1881,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("This asset is a vertical wall panel, likely used as a decorative or structural element in interior design. The glass insert suggests it may be used for display or to allow light to pass through."),
         ),
         (
             id: "wall_window",
@@ -1604,23 +1892,44 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.20000003, 2.0000005)),
                 height: Some(2.4),
             ),
-            mount: None,
+            mount: Some(InOpening(
+                clear: None,
+            )),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
-            effects: [],
-            look: [],
+            kind: [
+                "door",
+                "structure",
+            ],
+            effects: [
+                "pass",
+            ],
+            look: [
+                "grey",
+                "black",
+                "metal",
+                "clean",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "hall",
+                    "living",
+                    "office",
+                    "bedroom",
+                    "kitchen",
+                    "bathroom",
+                    "decor",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -1727,7 +2036,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("The window is a vertical structure that fills an opening in a wall, allowing passage through it. The frame appears metallic and clean, with dark glass and a light blue accent line."),
         ),
         (
             id: "water_dispenser",
@@ -1738,23 +2047,39 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((0.45, 0.45000008)),
                 height: Some(1.2),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
-            effects: [],
-            look: [],
+            kind: [
+                "appliance",
+                "container",
+            ],
+            effects: [
+                "uses-electricity",
+            ],
+            look: [
+                "white",
+                "grey",
+                "orange",
+                "plastic",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "kitchen",
+                    "office",
+                    "living",
+                    "hall",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -1771,7 +2096,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("The dispenser has a clean, modern design with a white body, grey base, and orange side accents. It features a control panel and a dispensing area on the front face."),
         ),
         (
             id: "wall_corner",
@@ -1788,17 +2113,33 @@
                 footprint: Some((0.22, 0.22000015)),
                 height: Some(2.4),
             ),
-            mount: None,
+            mount: Some(OnWall(
+                height: 1.8,
+            )),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "structure",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "grey",
+                "metal",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "hall",
+                    "living",
+                    "office",
+                    "dining",
+                    "kitchen",
+                    "bedroom",
+                    "bathroom",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -1830,7 +2171,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("a structural corner element that forms the intersection of two walls; appears symmetrical and is intended to be mounted vertically on a wall at 1.8 m height"),
         ),
         (
             id: "wall_header",
@@ -1851,6 +2192,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [],
@@ -1891,17 +2233,32 @@
                 footprint: Some((0.10000067, 1.0000001)),
                 height: Some(2.3999999),
             ),
-            mount: None,
+            mount: Some(OnWall(
+                height: 1.8,
+            )),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "structure",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "grey",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "bathroom",
+                    "bedroom",
+                    "dining",
+                    "hall",
+                    "kitchen",
+                    "living",
+                    "office",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -1958,7 +2315,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("a vertical wall panel used to form room boundaries; symmetric and intended to be placed against a wall at 1.8 m height"),
         ),
         (
             id: "tube_rack",
@@ -1969,23 +2326,37 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.051290706, 0.21575937)),
                 height: Some(0.12533914),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "prop",
+                "storage",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "white",
+                "plastic",
+                "clean",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "kitchen",
+                    "office",
+                    "living",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -1997,7 +2368,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("The rack is designed to hold test tubes and is intended to be placed on a flat surface. It is symmetrical along its length, but the front is defined by the orientation of the test tubes."),
         ),
         (
             id: "mess_table",
@@ -2014,17 +2385,30 @@
                 footprint: Some((0.6, 0.6)),
                 height: Some(1.2000029),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "worktop",
+                ],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "table",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "white",
+                "clean",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "kitchen",
+                    "dining",
+                    "living",
+                    "office",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -2041,7 +2425,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("The table is symmetrical and has no designated front; it can be oriented in any direction."),
         ),
         (
             id: "pipe",
@@ -2058,17 +2442,31 @@
                 footprint: Some((0.30028182, 0.87794495)),
                 height: Some(0.30226162),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "fixture",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "grey",
+                "metal",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "decor",
+                    "office",
+                    "hall",
+                    "kitchen",
+                    "living",
+                    "bedroom",
+                    "bathroom",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -2085,7 +2483,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("The pipe is a structural fixture with no clear front; it is symmetrical and can be oriented in any direction."),
         ),
         (
             id: "pipe_corner",
@@ -2096,23 +2494,36 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((0.58911353, 0.5891134)),
                 height: Some(0.3022616),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
-            effects: [],
-            look: [],
+            kind: [
+                "fixture",
+            ],
+            effects: [
+                "emit",
+            ],
+            look: [
+                "grey",
+                "metal",
+                "clean",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "decor",
+                    "hall",
+                    "office",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -2124,7 +2535,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("The asset appears to be a compact, self-contained unit with illuminated panels, possibly a power or control box. Its symmetrical design suggests it can be placed in any orientation, but the front is indicated by the glowing panels on the south face."),
         ),
         (
             id: "server_rack",
@@ -2135,23 +2546,38 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.74377644, 1.3168555)),
                 height: Some(1.8),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
-            effects: [],
-            look: [],
+            kind: [
+                "appliance",
+                "storage",
+            ],
+            effects: [
+                "uses-electricity",
+            ],
+            look: [
+                "grey",
+                "black",
+                "orange",
+                "metal",
+                "clean",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "office",
+                    "living",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -2218,7 +2644,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("The server rack has a front panel with a handle and indicator lights, and a vented side panel. It is designed to stand upright on the floor."),
         ),
         (
             id: "medical_vial",
@@ -2235,17 +2661,32 @@
                 footprint: Some((0.07, 0.07000001)),
                 height: Some(0.15657106),
             ),
-            mount: None,
+            mount: Some(OnSurface(
+                class: "support",
+            )),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "container",
+                "prop",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "white",
+                "grey",
+                "plastic",
+                "clean",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "bathroom",
+                    "office",
+                    "living",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -2257,7 +2698,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("The vial is a small, upright container with a medical label, intended as a decorative or functional prop in a medical or laboratory setting."),
         ),
         (
             id: "map_table",
@@ -2268,23 +2709,40 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((1.4596505, 1.4617425)),
                 height: Some(1.0141555),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "worktop",
+                ],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
-            effects: [],
-            look: [],
+            kind: [
+                "prop",
+                "table",
+            ],
+            effects: [
+                "emit",
+                "screen",
+            ],
+            look: [
+                "grey",
+                "metal",
+                "clean",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "living",
+                    "office",
+                    "decor",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -2381,7 +2839,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("The table has a central screen that emits light and is designed for display or interaction, likely in a tech or control room setting."),
         ),
         (
             id: "data_folder",
@@ -2392,23 +2850,36 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.2500955, 0.20234182)),
                 height: Some(0.05002685),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "container",
+                "prop",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "grey",
+                "plastic",
+                "worn",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "office",
+                    "living",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -2420,7 +2891,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("The asset is a low-profile data folder, likely used as a decorative or functional prop in a tech or office environment. Its small size and flat profile suggest it is meant to be placed on a surface rather than standing freely."),
         ),
         (
             id: "doorframe_double",
@@ -2431,23 +2902,42 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((0.4033714, 2.0031145)),
                 height: Some(1.9799953),
             ),
-            mount: None,
+            mount: Some(InOpening(
+                clear: None,
+            )),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
-            effects: [],
-            look: [],
+            kind: [
+                "door",
+                "structure",
+            ],
+            effects: [
+                "pass",
+            ],
+            look: [
+                "grey",
+                "clean",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "hall",
+                    "living",
+                    "office",
+                    "dining",
+                    "kitchen",
+                    "bedroom",
+                    "bathroom",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -2514,7 +3004,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("a double doorframe with no doors installed, designed to fill an opening in a wall and allow passage."),
         ),
         (
             id: "floor",
@@ -2531,17 +3021,31 @@
                 footprint: Some((1.0, 1.0)),
                 height: Some(0.05976976),
             ),
-            mount: None,
+            mount: Some(Tiled),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "structure",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "grey",
+                "clean",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "bathroom",
+                    "bedroom",
+                    "dining",
+                    "hall",
+                    "kitchen",
+                    "living",
+                    "office",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -2568,7 +3072,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("a repeating floor tile with a raised border, designed to be placed in a grid pattern"),
         ),
         (
             id: "floor_line_cross",
@@ -2585,17 +3089,31 @@
                 footprint: Some((1.0, 1.0)),
                 height: Some(0.050000153),
             ),
-            mount: None,
+            mount: Some(Decal(
+                on: Floor,
+            )),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "marking",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "grey",
+                "clean",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "hall",
+                    "living",
+                    "dining",
+                    "office",
+                    "decor",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -2622,7 +3140,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("a decorative floor decal in the shape of a cross, used for visual guidance or decoration"),
         ),
         (
             id: "floor_line_straight",
@@ -2639,17 +3157,33 @@
                 footprint: Some((1.0, 1.0)),
                 height: Some(0.050000153),
             ),
-            mount: None,
+            mount: Some(Decal(
+                on: Floor,
+            )),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "marking",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "white",
+                "clean",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "hall",
+                    "living",
+                    "dining",
+                    "office",
+                    "kitchen",
+                    "bathroom",
+                    "bedroom",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -2676,7 +3210,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("a flat, straight line decal used to mark the floor, likely for guidance or decoration"),
         ),
         (
             id: "galley_counter",
@@ -2687,23 +3221,35 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((0.6, 1.4)),
                 height: Some(0.74886465),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "worktop",
+                ],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "structure",
+                "table",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "white",
+                "metal",
+                "clean",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "kitchen",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -2725,7 +3271,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("This is a galley counter, typically used in kitchens for food preparation. It is designed to be freestanding and has a clean, modern appearance."),
         ),
         (
             id: "locker",
@@ -2736,23 +3282,35 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(West),
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.45583838, 1.1000001)),
                 height: Some(1.9000001),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "storage",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "white",
+                "grey",
+                "orange",
+                "metal",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "decor",
+                    "office",
+                    "hall",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -2799,7 +3357,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("tall vertical locker with two doors and ventilation grilles"),
         ),
         (
             id: "bench",
@@ -2816,17 +3374,32 @@
                 footprint: Some((0.54999995, 2.0)),
                 height: Some(0.4500001),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "seating",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "white",
+                "grey",
+                "orange",
+                "plastic",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "living",
+                    "hall",
+                    "office",
+                    "dining",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -2853,7 +3426,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("The bench is symmetric and has no distinct front; it can be oriented in either direction."),
         ),
         (
             id: "bunk",
@@ -2870,17 +3443,30 @@
                 footprint: Some((2.2865834, 1.1837324)),
                 height: Some(0.5496147),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "bed",
+                "structure",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "white",
+                "grey",
+                "orange",
+                "clean",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "bedroom",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -2937,7 +3523,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("The asset is a flat, low-profile bunk bed frame designed for placement in a room. It has a clean, modern look with white and grey panels and orange trim. The mesh measures 2.29 x 1.18 m and is 0.55 m high, indicating it is a base or frame rather than a fully assembled bed."),
         ),
         (
             id: "coffee_machine",
@@ -2948,23 +3534,37 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.39999998, 0.5022619)),
                 height: Some(0.67348593),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "worktop",
+                ],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
-            effects: [],
-            look: [],
+            kind: [
+                "appliance",
+            ],
+            effects: [
+                "uses-electricity",
+            ],
+            look: [
+                "white",
+                "grey",
+                "black",
+                "plastic",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "kitchen",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -2976,7 +3576,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("a compact coffee machine with a control panel and drip area; designed to sit on a kitchen worktop"),
         ),
         (
             id: "doorframe_single",
@@ -2987,23 +3587,41 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.45807338, 2.0580733)),
                 height: Some(2.0122507),
             ),
-            mount: None,
+            mount: Some(InOpening(
+                clear: None,
+            )),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
-            effects: [],
-            look: [],
+            kind: [
+                "door",
+                "structure",
+            ],
+            effects: [
+                "pass",
+            ],
+            look: [
+                "grey",
+                "metal",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "hall",
+                    "living",
+                    "bedroom",
+                    "kitchen",
+                    "bathroom",
+                    "office",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -3090,7 +3708,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("The asset is a doorframe designed to fill an opening in a wall, with a vertical profile and a horizontal header. The front face is the side with the visible frame and glass, which is the east-facing side."),
         ),
         (
             id: "pallet",
@@ -3107,17 +3725,33 @@
                 footprint: Some((0.81082094, 1.2108209)),
                 height: Some(0.12553447),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "container",
+                "prop",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "brown",
+                "worn",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "decor",
+                    "office",
+                    "kitchen",
+                    "living",
+                    "hall",
+                    "dining",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -3144,7 +3778,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("a low-profile pallet with a worn appearance, suitable for use as a container or prop in industrial or storage settings"),
         ),
         (
             id: "slab",
@@ -3161,21 +3795,39 @@
                 footprint: Some((2.171285, 1.0736263)),
                 height: Some(1.7151144),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
-            effects: [],
-            look: [],
+            kind: [
+                "appliance",
+                "bed",
+            ],
+            effects: [
+                "uses-electricity",
+            ],
+            look: [
+                "white",
+                "grey",
+                "black",
+                "metal",
+                "clean",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "bedroom",
+                    "living",
+                    "office",
+                ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The asset is a high-tech bed with a sleek, modern design, likely used for patient care or therapy. Its clean lines and integrated lighting suggest advanced functionality."),
         ),
         (
             id: "cryo_pod",
@@ -3186,23 +3838,39 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((1.0, 1.0231869)),
                 height: Some(2.4084597),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
-            effects: [],
-            look: [],
+            kind: [
+                "appliance",
+                "prop",
+            ],
+            effects: [
+                "emit",
+                "uses-electricity",
+            ],
+            look: [
+                "white",
+                "grey",
+                "orange",
+                "metal",
+                "clean",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "decor",
+                    "office",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -3309,7 +3977,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("The cryo pod is a futuristic medical or storage device with a sleek design and illuminated base. It is intended to be a standalone piece in a sci-fi setting."),
         ),
         (
             id: "door_plaque",
@@ -3320,27 +3988,51 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.3360979, 0.120000005)),
                 height: Some(0.17999999),
             ),
-            mount: None,
+            mount: Some(OnWall(
+                height: 1.8,
+            )),
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
-            effects: [],
-            look: [],
+            kind: [
+                "light",
+                "marking",
+            ],
+            effects: [
+                "emit",
+                "screen",
+            ],
+            look: [
+                "white",
+                "grey",
+                "orange",
+                "metal",
+                "clean",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "decor",
+                    "hall",
+                    "office",
+                    "living",
+                    "bedroom",
+                    "bathroom",
+                    "kitchen",
+                    "dining",
+                ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The plaque is a wall-mounted sign with a glowing display, likely used to label a room. It emits light and functions as a screen for text."),
         ),
         (
             id: "utility_cart",
@@ -3357,17 +4049,33 @@
                 footprint: Some((1.0840936, 0.8130703)),
                 height: Some(0.9038393),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "container",
+                "prop",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "grey",
+                "metal",
+                "clean",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "kitchen",
+                    "office",
+                    "living",
+                    "hall",
+                    "decor",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -3404,7 +4112,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("The cart is designed to be pushed and used for transporting items. It has a flat, slatted platform and a handle for maneuvering."),
         ),
         (
             id: "step_ladder",
@@ -3421,17 +4129,32 @@
                 footprint: Some((0.6716165, 0.56346023)),
                 height: Some(0.84496397),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "prop",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "grey",
+                "orange",
+                "metal",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "decor",
+                    "office",
+                    "kitchen",
+                    "living",
+                    "hall",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -3448,7 +4171,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("The ladder is designed to stand upright on the floor and provides a support surface for stepping on. The orange accents are on the hand grips and step edges."),
         ),
         (
             id: "control_desk",
@@ -3465,17 +4188,33 @@
                 footprint: Some((1.4703499, 3.6820874)),
                 height: Some(1.1314399),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "worktop",
+                ],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
-            effects: [],
-            look: [],
+            kind: [
+                "prop",
+                "table",
+            ],
+            effects: [
+                "screen",
+            ],
+            look: [
+                "grey",
+                "black",
+                "orange",
+                "glass",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "office",
+                    "living",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -3672,7 +4411,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("The desk has a modern, industrial design with a central console and two display screens. It is intended for use in a control or monitoring environment."),
         ),
         (
             id: "command_chair",
@@ -3689,17 +4428,30 @@
                 footprint: Some((0.59183437, 0.54699314)),
                 height: Some(1.0975693),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "seating",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "grey",
+                "black",
+                "orange",
+                "plastic",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "office",
+                    "living",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -3716,7 +4468,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("The chair has a modern, angular design with a high back and armrests, suitable for a command or control room setting."),
         ),
         (
             id: "bedside_table",
@@ -3727,23 +4479,37 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.4033082, 0.5)),
                 height: Some(0.5),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "worktop",
+                ],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "storage",
+                "table",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "white",
+                "grey",
+                "orange",
+                "plastic",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "bedroom",
+                    "living",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -3755,7 +4521,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("The table has a clean, modern design with a white top, grey sides, and orange accents. It features a drawer and a lower compartment, suitable for placing items like a lamp or books."),
         ),
         (
             id: "crate",
@@ -3772,17 +4538,34 @@
                 footprint: Some((1.0, 1.0000001)),
                 height: Some(1.0),
             ),
-            mount: None,
+            mount: Some(OnFloor),
             clearance: [],
             offers: (
-                surfaces: [],
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "container",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "grey",
+                "worn",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "decor",
+                    "hall",
+                    "office",
+                    "living",
+                    "kitchen",
+                    "bedroom",
+                    "bathroom",
+                    "dining",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -3829,7 +4612,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("symmetrical cube with no distinct front; reinforced corners suggest durability"),
         ),
     ],
 )

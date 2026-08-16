@@ -93,6 +93,20 @@
             ( name: "glass",   note: "" ),
             ( name: "worn",    note: "scuffed, chipped, used" ),
             ( name: "clean",   note: "clinical, unmarked" ),
+
+            // **Appended 2026-08-15, on the rule three lines up: add a token the first time you
+            // want to search by it.** A 778-mesh labelling pass is that moment, and it stopped on
+            // its tenth mesh — `plant_a` is blue, `blue` was not a token, and the reprompt could
+            // not rescue it because there was no right answer to reprompt towards. Five colours
+            // that describe a real kit rather than only this one's accent palette.
+            //
+            // Appended rather than slotted in beside the other colours, because a token's bit is
+            // its POSITION and reordering silently re-points every mask already computed.
+            ( name: "blue",    note: "" ),
+            ( name: "green",   note: "" ),
+            ( name: "red",     note: "" ),
+            ( name: "yellow",  note: "" ),
+            ( name: "beige",   note: "cream, tan, off-white — the colour most 'white' props actually are" ),
         ],
     ),
 
