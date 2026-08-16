@@ -1245,6 +1245,87 @@ mod tests {
         );
     }
 
+    /// **Deleting leaves you next to where you were, not at the top.**
+    ///
+    /// Asked for at the keyboard: *"when I delete an item, it shouldn't bring me back to the top of
+    /// the menu — it should bring me back to the item right above the one I just deleted."* Clearing
+    /// several in a row meant finding your place again every time.
+    #[test]
+    fn deleting_lands_on_the_row_above() {
+        let root = Root::new("land-above");
+        root.kit(None, 1);
+        let kit = root.kit(Some("site"), 1);
+        for m in ["alpha", "bravo", "charlie", "delta"] {
+            create_map(&kit, m, (4.0, 3.0, 4.0), (0.0, 0.0, 0.0), None)
+                .unwrap_or_else(|e| panic!("{e}"));
+        }
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
+        c.focus = Focus::Maps;
+
+        // Stand on `charlie` (rows: 0 `+ new map`, 1 alpha, 2 bravo, 3 charlie, 4 delta).
+        c.map = 3;
+        assert_eq!(
+            c.current_map().map(|m| m.name.clone()),
+            Some("charlie".into())
+        );
+        c.ask_delete().unwrap_or_else(|e| panic!("{e}"));
+        c.confirm_delete().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            c.current_map().map(|m| m.name.clone()),
+            Some("bravo".to_owned()),
+            "the row above the one removed, not the top of the list"
+        );
+
+        // **Deleting the first entry floors at the first real row**, never the `+ new map` row —
+        // landing there would say nothing is selected when something still is.
+        c.map = 1;
+        assert_eq!(
+            c.current_map().map(|m| m.name.clone()),
+            Some("alpha".into())
+        );
+        c.ask_delete().unwrap_or_else(|e| panic!("{e}"));
+        c.confirm_delete().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(c.map, 1, "floors at the first real row");
+        assert_eq!(
+            c.current_map().map(|m| m.name.clone()),
+            Some("bravo".into())
+        );
+
+        // **And the last one leaves nothing behind to stand on.**
+        for _ in 0..2 {
+            c.map = c.current_kit().map_or(0, |k| k.maps.len());
+            c.ask_delete().unwrap_or_else(|e| panic!("{e}"));
+            c.confirm_delete().unwrap_or_else(|e| panic!("{e}"));
+        }
+        assert_eq!(c.map, 0, "an empty list has only the `+ new map` row");
+        assert_eq!(c.focus, Focus::Kits, "and the keyboard goes back a column");
+    }
+
+    /// **The same rule one column over.**
+    #[test]
+    fn deleting_a_kit_lands_on_the_kit_above() {
+        let root = Root::new("land-above-kit");
+        root.kit(None, 1);
+        for k in ["alpha", "bravo", "charlie"] {
+            root.kit(Some(k), 1);
+        }
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("charlie"));
+        c.focus = Focus::Kits;
+        assert_eq!(
+            c.current_kit().map(|k| k.label.clone()),
+            Some("charlie".to_owned())
+        );
+        c.ask_delete().unwrap_or_else(|e| panic!("{e}"));
+        c.confirm_delete().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            c.current_kit().map(|k| k.label.clone()),
+            Some("bravo".to_owned()),
+            "the kit above the one removed"
+        );
+    }
+
     /// **The default kit is not deletable, and that is the one guard that matters.** It is
     /// `assets/emerge` itself — every other kit is a subdirectory of it — so `remove_dir_all` there
     /// would take the whole library. It is refused at the question, not warned about after.
@@ -1649,6 +1730,21 @@ impl Chooser {
         usize::from(n > 0)
     }
 
+    /// **Where the keyboard goes after the row at `was` is removed**, out of `n` remaining.
+    ///
+    /// The row *above* the one deleted. Asked for at the keyboard: *"when I delete an item, it
+    /// shouldn't bring me back to the top of the menu — it should bring me back to the item right
+    /// above the one I just deleted."* It went to the top, which on a long list means finding your
+    /// place again after every removal, and clearing several in a row means doing that every time.
+    ///
+    /// Two clamps, and both are the reason this is a function rather than a subtraction. Deleting
+    /// the first entry would land on index 0 — the `+ new …` row — so the answer floors at the first
+    /// real one; and deleting the last leaves `was` past the end of the shortened list, so it also
+    /// ceilings. An empty list has only the `+ new …` row, and 0 is the right answer there.
+    fn next_to(was: usize, n: usize) -> usize {
+        was.saturating_sub(1).clamp(Chooser::first_real(n), n)
+    }
+
     /// Move within whichever column has the arrows. Clamped, not wrapped: a list that wraps makes
     /// "am I at the end" unanswerable without counting.
     pub fn step(&mut self, delta: i32) {
@@ -1798,11 +1894,20 @@ impl Chooser {
             std::fs::remove_file(&pending.path)
         };
         gone.map_err(|e| format!("could not delete `{}`: {e}", pending.name))?;
-        // The label `rescan_keeping_place` would try to hold is the kit just removed, so it falls
-        // through to the first real row — which is where the keyboard should be anyway.
+        // Where the removed row was, so the keyboard can land next to it rather than at the top.
+        let was = if pending.kit { self.kit } else { self.map };
+        // The label `rescan_keeping_place` would try to hold is the row just removed, so it falls
+        // through to the first real one — which is what this then corrects.
         rescan_keeping_place(self, None);
-        if pending.kit || self.current_map().is_none() {
+        if pending.kit {
+            self.kit = Chooser::next_to(was, self.catalog.kits.len());
+            self.map = Chooser::first_real(self.current_kit().map_or(0, |k| k.maps.len()));
             self.focus = Focus::Kits;
+        } else {
+            self.map = Chooser::next_to(was, self.current_kit().map_or(0, |k| k.maps.len()));
+            if self.current_map().is_none() {
+                self.focus = Focus::Kits;
+            }
         }
         Ok(pending.name)
     }
