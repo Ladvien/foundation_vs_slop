@@ -9,8 +9,8 @@
         "read the three headers left to right",
         "say whether the containment is obvious, or whether you had to work it out"
       ],
-      "checkpoint": "the kit list has the arrows",
-      "recovery": "if the arrows are somewhere else, press Tab until KITS is highlighted"
+      "checkpoint": null,
+      "recovery": "there is nothing to get wrong here — say what you saw, including 'I had to work it out'"
     },
     {
       "label": "which kit is blank",

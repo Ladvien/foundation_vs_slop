@@ -2026,6 +2026,23 @@ const COL: f32 = 300.0;
 /// How many columns stand side by side: kits, that kit's maps, that map's settings.
 const COLS: f32 = 3.0;
 
+/// The screen's own height, before any guide card. Title, one row of columns, the message line and
+/// the hint — measured off a capture rather than computed from font metrics, which would be a
+/// second layout engine. The slack is deliberate and small: a kit with several maps grows the row.
+const CONTENT_H: f32 = 300.0;
+
+/// **Room for a guide card, added to the window only while one is up.**
+///
+/// Reported at the keyboard: *"your guide is in the way of UI."* It was — the card sits at
+/// `top: <n>` from the top of the window, and this screen is dense from its first pixel, so any
+/// offset small enough to be on screen landed on the columns. The editor can take a top overlay
+/// because its content is a 3D view with panels down the sides; this one cannot.
+///
+/// So the card goes **below** the screen, and the window grows to hold it — and shrinks back when
+/// the guide is cleared, because a permanently taller window is the empty half this screen was
+/// already once criticised for.
+const CARD_ROOM: f32 = 230.0;
+
 /// **The interface scale, and both halves of the binary read it from here.**
 ///
 /// `UiScale` multiplies every `Val::Px` and every font size, so a window sized in raw pixels is a
@@ -2041,11 +2058,7 @@ pub const UI_SCALE: f32 = 1.2;
 pub fn window_size() -> (f32, f32) {
     let content = COL * COLS + crate::chrome::PAD * (COLS - 1.0);
     let width = (content + crate::chrome::PAD * 3.0) * UI_SCALE;
-    // Title, one row of columns, the message line and the hint — measured off a capture rather
-    // than computed from font metrics, which would be a second layout engine. The slack is
-    // deliberate and small: a kit with several maps grows the row, and a window that has to be
-    // resized to see the last map is worse than one with a little air at the bottom.
-    let height = 300.0 * UI_SCALE;
+    let height = CONTENT_H * UI_SCALE;
     (width, height)
 }
 
@@ -2782,6 +2795,28 @@ mod render_tests {
 // The guide vocabulary
 // ------------------------------------------------------------------------------------------------
 
+/// **Grow the window while a card is up, and shrink back when it goes.**
+///
+/// The card is placed below the screen (see [`CARD_ROOM`]), so without this it would be drawn off
+/// the bottom edge — which is the same defect as covering the columns, one direction over.
+#[cfg(feature = "debugger")]
+fn room_for_the_card(
+    guide: Res<bevy_debugger_bevy::Guide>,
+    mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
+) {
+    let Ok(mut window) = windows.single_mut() else {
+        return;
+    };
+    let want = (CONTENT_H + if guide.visible { CARD_ROOM } else { 0.0 }) * UI_SCALE;
+    // Compared with a tolerance rather than for equality: the window reports back what the
+    // compositor gave it, which is not always the float that was asked for, and a system that
+    // rewrote the size every frame would fight the window manager forever.
+    if (window.resolution.height() - want).abs() > 1.0 {
+        let w = window.resolution.width();
+        window.resolution.set(w, want);
+    }
+}
+
 /// **The chooser's own words for the guide channel**, and it needs its own because
 /// `crate::guided`'s every condition reads `Res<Project>` — which does not exist in this `App` and
 /// in Bevy 0.19 panics the system that asks for it. Same idea, different world.
@@ -2803,9 +2838,13 @@ impl Plugin for ChooserGuidePlugin {
             // Below the title line, so the card does not sit on top of the panels it is talking
             // about — the same correction the editor's placement records.
             .insert_resource(bevy_debugger_bevy::GuidePlacement {
-                top: 40.0,
-                ..default()
-            });
+                // Just under the hint line — the card is below the screen, not over it.
+                top: CONTENT_H - 4.0,
+                // Wide enough to read a step without wrapping every line, narrow enough to sit
+                // under the columns rather than beyond them.
+                width: 620.0,
+            })
+            .add_systems(Update, room_for_the_card);
 
         let want = |args: &Value, key: &str| -> Option<String> {
             args.get(key).and_then(Value::as_str).map(str::to_owned)
