@@ -2777,3 +2777,91 @@ mod render_tests {
         );
     }
 }
+
+// ------------------------------------------------------------------------------------------------
+// The guide vocabulary
+// ------------------------------------------------------------------------------------------------
+
+/// **The chooser's own words for the guide channel**, and it needs its own because
+/// `crate::guided`'s every condition reads `Res<Project>` — which does not exist in this `App` and
+/// in Bevy 0.19 panics the system that asks for it. Same idea, different world.
+///
+/// A checkpoint asks *"has the state the step wanted arrived?"*, never *"did they press the right
+/// key?"* — a script that watched keystrokes would be testing the author, and the exercise exists to
+/// test the editor.
+#[cfg(feature = "debugger")]
+pub struct ChooserGuidePlugin;
+
+#[cfg(feature = "debugger")]
+impl Plugin for ChooserGuidePlugin {
+    fn build(&self, app: &mut App) {
+        use bevy_debugger_bevy::Checkpoints;
+        use serde_json::Value;
+
+        app.init_resource::<Checkpoints>()
+            .init_resource::<bevy_debugger_bevy::Guide>()
+            // Below the title line, so the card does not sit on top of the panels it is talking
+            // about — the same correction the editor's placement records.
+            .insert_resource(bevy_debugger_bevy::GuidePlacement {
+                top: 40.0,
+                ..default()
+            });
+
+        let want = |args: &Value, key: &str| -> Option<String> {
+            args.get(key).and_then(Value::as_str).map(str::to_owned)
+        };
+
+        let on_kits = app.register_system(|_: In<Value>, c: Res<Chooser>| c.focus == Focus::Kits);
+        let on_maps = app.register_system(|_: In<Value>, c: Res<Chooser>| c.focus == Focus::Maps);
+        let on_settings =
+            app.register_system(|_: In<Value>, c: Res<Chooser>| c.focus == Focus::Settings);
+        let making_kit =
+            app.register_system(|_: In<Value>, c: Res<Chooser>| matches!(c.creating, Some(New::Kit(_))));
+        let making_map =
+            app.register_system(|_: In<Value>, c: Res<Chooser>| matches!(c.creating, Some(New::Map(_))));
+        let typing = app.register_system(|_: In<Value>, c: Res<Chooser>| c.editing);
+
+        // **By name, and off the CATALOG rather than the draft** — the catalog is a description of
+        // disk, so this answers "does it exist" and not "did somebody type it".
+        let kit_exists = app.register_system(move |args: In<Value>, c: Res<Chooser>| {
+            want(&args.0, "name").is_some_and(|n| c.catalog.kits.iter().any(|k| k.label == n))
+        });
+        let map_exists = app.register_system(move |args: In<Value>, c: Res<Chooser>| {
+            want(&args.0, "name").is_some_and(|n| {
+                c.catalog
+                    .kits
+                    .iter()
+                    .any(|k| k.maps.iter().any(|m| m.name == n))
+            })
+        });
+        let map_gone = app.register_system(move |args: In<Value>, c: Res<Chooser>| {
+            want(&args.0, "name").is_some_and(|n| {
+                !c.catalog
+                    .kits
+                    .iter()
+                    .any(|k| k.maps.iter().any(|m| m.name == n))
+            })
+        });
+        let asking_delete = app
+            .register_system(|_: In<Value>, c: Res<Chooser>| matches!(c.ask, Some(Ask::Delete(_))));
+        let asking_quit =
+            app.register_system(|_: In<Value>, c: Res<Chooser>| matches!(c.ask, Some(Ask::Quit)));
+        let nothing_asked = app.register_system(|_: In<Value>, c: Res<Chooser>| c.ask.is_none());
+        let on_new_row = app.register_system(|_: In<Value>, c: Res<Chooser>| c.on_new_row());
+
+        let mut checkpoints = app.world_mut().resource_mut::<Checkpoints>();
+        checkpoints.register("the kit list has the arrows", on_kits);
+        checkpoints.register("the map list has the arrows", on_maps);
+        checkpoints.register("the settings have the arrows", on_settings);
+        checkpoints.register("the highlighted row makes a new one", on_new_row);
+        checkpoints.register("a new kit is being made", making_kit);
+        checkpoints.register("a new map is being made", making_map);
+        checkpoints.register("a field is taking text", typing);
+        checkpoints.register("the kit exists", kit_exists);
+        checkpoints.register("the map exists", map_exists);
+        checkpoints.register("the map is gone", map_gone);
+        checkpoints.register("a deletion is being asked about", asking_delete);
+        checkpoints.register("quitting is being asked about", asking_quit);
+        checkpoints.register("nothing is being asked", nothing_asked);
+    }
+}

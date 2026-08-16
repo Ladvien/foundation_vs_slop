@@ -5427,6 +5427,23 @@ fn every_checkpoint_a_shipped_guide_names_is_registered_and_runs() {
     let registered = app.world().resource::<Checkpoints>().names();
     assert!(!registered.is_empty(), "GuidePlugin registered nothing");
 
+    // **The chooser is a second app with a second vocabulary**, and a guide says which it drives.
+    // Checking every script against the editor's names would have been the easy fix and the wrong
+    // one: it would let an editor script name a chooser condition and still pass.
+    let mut chooser_app = App::new();
+    chooser_app
+        .insert_resource(emerge_mapper::chooser::Chooser::new(
+            std::path::PathBuf::from("."),
+            emerge_mapper::chooser::Catalog { kits: Vec::new() },
+            None,
+        ))
+        .add_plugins(emerge_mapper::chooser::ChooserGuidePlugin);
+    let chooser_names = chooser_app.world().resource::<Checkpoints>().names();
+    assert!(
+        !chooser_names.is_empty(),
+        "ChooserGuidePlugin registered nothing"
+    );
+
     let mut seen = 0;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -5446,6 +5463,17 @@ fn every_checkpoint_a_shipped_guide_names_is_registered_and_runs() {
             .unwrap_or_else(|| panic!("{name} has no `steps` array"));
         assert!(!steps.is_empty(), "{name} has an empty script");
 
+        // Which app this script drives. Absent means the editor, so every existing guide is
+        // unchanged and only a script that needs the other vocabulary has to say so.
+        let (app_name, vocabulary) = match script["app"].as_str() {
+            Some("chooser") => ("chooser", &chooser_names),
+            Some(other) => panic!(
+                "{name}: `app` is `{other}`, which is not an app this editor has. Use `chooser`, \
+                 or leave it out for the editor."
+            ),
+            None => ("editor", &registered),
+        };
+
         for step in steps {
             let label = step["label"].as_str().unwrap_or("");
             assert!(!label.is_empty(), "{name} has a step with no label");
@@ -5460,10 +5488,10 @@ fn every_checkpoint_a_shipped_guide_names_is_registered_and_runs() {
                 continue;
             };
             assert!(
-                registered.iter().any(|r| r == checkpoint),
-                "{name}: step `{label}` watches `{checkpoint}`, which this editor does not \
+                vocabulary.iter().any(|r| r == checkpoint),
+                "{name}: step `{label}` watches `{checkpoint}`, which the {app_name} does not \
                  register. It would park for ever. Registered: {}",
-                registered.join(", ")
+                vocabulary.join(", ")
             );
         }
     }

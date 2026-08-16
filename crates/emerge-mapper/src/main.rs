@@ -195,6 +195,25 @@ fn run_chooser(root: &std::path::Path, kit: Option<&str>) {
             // looks at the *editor* — returns a frame with nothing in it here.
             bevy_devshot::DevShotPlugin,
         ));
+        // **The guide channel, so an agent can walk somebody through this screen.** Its vocabulary
+        // is the chooser's own (`ChooserGuidePlugin`) rather than `guided.rs`'s, whose every
+        // condition reads `Res<Project>` — absent here, and a missing `Res<T>` panics its system.
+        //
+        // `DebuggerPlugin` owns `RemotePlugin`; only the HTTP transport is ours to add.
+        // `debug_capture` is deliberately left out: it is the editor's mirror camera, and a second
+        // `Camera2d` in this app would break every `Single<.., With<Camera2d>>` in it.
+        #[cfg(feature = "debugger")]
+        {
+            let port = std::env::var("BEVY_BRP_PORT")
+                .ok()
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(bevy::remote::http::DEFAULT_PORT);
+            app.add_plugins((
+                bevy_debugger_bevy::DebuggerPlugin,
+                bevy::remote::http::RemoteHttpPlugin::default().with_port(port),
+                emerge_mapper::chooser::ChooserGuidePlugin,
+            ));
+        }
         // The same borrowed face the editor installs — without it every `—` in this screen's copy
         // draws as a tofu box, because Bevy's embedded default is 95 codepoints of ASCII.
         if let Err(e) = harness::install_font(&mut app, root) {
@@ -202,6 +221,12 @@ fn run_chooser(root: &std::path::Path, kit: Option<&str>) {
             std::process::exit(1);
         }
         app.run();
+
+        // **Drop the app before launching the editor.** With the `debugger` feature on, both bind
+        // `BEVY_BRP_PORT`, and this process stays alive waiting on its child — so a chooser still
+        // holding the socket would make every editor launch fail to bind. `run()` returning is not
+        // the app being gone; this is.
+        drop(app);
 
         // Nothing chosen — the author quit. That is a success, not a failure.
         let Some(args) = out.lock().ok().and_then(|slot| slot.clone()) else {

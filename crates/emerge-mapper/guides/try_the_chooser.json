@@ -1,0 +1,147 @@
+{
+  "_": "Drives the CHOOSER, not the editor — its checkpoints are Chooser state, and guided.rs's every condition reads Res<Project>, which does not exist in that App.",
+  "app": "chooser",
+  "steps": [
+    {
+      "label": "look at the three columns",
+      "goal": "before pressing anything: the columns are a drill-down, left to right. A kit contains maps; a map has settings. Each header names its parent, so the chain reads without relying on position",
+      "do": [
+        "read the three headers left to right",
+        "say whether the containment is obvious, or whether you had to work it out"
+      ],
+      "checkpoint": "the kit list has the arrows",
+      "recovery": "if the arrows are somewhere else, press Tab until KITS is highlighted"
+    },
+    {
+      "label": "which kit is blank",
+      "goal": "this is the fact the whole screen exists for. On 2026-08-15 you relaunched three times against the wrong kit because nothing said which was loaded",
+      "do": [
+        "without reading the numbers, say which kit is the empty one",
+        "then check the piece counts to see if you were right"
+      ],
+      "checkpoint": null,
+      "recovery": "if the blank one does not stand out, that is the report — say what you looked at first"
+    },
+    {
+      "label": "walk the kits with the arrows",
+      "goal": "arrows move INSIDE a panel. Watch the two columns to the right change as you go -- they are that kit's maps and that map's settings",
+      "do": ["press up and down a few times", "watch the right-hand columns follow"],
+      "checkpoint": "the kit list has the arrows",
+      "recovery": "if a column does not follow the selection, say which one"
+    },
+    {
+      "label": "go up to the very top row",
+      "goal": "every list starts with a row that makes a new one. Landing on it means nothing is selected, so the columns beside it go blank on purpose -- showing the last kit's contents there would misrepresent what Enter is about to do",
+      "do": ["press up until you reach `+ new kit`", "look at the two columns to the right"],
+      "checkpoint": "the highlighted row makes a new one",
+      "recovery": "if the right-hand columns still show a kit's contents, that is the report"
+    },
+    {
+      "label": "make a kit",
+      "goal": "Enter on that row does what N does. A kit asks for one field, not four -- bounds and origin belong to a map",
+      "do": ["press Enter", "type a name like scratch"],
+      "checkpoint": "a new kit is being made",
+      "recovery": "Esc backs out of the field; a second Esc abandons the whole thing"
+    },
+    {
+      "label": "commit it with Ctrl+Enter",
+      "goal": "the key I trust least in this screen. Enter means 'edit this row' in the settings, so making the thing needed its own key -- and it may simply feel wrong in the hand",
+      "do": ["press Ctrl+Enter", "look for the kit in the list"],
+      "checkpoint": "the kit exists",
+      "with": { "name": "scratch" },
+      "recovery": "if nothing happened, say what the message line said -- and say whether Ctrl+Enter was guessable"
+    },
+    {
+      "label": "make a map inside it",
+      "goal": "the same rule one column over: the top row of the map list makes a map, and it names the kit it will land in",
+      "do": [
+        "press Tab to the map list",
+        "the top row should be `+ new map` -- press Enter on it",
+        "type a name like porch"
+      ],
+      "checkpoint": "a new map is being made",
+      "recovery": "if Tab did not move you one column right, say where it went"
+    },
+    {
+      "label": "give it bounds before you make it",
+      "goal": "the setting that was previously reachable only by editing source. Tab moves between fields is WRONG here -- arrows move inside a panel, Tab crosses panels",
+      "do": [
+        "press Enter to keep the name",
+        "press down to reach BOUNDS, then Enter to edit it",
+        "type three numbers like 20 4 20, then Enter"
+      ],
+      "checkpoint": "the settings have the arrows",
+      "recovery": "if it refuses, the message names the rule -- that message is the report"
+    },
+    {
+      "label": "commit the map",
+      "goal": "same key as the kit, which is the point: one rule for making things",
+      "do": ["press Ctrl+Enter"],
+      "checkpoint": "the map exists",
+      "with": { "name": "porch" },
+      "recovery": "if it refused, say what it said"
+    },
+    {
+      "label": "now delete it",
+      "goal": "there is no undo for a removed file here, so the verb is split in two: asking changes nothing, agreeing is a separate key",
+      "do": ["make sure `porch` is highlighted in the map list", "press Delete"],
+      "checkpoint": "a deletion is being asked about",
+      "recovery": "Delete only works on the map list -- if it refused, it said so and named where to be"
+    },
+    {
+      "label": "read the question, then decline it",
+      "goal": "the question names the map and the file. Esc keeps it -- and the file must still be there afterwards",
+      "do": ["read what the question says", "press Esc", "check `porch` is still in the list"],
+      "checkpoint": "nothing is being asked",
+      "recovery": "if the map vanished on Esc, stop and say so -- that is data loss"
+    },
+    {
+      "label": "delete it for real",
+      "goal": "Y agrees. Not Enter, deliberately -- Enter opens maps and edits fields everywhere else on this screen, and a destructive prompt answered by the most-pressed key gets answered by accident",
+      "do": ["press Delete again", "press Y"],
+      "checkpoint": "the map is gone",
+      "with": { "name": "porch" },
+      "recovery": "if Y did nothing, say so -- and say which key you expected to work"
+    },
+    {
+      "label": "try to lose your work with Escape",
+      "goal": "this closed the whole program on you once. One Escape was being read twice -- by the text handler and again by the key handler, in the same frame",
+      "do": [
+        "Tab to the settings and press Enter on a row to start typing",
+        "type something",
+        "press Escape ONCE"
+      ],
+      "checkpoint": "the settings have the arrows",
+      "recovery": "if the program closed, that is the bug back -- and it is the most serious thing on this card"
+    },
+    {
+      "label": "Escape again, and again",
+      "goal": "Escape unwinds one layer at a time and never destroys anything on the first press: leave the field, then abandon a draft, then ASK about quitting",
+      "do": ["press Escape a second time", "read what it asks", "press Esc again to stay"],
+      "checkpoint": "nothing is being asked",
+      "recovery": "if it quit without asking, say at which press"
+    },
+    {
+      "label": "open a map and come back",
+      "goal": "the last loop: the editor is a separate process, and Cmd+O exits back to this screen. Coming back rescans, so anything you made or deleted meanwhile is on the list",
+      "do": [
+        "highlight a real map and press Enter",
+        "wait for the editor",
+        "press Cmd+O"
+      ],
+      "checkpoint": null,
+      "recovery": "if Cmd+O refused, it will have said `unsaved changes` -- press Cmd+S first. Say whether that refusal was clear"
+    },
+    {
+      "label": "what was worst about all that",
+      "goal": "the question the checkpoints cannot answer. Not whether it worked -- whether any of it made you stop and think",
+      "do": [
+        "name the step where you hesitated",
+        "name any key you expected to do something else",
+        "say whether the three columns read as a hierarchy or as three lists"
+      ],
+      "checkpoint": null,
+      "recovery": "everything here is worth saying, however small -- a step you followed while thinking it was odd is the most useful report there is"
+    }
+  ]
+}
