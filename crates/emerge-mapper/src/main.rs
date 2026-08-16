@@ -172,7 +172,11 @@ fn run_chooser(root: &std::path::Path, kit: Option<&str>) {
             std::process::exit(1);
         }
 
-        let (w, h) = emerge_mapper::chooser::window_size();
+        // The first frame's size only. `chooser::fit_capture_to_window` owns it from then on, in
+        // logical pixels — `WindowResolution::new` takes PHYSICAL ones, so this is the right shape
+        // and, on a scaled display, the wrong number.
+        let (kits, maps) = catalog.shape();
+        let (w, h) = emerge_mapper::chooser::window_size(kits, maps, false);
         let out: emerge_mapper::chooser::Choice = std::sync::Arc::new(std::sync::Mutex::new(None));
         let mut app = App::new();
         app.add_plugins(DefaultPlugins.set(WindowPlugin {

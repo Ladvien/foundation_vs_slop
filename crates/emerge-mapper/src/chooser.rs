@@ -105,6 +105,16 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    /// **What the screen has to be big enough to draw**: the kit count, and the map count of the
+    /// *fullest* kit. The largest rather than the selected one, so moving down the kit list never
+    /// resizes the window mid-keystroke.
+    pub fn shape(&self) -> (usize, usize) {
+        (
+            self.kits.len(),
+            self.kits.iter().map(|k| k.maps.len()).max().unwrap_or(0),
+        )
+    }
+
     /// **Scan a project root.**
     ///
     /// A directory is a kit iff it holds a `library.ron` — the same test `Project::open` applies
@@ -351,6 +361,63 @@ mod tests {
         }
     }
 
+    /// **The screen is as tall as the lists it draws, and not one fixed number.**
+    ///
+    /// It *was* one fixed number, and a capture showed roughly a fifth of the window as empty
+    /// ground below the hint line. A constant cannot be right for both a four-kit root and a
+    /// twelve-kit one: it is padded for the first or clipped for the second. This is the guard
+    /// against quietly going back — a constant would make the two sides equal.
+    #[test]
+    fn the_screen_is_as_tall_as_what_it_has_to_draw() {
+        assert!(
+            content_h(12, 0, false) > content_h(4, 0, false),
+            "more kits must need more window"
+        );
+        assert!(
+            content_h(0, 12, false) > content_h(0, 4, false),
+            "more maps must need more window"
+        );
+        // A question needs a row to be asked in. It had none, and the hint line under the delete
+        // prompt was pushed off the bottom edge of the window.
+        assert!(
+            content_h(4, 1, true) > content_h(4, 1, false),
+            "a message must be given room, not pushed off the screen"
+        );
+        // The taller column decides, so a screen full of maps is as tall as one full of kits — the
+        // two are alternatives, never a sum.
+        assert_eq!(content_h(20, 0, false), content_h(20, 3, false));
+    }
+
+    /// **`window_size` is measured in the units `WindowResolution::set` takes**, which are logical
+    /// pixels — and `WindowResolution::new`, the only thing `main.rs` can call, takes *physical*
+    /// ones. That mismatch made the window half its intended size on a scaled display, invisibly,
+    /// because the offscreen target carries its own size and every capture looked correct.
+    ///
+    /// Pinned as a relationship rather than a number: whatever the layout does, the window must be
+    /// the content scaled by `UI_SCALE`, because that is what multiplies every `Val::Px` in it.
+    #[test]
+    fn the_window_is_the_content_times_the_interface_scale() {
+        let (_, h) = window_size(4, 1, false);
+        assert!(
+            (h - content_h(4, 1, false) * UI_SCALE).abs() < 0.001,
+            "the window has to be the content at the scale the content is drawn at"
+        );
+    }
+
+    /// **The mirror must not be on the layer the offscreen camera renders.**
+    ///
+    /// It was, and the capture came back a flat `000000` with nothing in the log: the camera that
+    /// renders into the image was drawing the sprite that *shows* that image — one texture as
+    /// colour attachment and sampled source in a single pass. Nothing in Bevy says so out loud, so
+    /// the only way this stays fixed is a test that names the two layers.
+    #[test]
+    fn the_mirror_is_not_on_the_layer_it_mirrors() {
+        assert_ne!(
+            MIRROR_LAYER, 0,
+            "layer 0 is where the UI camera draws; a mirror there renders its own target"
+        );
+    }
+
     /// **A directory is a kit only if it holds a `library.ron`** — the rule `Project::open` enforces
     /// before it accepts a `--kit`. Quoted rather than re-decided, so the chooser cannot offer a kit
     /// the editor would then refuse by name.
@@ -539,7 +606,11 @@ mod tests {
         c.raw.clear();
         c.editing = false;
         c.swallowed = true;
-        assert_eq!(c.focus, Focus::Settings, "you stay in the panel you were in");
+        assert_eq!(
+            c.focus,
+            Focus::Settings,
+            "you stay in the panel you were in"
+        );
         assert!(c.ask.is_none(), "and nothing is asked yet");
 
         // **The key is spent.** `drive_chooser` takes the flag and stops; without this the same
@@ -603,7 +674,10 @@ mod tests {
 
         c.ask = Some(Ask::Quit);
         let hint = c.hint();
-        assert!(hint.contains('Y') && hint.contains("Esc"), "same two answers: {hint}");
+        assert!(
+            hint.contains('Y') && hint.contains("Esc"),
+            "same two answers: {hint}"
+        );
         assert!(!hint.contains("Enter"), "{hint}");
     }
 
@@ -624,7 +698,11 @@ mod tests {
 
         let s = c.screen();
         assert_eq!(s.kits.first().map(|r| r.left.as_str()), Some("+ new kit"));
-        assert_eq!(s.kits.first().map(|r| r.right.as_str()), Some("N"), "the key rides the row");
+        assert_eq!(
+            s.kits.first().map(|r| r.right.as_str()),
+            Some("N"),
+            "the key rides the row"
+        );
         assert_eq!(s.maps.first().map(|r| r.left.as_str()), Some("+ new map"));
 
         // **It opens on a real kit, not on the `+ new` row** — landing there would greet an author
@@ -644,6 +722,71 @@ mod tests {
         assert!(
             c.launch_args().is_err(),
             "and Enter cannot open a map from a row that makes one"
+        );
+    }
+
+    /// **Each column's panel describes that column's selection, and says whose it is.**
+    ///
+    /// Reported at the keyboard: *"settings is still confusing as to whether it's a kit or a map."*
+    /// The deeper fault was that one shared panel never followed the focus — standing on a kit row,
+    /// an author was reading a panel about a map two levels down, and no amount of labelling fixes
+    /// a panel that is describing the wrong thing.
+    #[test]
+    fn each_panel_names_what_it_is_describing() {
+        let root = Root::new("whose-panel");
+        let kit = root.kit(Some("site"), 7);
+        create_map(&kit, "hall", (4.0, 3.0, 4.0), (0.0, 0.0, 0.0), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let c = Chooser::new(root.0.clone(), catalog, Some("site"));
+
+        let s = c.screen();
+        assert!(
+            s.kit_header.contains("site"),
+            "the kit panel names the kit: {}",
+            s.kit_header
+        );
+        assert!(
+            s.settings_header.contains("hall"),
+            "the map panel names the map: {}",
+            s.settings_header
+        );
+        assert_ne!(
+            s.kit_header, s.settings_header,
+            "and they cannot be confused for each other"
+        );
+
+        // The kit panel carries the kit's facts and none of the map's.
+        let kit_left: Vec<&str> = s.kit_info.iter().map(|r| r.left.as_str()).collect();
+        assert!(kit_left.contains(&"pieces"), "{kit_left:?}");
+        assert!(
+            !kit_left.iter().any(|l| *l == "BOUNDS" || *l == "ORIGIN"),
+            "bounds belong to a map, not a kit: {kit_left:?}"
+        );
+        assert!(
+            s.kit_info.iter().any(|r| r.right == "7"),
+            "and the numbers are this kit's: {:?}",
+            s.kit_info
+        );
+
+        // The map panel carries the map's four properties and none of the kit's.
+        let map_left: Vec<&str> = s.settings.iter().map(|r| r.left.as_str()).collect();
+        assert_eq!(map_left, vec!["NAME", "BOUNDS", "ORIGIN", "NOTE"]);
+    }
+
+    /// On the `+ new kit` row nothing is selected, so the kit panel is empty rather than describing
+    /// whichever kit happened to be there before.
+    #[test]
+    fn the_kit_panel_is_empty_when_no_kit_is_selected() {
+        let root = Root::new("no-kit-selected");
+        root.kit(Some("site"), 3);
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
+        c.step(-1); // up onto `+ new kit`
+        assert!(c.on_new_row());
+        assert!(
+            c.screen().kit_info.is_empty(),
+            "describing the last kit here would be the same lie the map column already refuses"
         );
     }
 
@@ -695,8 +838,14 @@ mod tests {
 
         assert_eq!(c.focus, Focus::Kits);
         c.start_new();
-        assert!(matches!(c.creating, Some(New::Kit(_))), "on the kit list, a kit");
-        assert!(c.editing, "and straight into the name — neither can be made without one");
+        assert!(
+            matches!(c.creating, Some(New::Kit(_))),
+            "on the kit list, a kit"
+        );
+        assert!(
+            c.editing,
+            "and straight into the name — neither can be made without one"
+        );
         assert!(
             render(&c).contains("NEW KIT"),
             "the settings column says which:\n{}",
@@ -706,8 +855,15 @@ mod tests {
         c.creating = None;
         c.focus = Focus::Maps;
         c.start_new();
-        assert!(matches!(c.creating, Some(New::Map(_))), "on the map list, a map");
-        assert!(render(&c).contains("NEW MAP IN site"), "and names its kit:\n{}", render(&c));
+        assert!(
+            matches!(c.creating, Some(New::Map(_))),
+            "on the map list, a map"
+        );
+        assert!(
+            render(&c).contains("NEW MAP IN site"),
+            "and names its kit:\n{}",
+            render(&c)
+        );
     }
 
     /// **A new kit is one the editor will actually open**, which is the only thing that makes it a
@@ -719,7 +875,11 @@ mod tests {
         root.kit(Some("site"), 3);
 
         let dir = create_kit(&root.0, "Site V3").unwrap_or_else(|e| panic!("{e}"));
-        assert!(dir.ends_with("site_v3"), "forced to snake_case: {}", dir.display());
+        assert!(
+            dir.ends_with("site_v3"),
+            "forced to snake_case: {}",
+            dir.display()
+        );
         assert!(dir.join(LIBRARY_FILE).is_file(), "a kit is its library");
         assert!(
             dir.join(emerge_core::policy::POLICY_FILE).is_file(),
@@ -737,7 +897,11 @@ mod tests {
             .unwrap_or_else(|| panic!("the new kit did not scan"));
         assert_eq!(made.pieces, 0, "it starts empty");
         assert!(made.maps.is_empty(), "and with no maps");
-        assert_eq!(made.flag.as_deref(), Some("site_v3"), "reachable as --kit site_v3");
+        assert_eq!(
+            made.flag.as_deref(),
+            Some("site_v3"),
+            "reachable as --kit site_v3"
+        );
     }
 
     /// An unusable name is refused by name, and a taken one is refused rather than merged into
@@ -760,7 +924,11 @@ mod tests {
         // And the kit that was there is untouched.
         let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
-            catalog.kits.iter().find(|k| k.label == "site").map(|k| k.pieces),
+            catalog
+                .kits
+                .iter()
+                .find(|k| k.label == "site")
+                .map(|k| k.pieces),
             Some(1),
             "refusing must not have emptied the existing kit"
         );
@@ -781,7 +949,10 @@ mod tests {
         c.ask_delete().unwrap_or_else(|e| panic!("{e}"));
 
         assert!(matches!(c.ask, Some(Ask::Delete(_))), "the question is up");
-        assert!(path.is_file(), "and the file is UNTOUCHED until it is answered");
+        assert!(
+            path.is_file(),
+            "and the file is UNTOUCHED until it is answered"
+        );
         assert!(
             render(&c).contains("delete `hall`?"),
             "the question names the map:\n{}",
@@ -833,8 +1004,14 @@ mod tests {
 
         c.map = 1; // the selection moves to `beta`
         let gone = c.confirm_delete().unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(gone, "alpha", "the question named alpha, so alpha is what goes");
-        assert!(kit.join("beta.map.ron").is_file(), "beta was never in question");
+        assert_eq!(
+            gone, "alpha",
+            "the question named alpha, so alpha is what goes"
+        );
+        assert!(
+            kit.join("beta.map.ron").is_file(),
+            "beta was never in question"
+        );
         assert!(!kit.join("alpha.map.ron").exists());
     }
 
@@ -1282,9 +1459,9 @@ impl Chooser {
         if self.on_new_row() {
             return Err("that row makes a new map — press Enter on it".to_owned());
         }
-        let map = self.current_map().ok_or_else(|| {
-            format!("no maps in {} yet — press Enter on `+ new map`", kit.label)
-        })?;
+        let map = self
+            .current_map()
+            .ok_or_else(|| format!("no maps in {} yet — press Enter on `+ new map`", kit.label))?;
         if let MapSummary::Unreadable(why) = &map.summary {
             return Err(format!("`{}` will not open: {why}", map.name));
         }
@@ -1390,7 +1567,10 @@ mod screen_tests {
     fn the_arrows_clamp_at_both_ends() {
         let mut c = chooser(None);
         c.step(-1);
-        assert_eq!(c.kit, 0, "up at the top stays — and the top is the `+ new kit` row");
+        assert_eq!(
+            c.kit, 0,
+            "up at the top stays — and the top is the `+ new kit` row"
+        );
         for _ in 0..6 {
             c.step(1);
         }
@@ -1652,6 +1832,17 @@ pub struct Row {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Screen {
     pub kits: Vec<Row>,
+    /// **What the highlighted KIT is**, shown under the kit list where it cannot be mistaken for a
+    /// map's. Reported at the keyboard: *"settings is still confusing as to whether it's a kit or a
+    /// map. It's almost like they each need their own setting area."* They do — and the deeper
+    /// fault was that one panel never followed the focus, so an author standing on a kit row was
+    /// reading a panel about a map two levels below it.
+    ///
+    /// Facts, not a form: a kit's editable properties live in `project.ron` and its exclusions are
+    /// edited on the Meshes tab with `Shift+R`. Nothing here is focusable, because a panel the
+    /// arrows can enter and do nothing in is the dead stop this screen keeps removing.
+    pub kit_header: String,
+    pub kit_info: Vec<Row>,
     pub maps_header: String,
     pub maps: Vec<Row>,
     pub settings_header: String,
@@ -1675,36 +1866,28 @@ impl Chooser {
                 Tone::Row
             },
         }];
-        kits.extend(self
-            .catalog
-            .kits
-            .iter()
-            .enumerate()
-            .map(|(i, k)| {
-                let selected = self.focus == Focus::Kits && i + 1 == self.kit;
-                Row {
-                    left: if k.flag.is_none() {
-                        format!("{} (default)", k.label)
-                    } else {
-                        k.label.clone()
-                    },
-                    right: format!("{} pieces", k.pieces),
-                    // **A blank kit reads as blank without being read.** This is the fact the screen
-                    // exists to carry: on 2026-08-15 an author could not tell `site` from `site_v2`
-                    // and relaunched three times. A count nobody looks at would not have helped.
-                    tone: match (selected, k.pieces) {
-                        (true, _) => Tone::Selected,
-                        (false, 0) => Tone::Empty,
-                        (false, _) => Tone::Stocked,
-                    },
-                }
-            }));
+        kits.extend(self.catalog.kits.iter().enumerate().map(|(i, k)| {
+            let selected = self.focus == Focus::Kits && i + 1 == self.kit;
+            Row {
+                left: if k.flag.is_none() {
+                    format!("{} (default)", k.label)
+                } else {
+                    k.label.clone()
+                },
+                right: format!("{} pieces", k.pieces),
+                // **A blank kit reads as blank without being read.** This is the fact the screen
+                // exists to carry: on 2026-08-15 an author could not tell `site` from `site_v2`
+                // and relaunched three times. A count nobody looks at would not have helped.
+                tone: match (selected, k.pieces) {
+                    (true, _) => Tone::Selected,
+                    (false, 0) => Tone::Empty,
+                    (false, _) => Tone::Stocked,
+                },
+            }
+        }));
 
         let kit = self.current_kit();
-        let maps_header = kit.map_or_else(
-            || "MAPS".to_owned(),
-            |k| format!("MAPS IN {}", k.label),
-        );
+        let maps_header = kit.map_or_else(|| "MAPS".to_owned(), |k| format!("MAPS IN {}", k.label));
         // **`+ new map` is the first row, and on an empty kit it is the only one** — which is
         // §1.4's instruction-not-a-report, said by a row you can press rather than by a sentence.
         let mut maps = Vec::new();
@@ -1762,27 +1945,99 @@ impl Chooser {
         // did nothing on an existing map and three of the four settings were unreachable.
         let (settings_header, settings) = self.settings_rows();
 
+        let (kit_header, kit_info) = self.kit_rows();
         Screen {
             kits,
+            kit_header,
+            kit_info,
             maps_header,
             maps,
             settings_header,
             settings,
             asking: self.ask.as_ref().map(|a| match a {
+                // **The question has to carry its own answer.** A capture of this prompt showed it
+                // saying what would be lost and never saying which key agreed — the fact lived only
+                // in a guide card's prose and in `drive_chooser`. `Y` rather than `Enter` is a
+                // deliberate choice (`Enter` opens maps and edits fields everywhere else on this
+                // screen, and a destructive prompt answered by the most-pressed key gets answered
+                // by accident), and a deliberate choice nobody can see is indistinguishable from
+                // no choice at all.
                 Ask::Delete(c) => format!(
-                    "delete `{}`? {} goes, and nothing here can bring it back.",
+                    "delete `{}`? Y removes {} for good — Esc keeps it",
                     c.map,
-                    c.path
-                        .file_name()
-                        .map_or_else(|| c.path.display().to_string(), |f| f
-                            .to_string_lossy()
-                            .into_owned())
+                    c.path.file_name().map_or_else(
+                        || c.path.display().to_string(),
+                        |f| f.to_string_lossy().into_owned()
+                    )
                 ),
-                Ask::Quit => "quit emerge-mapper?".to_owned(),
+                Ask::Quit => "quit emerge-mapper? Y quits — Esc stays".to_owned(),
             }),
             problem: self.problem.clone(),
             hint: self.hint().to_owned(),
         }
+    }
+
+    /// The highlighted kit, as facts. Empty when the `+ new kit` row is highlighted, because
+    /// nothing is selected and inventing a panel for it would be the same lie the columns to the
+    /// right already refuse to tell.
+    /// **Is there a line to say?** A question or a refusal both occupy the message row, and the
+    /// window has to be tall enough to hold whichever is up — see [`MESSAGE_ROWS`].
+    pub fn has_message(&self) -> bool {
+        self.ask.is_some() || self.problem.is_some()
+    }
+
+    fn kit_rows(&self) -> (String, Vec<Row>) {
+        let Some(k) = self.current_kit() else {
+            return ("KIT INFO".to_owned(), Vec::new());
+        };
+        let excluded = k.dir.file_name().map_or(0, |_| self.excluded_count());
+        let mut rows = vec![
+            Row {
+                left: "pieces".to_owned(),
+                right: k.pieces.to_string(),
+                tone: if k.pieces == 0 {
+                    Tone::Empty
+                } else {
+                    Tone::Stocked
+                },
+            },
+            Row {
+                left: "maps".to_owned(),
+                right: k.maps.len().to_string(),
+                tone: if k.maps.is_empty() {
+                    Tone::Empty
+                } else {
+                    Tone::Row
+                },
+            },
+            Row {
+                left: "opened with".to_owned(),
+                right: k
+                    .flag
+                    .as_ref()
+                    .map_or_else(|| "no --kit".to_owned(), |f| format!("--kit {f}")),
+                tone: Tone::Row,
+            },
+        ];
+        if excluded > 0 {
+            rows.push(Row {
+                left: "excluded".to_owned(),
+                right: format!("{excluded} pack(s)"),
+                tone: Tone::Empty,
+            });
+        }
+        (format!("KIT INFO — {}", k.label), rows)
+    }
+
+    /// How many packs this kit's policy excludes. Read from the kit's own `project.ron` rather than
+    /// carried on `Kit`, because the catalog is a scan of what exists and this is a statement of
+    /// policy — two different questions about the same directory.
+    fn excluded_count(&self) -> usize {
+        self.current_kit()
+            .map(|k| k.dir.join(emerge_core::policy::POLICY_FILE))
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|t| emerge_core::policy::Policy::parse(&t).ok())
+            .map_or(0, |p| p.exclude.len())
     }
 
     fn settings_rows(&self) -> (String, Vec<Row>) {
@@ -1808,8 +2063,10 @@ impl Chooser {
         }
         let (header, name, bounds, origin, note) = match (&self.creating, self.current_map()) {
             (Some(New::Map(d)), _) => (
-                self.current_kit()
-                    .map_or_else(|| "NEW MAP".to_owned(), |k| format!("NEW MAP IN {}", k.label)),
+                self.current_kit().map_or_else(
+                    || "NEW MAP".to_owned(),
+                    |k| format!("NEW MAP IN {}", k.label),
+                ),
                 d.name.clone(),
                 d.bounds,
                 d.origin,
@@ -1823,16 +2080,16 @@ impl Chooser {
                     // list. Selecting one is what asks the question, so it is read here.
                     let (origin, note) = read_origin_and_note(&m.path);
                     (
-                        format!("SETTINGS FOR {}", m.name),
+                        format!("MAP INFO — {}", m.name),
                         m.name.clone(),
                         *bounds,
                         origin,
                         note,
                     )
                 }
-                MapSummary::Unreadable(_) => return ("SETTINGS".to_owned(), Vec::new()),
+                MapSummary::Unreadable(_) => return ("MAP INFO".to_owned(), Vec::new()),
             },
-            (None, None) => return ("SETTINGS".to_owned(), Vec::new()),
+            (None, None) => return ("MAP INFO".to_owned(), Vec::new()),
         };
 
         let live = |f: Field| self.focus == Focus::Settings && self.field == f;
@@ -1907,19 +2164,13 @@ impl Chooser {
             Focus::Settings => "up/down field    Enter edit    Tab panel    Esc quit",
             // **Only verbs that would do something right now.** `Enter` opens a map — so it is
             // not offered on a kit with none, nor on the `+ new` row where it makes instead.
-            Focus::Kits if self.kit == 0 => {
-                "up/down kit    Enter new kit    Tab panel    Esc quit"
-            }
+            Focus::Kits if self.kit == 0 => "up/down kit    Enter new kit    Tab panel    Esc quit",
             Focus::Kits if self.current_kit().is_some_and(|k| k.maps.is_empty()) => {
                 "up/down kit    Tab panel    N new kit    Esc quit"
             }
             Focus::Kits => "up/down kit    Tab panel    Enter open    N new kit    Esc quit",
-            Focus::Maps if self.map == 0 => {
-                "up/down map    Enter new map    Tab panel    Esc quit"
-            }
-            Focus::Maps => {
-                "up/down map    Tab panel    Enter open    Delete remove    Esc quit"
-            }
+            Focus::Maps if self.map == 0 => "up/down map    Enter new map    Tab panel    Esc quit",
+            Focus::Maps => "up/down map    Tab panel    Enter open    Delete remove    Esc quit",
         }
     }
 }
@@ -1967,6 +2218,12 @@ pub fn render(c: &Chooser) -> String {
     for r in &s.kits {
         out.push_str(&line(r));
     }
+    if !s.kit_info.is_empty() {
+        out.push_str(&format!("\n{}\n", s.kit_header));
+        for r in &s.kit_info {
+            out.push_str(&line(r));
+        }
+    }
     out.push_str(&format!("\n{}\n", s.maps_header));
     for r in &s.maps {
         out.push_str(&line(r));
@@ -2010,6 +2267,10 @@ struct MapList;
 #[derive(Component)]
 struct MapsHeader;
 #[derive(Component)]
+struct KitInfoList;
+#[derive(Component)]
+struct KitInfoHeader;
+#[derive(Component)]
 struct SettingsList;
 #[derive(Component)]
 struct SettingsHeader;
@@ -2042,13 +2303,24 @@ impl Plugin for ChooserPlugin {
             swallowed: false,
         })
         .insert_resource(ChoiceOut(self.out.clone()))
-        .add_systems(Startup, spawn_screen)
+        .add_plugins(ChooserCapturePlugin)
+        // **`PostStartup`, not `Startup.after(..)`.** Ordering systems does not flush commands: a
+        // camera spawned in `Startup` does not exist in the World until that schedule ends, so an
+        // `.after()` here found no camera, returned early, and drew no interface at all — a black
+        // window with nothing in the log, because the early return was silent.
+        .add_systems(PostStartup, spawn_screen)
         // **Text before chords, as `keys::Phase` orders them in the editor**: a field with the
         // keyboard consumes a keystroke before anything reads it as a verb, or typing `n` into a
         // name starts a second new map.
         .add_systems(
             Update,
-            (type_into_field, drive_chooser, paint_chooser).chain(),
+            (
+                type_into_field,
+                drive_chooser,
+                paint_chooser,
+                hold_the_panels_still,
+            )
+                .chain(),
         );
     }
 }
@@ -2059,12 +2331,85 @@ impl Plugin for ChooserPlugin {
 const COL: f32 = 300.0;
 
 /// How many columns stand side by side: kits, that kit's maps, that map's settings.
-const COLS: f32 = 3.0;
+const COLS: f32 = 2.0;
 
-/// The screen's own height, before any guide card. Title, one row of columns, the message line and
-/// the hint — measured off a capture rather than computed from font metrics, which would be a
-/// second layout engine. The slack is deliberate and small: a kit with several maps grows the row.
-const CONTENT_H: f32 = 300.0;
+/// **One list row, and everything under it, in logical pixels before [`UI_SCALE`].**
+///
+/// Measured off a capture rather than computed from font metrics — a height derived from ascenders
+/// and line gaps would be a second layout engine, disagreeing with the first the day a font
+/// changes. Two panels of known row counts in one frame give the slope and the intercept:
+/// a 5-row list and a 3-row list differed by exactly two rows' worth.
+const ROW_H: f32 = 17.9;
+
+/// A panel's fixed cost: its header line and its own padding, top and bottom.
+const PANEL_CHROME: f32 = 39.6;
+
+/// Between a list and the inspector standing under it.
+const COL_GAP: f32 = 19.2;
+
+/// The screen's fixed cost: the title line, the hint line, and the root's padding — plus a few
+/// pixels of ground under the hint, because a line of text ending exactly on the window edge reads
+/// as clipped whether or not a descender actually is.
+const SCREEN_CHROME: f32 = 87.0;
+
+/// Rows in `KIT INFO` — pieces, maps, opened-with.
+const KIT_FACTS: f32 = 3.0;
+
+/// Rows in `MAP INFO` — name, bounds, origin, note.
+const MAP_FACTS: f32 = 4.0;
+
+fn panel_h(rows: f32) -> f32 {
+    PANEL_CHROME + ROW_H * rows
+}
+
+/// **How tall this screen actually is**, for the lists it is about to draw.
+///
+/// It was a constant, and the constant was 15% too big: a capture showed roughly a fifth of the
+/// window as empty ground below the hint line. *"The empty half"* had already been reported once
+/// about an earlier layout, and a fixed height cannot be right for both a four-kit root and a
+/// twelve-kit one — it is either padded or clipped.
+///
+/// `maps` is the **largest** kit's map count, not the selected kit's, so walking the kit list does
+/// not resize the window under the author's hands.
+pub fn content_h(kits: usize, maps: usize, message: bool) -> f32 {
+    let (list, info) = panel_heights(kits, maps);
+    SCREEN_CHROME + list + COL_GAP + info + if message { MESSAGE_ROWS * ROW_H } else { 0.0 }
+}
+
+/// **The two heights this screen is built from: a list, and the panel under it.**
+///
+/// Both are *fixed*, and that is the whole point. Reported at the keyboard: *"make sure the input
+/// boxes don't move up and down as the menu changes — they should be statically fixed."* They did
+/// move, twice over. Each list sized itself to its own contents, so `MAP INFO` sat at whatever
+/// height that kit's map count left it at and jumped every time the selection crossed to a kit with
+/// a different number of maps; and the two columns' panels, sized independently, never agreed with
+/// each other either.
+///
+/// So one list height serves both columns — the **fullest** list in the whole catalogue, `+ new …`
+/// row included — and one info height serves both panels, the taller of the two fact counts. A
+/// field you are about to type into does not move because you looked somewhere else first.
+///
+/// Derived from the catalogue rather than fixed at startup, so creating a kit grows the screen
+/// once, everywhere, instead of overflowing a box that was measured before it existed.
+fn panel_heights(kits: usize, maps: usize) -> (f32, f32) {
+    // `+ 1` for the `+ new kit` / `+ new map` row every list opens with.
+    let rows = kits.max(maps) as f32 + 1.0;
+    (panel_h(rows), panel_h(KIT_FACTS.max(MAP_FACTS)))
+}
+
+/// **Rows kept for a message or a question, and only while one is up.**
+///
+/// A capture of the delete prompt caught this: the question appeared, and the hint line under it
+/// went off the bottom edge — the screen had no room reserved for a message and did not make any.
+/// Two rows because a question naming both a map and its file wraps, and a clipped question about
+/// deleting a file is the worst line on this screen to lose.
+///
+/// Reserved on demand rather than always, because an empty band waiting for a message that is not
+/// there is the same defect as the fifth of a window this layout was just measured to be wasting.
+/// Three, not two, and the difference was measured rather than reasoned: at two the question fitted
+/// and the hint line under it ran to the last pixel row of the window. A message costs its own line
+/// *plus* the gap above it, which a row count expressed in text rows alone does not capture.
+const MESSAGE_ROWS: f32 = 3.0;
 
 /// **Room for a guide card, added to the window only while one is up.**
 ///
@@ -2076,7 +2421,11 @@ const CONTENT_H: f32 = 300.0;
 /// So the card goes **below** the screen, and the window grows to hold it — and shrinks back when
 /// the guide is cleared, because a permanently taller window is the empty half this screen was
 /// already once criticised for.
-const CARD_ROOM: f32 = 230.0;
+/// Trimmed from 230 once a capture showed what a card actually occupies: a two-instruction step
+/// left a third of the added height empty. The slack that remains is deliberate — a card is sized
+/// by its own text, so a number tight against one step would clip the next, and clipping an
+/// instruction is the failure this whole placement exists to avoid.
+const CARD_ROOM: f32 = 200.0;
 
 /// **The interface scale, and both halves of the binary read it from here.**
 ///
@@ -2085,25 +2434,26 @@ const CARD_ROOM: f32 = 230.0;
 /// panel at 1.2 is 806, inside a 740 px window, and the values ran off the right edge.
 pub const UI_SCALE: f32 = 1.2;
 
-/// **How big the window has to be to hold this screen**, derived rather than guessed.
-///
-/// Two columns and the gap, plus the root's padding on both sides, times the scale. Returned so
-/// `main.rs` cannot fall out of step with `COL` — the previous version hard-coded a size and was
-/// wrong the moment the columns were given a fixed width.
-pub fn window_size() -> (f32, f32) {
+/// **How big the window has to be to hold this screen**, derived rather than guessed. Logical
+/// pixels — which is what `WindowResolution::set` takes, and *not* what `WindowResolution::new`
+/// takes; see [`fit_capture_to_window`], which owns the size after the first frame for exactly that
+/// reason.
+pub fn window_size(kits: usize, maps: usize, message: bool) -> (f32, f32) {
     let content = COL * COLS + crate::chrome::PAD * (COLS - 1.0);
     let width = (content + crate::chrome::PAD * 3.0) * UI_SCALE;
-    let height = CONTENT_H * UI_SCALE;
-    (width, height)
+    (width, content_h(kits, maps, message) * UI_SCALE)
 }
 
-fn panel(width: f32, kind: PanelKind) -> impl Bundle {
+fn panel(width: f32, height: f32, kind: PanelKind) -> impl Bundle {
     (
         Node {
             flex_direction: FlexDirection::Column,
             padding: UiRect::all(Val::Px(crate::chrome::PAD)),
             row_gap: Val::Px(crate::chrome::GAP_ROW),
             width: Val::Px(width),
+            // Fixed, not content-sized — see [`panel_heights`]. A short list leaves ground below
+            // its last row rather than pulling the panel under it upwards.
+            height: Val::Px(height),
             ..default()
         },
         // **A different surface for a different kind of thing.** The inspector sits on the lighter
@@ -2130,10 +2480,25 @@ fn header(text: &str) -> impl Bundle {
     )
 }
 
-fn spawn_screen(mut commands: Commands) {
-    commands.spawn(Camera2d);
+fn spawn_screen(
+    mut commands: Commands,
+    chooser: Res<Chooser>,
+    ui_camera: Query<Entity, With<UiCamera>>,
+) {
+    let (kits, maps) = chooser.catalog.shape();
+    let (list_h, info_h) = panel_heights(kits, maps);
+    // **The UI is drawn to the offscreen camera**, which the window then mirrors — see
+    // `ChooserCapturePlugin`. Named explicitly rather than left to Bevy's default-camera pick,
+    // because with two cameras present "the default" is not a thing to rely on.
+    let Ok(camera) = ui_camera.single() else {
+        // Loud, because the failure mode is an empty window and no other symptom. The silent
+        // version of this line cost an afternoon.
+        error!("no UI camera — the chooser cannot draw its screen");
+        return;
+    };
     commands
         .spawn((
+            UiTargetCamera(camera),
             Node {
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
@@ -2167,17 +2532,43 @@ fn spawn_screen(mut commands: Commands) {
                 ..default()
             })
             .with_children(|row| {
-                row.spawn(panel(COL, PanelKind::List)).with_children(|p| {
-                    p.spawn(header("KITS"));
-                    p.spawn((Node::default(), KitList));
+                // **Each column owns what belongs to it.** A kit's facts sit under the kit list; a
+                // map's settings sit under the map list. One shared panel could not say whose it
+                // was — and worse, it never followed the focus, so standing on a kit row you read a
+                // panel about a map two levels down.
+                row.spawn(Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(crate::chrome::GAP_ROW * 2.0),
+                    ..default()
+                })
+                .with_children(|col| {
+                    col.spawn((panel(COL, list_h, PanelKind::List), ListPanel))
+                        .with_children(|p| {
+                            p.spawn(header("KITS"));
+                            p.spawn((Node::default(), KitList));
+                        });
+                    col.spawn((panel(COL, info_h, PanelKind::Inspector), InfoPanel))
+                        .with_children(|p| {
+                            p.spawn((header("KIT INFO"), KitInfoHeader));
+                            p.spawn((Node::default(), KitInfoList));
+                        });
                 });
-                row.spawn(panel(COL, PanelKind::List)).with_children(|p| {
-                    p.spawn((header("MAPS"), MapsHeader));
-                    p.spawn((Node::default(), MapList));
-                });
-                row.spawn(panel(COL, PanelKind::Inspector)).with_children(|p| {
-                    p.spawn((header("SETTINGS"), SettingsHeader));
-                    p.spawn((Node::default(), SettingsList));
+                row.spawn(Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(crate::chrome::GAP_ROW * 2.0),
+                    ..default()
+                })
+                .with_children(|col| {
+                    col.spawn((panel(COL, list_h, PanelKind::List), ListPanel))
+                        .with_children(|p| {
+                            p.spawn((header("MAPS"), MapsHeader));
+                            p.spawn((Node::default(), MapList));
+                        });
+                    col.spawn((panel(COL, info_h, PanelKind::Inspector), InfoPanel))
+                        .with_children(|p| {
+                            p.spawn((header("MAP INFO"), SettingsHeader));
+                            p.spawn((Node::default(), SettingsList));
+                        });
                 });
             });
             root.spawn((
@@ -2193,6 +2584,39 @@ fn spawn_screen(mut commands: Commands) {
                 HintLine,
             ));
         });
+}
+
+/// A list panel, held to the height of the fullest list. See [`panel_heights`].
+#[derive(Component)]
+struct ListPanel;
+
+/// An inspector panel, held to a fixed height so the fields inside it never move.
+#[derive(Component)]
+struct InfoPanel;
+
+/// **Keep the panels where they are.**
+///
+/// The heights come from the catalogue, not from what each list happens to be showing, so walking
+/// the kit list — which changes what the map list contains — moves nothing. Re-applied every frame
+/// rather than set once at spawn, because creating a kit changes the catalogue and a box measured
+/// before that would clip its own last row.
+fn hold_the_panels_still(
+    chooser: Res<Chooser>,
+    mut lists: Query<&mut Node, (With<ListPanel>, Without<InfoPanel>)>,
+    mut infos: Query<&mut Node, (With<InfoPanel>, Without<ListPanel>)>,
+) {
+    let (kits, maps) = chooser.catalog.shape();
+    let (list_h, info_h) = panel_heights(kits, maps);
+    for mut n in &mut lists {
+        if n.height != Val::Px(list_h) {
+            n.height = Val::Px(list_h);
+        }
+    }
+    for mut n in &mut infos {
+        if n.height != Val::Px(info_h) {
+            n.height = Val::Px(info_h);
+        }
+    }
 }
 
 fn colour(tone: Tone) -> Color {
@@ -2285,6 +2709,7 @@ fn paint_chooser(
         Option<&KitList>,
         Option<&MapList>,
         Option<&SettingsList>,
+        Option<&KitInfoList>,
     )>,
     mut texts: Query<(
         &mut Text,
@@ -2292,23 +2717,28 @@ fn paint_chooser(
         Option<&SettingsHeader>,
         Option<&ProblemLine>,
         Option<&HintLine>,
+        Option<&KitInfoHeader>,
     )>,
 ) {
     if !chooser.is_changed() {
         return;
     }
     let s = chooser.screen();
-    for (e, kit, map, set) in &lists {
+    for (e, kit, map, set, info) in &lists {
         if kit.is_some() {
             fill(&mut commands, e, &s.kits, PanelKind::List);
         } else if map.is_some() {
             fill(&mut commands, e, &s.maps, PanelKind::List);
         } else if set.is_some() {
             fill(&mut commands, e, &s.settings, PanelKind::Inspector);
+        } else if info.is_some() {
+            fill(&mut commands, e, &s.kit_info, PanelKind::Inspector);
         }
     }
-    for (mut text, maps, settings, problem, hint) in &mut texts {
-        if maps.is_some() {
+    for (mut text, maps, settings, problem, hint, kit_info) in &mut texts {
+        if kit_info.is_some() {
+            **text = s.kit_header.clone();
+        } else if maps.is_some() {
             **text = s.maps_header.clone();
         } else if settings.is_some() {
             **text = s.settings_header.clone();
@@ -2512,14 +2942,10 @@ fn make_it(chooser: &mut Chooser, new: &New) -> Result<(), String> {
             chooser.creating = None;
             rescan_keeping_place(chooser, None);
             // Land on the kit that was just made, so the maps column beside it is already its own.
-            if let Some(i) = chooser
-                .catalog
-                .kits
-                .iter()
-                .position(|k| &k.label == name)
-            {
+            if let Some(i) = chooser.catalog.kits.iter().position(|k| &k.label == name) {
                 chooser.kit = i + 1;
-                chooser.map = Chooser::first_real(chooser.current_kit().map_or(0, |k| k.maps.len()));
+                chooser.map =
+                    Chooser::first_real(chooser.current_kit().map_or(0, |k| k.maps.len()));
             }
             chooser.focus = Focus::Kits;
         }
@@ -2546,7 +2972,10 @@ fn rescan_keeping_place(chooser: &mut Chooser, want: Option<&str>) {
             chooser.catalog = catalog;
             chooser.kit = label
                 .and_then(|l| chooser.catalog.kits.iter().position(|k| k.label == l))
-                .map_or_else(|| Chooser::first_real(chooser.catalog.kits.len()), |i| i + 1);
+                .map_or_else(
+                    || Chooser::first_real(chooser.catalog.kits.len()),
+                    |i| i + 1,
+                );
             chooser.map = want
                 .and_then(|w| {
                     chooser
@@ -2879,18 +3308,23 @@ mod render_tests {
 #[cfg(feature = "debugger")]
 fn room_for_the_card(
     guide: Res<bevy_debugger_bevy::Guide>,
-    mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
+    chooser: Res<Chooser>,
+    mut placement: ResMut<bevy_debugger_bevy::GuidePlacement>,
+    mut extra: ResMut<ExtraRoom>,
 ) {
-    let Ok(mut window) = windows.single_mut() else {
-        return;
-    };
-    let want = (CONTENT_H + if guide.visible { CARD_ROOM } else { 0.0 }) * UI_SCALE;
-    // Compared with a tolerance rather than for equality: the window reports back what the
-    // compositor gave it, which is not always the float that was asked for, and a system that
-    // rewrote the size every frame would fight the window manager forever.
-    if (window.resolution.height() - want).abs() > 1.0 {
-        let w = window.resolution.width();
-        window.resolution.set(w, want);
+    let (kits, maps) = chooser.catalog.shape();
+    let screen = content_h(kits, maps, chooser.has_message());
+    // The card hangs just under the hint line. That offset moved the day the screen's height stopped
+    // being a constant, so it is computed beside the height rather than fixed at plugin build — when
+    // the catalog is not yet known.
+    let top = screen - 4.0;
+    if (placement.top - top).abs() > 0.5 {
+        placement.top = top;
+    }
+    // Declared, not applied — `fit_capture_to_window` is the one writer of the window's size.
+    let want = if guide.visible { CARD_ROOM } else { 0.0 };
+    if extra.0 != want {
+        extra.0 = want;
     }
 }
 
@@ -2915,8 +3349,9 @@ impl Plugin for ChooserGuidePlugin {
             // Below the title line, so the card does not sit on top of the panels it is talking
             // about — the same correction the editor's placement records.
             .insert_resource(bevy_debugger_bevy::GuidePlacement {
-                // Just under the hint line — the card is below the screen, not over it.
-                top: CONTENT_H - 4.0,
+                // Overwritten by `room_for_the_card` on the first frame, which is where the height
+                // is actually known; a card is never up before then.
+                top: 0.0,
                 // Wide enough to read a step without wrapping every line, narrow enough to sit
                 // under the columns rather than beyond them.
                 width: 620.0,
@@ -2931,10 +3366,12 @@ impl Plugin for ChooserGuidePlugin {
         let on_maps = app.register_system(|_: In<Value>, c: Res<Chooser>| c.focus == Focus::Maps);
         let on_settings =
             app.register_system(|_: In<Value>, c: Res<Chooser>| c.focus == Focus::Settings);
-        let making_kit =
-            app.register_system(|_: In<Value>, c: Res<Chooser>| matches!(c.creating, Some(New::Kit(_))));
-        let making_map =
-            app.register_system(|_: In<Value>, c: Res<Chooser>| matches!(c.creating, Some(New::Map(_))));
+        let making_kit = app.register_system(|_: In<Value>, c: Res<Chooser>| {
+            matches!(c.creating, Some(New::Kit(_)))
+        });
+        let making_map = app.register_system(|_: In<Value>, c: Res<Chooser>| {
+            matches!(c.creating, Some(New::Map(_)))
+        });
         let typing = app.register_system(|_: In<Value>, c: Res<Chooser>| c.editing);
 
         // **By name, and off the CATALOG rather than the draft** — the catalog is a description of
@@ -2979,5 +3416,223 @@ impl Plugin for ChooserGuidePlugin {
         checkpoints.register("a deletion is being asked about", asking_delete);
         checkpoints.register("quitting is being asked about", asking_quit);
         checkpoints.register("nothing is being asked", nothing_asked);
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+// Seeing this screen without touching the one you are using
+// ------------------------------------------------------------------------------------------------
+
+/// **An offscreen frame of the chooser — panels included — that does not need the window in front.**
+///
+/// `crates/emerge-mapper/src/debug_capture.rs` records the measurement that makes this necessary:
+/// `Screenshot::primary_window()` reads the window surface, which macOS keeps current only while the
+/// window is on screen, and the same capture returns *"7,188 distinct colours focused and 1 — a flat
+/// rectangle — with something else in front."* Making that path produce a frame means raising the
+/// window, which steals the machine from whoever is at it.
+///
+/// That file also records why its own mirror cannot help: **Bevy draws a UI tree to one camera**, so
+/// an offscreen camera in the editor never receives the interface. That is true of the editor, whose
+/// UI targets the window camera and whose subject is a 3-D map. It is not a law.
+///
+/// This screen is nothing *but* interface, so the arrangement is inverted: the UI renders to an
+/// **image**, and the window shows that image. The capture is then the same pixels an author is
+/// looking at, whether or not the window is in front — and reviewing a layout change stops depending
+/// on somebody else being at the keyboard to say what they see.
+///
+/// # Why two cameras is safe here
+///
+/// The trap `view.rs` names is that `Single<.., With<Camera2d>>` **silently skips** on a non-unique
+/// match. This app has no such query, and the guide overlay deliberately spawns no camera of its own
+/// — its own doc says so, for this reason. Both cameras are marked, so any query added later can
+/// filter positively rather than by type.
+/// **The layer the window camera sees, and the offscreen one does not.**
+///
+/// Both cameras default to layer 0, so the sprite showing the render target was drawn *by* the
+/// camera that renders into it — the same texture as colour attachment and sampled source in one
+/// pass. The result is a frame of flat `000000`, no warning, no error, nothing in the log.
+const MIRROR_LAYER: usize = 1;
+
+/// **How much taller than the screen the window has to be**, in logical pixels.
+///
+/// Zero except while a guide card is up. It exists so that exactly one system writes the window's
+/// size: the card cannot resize the window itself without fighting the system that fits the render
+/// target to it, and two systems writing one window is the shape of every resize flicker there is.
+#[derive(Resource, Default)]
+pub struct ExtraRoom(pub f32);
+
+pub struct ChooserCapturePlugin;
+
+/// The camera the UI tree is drawn to. Everything visible is on this one.
+#[derive(Component)]
+pub struct UiCamera;
+
+/// The camera that shows [`UiCamera`]'s image in the window. Draws one sprite and nothing else.
+#[derive(Component)]
+pub struct WindowCamera;
+
+impl Plugin for ChooserCapturePlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<ExtraRoom>()
+            .add_systems(Startup, spawn_capture_rig)
+            .add_systems(Update, fit_capture_to_window);
+    }
+}
+
+#[derive(Component)]
+struct Mirror;
+
+fn spawn_capture_rig(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    chooser: Res<Chooser>,
+    clear: Option<Res<ClearColor>>,
+) {
+    use bevy::camera::visibility::RenderLayers;
+    use bevy::camera::{ImageRenderTarget, RenderTarget};
+    use bevy::render::render_resource::{
+        Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+    };
+
+    let (kits, maps) = chooser.catalog.shape();
+    let (w, h) = window_size(kits, maps, chooser.has_message());
+    let size = Extent3d {
+        // **The image is the viewport, one texel per logical pixel**, exactly as
+        // `$BEVY/examples/ui/render_ui_to_texture.rs` sizes it. A 2x image with `scale_factor: 2.0`
+        // was tried first, for a capture legible at 11 px type; it renders nothing. Sizing has to
+        // match what the camera thinks its viewport is, and `window_size()` is not integral
+        // (777.6 x 480), so the doubled target rounded to an odd 1555 and never agreed with any
+        // logical size. Legibility is a zoom on the capture, not a mismatched target.
+        width: w as u32,
+        height: h as u32,
+        depth_or_array_layers: 1,
+    };
+    let mut image = Image {
+        texture_descriptor: TextureDescriptor {
+            label: Some("emerge-mapper chooser capture"),
+            size,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Bgra8UnormSrgb,
+            mip_level_count: 1,
+            sample_count: 1,
+            // `COPY_SRC` is what lets the frame be read back — without it the capture reports a
+            // target it cannot read rather than writing a file.
+            usage: TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_DST
+                | TextureUsages::COPY_SRC
+                | TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        },
+        ..default()
+    };
+    image.resize(size);
+    let handle = images.add(image);
+
+    let ground = clear.map_or(Color::BLACK, |c| c.0);
+    commands.spawn((
+        // **The offscreen camera stays on the default layer and the mirror does not** — see
+        // [`MIRROR_LAYER`]. Without that split this camera drew the sprite showing its own render
+        // target, and the frame came back a flat `000000` with nothing in the log at all.
+        //
+        // **And it is the default UI camera**, which is what puts *everyone's* interface on the
+        // image rather than only this file's. Bevy picks the highest-order camera rendering to the
+        // primary window when a node names none (`bevy_ui-0.19.0/src/ui_node.rs:2934`) — so the
+        // guide overlay, which spawns its root without a `UiTargetCamera`, went to the window
+        // camera instead. The window grew to make room for a card that then appeared in no capture.
+        bevy::ui::IsDefaultUiCamera,
+        UiCamera,
+        Camera2d,
+        Camera {
+            // Before the window camera, so a capture taken this frame shows this frame.
+            order: -1,
+            clear_color: bevy::camera::ClearColorConfig::Custom(ground),
+            ..default()
+        },
+        // `RenderTarget` is its own component in 0.19 — one of `Camera`'s `#[require]`s, not a
+        // field on it. Listed in `CLAUDE.md` among the traps already paid for.
+        RenderTarget::Image(ImageRenderTarget {
+            handle: handle.clone(),
+            scale_factor: 1.0,
+        }),
+    ));
+    commands.spawn((
+        WindowCamera,
+        Camera2d,
+        Camera {
+            order: 0,
+            ..default()
+        },
+        // Sees the mirror and nothing else. The UI is not on this layer, so it reaches the window
+        // only by way of the image — one rendering path, and the capture is the same pixels.
+        RenderLayers::layer(MIRROR_LAYER),
+    ));
+    // **Scale 1, deliberately.** A `Camera2d`'s default projection makes one world unit one logical
+    // pixel, and the target is now sized in logical pixels, so the mirror is 1:1 with the window
+    // without a scale-factor correction — the correction that was there is what a physically-sized
+    // target would have needed.
+    commands.spawn((
+        Mirror,
+        Sprite::from_image(handle.clone()),
+        RenderLayers::layer(MIRROR_LAYER),
+    ));
+    // Only the debugger needs to be told which image to read; the rig itself is not optional,
+    // because it is how this screen is drawn at all.
+    #[cfg(feature = "debugger")]
+    commands.insert_resource(bevy_debugger_bevy::DebugCaptureTarget { image: handle });
+    #[cfg(not(feature = "debugger"))]
+    let _ = handle;
+}
+
+/// Scale the mirrored sprite so the window shows the image at its own size, whatever the window is.
+///
+/// Without this the sprite draws at the image's pixel size against a camera in logical units, and
+/// the screen an author sees is twice the size of the one being captured.
+fn fit_capture_to_window(
+    mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
+    target: Query<&bevy::camera::RenderTarget, With<UiCamera>>,
+    mut images: ResMut<Assets<Image>>,
+    chooser: Res<Chooser>,
+    extra: Res<ExtraRoom>,
+) {
+    use bevy::render::render_resource::Extent3d;
+
+    let (Ok(mut window), Ok(bevy::camera::RenderTarget::Image(t))) =
+        (windows.single_mut(), target.single())
+    else {
+        return;
+    };
+
+    // **`set` takes LOGICAL pixels and `new` takes PHYSICAL ones**, which is why the window has been
+    // the wrong size on a Retina display since it was written: `main.rs` can only pass `new`, so a
+    // 777-logical-pixel screen asked for a 777-*physical* window and got half of one. Nothing said
+    // so, because the offscreen target has its own size and the capture looked right.
+    //
+    // So the window's size is owned here, in logical units, from the same numbers the layout uses.
+    let (kits, maps) = chooser.catalog.shape();
+    let (w, h) = window_size(kits, maps, chooser.has_message());
+    let h = h + extra.0 * UI_SCALE;
+    // Compared with a tolerance rather than for equality: the window reports back what the
+    // compositor gave it, which is not always the float that was asked for, and a system rewriting
+    // the size every frame would fight the window manager forever.
+    if (window.resolution.width() - w).abs() > 1.0 || (window.resolution.height() - h).abs() > 1.0 {
+        window.resolution.set(w, h);
+    }
+
+    // The render target is the viewport the UI is laid out in, so it tracks the window rather than
+    // being fixed at startup — otherwise a card that grows the window is drawn outside the image and
+    // is missing from every capture of the moment it was up.
+    let (iw, ih) = (
+        window.resolution.width().max(1.0) as u32,
+        window.resolution.height().max(1.0) as u32,
+    );
+    let Some(mut image) = images.get_mut(&t.handle) else {
+        return;
+    };
+    if image.texture_descriptor.size.width != iw || image.texture_descriptor.size.height != ih {
+        image.resize(Extent3d {
+            width: iw,
+            height: ih,
+            depth_or_array_layers: 1,
+        });
     }
 }
