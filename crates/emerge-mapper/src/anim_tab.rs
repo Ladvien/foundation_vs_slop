@@ -264,6 +264,7 @@ fn spawn_panels(mut commands: Commands) {
     .insert(AnimRoot)
     .with_children(|p| {
         crate::chrome::title(p, "ANIMATION");
+        crate::chrome::back_button(p);
         crate::chrome::problem_banner(p, &[crate::tiles::Mode::Anim]);
         crate::chrome::shortcut_hint(p);
         p.spawn((

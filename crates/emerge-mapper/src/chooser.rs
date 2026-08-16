@@ -370,22 +370,23 @@ mod tests {
     #[test]
     fn the_screen_is_as_tall_as_what_it_has_to_draw() {
         assert!(
-            content_h(12, 0, false) > content_h(4, 0, false),
-            "more kits must need more window"
+            content_h(20, 0) > content_h(4, 0),
+            "more kits than the floor must need more window"
         );
         assert!(
-            content_h(0, 12, false) > content_h(0, 4, false),
-            "more maps must need more window"
+            content_h(0, 20) > content_h(0, 4),
+            "more maps than the floor must need more window"
         );
-        // A question needs a row to be asked in. It had none, and the hint line under the delete
-        // prompt was pushed off the bottom edge of the window.
-        assert!(
-            content_h(4, 1, true) > content_h(4, 1, false),
-            "a message must be given room, not pushed off the screen"
+        // **And below the floor, nothing moves.** Making a kit and removing it again resized the
+        // window twice; a delete prompt resized it a third time, under the hand about to answer it.
+        assert_eq!(
+            content_h(3, 1),
+            content_h(6, 2),
+            "small catalogues all get the same, static window"
         );
         // The taller column decides, so a screen full of maps is as tall as one full of kits — the
         // two are alternatives, never a sum.
-        assert_eq!(content_h(20, 0, false), content_h(20, 3, false));
+        assert_eq!(content_h(20, 0), content_h(20, 3));
     }
 
     /// **`window_size` is measured in the units `WindowResolution::set` takes**, which are logical
@@ -397,9 +398,9 @@ mod tests {
     /// the content scaled by `UI_SCALE`, because that is what multiplies every `Val::Px` in it.
     #[test]
     fn the_window_is_the_content_times_the_interface_scale() {
-        let (_, h) = window_size(4, 1, false);
+        let (_, h) = window_size(4, 1);
         assert!(
-            (h - content_h(4, 1, false) * UI_SCALE).abs() < 0.001,
+            (h - content_h(4, 1) * UI_SCALE).abs() < 0.001,
             "the window has to be the content at the scale the content is drawn at"
         );
     }
@@ -899,6 +900,50 @@ mod tests {
             "bounds are still reachable, in MAP INFO: {:?}",
             c.screen().settings
         );
+    }
+
+    /// **Coming back from the editor lands on the map you left.**
+    ///
+    /// The chooser is rebuilt from scratch each time the editor exits — that is what makes going
+    /// back cost no teardown — so without this it reopened wherever the command line pointed, and
+    /// the round trip felt like a restart instead of a step back.
+    #[test]
+    fn coming_back_lands_where_you_were() {
+        let root = Root::new("reveal");
+        root.kit(None, 1);
+        let kit = root.kit(Some("site"), 2);
+        for m in ["alpha", "hall", "zulu"] {
+            create_map(&kit, m, (4.0, 3.0, 4.0), (0.0, 0.0, 0.0), None)
+                .unwrap_or_else(|e| panic!("{e}"));
+        }
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, None);
+
+        // Opens on the first kit's first map, which is not where we were.
+        assert_ne!(c.current_map().map(|m| m.name.clone()), Some("hall".into()));
+
+        c.reveal(Some("site"), Some("hall"));
+        assert_eq!(
+            c.current_kit().map(|k| k.label.clone()),
+            Some("site".to_owned())
+        );
+        assert_eq!(
+            c.current_map().map(|m| m.name.clone()),
+            Some("hall".to_owned()),
+            "standing on the map the editor was just showing"
+        );
+
+        // **Best-effort, separately.** A map deleted while the editor was up still lands the
+        // keyboard on the right kit rather than refusing to move at all.
+        c.reveal(Some("site"), Some("gone"));
+        assert_eq!(
+            c.current_kit().map(|k| k.label.clone()),
+            Some("site".to_owned())
+        );
+        // And a kit that no longer exists leaves the selection alone rather than blanking it.
+        let before = c.kit;
+        c.reveal(Some("no_such_kit"), None);
+        assert_eq!(c.kit, before);
     }
 
     /// **A kit with no name is refused, and the refusal keeps you in the field.** The one thing
@@ -1535,6 +1580,37 @@ impl Chooser {
             creating: None,
             ask: None,
             swallowed: false,
+        }
+    }
+
+    /// **Come back standing on the map you just left.**
+    ///
+    /// Returning from the editor rebuilds this screen from scratch — that is what makes going back
+    /// cost no teardown — so without this it reopened wherever the original command line pointed,
+    /// which after a few rounds is nowhere near where you were. Coming out of `site/hall` and being
+    /// dropped on the first kit's first map is the transition feeling like a restart rather than a
+    /// step back.
+    ///
+    /// Both are `Option` and both are separately best-effort: a kit that has since been deleted
+    /// leaves the selection where `new` put it, and a map that has been deleted still lands you on
+    /// the right kit.
+    pub fn reveal(&mut self, kit: Option<&str>, map: Option<&str>) {
+        if let Some(want) = kit
+            && let Some(i) = self
+                .catalog
+                .kits
+                .iter()
+                .position(|k| k.flag.as_deref() == Some(want) || k.label == want)
+        {
+            self.kit = i + 1;
+            self.map = Chooser::first_real(self.current_kit().map_or(0, |k| k.maps.len()));
+        }
+        if let Some(want) = map
+            && let Some(i) = self
+                .current_kit()
+                .and_then(|k| k.maps.iter().position(|m| m.name == want))
+        {
+            self.map = i + 1;
         }
     }
 
@@ -2271,12 +2347,6 @@ impl Chooser {
     /// The highlighted kit, as facts. Empty when the `+ new kit` row is highlighted, because
     /// nothing is selected and inventing a panel for it would be the same lie the columns to the
     /// right already refuse to tell.
-    /// **Is there a line to say?** A question or a refusal both occupy the message row, and the
-    /// window has to be tall enough to hold whichever is up — see [`MESSAGE_ROWS`].
-    pub fn has_message(&self) -> bool {
-        self.ask.is_some() || self.problem.is_some()
-    }
-
     fn kit_rows(&self) -> (String, Vec<Row>) {
         let Some(k) = self.current_kit() else {
             return ("KIT INFO".to_owned(), Vec::new());
@@ -2701,9 +2771,19 @@ fn panel_h(rows: f32) -> f32 {
 ///
 /// `maps` is the **largest** kit's map count, not the selected kit's, so walking the kit list does
 /// not resize the window under the author's hands.
-pub fn content_h(kits: usize, maps: usize, message: bool) -> f32 {
+pub fn content_h(kits: usize, maps: usize) -> f32 {
     let (list, info) = panel_heights(kits, maps);
-    SCREEN_CHROME + list + COL_GAP + info + if message { MESSAGE_ROWS * ROW_H } else { 0.0 }
+    // **The message row is always reserved, whether or not anything is being said.**
+    //
+    // It was added only when a message was up, and the window grew to make room. Reported at the
+    // keyboard: *"I press delete on one of the kits… there's this jarring redrawing of the UI where
+    // it bounces as the prompt message comes up"*, and then *"we should probably keep the UI window
+    // a static size."*
+    //
+    // Two rows of ground waiting for a sentence is a real cost, and it is smaller than the one it
+    // replaces: a window that changes shape at the exact moment it is asking whether to delete
+    // something moves the answer keys under the hand about to press them.
+    SCREEN_CHROME + list + COL_GAP + info + MESSAGE_ROWS * ROW_H
 }
 
 /// **The two heights this screen is built from: a list, and the panel under it.**
@@ -2722,10 +2802,18 @@ pub fn content_h(kits: usize, maps: usize, message: bool) -> f32 {
 /// Derived from the catalogue rather than fixed at startup, so creating a kit grows the screen
 /// once, everywhere, instead of overflowing a box that was measured before it existed.
 fn panel_heights(kits: usize, maps: usize) -> (f32, f32) {
-    // `+ 1` for the `+ new kit` / `+ new map` row every list opens with.
-    let rows = kits.max(maps) as f32 + 1.0;
+    // `+ 1` for the `+ new kit` / `+ new map` row every list opens with, and a floor so that making
+    // or removing one does not resize the window either — the same stillness the message row buys,
+    // applied to the other thing an author does here. Empty rows inside a list read as room for
+    // more; a window that changes shape reads as a fault.
+    let rows = kits.max(maps).max(LIST_FLOOR) as f32 + 1.0;
     (panel_h(rows), panel_h(KIT_FACTS.max(MAP_FACTS)))
 }
+
+/// How many list rows the panels hold before the window has to grow at all. Past this the screen
+/// does get taller — clipping a kit out of sight would be worse than a resize — but it only ever
+/// grows, never shrinks, so the common act of making one and removing it again moves nothing.
+const LIST_FLOOR: usize = 8;
 
 /// **Rows kept for a message or a question, and only while one is up.**
 ///
@@ -2768,10 +2856,10 @@ pub const UI_SCALE: f32 = 1.2;
 /// pixels — which is what `WindowResolution::set` takes, and *not* what `WindowResolution::new`
 /// takes; see [`fit_capture_to_window`], which owns the size after the first frame for exactly that
 /// reason.
-pub fn window_size(kits: usize, maps: usize, message: bool) -> (f32, f32) {
+pub fn window_size(kits: usize, maps: usize) -> (f32, f32) {
     let content = COL * COLS + crate::chrome::PAD * (COLS - 1.0);
     let width = (content + crate::chrome::PAD * 3.0) * UI_SCALE;
-    (width, content_h(kits, maps, message) * UI_SCALE)
+    (width, content_h(kits, maps) * UI_SCALE)
 }
 
 fn panel(width: f32, height: f32, kind: PanelKind) -> impl Bundle {
@@ -3657,7 +3745,7 @@ fn room_for_the_card(
     mut extra: ResMut<ExtraRoom>,
 ) {
     let (kits, maps) = chooser.catalog.shape();
-    let screen = content_h(kits, maps, chooser.has_message());
+    let screen = content_h(kits, maps);
     // The card hangs just under the hint line. That offset moved the day the screen's height stopped
     // being a constant, so it is computed beside the height rather than fixed at plugin build — when
     // the catalog is not yet known.
@@ -3839,7 +3927,7 @@ fn spawn_capture_rig(
     };
 
     let (kits, maps) = chooser.catalog.shape();
-    let (w, h) = window_size(kits, maps, chooser.has_message());
+    let (w, h) = window_size(kits, maps);
     let size = Extent3d {
         // A starting size only. **`fit_capture_to_window` owns it**, in physical pixels taken from
         // the window itself — see there for why that matters and what it cost to get wrong.
@@ -3956,7 +4044,7 @@ fn fit_capture_to_window(
     //
     // So the window's size is owned here, in logical units, from the same numbers the layout uses.
     let (kits, maps) = chooser.catalog.shape();
-    let (w, h) = window_size(kits, maps, chooser.has_message());
+    let (w, h) = window_size(kits, maps);
     let h = h + extra.0 * UI_SCALE;
     // Compared with a tolerance rather than for equality: the window reports back what the
     // compositor gave it, which is not always the float that was asked for, and a system rewriting

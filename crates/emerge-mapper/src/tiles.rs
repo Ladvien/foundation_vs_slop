@@ -3226,6 +3226,7 @@ fn spawn_tiles_panel(mut commands: Commands) {
     .insert(TilesRoot)
     .with_children(|p| {
         crate::chrome::title(p, "MESHES AND TILES");
+        crate::chrome::back_button(p);
         // **One banner per tab, both in the shared panel.** `ProblemBanner` carries the tabs it
         // speaks for and `notice.rs` shows only a matching one, so a panel serving two tabs needs
         // two — without the second, every refusal the Tiles tab's verbs write would be invisible on

@@ -920,7 +920,8 @@ impl Plugin for ChromePlugin {
             )
             // **After `Phase::Text`, not in it.** The field consumes the keystroke there; painting
             // before it would show the box one character behind what has been typed.
-            .add_systems(Update, paint_name_box.after(keys::Phase::Text));
+            .add_systems(Update, paint_name_box.after(keys::Phase::Text))
+            .add_systems(Update, light_the_back_button);
     }
 }
 
@@ -1220,6 +1221,65 @@ mod status_tests {
 }
 
 /// **One line where eighteen rows used to be.** See [`ChromePlugin`] for why it is not optional.
+/// **The way back to the chooser, as something you can see and click.**
+///
+/// Asked for at the keyboard: *"when we go into the map editor, we actually need a button to go back
+/// to the main UI."* There was only `Cmd+O`, and a key nothing on screen mentions is a key nobody
+/// finds — the same defect the always-on shortcut hint below this exists to fix, in the one place
+/// where being stuck is worst: an author who cannot get back out of a map has to close the window.
+///
+/// It names its chord as well as being clickable, which is `ExposeHK`'s rehearsal argument: the
+/// pointer is the way in, and the label beside it is what turns a pointing habit into a typing one.
+/// The click and the key both go through `editor::leave_for_menu`, so the unsaved-work refusal
+/// cannot differ between them.
+pub fn back_button(parent: &mut ChildSpawnerCommands) {
+    parent
+        .spawn((
+            BackButton,
+            Node {
+                flex_direction: FlexDirection::Row,
+                justify_content: JustifyContent::SpaceBetween,
+                align_items: AlignItems::Center,
+                padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
+                margin: UiRect::bottom(Val::Px(4.0)),
+                ..default()
+            },
+            BackgroundColor(SLOT_BG),
+            // The panel root is `Pickable::IGNORE` so the world stays reachable through it; this
+            // narrows that for one node rather than undoing it — the same move `spawn_name_box`
+            // makes, and for the same reason.
+            bevy::picking::Pickable::default(),
+            Hovered::default(),
+        ))
+        .with_children(|b| {
+            b.spawn((
+                Text::new("\u{2039} kits & maps".to_owned()),
+                TextColor(KEY),
+                TextFont::from_font_size(11.0),
+                bevy::picking::Pickable::IGNORE,
+            ));
+            b.spawn((
+                Text::new(keys::chord(keys::Action::MainMenu)),
+                TextColor(LABEL),
+                TextFont::from_font_size(11.0),
+                bevy::picking::Pickable::IGNORE,
+            ));
+        });
+}
+
+/// The clickable way back. Marked so `editor` can hang one observer on it wherever a panel put it.
+#[derive(Component)]
+pub struct BackButton;
+
+/// Lift the button while the pointer is on it, so it reads as pressable before it is pressed.
+pub fn light_the_back_button(
+    mut buttons: Query<(&Hovered, &mut BackgroundColor), (With<BackButton>, Changed<Hovered>)>,
+) {
+    for (hovered, mut bg) in &mut buttons {
+        bg.0 = if hovered.get() { ROW_SELECTED } else { SLOT_BG };
+    }
+}
+
 pub fn shortcut_hint(parent: &mut ChildSpawnerCommands) {
     parent.spawn((
         Text::new(format!(

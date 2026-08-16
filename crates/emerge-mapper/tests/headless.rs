@@ -656,6 +656,40 @@ mod stepped {
         assert_eq!(project.policy.face_bands, 1);
     }
 
+    /// **Every tab offers the way out, and the pointer can take it.**
+    ///
+    /// Asked for at the keyboard: *"when we go into the map editor, we actually need a button to go
+    /// back to the main UI."* There was only `Cmd+O` — a key nothing on screen mentioned, in the
+    /// one place where not finding it means closing the window.
+    ///
+    /// Four tabs build their own furniture, so the failure this guards is a fifth arriving without
+    /// one, or a panel losing it in a rewrite. It also asserts the entity is **pickable**: the panel
+    /// root is `Pickable::IGNORE` so the world stays reachable through it, and a button inheriting
+    /// that would look exactly like a working one and answer no clicks at all.
+    #[test]
+    fn every_panel_offers_the_way_back() {
+        let mut app = harness::build_headless(&root(), "untitled_map", Some("site"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        for _ in 0..10 {
+            app.update();
+        }
+        let mut q = app
+            .world_mut()
+            .query::<(&emerge_mapper::chrome::BackButton, &bevy::picking::Pickable)>();
+        let found: Vec<_> = q.iter(app.world()).collect();
+        assert!(
+            found.len() >= 4,
+            "each tab's panel needs its own way back; found {}",
+            found.len()
+        );
+        assert!(
+            found
+                .iter()
+                .all(|(_, p)| p.should_block_lower || p.is_hoverable),
+            "a back button inheriting the panel root's `Pickable::IGNORE` answers no clicks"
+        );
+    }
+
     /// **An ASSET-CONTRACT test — it reads the shipped corpus on purpose.**
     ///
     /// Reported live: sending `site/floor` over from the PLACE list "didn't open the item in Tiles",
@@ -8215,10 +8249,12 @@ fn the_chooser_sees_the_shipped_kits() {
 #[test]
 fn the_menu_key_refuses_to_leave_unsaved_work() {
     use bevy::app::AppExit;
-    use emerge_mapper::keys::{binding, Action, MOD_KEYS};
+    use emerge_mapper::keys::{Action, MOD_KEYS, binding};
     use emerge_mapper::project::Project;
 
-    let root = Fixture::new("menu-key").descriptor("floor", "alpha").build("m");
+    let root = Fixture::new("menu-key")
+        .descriptor("floor", "alpha")
+        .build("m");
     let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
     for _ in 0..3 {
         app.update();
@@ -8244,10 +8280,32 @@ fn the_menu_key_refuses_to_leave_unsaved_work() {
         );
         app.update();
     };
+    let tap = |app: &mut App, key: KeyCode| {
+        app.add_systems(
+            Update,
+            IntoScheduleConfigs::before(
+                move |mut input: ResMut<bevy::input::ButtonInput<KeyCode>>,
+                      mut done: Local<bool>| {
+                    if !*done {
+                        input.release_all();
+                        input.press(key);
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    };
     let exits = |app: &App| {
         app.world()
             .get_resource::<bevy::ecs::message::Messages<AppExit>>()
             .map_or(0, bevy::ecs::message::Messages::len)
+    };
+    let leaving = |app: &App| {
+        app.world()
+            .resource::<emerge_mapper::editor::EditorState>()
+            .leaving
     };
 
     // **Dirty: it must not go.**
@@ -8268,6 +8326,11 @@ fn the_menu_key_refuses_to_leave_unsaved_work() {
         "Cmd+O left with unsaved edits on the map — that discards work the undo stack cannot get \
          back, because it does not survive the process"
     );
+    assert!(
+        leaving(&app),
+        "it must ASK rather than merely refuse: a refusal cannot lose anything and is also a dead \
+         end, and the author still wants to leave"
+    );
     let said = app
         .world()
         .resource::<emerge_mapper::editor::EditorState>()
@@ -8278,16 +8341,43 @@ fn the_menu_key_refuses_to_leave_unsaved_work() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(
-        said.contains("unsaved") && said.contains("Cmd+S"),
-        "the refusal has to name the way out of it, per docs/ui.md §1.4; it said: {said}"
+        said.contains("unsaved")
+            && said.contains(" S ")
+            && said.contains('D')
+            && said.contains("Esc"),
+        "the question has to name every answer, per docs/ui.md §1.4; it said: {said}"
     );
 
-    // **Saved: it goes.**
+    // **Esc stays, and changes nothing.** The first press of anything must never be the one that
+    // loses work.
+    tap(&mut app, KeyCode::Escape);
+    assert!(!leaving(&app), "Esc puts the question away");
+    assert_eq!(exits(&app), before, "and does not leave");
+    assert!(
+        app.world().resource::<Project>().dirty,
+        "nor save behind your back"
+    );
+
+    // **`D` is the one answer that discards, and it takes a key that means nothing else here.**
+    chord(&mut app);
+    assert!(leaving(&app), "asking again");
+    tap(&mut app, KeyCode::KeyD);
+    assert!(
+        exits(&app) > before,
+        "D discards and goes — the whole reason this asks instead of refusing"
+    );
+
+    // **Saved: it goes without asking at all.**
+    let before = exits(&app);
     {
         let mut project = app.world_mut().resource_mut::<Project>();
         project.dirty = false;
     }
     chord(&mut app);
+    assert!(
+        !leaving(&app),
+        "nothing to ask about when nothing is unsaved"
+    );
     assert!(
         exits(&app) > before,
         "with nothing unsaved, Cmd+O must actually leave — otherwise there is no way back to the \

@@ -216,6 +216,7 @@ fn spawn_compose_panel(mut commands: Commands) {
     .insert(ComposeRoot)
     .with_children(|p| {
         crate::chrome::title(p, "COMPOSE");
+        crate::chrome::back_button(p);
         // Directly under the title, above everything a working author reads — a problem that has to
         // be scrolled to is a problem that gets missed.
         crate::chrome::problem_banner(p, &[Mode::Compose]);

@@ -151,6 +151,10 @@ fn main() {
 fn run_chooser(root: &std::path::Path, kit: Option<&str>) {
     use emerge_mapper::chooser::{Catalog, Chooser, ChooserPlugin};
 
+    // **What the last round opened**, so coming back out of the editor lands on it rather than on
+    // wherever the original command line pointed. See `Chooser::reveal`.
+    let mut last: Option<(Option<String>, String)> = None;
+
     // **A loop, not recursion.** Each round builds an `App`; recursing would keep every previous
     // one alive on the stack for as long as the author kept bouncing between the menu and a map.
     loop {
@@ -176,7 +180,7 @@ fn run_chooser(root: &std::path::Path, kit: Option<&str>) {
         // logical pixels — `WindowResolution::new` takes PHYSICAL ones, so this is the right shape
         // and, on a scaled display, the wrong number.
         let (kits, maps) = catalog.shape();
-        let (w, h) = emerge_mapper::chooser::window_size(kits, maps, false);
+        let (w, h) = emerge_mapper::chooser::window_size(kits, maps);
         let out: emerge_mapper::chooser::Choice = std::sync::Arc::new(std::sync::Mutex::new(None));
         let mut app = App::new();
         app.add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -191,7 +195,13 @@ fn run_chooser(root: &std::path::Path, kit: Option<&str>) {
         .insert_resource(UiScale(emerge_mapper::chooser::UI_SCALE))
         .add_plugins((
             ChooserPlugin {
-                chooser: Chooser::new(root.to_path_buf(), catalog, kit),
+                chooser: {
+                    let mut c = Chooser::new(root.to_path_buf(), catalog, kit);
+                    if let Some((k, m)) = &last {
+                        c.reveal(k.as_deref(), Some(m));
+                    }
+                    c
+                },
                 out: out.clone(),
             },
             // **The chooser is entirely UI, so devshot is the only way to see it.** Bevy draws a UI
@@ -244,6 +254,17 @@ fn run_chooser(root: &std::path::Path, kit: Option<&str>) {
                 std::process::exit(1);
             }
         };
+        // Remember it before handing control to the editor, so the next round can put the keyboard
+        // back where it was. `args` is `[root, map, (--kit, kit)?]` — the same shape `main` parses.
+        last = args.get(1).map(|map| {
+            let kit = args
+                .iter()
+                .position(|a| a == "--kit")
+                .and_then(|i| args.get(i + 1))
+                .cloned();
+            (kit, map.clone())
+        });
+
         match std::process::Command::new(&exe).args(&args).status() {
             // **`BACK_TO_MENU` means round again, not done.** `Cmd+O` in the editor exits with it,
             // and this is the whole of "go back to the menu": no teardown and no reload, the

@@ -203,6 +203,19 @@ pub struct EditorState {
     /// frame would tear the whole palette down and rebuild it at frame rate. This changes twice per
     /// use; those change every frame, so they live elsewhere.
     pub tool: Tool,
+    /// **A question is up: leaving for the chooser would lose unsaved work.**
+    ///
+    /// This began as a flat refusal — `Cmd+O` said *"unsaved changes, `Cmd+S` first"* and did
+    /// nothing, on the argument that a refusal cannot lose anything. Asked for at the keyboard:
+    /// *"[it] should probably prompt the user for any unsaved changes if they go back to the main
+    /// menu."* A refusal is safe and it is also a dead end — the author still wants to leave, and
+    /// the editor made them work out how on their own.
+    ///
+    /// So it asks, and every answer is a key that names what it does: `S` save and go, `D` discard
+    /// and go, `Esc` stay. `Enter` deliberately answers nothing — it is the most-pressed key in this
+    /// editor, and a question about discarding work must not be answerable by reflex. That is the
+    /// same rule the chooser's delete prompt follows, where `Y` agrees and `Enter` does not.
+    pub leaving: bool,
 }
 
 impl EditorState {
@@ -570,6 +583,7 @@ impl Default for EditorState {
             undo: Vec::new(),
             redo: Vec::new(),
             tool: Tool::default(),
+            leaving: false,
         }
     }
 }
@@ -839,6 +853,9 @@ impl Plugin for EditorPlugin {
                 ),
             )
             .add_observer(crate::filter::on_click)
+            .add_systems(Update, wire_back_buttons)
+            // Ahead of every verb, because two of its three answers are also map verbs.
+            .add_systems(Update, answer_the_leaving_prompt.before(keys::Phase::Act))
             .add_systems(
                 Startup,
                 (
@@ -988,6 +1005,92 @@ fn spawn_cost_readout(mut commands: Commands) {
         });
 }
 
+/// **Leave for the chooser — the whole decision, in one place.**
+///
+/// Two things ask for it: `Cmd+O`, and the panel's `‹ kits & maps` button. That is two entry points
+/// to one path, the way `N` and `Enter` on a `+ new …` row both start the same creation — and it is
+/// what keeps the unsaved-work refusal from being written twice and drifting apart. A button that
+/// discarded work the key would have protected is the exact failure this shape rules out.
+pub fn leave_for_menu(
+    project: &Project,
+    state: &mut EditorState,
+    exit: &mut MessageWriter<bevy::app::AppExit>,
+) {
+    if project.dirty {
+        state.leaving = true;
+        state
+            .status
+            .problem("unsaved changes — S save and go, D discard and go, Esc stay".to_owned());
+    } else {
+        state.status.note("back to the menu".to_owned());
+        exit.write(bevy::app::AppExit::from_code(crate::chooser::BACK_TO_MENU));
+    }
+}
+
+/// **Answer the leaving question, and nothing else.**
+///
+/// Runs ahead of [`keys`], which stands down entirely while this is up — otherwise `S` and `D` would
+/// do their ordinary jobs on the map at the same moment they answer a question about discarding it.
+/// The three keys are the three real outcomes; there is no fourth, and no default.
+fn answer_the_leaving_prompt(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<EditorState>,
+    mut exit: MessageWriter<bevy::app::AppExit>,
+) {
+    if !state.leaving {
+        return;
+    }
+    if keyboard.just_pressed(KeyCode::Escape) {
+        state.leaving = false;
+        state.status.note("staying on this map".to_owned());
+    } else if keyboard.just_pressed(KeyCode::KeyD) {
+        // The one branch that loses work, on a key that means nothing else here.
+        state.leaving = false;
+        exit.write(bevy::app::AppExit::from_code(crate::chooser::BACK_TO_MENU));
+    } else if keyboard.just_pressed(KeyCode::KeyS) {
+        // **Through `Project::save`, the same door `Cmd+S` uses** — validate, then an atomic write.
+        // A save that refuses keeps you here with the reason rather than leaving on a map that was
+        // never written.
+        match project.save() {
+            Ok(()) => {
+                state.leaving = false;
+                exit.write(bevy::app::AppExit::from_code(crate::chooser::BACK_TO_MENU));
+            }
+            Err(e) => {
+                state.leaving = false;
+                state.status.problem(format!("NOT SAVED: {e}"));
+            }
+        }
+    }
+}
+
+/// **Give every back button its click, wherever a panel put one.**
+///
+/// Four tabs each build their own furniture, so the button is spawned in four places; hanging the
+/// observer here rather than at each spawn site means a fifth tab gets a working button by calling
+/// `chrome::back_button` and nothing else. `Added` fires once per entity, so this is a no-op on
+/// every frame after the panels are built.
+fn wire_back_buttons(
+    mut commands: Commands,
+    fresh: Query<Entity, Added<crate::chrome::BackButton>>,
+) {
+    for e in &fresh {
+        commands.entity(e).observe(back_button_clicked);
+    }
+}
+
+/// Hang the click on whichever panel spawned the button. An observer rather than a polling system,
+/// so it costs nothing on the frames nobody clicks.
+fn back_button_clicked(
+    _: On<bevy::picking::events::Pointer<bevy::picking::events::Click>>,
+    project: Res<Project>,
+    mut state: ResMut<EditorState>,
+    mut exit: MessageWriter<bevy::app::AppExit>,
+) {
+    leave_for_menu(&project, &mut state, &mut exit);
+}
+
 /// Build the panel's fixed furniture. The palette itself is `rebuild_palette`'s, which is why neither
 /// the project nor the thumbnails are read here — they were parameters that had stopped being used.
 fn spawn_panel(mut commands: Commands) {
@@ -1003,6 +1106,7 @@ fn spawn_panel(mut commands: Commands) {
 
     commands.entity(root).with_children(|p| {
         crate::chrome::title(p, "EMERGE MAPPER");
+        crate::chrome::back_button(p);
         crate::chrome::problem_banner(p, &[crate::tiles::Mode::Map]);
         crate::chrome::shortcut_hint(p);
 
@@ -4298,6 +4402,12 @@ fn keys(
         ResMut<crate::tiles::ImportState>,
     ),
 ) {
+    // **Every other verb stands down while the leaving question is up.** `S` and `D` answer it and
+    // both mean something else on a map; a question that could be answered *and* acted on by one
+    // press is a question that changes the thing it is asking about.
+    if state.leaving {
+        return;
+    }
     let (mode, import) = &mut tiles;
     let (move_drag, clone_drag, target, proposal, compose) = &mut tools;
     // One clock for every key that repeats while held — see `keys::repeating`.
@@ -4529,14 +4639,7 @@ fn keys(
     // this names `Cmd+S` and does nothing, which cannot lose anything; an author who genuinely wants
     // to discard closes the window, and that is a gesture nobody presses by accident.
     if keys::just_pressed(&keyboard, *live, Action::MainMenu) {
-        if project.dirty {
-            state.status.problem(
-                "unsaved changes — Cmd+S first, or close the window to leave them".to_owned(),
-            );
-        } else {
-            state.status.note("back to the menu".to_owned());
-            exit.write(bevy::app::AppExit::from_code(crate::chooser::BACK_TO_MENU));
-        }
+        leave_for_menu(&project, &mut state, &mut exit);
         return;
     }
 
