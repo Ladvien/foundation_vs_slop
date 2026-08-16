@@ -741,19 +741,23 @@ mod tests {
         let c = Chooser::new(root.0.clone(), catalog, Some("site"));
 
         let s = c.screen();
-        assert!(
-            s.kit_header.contains("site"),
-            "the kit panel names the kit: {}",
-            s.kit_header
-        );
-        assert!(
-            s.settings_header.contains("hall"),
-            "the map panel names the map: {}",
-            s.settings_header
-        );
+        // **The headers say what kind of thing, not which one.** They used to carry `— site` and
+        // `— hall`, and that was reported as stray text: the panel sits under the list it belongs
+        // to, with the chevron on the row it describes, so the name was words restating a fact the
+        // layout already makes. What must still hold is that the two cannot be confused, and that
+        // each panel carries only its own subject's rows.
+        assert_eq!(s.kit_header, "KIT INFO");
+        assert_eq!(s.settings_header, "MAP INFO");
         assert_ne!(
             s.kit_header, s.settings_header,
             "and they cannot be confused for each other"
+        );
+        // The map's name is not lost — it is the first row of its own panel, which is where an
+        // author would look for it.
+        assert!(
+            s.settings.iter().any(|r| r.right == "hall"),
+            "the map names itself in its own rows: {:?}",
+            s.settings
         );
 
         // The kit panel carries the kit's facts and none of the map's.
@@ -861,6 +865,40 @@ mod tests {
             "standing on the kit just made, so the column beside it is already its own"
         );
         assert!(!c.editing, "and no longer typing");
+    }
+
+    /// **And the same for a map**, asked for in those words. A map made this way takes
+    /// `Map::default()`'s bounds, which is not a substitution — `MAP INFO` edits them afterwards
+    /// through the same validate-then-atomic write, so nothing is reachable before creation that
+    /// is not reachable after it.
+    #[test]
+    fn naming_a_map_makes_it_and_lands_on_it() {
+        let root = Root::new("map-by-enter");
+        root.kit(Some("site"), 2);
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
+
+        c.focus = Focus::Maps;
+        c.start_new();
+        assert!(matches!(c.creating, Some(New::Map(_))), "making a map");
+        assert!(c.editing, "straight into the name");
+        c.raw = "porch".to_owned();
+        keep_field(&mut c, Field::Name);
+
+        assert_eq!(c.problem, None, "nothing to refuse");
+        assert!(c.creating.is_none(), "one Enter finishes a map too");
+        assert_eq!(c.focus, Focus::Maps, "the keyboard comes back to the list");
+        assert_eq!(
+            c.current_map().map(|m| m.name.clone()),
+            Some("porch".to_owned()),
+            "standing on the map just made"
+        );
+        // And its settings are the ones a map starts with — editable from here, not lost.
+        assert!(
+            c.screen().settings.iter().any(|r| r.left == "BOUNDS"),
+            "bounds are still reachable, in MAP INFO: {:?}",
+            c.screen().settings
+        );
     }
 
     /// **A kit with no name is refused, and the refusal keeps you in the field.** The one thing
@@ -1075,18 +1113,155 @@ mod tests {
     /// Pressing Delete with the arrows on the kit list is a refusal that says what to do, not a
     /// silent no-op (`docs/ui.md` §1.4).
     #[test]
-    fn delete_outside_the_map_panel_says_what_to_do() {
+    fn delete_asks_about_whichever_list_you_are_in() {
         let root = Root::new("wrong-panel");
-        root.kit(Some("site"), 1);
+        root.kit(None, 4);
+        let kit = root.kit(Some("site"), 1);
+        create_map(&kit, "hall", (4.0, 3.0, 4.0), (0.0, 0.0, 0.0), None)
+            .unwrap_or_else(|e| panic!("{e}"));
         let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
         let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
+
+        // On the kit list it asks about the kit, and names what is inside it.
         assert_eq!(c.focus, Focus::Kits);
+        c.ask_delete().unwrap_or_else(|e| panic!("{e}"));
+        match &c.ask {
+            Some(Ask::Delete(p)) => {
+                assert!(p.kit, "the kit list asks about a kit");
+                assert_eq!(p.name, "site");
+                assert!(p.path.is_dir(), "and holds the directory that would go");
+            }
+            other => panic!("expected a kit deletion: {other:?}"),
+        }
+        c.ask = None;
+
+        // On the map list it asks about the map.
+        c.focus = Focus::Maps;
+        c.ask_delete().unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            matches!(&c.ask, Some(Ask::Delete(p)) if !p.kit && p.name == "hall"),
+            "{:?}",
+            c.ask
+        );
+        c.ask = None;
+
+        // In the settings there is nothing to remove, and the refusal says where to be.
+        c.focus = Focus::Settings;
         let e = c
             .ask_delete()
             .err()
-            .unwrap_or_else(|| panic!("must refuse from the kit panel"));
-        assert!(e.contains("Tab to the map panel"), "{e}");
+            .unwrap_or_else(|| panic!("must refuse from the settings"));
+        assert!(e.contains("Tab to one of those lists"), "{e}");
         assert!(c.ask.is_none());
+    }
+
+    /// **The question counts in English.** `1 maps` reads as generated rather than written, in the
+    /// one sentence on this screen that has to be trusted before a directory is removed.
+    #[test]
+    fn the_question_counts_in_english() {
+        let root = Root::new("plurals");
+        root.kit(None, 1);
+        let kit = root.kit(Some("site"), 1);
+        create_map(&kit, "hall", (4.0, 3.0, 4.0), (0.0, 0.0, 0.0), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
+        c.focus = Focus::Kits;
+        c.ask_delete().unwrap_or_else(|e| panic!("{e}"));
+
+        let asked = c
+            .screen()
+            .asking
+            .unwrap_or_else(|| panic!("a question is up"));
+        // **The question carries no counts at all**, deliberately: `KIT INFO` is beside it saying
+        // exactly that, and a question restating its neighbour is text to read rather than a
+        // decision to make.
+        assert!(asked.contains("delete kit `site`?"), "{asked}");
+        assert!(asked.contains('Y') && asked.contains("Esc"), "{asked}");
+        assert!(
+            !asked.contains("piece") && !asked.contains("map "),
+            "no inventory in the question: {asked}"
+        );
+        assert_eq!(plural(0, "map"), "maps", "zero is plural");
+        assert_eq!(plural(2, "piece"), "pieces");
+
+        // And the map rows count the same way. A fresh map is `empty` rather than `0 pieces`, so
+        // what this can observe is the absence of the parenthetical — `1 piece(s)` was the same
+        // defect one row above the line that was reported.
+        c.ask = None;
+        let rows = c.screen().maps;
+        assert!(
+            !rows.iter().any(|r| r.right.contains("(s)")),
+            "no parenthetical plurals anywhere: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.right == "empty"),
+            "and a new map reads as empty, not as a count of nothing: {rows:?}"
+        );
+    }
+
+    /// **The default kit is not deletable, and that is the one guard that matters.** It is
+    /// `assets/emerge` itself — every other kit is a subdirectory of it — so `remove_dir_all` there
+    /// would take the whole library. It is refused at the question, not warned about after.
+    #[test]
+    fn the_default_kit_cannot_be_deleted() {
+        let root = Root::new("root-kit-safe");
+        root.kit(None, 3);
+        root.kit(Some("site"), 1);
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, None);
+
+        // Stand on the root kit — the one whose `flag` is None.
+        let i = c
+            .catalog
+            .kits
+            .iter()
+            .position(|k| k.flag.is_none())
+            .unwrap_or_else(|| panic!("the root kit is always listed"));
+        c.kit = i + 1;
+        c.focus = Focus::Kits;
+
+        let e = c
+            .ask_delete()
+            .err()
+            .unwrap_or_else(|| panic!("must refuse the default kit"));
+        assert!(e.contains("default kit"), "{e}");
+        assert!(c.ask.is_none(), "and nothing is pending");
+        // **But the verb is still listed.** Hiding it on the row an author lands on taught "there
+        // is no delete here" rather than "not this kit" — reported in those words.
+        assert!(
+            c.hint().contains("Delete"),
+            "the verb stays visible; the refusal is what teaches: {}",
+            c.hint()
+        );
+    }
+
+    /// **Agreeing removes the whole directory, and the keyboard lands somewhere real.**
+    #[test]
+    fn deleting_a_kit_takes_the_directory_with_it() {
+        let root = Root::new("kit-delete");
+        root.kit(None, 2);
+        let doomed = root.kit(Some("scratch"), 1);
+        root.kit(Some("site"), 1);
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("scratch"));
+
+        c.focus = Focus::Kits;
+        c.ask_delete().unwrap_or_else(|e| panic!("{e}"));
+        assert!(doomed.exists(), "asking removes nothing");
+
+        let gone = c.confirm_delete().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(gone, "scratch");
+        assert!(!doomed.exists(), "the whole kit directory goes");
+        assert!(
+            !c.catalog.kits.iter().any(|k| k.label == "scratch"),
+            "and it is off the list"
+        );
+        assert_eq!(c.focus, Focus::Kits, "the keyboard stays on the kit list");
+        assert!(
+            c.current_kit().is_some(),
+            "standing on a kit that still exists"
+        );
     }
 
     /// An empty kit is a kit with no maps, not an error — and the screen turns that into an
@@ -1273,8 +1448,15 @@ pub enum Ask {
 /// it names the map and the file, because "are you sure?" is not information.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pending {
-    pub map: String,
+    /// What the row said — the map's name, or the kit's label.
+    pub name: String,
+    /// The file or directory that goes. **A path, never a row index**: a prompt remembering "row 2"
+    /// deletes whatever row 2 became if the list moved underneath it.
     pub path: PathBuf,
+    /// `true` when `path` is a whole kit directory. Decides `remove_dir_all` against `remove_file`,
+    /// and it is carried rather than re-derived so the question and the act cannot disagree about
+    /// what is being removed.
+    pub kit: bool,
 }
 
 /// **What is being made**, which is decided by the panel the arrows were in.
@@ -1480,17 +1662,50 @@ impl Chooser {
     /// would delete whatever row 2 became if the list moved underneath it; a prompt holding a path
     /// deletes the file it named or nothing at all.
     pub fn ask_delete(&mut self) -> Result<(), String> {
-        if self.focus != Focus::Maps {
-            return Err("select a map first — Tab to the map panel, then Delete".to_owned());
+        match self.focus {
+            Focus::Maps => {
+                let m = self
+                    .current_map()
+                    .ok_or_else(|| "there is no map here to delete".to_owned())?;
+                self.ask = Some(Ask::Delete(Pending {
+                    name: m.name.clone(),
+                    path: m.path.clone(),
+                    kit: false,
+                }));
+                Ok(())
+            }
+            // **A kit goes as a whole directory**, which is why the question names what is inside
+            // it. Asked for at the keyboard: *"under the kits area, I don't see a way to delete the
+            // kits."*
+            Focus::Kits => {
+                let k = self
+                    .current_kit()
+                    .ok_or_else(|| "there is no kit here to delete".to_owned())?;
+                // **The root kit is refused, and this is the guard that matters.** It is
+                // `assets/emerge` itself — the directory every other kit is a subdirectory of, and
+                // the one holding the shared vocabulary. `remove_dir_all` on it would take the
+                // whole library, so it is not offered rather than offered and warned about.
+                if k.flag.is_none() {
+                    // Short on purpose. It used to explain the directory layout — *"every other
+                    // kit lives inside it"* — and that was reported as too much: *"I don't need
+                    // quite as much text… just say it can't be deleted."* A refusal is read while
+                    // reaching for the next key, so it says which and that it won't, and stops.
+                    return Err(format!(
+                        "`{}` is the default kit and cannot be deleted",
+                        k.label
+                    ));
+                }
+                self.ask = Some(Ask::Delete(Pending {
+                    name: k.label.clone(),
+                    path: k.dir.clone(),
+                    kit: true,
+                }));
+                Ok(())
+            }
+            Focus::Settings => {
+                Err("Delete removes a kit or a map — Tab to one of those lists first".to_owned())
+            }
         }
-        let m = self
-            .current_map()
-            .ok_or_else(|| "there is no map here to delete".to_owned())?;
-        self.ask = Some(Ask::Delete(Pending {
-            map: m.name.clone(),
-            path: m.path.clone(),
-        }));
-        Ok(())
     }
 
     /// **Agree to it.** Removes the file the question named, then rescans so the list is a
@@ -1499,13 +1714,21 @@ impl Chooser {
         let Some(Ask::Delete(pending)) = self.ask.take() else {
             return Err("no deletion was asked about".to_owned());
         };
-        std::fs::remove_file(&pending.path)
-            .map_err(|e| format!("could not delete `{}`: {e}", pending.map))?;
+        // One call or the other, chosen by what the question captured — not by looking at the
+        // path again, which could have become a different kind of thing in between.
+        let gone = if pending.kit {
+            std::fs::remove_dir_all(&pending.path)
+        } else {
+            std::fs::remove_file(&pending.path)
+        };
+        gone.map_err(|e| format!("could not delete `{}`: {e}", pending.name))?;
+        // The label `rescan_keeping_place` would try to hold is the kit just removed, so it falls
+        // through to the first real row — which is where the keyboard should be anyway.
         rescan_keeping_place(self, None);
-        if self.current_map().is_none() {
+        if pending.kit || self.current_map().is_none() {
             self.focus = Focus::Kits;
         }
-        Ok(pending.map)
+        Ok(pending.name)
     }
 
     /// **What the editor would be launched with**, or why it cannot be.
@@ -1973,11 +2196,17 @@ impl Chooser {
                         MapSummary::Read {
                             placements, stamps, ..
                         } => {
+                            // `1 piece`, not `1 piece(s)` — see [`plural`]. The parenthetical is
+                            // the same defect as `1 maps`, one row up from where it was reported.
                             let text = match (placements, stamps) {
                                 (0, 0) => "empty".to_owned(),
-                                (p, 0) => format!("{p} piece(s)"),
-                                (0, t) => format!("{t} tile(s)"),
-                                (p, t) => format!("{p} piece(s), {t} tile(s)"),
+                                (p, 0) => format!("{p} {}", plural(*p, "piece")),
+                                (0, t) => format!("{t} {}", plural(*t, "tile")),
+                                (p, t) => format!(
+                                    "{p} {}, {t} {}",
+                                    plural(*p, "piece"),
+                                    plural(*t, "tile")
+                                ),
                             };
                             let tone = if *placements == 0 && *stamps == 0 {
                                 Tone::Empty
@@ -2019,14 +2248,19 @@ impl Chooser {
                 // screen, and a destructive prompt answered by the most-pressed key gets answered
                 // by accident), and a deliberate choice nobody can see is indistinguishable from
                 // no choice at all.
-                Ask::Delete(c) => format!(
-                    "delete `{}`? Y removes {} for good — Esc keeps it",
-                    c.map,
-                    c.path.file_name().map_or_else(
-                        || c.path.display().to_string(),
-                        |f| f.to_string_lossy().into_owned()
-                    )
-                ),
+                // **Only what is needed to decide.** It named the piece and map counts, and for a
+                // map the file name too — reported at the keyboard: *"I don't want how much stuff
+                // is in there, I can see that in the info area. Just give me the text that I need
+                // to decide."* `KIT INFO` sits on screen beside the question still showing those
+                // counts, so restating them is the same defect as the header that repeated the
+                // selected kit's name. What only the question can say is which thing, that it is
+                // final, and which key agrees.
+                Ask::Delete(c) if c.kit => {
+                    format!("delete kit `{}`? Y removes it all, Esc keeps it", c.name)
+                }
+                Ask::Delete(c) => {
+                    format!("delete `{}`? Y removes it for good, Esc keeps it", c.name)
+                }
                 Ask::Quit => "quit emerge-mapper? Y quits — Esc stays".to_owned(),
             }),
             problem: self.problem.clone(),
@@ -2083,7 +2317,12 @@ impl Chooser {
                 tone: Tone::Empty,
             });
         }
-        (format!("KIT INFO — {}", k.label), rows)
+        // **No `— <name>` after it.** Reported at the keyboard: *"what is the m-dash scratch in the
+        // info area? … they should be able to intuit things, not have to read it."* The suffix was
+        // added when this was one shared panel that could not say whose settings it held. It now
+        // sits directly under the list it belongs to, with the chevron marking the row it is
+        // about — so the name was restating, in words, a fact the layout already made.
+        ("KIT INFO".to_owned(), rows)
     }
 
     /// How many packs this kit's policy excludes. Read from the kit's own `project.ron` rather than
@@ -2137,7 +2376,9 @@ impl Chooser {
                     // list. Selecting one is what asks the question, so it is read here.
                     let (origin, note) = read_origin_and_note(&m.path);
                     (
-                        format!("MAP INFO — {}", m.name),
+                        // The map's own name is the first row of this panel, so a name in the header was
+                        // saying it twice — see the kit header above for the report behind this.
+                        "MAP INFO".to_owned(),
                         m.name.clone(),
                         *bounds,
                         origin,
@@ -2214,31 +2455,53 @@ impl Chooser {
 
     fn hint_when_nothing_is_asked(&self) -> &'static str {
         match self.focus {
-            // A kit's name is its only field, so `Enter` here finishes it rather than merely
-            // keeping it — and the line has to say so, or the key that makes a kit is invisible.
+            // Naming finishes the thing, so the line has to say which thing — otherwise the key
+            // that makes a map is invisible, which is how it got reported in the first place.
             _ if self.editing && matches!(self.creating, Some(New::Kit(_))) => {
                 "type    Enter makes the kit    Esc cancel"
             }
+            _ if self.editing && matches!(self.creating, Some(New::Map(_))) => {
+                "type    Enter makes the map    Esc cancel"
+            }
             _ if self.editing => "type    Enter keep    Esc leave the field",
-            // Reached by leaving the name field with Esc while still making a kit. `Ctrl+Enter` is
-            // deliberately absent: a kit is made by naming it, and there is no second way.
-            Focus::Settings if matches!(self.creating, Some(New::Kit(_))) => {
-                "Enter name it    Esc cancel"
-            }
-            Focus::Settings if self.creating.is_some() => {
-                "up/down field    Enter edit    Tab panel    Ctrl+Enter make it    Esc cancel"
-            }
+            // Reached by leaving the name field with Esc while still making something. No chord is
+            // offered: naming it is what makes it, and there is no second way.
+            Focus::Settings if self.creating.is_some() => "Enter name it    Esc cancel",
             Focus::Settings => "up/down field    Enter edit    Tab panel    Esc quit",
             // **Only verbs that would do something right now.** `Enter` opens a map — so it is
             // not offered on a kit with none, nor on the `+ new` row where it makes instead.
             Focus::Kits if self.kit == 0 => "up/down kit    Enter new kit    Tab panel    Esc quit",
+            // **`Delete` is listed on the default kit too, even though it refuses there.**
+            //
+            // It was hidden at first, on the rule that a verb which only produces a refusal should
+            // not be offered. That rule was right about maps and wrong here, and the report says
+            // why: *"I'm still not seeing the delete in the kits area."* The default kit is the
+            // first row and the one an author lands on, so hiding the verb there does not teach
+            // "not this kit" — it teaches "no such verb", which is the opposite of true.
+            //
+            // The refusal names the reason (every other kit lives inside this one), which is
+            // `docs/ui.md` §1.4: an unmet condition is an instruction.
             Focus::Kits if self.current_kit().is_some_and(|k| k.maps.is_empty()) => {
-                "up/down kit    Tab panel    N new kit    Esc quit"
+                "up/down kit    Tab panel    N new kit    Delete remove    Esc quit"
             }
-            Focus::Kits => "up/down kit    Tab panel    Enter open    N new kit    Esc quit",
+            Focus::Kits => {
+                "up/down kit    Tab panel    Enter open    N new kit    Delete remove    Esc quit"
+            }
             Focus::Maps if self.map == 0 => "up/down map    Enter new map    Tab panel    Esc quit",
             Focus::Maps => "up/down map    Tab panel    Enter open    Delete remove    Esc quit",
         }
+    }
+}
+
+/// **`1 map`, not `1 maps`.** Reported at the keyboard, about a different line: *"be careful about
+/// leaving stray text that doesn't make sense to the user."* A count that disagrees with its noun
+/// is exactly that — it reads as something generated rather than something written, in the one
+/// sentence on this screen that has to be trusted before a directory is removed.
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 {
+        word.to_owned()
+    } else {
+        format!("{word}s")
     }
 }
 
@@ -2871,25 +3134,29 @@ fn type_into_field(
     }
 }
 
-/// **Keep what was typed — and for a kit, keeping the name is the whole act.**
+/// **Keep what was typed — and while making something, keeping the name is the whole act.**
 ///
 /// Asked for at the keyboard: *"I create a new kit, I hit enter to confirm the name… once you hit
-/// enter, select the kit in the kit area."* It did not; the name was kept and the kit was made by a
-/// second, different key.
+/// enter, select the kit in the kit area"*, and then *"do the same for maps."* Neither did; the name
+/// was kept, and a second, different key — `Ctrl+Enter` — made the thing. A guide card written for
+/// this screen had already called that *"the key I trust least."*
 ///
-/// A kit has **one** field, so a commit door standing between "the name is right" and "make it"
-/// guards nothing — there is no second value that could still be wrong. A map has four, and its
-/// bounds are exactly the setting that was previously reachable only by editing source, so that one
-/// keeps `Ctrl+Enter`. The rule is the field count, not the kind of thing.
+/// The map half was argued the other way first, and the argument was wrong. It ran: a kit has one
+/// field so a commit door guards nothing, but a map has four, and its bounds were the setting once
+/// reachable only by editing source — so a map should keep its door. What that missed is that
+/// **`MAP INFO` edits a map that exists**, writing the file through the same validate-then-atomic
+/// door `Project::save` uses. Bounds set before creation and bounds set after are the same bounds
+/// by the same code. The door was not protecting the value; it was only making the author find a
+/// key to get past it.
 ///
-/// `make_it` already lands the selection on what was just made, so the keyboard comes back to the
-/// kit list with the new kit under it.
+/// So there is one rule for making things, and it is `Enter` on the name. `make_it` already lands
+/// the selection on what it made, so the keyboard comes back to the list with the new row under it.
 fn keep_field(chooser: &mut Chooser, field: Field) {
     if !commit_field(chooser, field) {
         return;
     }
     chooser.editing = false;
-    if let Some(new @ New::Kit(_)) = chooser.creating.clone() {
+    if let Some(new) = chooser.creating.clone() {
         chooser.problem = make_it(chooser, &new).err();
     }
 }
@@ -3182,25 +3449,10 @@ fn drive_chooser(
         }
     }
     if keyboard.just_pressed(KeyCode::Enter) {
-        // **`Ctrl+Enter` makes the MAP, and only the map**, because plain `Enter` in this panel
-        // means "edit this row" and a map has four rows that could still be wrong. Two verbs on one
-        // panel need two keys.
+        // **There is no `Ctrl+Enter` here any more.** Both a kit and a map are made by pressing
+        // `Enter` on the name (see [`keep_field`]); a chord that made the same thing a second way
+        // would be the way nobody found.
         //
-        // A kit is not in this branch: it has one field, so `Enter` on its name finishes it (see
-        // [`keep_field`]). Leaving `Ctrl+Enter` working for kits as well would be two ways to make
-        // one thing, and the second would be the one nobody found.
-        let commit_new = keyboard.any_pressed([
-            KeyCode::ControlLeft,
-            KeyCode::ControlRight,
-            KeyCode::SuperLeft,
-            KeyCode::SuperRight,
-        ]);
-        if let Some(new @ New::Map(_)) = chooser.creating.clone()
-            && commit_new
-        {
-            chooser.problem = make_it(&mut chooser, &new).err();
-            return;
-        }
         // In the settings, `Enter` opens the highlighted row for typing.
         if chooser.focus == Focus::Settings {
             chooser.raw.clear();
@@ -3589,12 +3841,8 @@ fn spawn_capture_rig(
     let (kits, maps) = chooser.catalog.shape();
     let (w, h) = window_size(kits, maps, chooser.has_message());
     let size = Extent3d {
-        // **The image is the viewport, one texel per logical pixel**, exactly as
-        // `$BEVY/examples/ui/render_ui_to_texture.rs` sizes it. A 2x image with `scale_factor: 2.0`
-        // was tried first, for a capture legible at 11 px type; it renders nothing. Sizing has to
-        // match what the camera thinks its viewport is, and `window_size()` is not integral
-        // (777.6 x 480), so the doubled target rounded to an odd 1555 and never agreed with any
-        // logical size. Legibility is a zoom on the capture, not a mismatched target.
+        // A starting size only. **`fit_capture_to_window` owns it**, in physical pixels taken from
+        // the window itself — see there for why that matters and what it cost to get wrong.
         width: w as u32,
         height: h as u32,
         depth_or_array_layers: 1,
@@ -3642,6 +3890,8 @@ fn spawn_capture_rig(
         },
         // `RenderTarget` is its own component in 0.19 — one of `Camera`'s `#[require]`s, not a
         // field on it. Listed in `CLAUDE.md` among the traps already paid for.
+        // Overwritten every frame from the window's own scale factor; see
+        // `fit_capture_to_window`. A fixed 1.0 here is what made the interface soft.
         RenderTarget::Image(ImageRenderTarget {
             handle: handle.clone(),
             scale_factor: 1.0,
@@ -3658,10 +3908,9 @@ fn spawn_capture_rig(
         // only by way of the image — one rendering path, and the capture is the same pixels.
         RenderLayers::layer(MIRROR_LAYER),
     ));
-    // **Scale 1, deliberately.** A `Camera2d`'s default projection makes one world unit one logical
-    // pixel, and the target is now sized in logical pixels, so the mirror is 1:1 with the window
-    // without a scale-factor correction — the correction that was there is what a physically-sized
-    // target would have needed.
+    // Its scale is set by `fit_capture_to_window`: a `Camera2d`'s default projection makes one
+    // world unit one *logical* pixel, and the target is sized in *physical* ones, so the sprite is
+    // drawn at `1 / scale_factor` to cover exactly the window it mirrors.
     commands.spawn((
         Mirror,
         Sprite::from_image(handle.clone()),
@@ -3682,17 +3931,23 @@ fn spawn_capture_rig(
 fn fit_capture_to_window(
     mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
     target: Query<&bevy::camera::RenderTarget, With<UiCamera>>,
+    mut mirror: Query<&mut Transform, With<Mirror>>,
+    mut ui_scale: ResMut<UiScale>,
     mut images: ResMut<Assets<Image>>,
     chooser: Res<Chooser>,
     extra: Res<ExtraRoom>,
 ) {
     use bevy::render::render_resource::Extent3d;
 
-    let (Ok(mut window), Ok(bevy::camera::RenderTarget::Image(t))) =
-        (windows.single_mut(), target.single())
+    let (Ok(mut window), Ok(target), Ok(mut mirror)) =
+        (windows.single_mut(), target.single(), mirror.single_mut())
     else {
         return;
     };
+    let bevy::camera::RenderTarget::Image(t) = target else {
+        return;
+    };
+    let handle = t.handle.clone();
 
     // **`set` takes LOGICAL pixels and `new` takes PHYSICAL ones**, which is why the window has been
     // the wrong size on a Retina display since it was written: `main.rs` can only pass `new`, so a
@@ -3710,17 +3965,55 @@ fn fit_capture_to_window(
         window.resolution.set(w, h);
     }
 
-    // The render target is the viewport the UI is laid out in, so it tracks the window rather than
-    // being fixed at startup — otherwise a card that grows the window is drawn outside the image and
-    // is missing from every capture of the moment it was up.
+    // **The target is sized in PHYSICAL pixels, and this is what makes the type sharp.**
+    //
+    // Reported at the keyboard: *"why isn't the text sharper? that feels like text rendered at a
+    // lower resolution and then zoomed in on."* It was exactly that. The interface renders to an
+    // image and the window shows that image, so the image *is* the resolution the interface is
+    // rasterised at — and it was sized in logical pixels. On a 2x display the window's surface is
+    // 1554 px wide and the texture was 777, upscaled by the sprite. Every glyph edge was an
+    // interpolation between texels that were never rendered.
+    //
+    // Taking the size from the window's own `physical_*` rather than multiplying the logical size
+    // by the scale factor keeps the two exactly equal — no rounding to disagree about.
+    let sf = window.scale_factor().max(1.0);
     let (iw, ih) = (
-        window.resolution.width().max(1.0) as u32,
-        window.resolution.height().max(1.0) as u32,
+        window.resolution.physical_width().max(1),
+        window.resolution.physical_height().max(1),
     );
-    let Some(mut image) = images.get_mut(&t.handle) else {
-        return;
-    };
-    if image.texture_descriptor.size.width != iw || image.texture_descriptor.size.height != ih {
+    // **`UiScale` is what carries the density, not the target's `scale_factor`.**
+    //
+    // The obvious move is `ImageRenderTarget { scale_factor: sf }` — layout in logical units,
+    // raster in physical ones. Bevy's own field doc says otherwise: *"This should almost always be
+    // 1.0"* (`bevy_camera-0.19.0/src/camera.rs:989`), and off that path it renders nothing at all —
+    // a flat `000000` frame with an empty log, twice.
+    //
+    // So the target stays at 1.0 and its pixels ARE its logical units, which means the interface
+    // has to be laid out at the physical size to fill it. `UiScale` multiplies every `Val::Px` and
+    // every font size, so scaling it by the window's factor lays the same design out twice as
+    // large in a twice-as-large target — and rasterises every glyph at that size, which is the
+    // whole point. The sprite then halves it back for the window.
+    let want_ui = UI_SCALE * sf;
+    if ui_scale.0 != want_ui {
+        ui_scale.0 = want_ui;
+    }
+    // And the sprite shrinks by the same factor, because a `Camera2d` world unit is one logical
+    // pixel: a `1554`-texel image drawn at `0.5` covers `777` logical pixels — the whole window,
+    // one texel per physical pixel, which is what sharp means here.
+    let want = Vec3::new(1.0 / sf, 1.0 / sf, 1.0);
+    if mirror.scale != want {
+        mirror.scale = want;
+    }
+    // Same rule for the image: `get_mut` marks the asset modified, so ask first.
+    let already = images.get(&handle).map(|i| {
+        (
+            i.texture_descriptor.size.width,
+            i.texture_descriptor.size.height,
+        )
+    });
+    if already != Some((iw, ih))
+        && let Some(mut image) = images.get_mut(&handle)
+    {
         image.resize(Extent3d {
             width: iw,
             height: ih,

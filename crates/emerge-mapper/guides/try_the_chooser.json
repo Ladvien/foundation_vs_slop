@@ -1,5 +1,5 @@
 {
-  "_": "Drives the CHOOSER, not the editor — its checkpoints are Chooser state, and guided.rs's every condition reads Res<Project>, which does not exist in that App.",
+  "_": "Drives the CHOOSER, not the editor \u2014 its checkpoints are Chooser state, and guided.rs's every condition reads Res<Project>, which does not exist in that App.",
   "app": "chooser",
   "steps": [
     {
@@ -10,7 +10,7 @@
         "say whether the containment is obvious, or whether you had to work it out"
       ],
       "checkpoint": null,
-      "recovery": "there is nothing to get wrong here — say what you saw, including 'I had to work it out'"
+      "recovery": "there is nothing to get wrong here \u2014 say what you saw, including 'I had to work it out'"
     },
     {
       "label": "which kit is blank",
@@ -20,36 +20,50 @@
         "then check the piece counts to see if you were right"
       ],
       "checkpoint": null,
-      "recovery": "if the blank one does not stand out, that is the report — say what you looked at first"
+      "recovery": "if the blank one does not stand out, that is the report \u2014 say what you looked at first"
     },
     {
       "label": "walk the kits with the arrows",
       "goal": "arrows move INSIDE a panel. Watch the two columns to the right change as you go -- they are that kit's maps and that map's settings",
-      "do": ["press up and down a few times", "watch the right-hand columns follow"],
+      "do": [
+        "press up and down a few times",
+        "watch the right-hand columns follow"
+      ],
       "checkpoint": "the kit list has the arrows",
       "recovery": "if a column does not follow the selection, say which one"
     },
     {
       "label": "go up to the very top row",
       "goal": "every list starts with a row that makes a new one. Landing on it means nothing is selected, so the columns beside it go blank on purpose -- showing the last kit's contents there would misrepresent what Enter is about to do",
-      "do": ["press up until you reach `+ new kit`", "look at the two columns to the right"],
+      "do": [
+        "press up until you reach `+ new kit`",
+        "look at the two columns to the right"
+      ],
       "checkpoint": "the highlighted row makes a new one",
       "recovery": "if the right-hand columns still show a kit's contents, that is the report"
     },
     {
       "label": "make a kit",
       "goal": "Enter on that row does what N does. A kit asks for one field, not four -- bounds and origin belong to a map",
-      "do": ["press Enter", "type a name like scratch"],
+      "do": [
+        "press Enter",
+        "type a name like scratch"
+      ],
       "checkpoint": "a new kit is being made",
       "recovery": "Esc backs out of the field; a second Esc abandons the whole thing"
     },
     {
-      "label": "commit it with Ctrl+Enter",
-      "goal": "the key I trust least in this screen. Enter means 'edit this row' in the settings, so making the thing needed its own key -- and it may simply feel wrong in the hand",
-      "do": ["press Ctrl+Enter", "look for the kit in the list"],
+      "label": "and that is the kit made",
+      "goal": "there is no second key. A kit has one field, so naming it IS making it -- and the keyboard should come straight back to the kit list with the new kit under it",
+      "do": [
+        "press Enter",
+        "look at which row is highlighted"
+      ],
       "checkpoint": "the kit exists",
-      "with": { "name": "scratch" },
-      "recovery": "if nothing happened, say what the message line said -- and say whether Ctrl+Enter was guessable"
+      "with": {
+        "name": "scratch"
+      },
+      "recovery": "if nothing happened, say what the message line said -- and say whether you expected Enter to finish it"
     },
     {
       "label": "make a map inside it",
@@ -63,10 +77,9 @@
       "recovery": "if Tab did not move you one column right, say where it went"
     },
     {
-      "label": "give it bounds before you make it",
-      "goal": "the setting that was previously reachable only by editing source. Tab moves between fields is WRONG here -- arrows move inside a panel, Tab crosses panels",
+      "label": "give it bounds after",
+      "goal": "the setting that was once reachable only by editing source. Arrows move inside a panel; Tab crosses panels",
       "do": [
-        "press Enter to keep the name",
         "press down to reach BOUNDS, then Enter to edit it",
         "type three numbers like 20 4 20, then Enter"
       ],
@@ -74,33 +87,50 @@
       "recovery": "if it refuses, the message names the rule -- that message is the report"
     },
     {
-      "label": "commit the map",
-      "goal": "same key as the kit, which is the point: one rule for making things",
-      "do": ["press Ctrl+Enter"],
+      "label": "and that is the map made",
+      "goal": "the same rule one column over: Enter on the name makes it. Bounds are edited afterwards in MAP INFO, which writes the file the same way",
+      "do": [
+        "press Enter",
+        "look at which row is highlighted"
+      ],
       "checkpoint": "the map exists",
-      "with": { "name": "porch" },
+      "with": {
+        "name": "porch"
+      },
       "recovery": "if it refused, say what it said"
     },
     {
       "label": "now delete it",
       "goal": "there is no undo for a removed file here, so the verb is split in two: asking changes nothing, agreeing is a separate key",
-      "do": ["make sure `porch` is highlighted in the map list", "press Delete"],
+      "do": [
+        "make sure `porch` is highlighted in the map list",
+        "press Delete"
+      ],
       "checkpoint": "a deletion is being asked about",
       "recovery": "Delete only works on the map list -- if it refused, it said so and named where to be"
     },
     {
       "label": "read the question, then decline it",
       "goal": "the question names the map and the file. Esc keeps it -- and the file must still be there afterwards",
-      "do": ["read what the question says", "press Esc", "check `porch` is still in the list"],
+      "do": [
+        "read what the question says",
+        "press Esc",
+        "check `porch` is still in the list"
+      ],
       "checkpoint": "nothing is being asked",
       "recovery": "if the map vanished on Esc, stop and say so -- that is data loss"
     },
     {
       "label": "delete it for real",
       "goal": "Y agrees. Not Enter, deliberately -- Enter opens maps and edits fields everywhere else on this screen, and a destructive prompt answered by the most-pressed key gets answered by accident",
-      "do": ["press Delete again", "press Y"],
+      "do": [
+        "press Delete again",
+        "press Y"
+      ],
       "checkpoint": "the map is gone",
-      "with": { "name": "porch" },
+      "with": {
+        "name": "porch"
+      },
       "recovery": "if Y did nothing, say so -- and say which key you expected to work"
     },
     {
@@ -117,7 +147,11 @@
     {
       "label": "Escape again, and again",
       "goal": "Escape unwinds one layer at a time and never destroys anything on the first press: leave the field, then abandon a draft, then ASK about quitting",
-      "do": ["press Escape a second time", "read what it asks", "press Esc again to stay"],
+      "do": [
+        "press Escape a second time",
+        "read what it asks",
+        "press Esc again to stay"
+      ],
       "checkpoint": "nothing is being asked",
       "recovery": "if it quit without asking, say at which press"
     },
