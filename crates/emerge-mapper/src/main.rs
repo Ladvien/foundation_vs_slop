@@ -151,75 +151,81 @@ fn main() {
 fn run_chooser(root: &std::path::Path, kit: Option<&str>) {
     use emerge_mapper::chooser::{Catalog, Chooser, ChooserPlugin};
 
-    let catalog = match Catalog::scan(root) {
-        Ok(c) => c,
-        Err(e) => {
+    // **A loop, not recursion.** Each round builds an `App`; recursing would keep every previous
+    // one alive on the stack for as long as the author kept bouncing between the menu and a map.
+    loop {
+        // **Rescanned every round**, so a map created or deleted while the editor was up is on the
+        // list when you come back. The catalog is a description of disk, never a cache of one.
+        let catalog = match Catalog::scan(root) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("emerge-mapper: {e}");
+                std::process::exit(1);
+            }
+        };
+        if catalog.kits.is_empty() {
+            eprintln!(
+                "emerge-mapper: {}/assets/emerge holds no kits — a kit is a directory with a \
+                 library.ron in it.",
+                root.display()
+            );
+            std::process::exit(1);
+        }
+
+        let (w, h) = emerge_mapper::chooser::window_size();
+        let out: emerge_mapper::chooser::Choice = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut app = App::new();
+        app.add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "emerge-mapper — choose a map".to_owned(),
+                resolution: bevy::window::WindowResolution::new(w as u32, h as u32),
+                ..default()
+            }),
+            ..default()
+        }))
+        .insert_resource(ClearColor(Color::srgb(0.035, 0.033, 0.030)))
+        .insert_resource(UiScale(emerge_mapper::chooser::UI_SCALE))
+        .add_plugins((
+            ChooserPlugin {
+                chooser: Chooser::new(root.to_path_buf(), catalog, kit),
+                out: out.clone(),
+            },
+            // **The chooser is entirely UI, so devshot is the only way to see it.** Bevy draws a UI
+            // tree to one camera, so `bevy_debugger`'s offscreen mirror — which is how an agent
+            // looks at the *editor* — returns a frame with nothing in it here.
+            bevy_devshot::DevShotPlugin,
+        ));
+        // The same borrowed face the editor installs — without it every `—` in this screen's copy
+        // draws as a tofu box, because Bevy's embedded default is 95 codepoints of ASCII.
+        if let Err(e) = harness::install_font(&mut app, root) {
             eprintln!("emerge-mapper: {e}");
             std::process::exit(1);
         }
-    };
-    if catalog.kits.is_empty() {
-        eprintln!(
-            "emerge-mapper: {}/assets/emerge holds no kits — a kit is a directory with a \
-             library.ron in it.",
-            root.display()
-        );
-        std::process::exit(1);
-    }
+        app.run();
 
-    let (w, h) = emerge_mapper::chooser::window_size();
-    let out: emerge_mapper::chooser::Choice = std::sync::Arc::new(std::sync::Mutex::new(None));
-    let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: "emerge-mapper — choose a map".to_owned(),
-            // **Sized from the layout constants, not typed in.** `UiScale` multiplies every
-            // `Val::Px`, so a hand-picked pixel size is one that stops fitting the moment a
-            // column width changes — which it did, and the settings values ran off the edge.
-            resolution: bevy::window::WindowResolution::new(w as u32, h as u32),
-            ..default()
-        }),
-        ..default()
-    }))
-    .insert_resource(ClearColor(Color::srgb(0.035, 0.033, 0.030)))
-    .insert_resource(UiScale(emerge_mapper::chooser::UI_SCALE))
-    .add_plugins((
-        ChooserPlugin {
-            chooser: Chooser::new(root.to_path_buf(), catalog, kit),
-            out: out.clone(),
-        },
-        // **The chooser is entirely UI, so devshot is the only way to see it.** Bevy draws a UI tree
-        // to one camera, so `bevy_debugger`'s offscreen mirror — which is how an agent looks at the
-        // *editor* — returns a frame with nothing in it here. `Screenshot::primary_window` captures
-        // what is actually on screen, panels included. Added at the first request to review this
-        // screen's layout, which could not be answered at all without it.
-        bevy_devshot::DevShotPlugin,
-    ));
-    // The same borrowed face the editor installs — without it every `—` in this screen's copy draws
-    // as a tofu box, because Bevy's embedded default is 95 codepoints of ASCII.
-    if let Err(e) = harness::install_font(&mut app, root) {
-        eprintln!("emerge-mapper: {e}");
-        std::process::exit(1);
-    }
-    app.run();
+        // Nothing chosen — the author quit. That is a success, not a failure.
+        let Some(args) = out.lock().ok().and_then(|slot| slot.clone()) else {
+            return;
+        };
 
-    // Nothing chosen — the author quit. That is a success, not a failure.
-    let Some(args) = out.lock().ok().and_then(|slot| slot.clone()) else {
-        return;
-    };
-
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("emerge-mapper: cannot find my own binary to relaunch: {e}");
-            std::process::exit(1);
-        }
-    };
-    match std::process::Command::new(&exe).args(&args).status() {
-        Ok(status) => std::process::exit(status.code().unwrap_or(0)),
-        Err(e) => {
-            eprintln!("emerge-mapper: cannot launch the editor: {e}");
-            std::process::exit(1);
+        let exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("emerge-mapper: cannot find my own binary to relaunch: {e}");
+                std::process::exit(1);
+            }
+        };
+        match std::process::Command::new(&exe).args(&args).status() {
+            // **`BACK_TO_MENU` means round again, not done.** `Cmd+O` in the editor exits with it,
+            // and this is the whole of "go back to the menu": no teardown and no reload, the
+            // chooser simply runs again — which is why it was built as a separate `App` at all.
+            Ok(status)
+                if status.code() == Some(i32::from(emerge_mapper::chooser::BACK_TO_MENU)) => {}
+            Ok(status) => std::process::exit(status.code().unwrap_or(0)),
+            Err(e) => {
+                eprintln!("emerge-mapper: cannot launch the editor: {e}");
+                std::process::exit(1);
+            }
         }
     }
 }

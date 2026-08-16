@@ -46,6 +46,15 @@ use emerge_core::map::Map;
 use emerge_core::naming;
 use emerge_core::policy::LIBRARY_FILE;
 
+/// **The exit code the editor uses to say "take me back to the menu".**
+///
+/// The editor is a child process of the chooser, so going back is a process boundary: the editor
+/// exits with this and `main.rs`'s loop shows the menu again instead of quitting. Any other code is
+/// an ordinary exit and ends the run — which is what closing the window does.
+///
+/// 64 rather than 1, so it cannot be confused with a crash or with a refusal from `Project::open`.
+pub const BACK_TO_MENU: u8 = 64;
+
 /// Where kits live, under the project root. The same directory `Project::open` resolves `--kit`
 /// against, named once so the two cannot drift.
 pub const EMERGE_DIR: &str = "assets/emerge";
@@ -456,6 +465,95 @@ mod tests {
         assert!(e.contains("already exists"), "{e}");
     }
 
+    /// **Asking to delete deletes nothing.** The whole point of the confirmation: the file is still
+    /// there after the question is raised, and only the second keystroke removes it.
+    #[test]
+    fn asking_to_delete_does_not_delete() {
+        let root = Root::new("ask-delete");
+        let kit = root.kit(Some("site"), 1);
+        let path = create_map(&kit, "hall", (4.0, 3.0, 4.0), (0.0, 0.0, 0.0), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
+        c.section(1); // into the map panel
+        c.ask_delete().unwrap_or_else(|e| panic!("{e}"));
+
+        assert!(c.confirm.is_some(), "the question is up");
+        assert!(path.is_file(), "and the file is UNTOUCHED until it is answered");
+        assert!(
+            render(&c).contains("delete `hall`?"),
+            "the question names the map:\n{}",
+            render(&c)
+        );
+
+        let gone = c.confirm_delete().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(gone, "hall");
+        assert!(!path.exists(), "answering yes removes it");
+        assert!(c.confirm.is_none(), "and the question is gone with it");
+    }
+
+    /// Declining leaves the file exactly where it was.
+    #[test]
+    fn declining_a_delete_keeps_the_map() {
+        let root = Root::new("keep-it");
+        let kit = root.kit(Some("site"), 1);
+        let path = create_map(&kit, "hall", (4.0, 3.0, 4.0), (0.0, 0.0, 0.0), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
+        c.section(1);
+        c.ask_delete().unwrap_or_else(|e| panic!("{e}"));
+
+        c.confirm = None; // what Esc does
+        assert!(path.is_file(), "declining must leave the map alone");
+        assert!(
+            c.confirm_delete().is_err(),
+            "and with nothing asked, agreeing deletes nothing"
+        );
+        assert!(path.is_file());
+    }
+
+    /// **The question holds a path, not a row.** If the list moves under a raised prompt, the thing
+    /// deleted is still the thing named — a prompt remembering "row 2" would delete whatever row 2
+    /// had become, which is how a confirmation removes the wrong file.
+    #[test]
+    fn the_question_deletes_what_it_named_even_if_the_selection_moves() {
+        let root = Root::new("moving-target");
+        let kit = root.kit(Some("site"), 1);
+        for m in ["alpha", "beta"] {
+            create_map(&kit, m, (4.0, 3.0, 4.0), (0.0, 0.0, 0.0), None)
+                .unwrap_or_else(|e| panic!("{e}"));
+        }
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
+        c.section(1);
+        c.ask_delete().unwrap_or_else(|e| panic!("{e}")); // asks about `alpha`
+
+        c.map = 1; // the selection moves to `beta`
+        let gone = c.confirm_delete().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(gone, "alpha", "the question named alpha, so alpha is what goes");
+        assert!(kit.join("beta.map.ron").is_file(), "beta was never in question");
+        assert!(!kit.join("alpha.map.ron").exists());
+    }
+
+    /// Pressing Delete with the arrows on the kit list is a refusal that says what to do, not a
+    /// silent no-op (`docs/ui.md` §1.4).
+    #[test]
+    fn delete_outside_the_map_panel_says_what_to_do() {
+        let root = Root::new("wrong-panel");
+        root.kit(Some("site"), 1);
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
+        assert_eq!(c.focus, Focus::Kits);
+        let e = c
+            .ask_delete()
+            .err()
+            .unwrap_or_else(|| panic!("must refuse from the kit panel"));
+        assert!(e.contains("Tab to the map panel"), "{e}");
+        assert!(c.confirm.is_none());
+    }
+
     /// An empty kit is a kit with no maps, not an error — and the screen turns that into an
     /// instruction rather than a report (`docs/ui.md` §1.4).
     #[test]
@@ -602,6 +700,21 @@ pub struct Chooser {
     pub problem: Option<String>,
     /// Set when a new map is being named — there is no map row to edit yet.
     pub creating: Option<Draft>,
+    /// **A deletion waiting for a yes.** See [`Pending`].
+    pub confirm: Option<Pending>,
+}
+
+/// **A destructive act that has been asked for and not yet agreed to.**
+///
+/// Deleting a map removes a file, and there is no undo for it here — the editor's undo stack is a
+/// different process's memory and does not survive the map being gone. So the act is split in two:
+/// asking, which changes nothing, and agreeing, which is a separate keystroke on a prompt naming
+/// exactly what will go. `docs/ui.md` §1.4's rule applies to the question as much as to a refusal —
+/// it names the map and the file, because "are you sure?" is not information.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pending {
+    pub map: String,
+    pub path: PathBuf,
 }
 
 /// The map being made, before it exists on disk.
@@ -651,6 +764,7 @@ impl Chooser {
             raw: String::new(),
             problem: None,
             creating: None,
+            confirm: None,
         }
     }
 
@@ -728,6 +842,40 @@ impl Chooser {
             Focus::Kits | Focus::Maps => true,
             Focus::Settings => self.creating.is_some() || self.current_map().is_some(),
         }
+    }
+
+    /// **Ask to delete the selected map.** Changes nothing on disk — see [`Pending`].
+    ///
+    /// The question captures the **path**, not the row index. A prompt that remembered "row 2"
+    /// would delete whatever row 2 became if the list moved underneath it; a prompt holding a path
+    /// deletes the file it named or nothing at all.
+    pub fn ask_delete(&mut self) -> Result<(), String> {
+        if self.focus != Focus::Maps {
+            return Err("select a map first — Tab to the map panel, then Delete".to_owned());
+        }
+        let m = self
+            .current_map()
+            .ok_or_else(|| "there is no map here to delete".to_owned())?;
+        self.confirm = Some(Pending {
+            map: m.name.clone(),
+            path: m.path.clone(),
+        });
+        Ok(())
+    }
+
+    /// **Agree to it.** Removes the file the question named, then rescans so the list is a
+    /// description of disk rather than of the edit.
+    pub fn confirm_delete(&mut self) -> Result<String, String> {
+        let Some(pending) = self.confirm.take() else {
+            return Err("nothing was asked".to_owned());
+        };
+        std::fs::remove_file(&pending.path)
+            .map_err(|e| format!("could not delete `{}`: {e}", pending.map))?;
+        rescan_keeping_place(self, None);
+        if self.current_map().is_none() {
+            self.focus = Focus::Kits;
+        }
+        Ok(pending.map)
     }
 
     /// **What the editor would be launched with**, or why it cannot be.
@@ -1107,6 +1255,9 @@ pub struct Screen {
     pub maps: Vec<Row>,
     pub settings_header: String,
     pub settings: Vec<Row>,
+    /// A question the screen is waiting on — a pending deletion. Takes the message line, because a
+    /// question you have not answered outranks a refusal you already read.
+    pub asking: Option<String>,
     pub problem: Option<String>,
     pub hint: String,
 }
@@ -1197,6 +1348,17 @@ impl Chooser {
             maps,
             settings_header,
             settings,
+            asking: self.confirm.as_ref().map(|c| {
+                format!(
+                    "delete `{}`? {} goes, and nothing here can bring it back.",
+                    c.map,
+                    c.path
+                        .file_name()
+                        .map_or_else(|| c.path.display().to_string(), |f| f
+                            .to_string_lossy()
+                            .into_owned())
+                )
+            }),
             problem: self.problem.clone(),
             hint: self.hint().to_owned(),
         }
@@ -1285,6 +1447,9 @@ impl Chooser {
     /// key not listed, because it teaches something untrue.
     pub fn hint(&self) -> &'static str {
         match self.focus {
+            // **The question owns the keyboard, and the hint says only its two answers.** Listing
+            // the ordinary verbs beside a pending deletion invites pressing one of them.
+            _ if self.confirm.is_some() => "Enter DELETE IT    Esc keep it",
             _ if self.editing => "type    Enter keep    Esc cancel",
             Focus::Settings if self.creating.is_some() => {
                 "up/down field    Enter edit    Tab panel    Ctrl+Enter make it    Esc cancel"
@@ -1294,7 +1459,9 @@ impl Chooser {
                 "up/down kit    Tab panel    N new map    Esc quit"
             }
             Focus::Kits => "up/down kit    Tab panel    Enter open    N new map    Esc quit",
-            Focus::Maps => "up/down map    Tab panel    Enter open    N new map    Esc quit",
+            Focus::Maps => {
+                "up/down map    Tab panel    Enter open    Delete remove    N new    Esc quit"
+            }
         }
     }
 }
@@ -1351,6 +1518,9 @@ pub fn render(c: &Chooser) -> String {
         for r in &s.settings {
             out.push_str(&line(r));
         }
+    }
+    if let Some(a) = &s.asking {
+        out.push_str(&format!("\n{a}\n"));
     }
     if let Some(p) = &s.problem {
         out.push_str(&format!("\n{p}\n"));
@@ -1410,6 +1580,7 @@ impl Plugin for ChooserPlugin {
             raw: self.chooser.raw.clone(),
             problem: self.chooser.problem.clone(),
             creating: self.chooser.creating.clone(),
+            confirm: self.chooser.confirm.clone(),
         })
         .insert_resource(ChoiceOut(self.out.clone()))
         .add_systems(Startup, spawn_screen)
@@ -1617,7 +1788,11 @@ fn paint_chooser(
         } else if settings.is_some() {
             **text = s.settings_header.clone();
         } else if problem.is_some() {
-            **text = s.problem.clone().unwrap_or_default();
+            **text = s
+                .asking
+                .clone()
+                .or_else(|| s.problem.clone())
+                .unwrap_or_default();
         } else if hint.is_some() {
             **text = s.hint.clone();
         }
@@ -1824,6 +1999,29 @@ fn drive_chooser(
 ) {
     // Typing owns the keyboard; `type_into_field` ran first and has already consumed it.
     if chooser.editing {
+        return;
+    }
+    // **A pending deletion owns it too, and answers only yes or no.** Every other key is ignored
+    // rather than doing its usual job behind the question — an arrow that moved the selection while
+    // "delete `hall`?" was on screen would leave the prompt naming one map and the highlight on
+    // another, which is how a confirmation deletes the wrong thing.
+    if chooser.confirm.is_some() {
+        if keyboard.just_pressed(KeyCode::Enter) {
+            chooser.problem = match chooser.confirm_delete() {
+                Ok(name) => Some(format!("`{name}` deleted")),
+                Err(e) => Some(e),
+            };
+        }
+        if keyboard.just_pressed(KeyCode::Escape) {
+            chooser.confirm = None;
+            chooser.problem = None;
+        }
+        return;
+    }
+    // **Ask; do not do.** `Delete` on a map raises the question and changes nothing — see
+    // [`Pending`] for why this verb is split in two.
+    if keyboard.just_pressed(KeyCode::Delete) || keyboard.just_pressed(KeyCode::Backspace) {
+        chooser.problem = chooser.ask_delete().err();
         return;
     }
     // **Arrows move inside a panel. `Tab` crosses between them.** One rule, no exceptions — the

@@ -4269,6 +4269,8 @@ fn keys(
     placed: Query<(Entity, &Placement)>,
     mut project: ResMut<Project>,
     mut state: ResMut<EditorState>,
+    // `Cmd+O` leaves for the chooser, which is an exit rather than a state change — see its handler.
+    mut exit: MessageWriter<bevy::app::AppExit>,
     // The aim keys repeat while held, so this system needs a clock and somewhere to keep the
     // countdown. Both are `Res`, and `KeysPlugin` owns `Repeat` for the reason its comment gives:
     // a missing `Res<T>` panics its system in Bevy 0.19 rather than skipping it.
@@ -4511,6 +4513,29 @@ fn keys(
                 state.status.problem(format!("NOT SAVED: {e}"));
                 error!("{e}");
             }
+        }
+        return;
+    }
+
+    // **`Cmd+O` leaves this map for the chooser**, and refuses while there is unsaved work.
+    //
+    // The editor is a child process of the chooser (`main.rs`), so going back is an **exit** rather
+    // than a state change — it signals with [`crate::chooser::BACK_TO_MENU`] and the parent loops
+    // round to the menu. Nothing is torn down here, which is the whole reason the chooser was built
+    // as a separate `App` in the first place.
+    //
+    // **A refusal rather than a confirmation, deliberately.** Leaving with unsaved edits would throw
+    // away work with one keystroke and no way back — the undo stack does not survive the process. So
+    // this names `Cmd+S` and does nothing, which cannot lose anything; an author who genuinely wants
+    // to discard closes the window, and that is a gesture nobody presses by accident.
+    if keys::just_pressed(&keyboard, *live, Action::MainMenu) {
+        if project.dirty {
+            state.status.problem(
+                "unsaved changes — Cmd+S first, or close the window to leave them".to_owned(),
+            );
+        } else {
+            state.status.note("back to the menu".to_owned());
+            exit.write(bevy::app::AppExit::from_code(crate::chooser::BACK_TO_MENU));
         }
         return;
     }

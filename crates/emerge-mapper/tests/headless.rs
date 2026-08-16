@@ -8174,3 +8174,95 @@ fn the_chooser_sees_the_shipped_kits() {
         "exactly one kit may be the no-flag one"
     );
 }
+
+/// **`Cmd+O` goes back to the menu, and refuses to take unsaved work with it.**
+///
+/// The editor is a child process of the chooser, so "back to the menu" is an exit: the handler
+/// writes `AppExit` with `chooser::BACK_TO_MENU` and `main.rs`'s loop shows the chooser again. What
+/// matters here is the guard in front of it — leaving with unsaved edits would discard them with one
+/// keystroke and no way back, because the undo stack does not survive the process.
+///
+/// A **refusal** rather than a confirmation, deliberately: it cannot lose anything, and an author
+/// who genuinely wants to discard closes the window, which nobody presses by accident.
+#[test]
+fn the_menu_key_refuses_to_leave_unsaved_work() {
+    use bevy::app::AppExit;
+    use emerge_mapper::keys::{binding, Action, MOD_KEYS};
+    use emerge_mapper::project::Project;
+
+    let root = Fixture::new("menu-key").descriptor("floor", "alpha").build("m");
+    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let chord = |app: &mut App| {
+        let keys = vec![MOD_KEYS[0], binding(Action::MainMenu).key];
+        app.add_systems(
+            Update,
+            IntoScheduleConfigs::before(
+                move |mut input: ResMut<bevy::input::ButtonInput<KeyCode>>,
+                      mut done: Local<bool>| {
+                    if !*done {
+                        input.release_all();
+                        for k in &keys {
+                            input.press(*k);
+                        }
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    };
+    let exits = |app: &App| {
+        app.world()
+            .get_resource::<bevy::ecs::message::Messages<AppExit>>()
+            .map_or(0, bevy::ecs::message::Messages::len)
+    };
+
+    // **Dirty: it must not go.**
+    {
+        let mut project = app.world_mut().resource_mut::<Project>();
+        project.map.placements.push(emerge_core::map::Placed {
+            id: "floor@1".to_owned(),
+            descriptor: "floor".to_owned(),
+            ..Default::default()
+        });
+        project.dirty = true;
+    }
+    let before = exits(&app);
+    chord(&mut app);
+    assert_eq!(
+        exits(&app),
+        before,
+        "Cmd+O left with unsaved edits on the map — that discards work the undo stack cannot get \
+         back, because it does not survive the process"
+    );
+    let said = app
+        .world()
+        .resource::<emerge_mapper::editor::EditorState>()
+        .status
+        .problems()
+        .iter()
+        .map(|p| p.text.clone())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        said.contains("unsaved") && said.contains("Cmd+S"),
+        "the refusal has to name the way out of it, per docs/ui.md §1.4; it said: {said}"
+    );
+
+    // **Saved: it goes.**
+    {
+        let mut project = app.world_mut().resource_mut::<Project>();
+        project.dirty = false;
+    }
+    chord(&mut app);
+    assert!(
+        exits(&app) > before,
+        "with nothing unsaved, Cmd+O must actually leave — otherwise there is no way back to the \
+         menu at all, which is the whole feature"
+    );
+}

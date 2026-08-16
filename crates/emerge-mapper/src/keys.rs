@@ -170,6 +170,13 @@ pub enum Action {
     CarouselPrev,
     CarouselNext,
     Save,
+    /// **Back to the chooser** — leave this map and pick another.
+    ///
+    /// `Cmd+O` because "open something else" is what every editor binds it to, and this screen has
+    /// no other opening verb to confuse it with. It is a **process** boundary, not a tab: the editor
+    /// was launched by the chooser and exits back to it, which is why the action lives here and the
+    /// mechanism lives in `main.rs`.
+    MainMenu,
     Undo,
     Redo,
     /// Hold to see this tab's key list.
@@ -574,6 +581,14 @@ pub const BINDINGS: &[Binding] = &[
         Context::Global,
         "S",
         "save",
+    ),
+    b(
+        Action::MainMenu,
+        KeyCode::KeyO,
+        true,
+        Context::Global,
+        "O",
+        "back to the menu",
     ),
     // **The agent's read-out, and it is Global because a problem is.**
     //
@@ -2258,6 +2273,7 @@ mod tests {
             Action::CarouselPrev,
             Action::CarouselNext,
             Action::Save,
+            Action::MainMenu,
             Action::Undo,
             Action::Redo,
             Action::Shortcuts,
@@ -2737,7 +2753,11 @@ mod tests {
         // (context, keys) — measured, not chosen. Lower these when a key goes; raising one is a
         // decision, and it belongs in a commit message.
         let pinned = [
-            (Context::Global, 17),
+            // 17 -> 18: `MainMenu`. `Cmd+O` leaves this map for the chooser, and it is Global
+            // because "I am on the wrong map" is true on every tab — the state an author was in
+            // when they opened the wrong kit three times in one afternoon, with no way back but
+            // quitting the process. Costs a row it shares with `Save`.
+            (Context::Global, 18),
             // 25 -> 26: `AcceptProposal`, the generate commit door. Bought deliberately, and it
             // costs no *row* — the four region-fills are `Stance::Idle` and this is
             // `Stance::Proposed`, so the two never share a list. See [`Stance::Proposed`].
