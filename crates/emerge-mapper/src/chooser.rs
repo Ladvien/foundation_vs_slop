@@ -465,6 +465,99 @@ mod tests {
         assert!(e.contains("already exists"), "{e}");
     }
 
+    /// **Escape unwinds one layer at a time and never quits on the first press.**
+    ///
+    /// Reported at the keyboard: typing into a field and pressing Escape *closed the whole
+    /// program*. Two causes, both fixed and both pinned here — the field handler now marks the key
+    /// as taken so the chord handler cannot read the same press again, and quitting is a question
+    /// rather than an act.
+    #[test]
+    fn escape_backs_out_one_layer_at_a_time() {
+        let root = Root::new("escape-stack");
+        let kit = root.kit(Some("site"), 1);
+        create_map(&kit, "hall", (4.0, 3.0, 4.0), (0.0, 0.0, 0.0), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
+
+        // Layer 1 — in a field. Leaving it must not touch anything else.
+        c.section(1);
+        c.section(1);
+        assert_eq!(c.focus, Focus::Settings);
+        c.editing = true;
+        c.raw.push_str("half-typed");
+        // What `type_into_field` does on Escape:
+        c.raw.clear();
+        c.editing = false;
+        c.swallowed = true;
+        assert_eq!(c.focus, Focus::Settings, "you stay in the panel you were in");
+        assert!(c.ask.is_none(), "and nothing is asked yet");
+
+        // **The key is spent.** `drive_chooser` takes the flag and stops; without this the same
+        // press fell through and quit the program, which is the bug as reported.
+        assert!(
+            std::mem::take(&mut c.swallowed),
+            "the field handler must mark the press as taken"
+        );
+
+        // Layer 3 — a second, separate press asks rather than quitting.
+        c.ask = Some(Ask::Quit);
+        assert!(
+            render(&c).contains("quit emerge-mapper?"),
+            "quitting is a question:\n{}",
+            render(&c)
+        );
+        assert!(
+            c.hint().contains("Y quit") && c.hint().contains("Esc stay"),
+            "and the hint offers both answers: {}",
+            c.hint()
+        );
+    }
+
+    /// Layer 2: a draft in hand is what Escape abandons, before quitting is ever on the table.
+    #[test]
+    fn escape_abandons_a_draft_before_it_offers_to_quit() {
+        let root = Root::new("escape-draft");
+        root.kit(Some("site"), 1);
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
+        c.creating = Some(Draft::default());
+
+        // What `drive_chooser` does with a draft in hand.
+        c.creating = None;
+        assert!(
+            c.ask.is_none(),
+            "abandoning the draft must not also raise the quit question — one press, one layer"
+        );
+    }
+
+    /// **`Y` is what agrees, not `Enter`.** `Enter` opens a map and edits a field elsewhere on this
+    /// screen, and a destructive prompt answered by the most-pressed key on the keyboard is one that
+    /// gets answered by accident.
+    #[test]
+    fn both_questions_offer_the_same_two_answers() {
+        let root = Root::new("answers");
+        let kit = root.kit(Some("site"), 1);
+        create_map(&kit, "hall", (4.0, 3.0, 4.0), (0.0, 0.0, 0.0), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
+        c.section(1);
+        c.ask_delete().unwrap_or_else(|e| panic!("{e}"));
+        let hint = c.hint();
+        assert!(hint.contains('Y'), "delete is answered with Y: {hint}");
+        assert!(hint.contains("Esc"), "and declined with Esc: {hint}");
+        assert!(
+            !hint.contains("Enter"),
+            "Enter must NOT answer a destructive question — it opens maps everywhere else: {hint}"
+        );
+
+        c.ask = Some(Ask::Quit);
+        let hint = c.hint();
+        assert!(hint.contains('Y') && hint.contains("Esc"), "same two answers: {hint}");
+        assert!(!hint.contains("Enter"), "{hint}");
+    }
+
     /// **Asking to delete deletes nothing.** The whole point of the confirmation: the file is still
     /// there after the question is raised, and only the second keystroke removes it.
     #[test]
@@ -479,7 +572,7 @@ mod tests {
         c.section(1); // into the map panel
         c.ask_delete().unwrap_or_else(|e| panic!("{e}"));
 
-        assert!(c.confirm.is_some(), "the question is up");
+        assert!(matches!(c.ask, Some(Ask::Delete(_))), "the question is up");
         assert!(path.is_file(), "and the file is UNTOUCHED until it is answered");
         assert!(
             render(&c).contains("delete `hall`?"),
@@ -490,7 +583,7 @@ mod tests {
         let gone = c.confirm_delete().unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(gone, "hall");
         assert!(!path.exists(), "answering yes removes it");
-        assert!(c.confirm.is_none(), "and the question is gone with it");
+        assert!(c.ask.is_none(), "and the question is gone with it");
     }
 
     /// Declining leaves the file exactly where it was.
@@ -505,7 +598,7 @@ mod tests {
         c.section(1);
         c.ask_delete().unwrap_or_else(|e| panic!("{e}"));
 
-        c.confirm = None; // what Esc does
+        c.ask = None; // what Esc does
         assert!(path.is_file(), "declining must leave the map alone");
         assert!(
             c.confirm_delete().is_err(),
@@ -551,7 +644,7 @@ mod tests {
             .err()
             .unwrap_or_else(|| panic!("must refuse from the kit panel"));
         assert!(e.contains("Tab to the map panel"), "{e}");
-        assert!(c.confirm.is_none());
+        assert!(c.ask.is_none());
     }
 
     /// An empty kit is a kit with no maps, not an error — and the screen turns that into an
@@ -700,8 +793,33 @@ pub struct Chooser {
     pub problem: Option<String>,
     /// Set when a new map is being named — there is no map row to edit yet.
     pub creating: Option<Draft>,
-    /// **A deletion waiting for a yes.** See [`Pending`].
-    pub confirm: Option<Pending>,
+    /// **A question the screen has asked and is waiting on.** See [`Ask`].
+    pub ask: Option<Ask>,
+    /// **Set by the text handler when it consumed a key this frame.**
+    ///
+    /// The two key systems run in one frame, chained. `type_into_field` leaves a field on `Escape`
+    /// by clearing `editing`, and `drive_chooser` then saw `editing == false` and read *the same
+    /// press* as "quit" — one Escape, consumed twice, and the whole program closed out from under
+    /// somebody who only wanted to leave a text box. Reported at the keyboard.
+    ///
+    /// A one-frame flag rather than reordering the systems, because the order is right: text takes
+    /// the keyboard first, exactly as `keys::Phase::Text` runs before `Act` in the editor. What was
+    /// missing is the other half of that contract — having taken the key, say so.
+    pub swallowed: bool,
+}
+
+/// **Something the screen has asked, and is waiting on an answer to.**
+///
+/// Both of these destroy something — a file, or unsaved intent — so both are asked the same way and
+/// answered with the same key. `Y` rather than `Enter`: `Enter` opens a map and edits a field
+/// elsewhere on this screen, and a destructive prompt answered by the most-pressed key on the
+/// keyboard is one that gets answered by accident.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Ask {
+    /// Delete a map. Holds the path it named — see [`Pending`].
+    Delete(Pending),
+    /// Leave the chooser.
+    Quit,
 }
 
 /// **A destructive act that has been asked for and not yet agreed to.**
@@ -764,7 +882,8 @@ impl Chooser {
             raw: String::new(),
             problem: None,
             creating: None,
-            confirm: None,
+            ask: None,
+            swallowed: false,
         }
     }
 
@@ -856,18 +975,18 @@ impl Chooser {
         let m = self
             .current_map()
             .ok_or_else(|| "there is no map here to delete".to_owned())?;
-        self.confirm = Some(Pending {
+        self.ask = Some(Ask::Delete(Pending {
             map: m.name.clone(),
             path: m.path.clone(),
-        });
+        }));
         Ok(())
     }
 
     /// **Agree to it.** Removes the file the question named, then rescans so the list is a
     /// description of disk rather than of the edit.
     pub fn confirm_delete(&mut self) -> Result<String, String> {
-        let Some(pending) = self.confirm.take() else {
-            return Err("nothing was asked".to_owned());
+        let Some(Ask::Delete(pending)) = self.ask.take() else {
+            return Err("no deletion was asked about".to_owned());
         };
         std::fs::remove_file(&pending.path)
             .map_err(|e| format!("could not delete `{}`: {e}", pending.map))?;
@@ -1274,7 +1393,7 @@ impl Chooser {
                 let selected = self.focus == Focus::Kits && i == self.kit;
                 Row {
                     left: if k.flag.is_none() {
-                        format!("{}   (default)", k.label)
+                        format!("{} (default)", k.label)
                     } else {
                         k.label.clone()
                     },
@@ -1328,7 +1447,7 @@ impl Chooser {
                         }
                     };
                     Row {
-                        left: m.name.clone(),
+                        left: clip(&m.name, 16),
                         right,
                         tone: if selected { Tone::Selected } else { tone },
                     }
@@ -1348,8 +1467,8 @@ impl Chooser {
             maps,
             settings_header,
             settings,
-            asking: self.confirm.as_ref().map(|c| {
-                format!(
+            asking: self.ask.as_ref().map(|a| match a {
+                Ask::Delete(c) => format!(
                     "delete `{}`? {} goes, and nothing here can bring it back.",
                     c.map,
                     c.path
@@ -1357,7 +1476,8 @@ impl Chooser {
                         .map_or_else(|| c.path.display().to_string(), |f| f
                             .to_string_lossy()
                             .into_owned())
-                )
+                ),
+                Ask::Quit => "quit emerge-mapper?".to_owned(),
             }),
             problem: self.problem.clone(),
             hint: self.hint().to_owned(),
@@ -1367,7 +1487,8 @@ impl Chooser {
     fn settings_rows(&self) -> (String, Vec<Row>) {
         let (header, name, bounds, origin, note) = match (&self.creating, self.current_map()) {
             (Some(d), _) => (
-                "NEW MAP".to_owned(),
+                self.current_kit()
+                    .map_or_else(|| "NEW MAP".to_owned(), |k| format!("NEW MAP IN {}", k.label)),
                 d.name.clone(),
                 d.bounds,
                 d.origin,
@@ -1380,7 +1501,7 @@ impl Chooser {
                     // list. Selecting one is what asks the question, so it is read here.
                     let (origin, note) = read_origin_and_note(&m.path);
                     (
-                        format!("SETTINGS — {}", m.name),
+                        format!("SETTINGS FOR {}", m.name),
                         m.name.clone(),
                         *bounds,
                         origin,
@@ -1410,7 +1531,7 @@ impl Chooser {
                     if name.is_empty() {
                         "(needs a name)".to_owned()
                     } else {
-                        name
+                        clip(&name, 18)
                     },
                 ),
                 tone: tone_for(
@@ -1435,7 +1556,7 @@ impl Chooser {
                 // own label onto a second line and broke the alignment of every row above it. The
                 // whole note is still there in the file and still editable; this panel is a summary,
                 // and a summary that reflows the screen is not one.
-                right: value(Field::Note, clip(note.unwrap_or_default().as_str(), 46)),
+                right: value(Field::Note, clip(note.unwrap_or_default().as_str(), 20)),
                 tone: tone_for(live(Field::Note), false),
             },
         ];
@@ -1446,11 +1567,18 @@ impl Chooser {
     /// immediately-issuable choices at three or four; a key listed where it is dead is worse than a
     /// key not listed, because it teaches something untrue.
     pub fn hint(&self) -> &'static str {
-        match self.focus {
+        match self.ask {
             // **The question owns the keyboard, and the hint says only its two answers.** Listing
-            // the ordinary verbs beside a pending deletion invites pressing one of them.
-            _ if self.confirm.is_some() => "Enter DELETE IT    Esc keep it",
-            _ if self.editing => "type    Enter keep    Esc cancel",
+            // the ordinary verbs beside a pending question invites pressing one of them.
+            Some(Ask::Delete(_)) => "Y delete it    Esc keep it",
+            Some(Ask::Quit) => "Y quit    Esc stay",
+            None => self.hint_when_nothing_is_asked(),
+        }
+    }
+
+    fn hint_when_nothing_is_asked(&self) -> &'static str {
+        match self.focus {
+            _ if self.editing => "type    Enter keep    Esc leave the field",
             Focus::Settings if self.creating.is_some() => {
                 "up/down field    Enter edit    Tab panel    Ctrl+Enter make it    Esc cancel"
             }
@@ -1580,7 +1708,8 @@ impl Plugin for ChooserPlugin {
             raw: self.chooser.raw.clone(),
             problem: self.chooser.problem.clone(),
             creating: self.chooser.creating.clone(),
-            confirm: self.chooser.confirm.clone(),
+            ask: self.chooser.ask.clone(),
+            swallowed: false,
         })
         .insert_resource(ChoiceOut(self.out.clone()))
         .add_systems(Startup, spawn_screen)
@@ -1597,7 +1726,10 @@ impl Plugin for ChooserPlugin {
 /// One column's width. **Both lists get the same one**, and the settings panel below spans exactly
 /// two of them plus the gap — so the three panels share a grid instead of each sizing itself to its
 /// longest row, which is what made the first version read as unrelated blobs.
-const COL: f32 = 330.0;
+const COL: f32 = 300.0;
+
+/// How many columns stand side by side: kits, that kit's maps, that map's settings.
+const COLS: f32 = 3.0;
 
 /// **The interface scale, and both halves of the binary read it from here.**
 ///
@@ -1612,13 +1744,13 @@ pub const UI_SCALE: f32 = 1.2;
 /// `main.rs` cannot fall out of step with `COL` — the previous version hard-coded a size and was
 /// wrong the moment the columns were given a fixed width.
 pub fn window_size() -> (f32, f32) {
-    let content = COL * 2.0 + crate::chrome::PAD;
+    let content = COL * COLS + crate::chrome::PAD * (COLS - 1.0);
     let width = (content + crate::chrome::PAD * 3.0) * UI_SCALE;
-    // Title, the list row, the settings panel, the hint, and the gaps — measured off a capture
-    // rather than computed from font metrics, which would be a second layout engine. The slack is
-    // deliberate and small: a kit with several maps grows the list row, and a window that has to be
+    // Title, one row of columns, the message line and the hint — measured off a capture rather
+    // than computed from font metrics, which would be a second layout engine. The slack is
+    // deliberate and small: a kit with several maps grows the row, and a window that has to be
     // resized to see the last map is worse than one with a little air at the bottom.
-    let height = 360.0 * UI_SCALE;
+    let height = 300.0 * UI_SCALE;
     (width, height)
 }
 
@@ -1663,8 +1795,17 @@ fn spawn_screen(mut commands: Commands) {
                 TextFont::from_font_size(13.0),
                 TextColor(crate::chrome::LABEL),
             ));
-            // **The two lists side by side.** Stacked, they left the right half of the window empty
-            // and read as two unrelated blobs; a kit and its maps are one question.
+            // **Three columns, left to right, each one the contents of the selection beside it.**
+            //
+            // Reported at the keyboard: *"can we make it clearer that the settings refer to a map?
+            // the hierarchy of the data structure isn't clear."* It was not: three panels of equal
+            // weight, with the settings as a full-width footer under both lists, read as three
+            // siblings — when a kit *contains* maps and a map *has* settings.
+            //
+            // Columns are that containment made spatial, and each header names its parent
+            // (`MAPS IN emerge`, `SETTINGS FOR untitled_map`) so the chain is legible without
+            // relying on position alone. It is also exactly the order `Tab` walks, which was
+            // already true and previously invisible.
             root.spawn(Node {
                 flex_direction: FlexDirection::Row,
                 column_gap: Val::Px(crate::chrome::PAD),
@@ -1679,12 +1820,11 @@ fn spawn_screen(mut commands: Commands) {
                     p.spawn((header("MAPS"), MapsHeader));
                     p.spawn((Node::default(), MapList));
                 });
-            });
-            root.spawn(panel(COL * 2.0 + crate::chrome::PAD))
-                .with_children(|p| {
+                row.spawn(panel(COL)).with_children(|p| {
                     p.spawn((header("SETTINGS"), SettingsHeader));
                     p.spawn((Node::default(), SettingsList));
                 });
+            });
             root.spawn((
                 Text::new(String::new()),
                 TextFont::from_font_size(12.0),
@@ -1825,12 +1965,17 @@ fn type_into_field(
                 if commit_field(&mut chooser, field) {
                     chooser.editing = false;
                 }
+                chooser.swallowed = true;
                 return;
             }
+            // **Escape leaves the FIELD, and nothing else.** It sets `swallowed` so the chord
+            // handler does not read the same press as "quit" — which is exactly what it did, and
+            // closed the program on somebody who only wanted out of a text box.
             Key::Escape => {
                 chooser.raw.clear();
                 chooser.problem = None;
                 chooser.editing = false;
+                chooser.swallowed = true;
                 return;
             }
             Key::Backspace => {
@@ -1997,6 +2142,11 @@ fn drive_chooser(
     out: Res<ChoiceOut>,
     mut exit: MessageWriter<AppExit>,
 ) {
+    // **A key the text handler already took is not read again.** One `Escape` is one press; see
+    // `Chooser::swallowed` for the bug this closes.
+    if std::mem::take(&mut chooser.swallowed) {
+        return;
+    }
     // Typing owns the keyboard; `type_into_field` ran first and has already consumed it.
     if chooser.editing {
         return;
@@ -2005,15 +2155,22 @@ fn drive_chooser(
     // rather than doing its usual job behind the question — an arrow that moved the selection while
     // "delete `hall`?" was on screen would leave the prompt naming one map and the highlight on
     // another, which is how a confirmation deletes the wrong thing.
-    if chooser.confirm.is_some() {
-        if keyboard.just_pressed(KeyCode::Enter) {
-            chooser.problem = match chooser.confirm_delete() {
-                Ok(name) => Some(format!("`{name}` deleted")),
-                Err(e) => Some(e),
-            };
+    if let Some(ask) = chooser.ask.clone() {
+        if keyboard.just_pressed(KeyCode::KeyY) {
+            match ask {
+                Ask::Delete(_) => {
+                    chooser.problem = match chooser.confirm_delete() {
+                        Ok(name) => Some(format!("`{name}` deleted")),
+                        Err(e) => Some(e),
+                    };
+                }
+                Ask::Quit => {
+                    exit.write(AppExit::Success);
+                }
+            }
         }
-        if keyboard.just_pressed(KeyCode::Escape) {
-            chooser.confirm = None;
+        if keyboard.just_pressed(KeyCode::Escape) || keyboard.just_pressed(KeyCode::KeyN) {
+            chooser.ask = None;
             chooser.problem = None;
         }
         return;
@@ -2055,12 +2212,23 @@ fn drive_chooser(
         // name is the one thing it cannot be saved without.
         chooser.editing = true;
     }
+    // **Escape unwinds one layer at a time, and never destroys anything on the first press.**
+    //
+    // Asked for at the keyboard after it closed the program mid-typing. The layers, outermost last:
+    //
+    //   1. in a text field  -> leave the field   (handled in `type_into_field`)
+    //   2. making a new map -> abandon the draft
+    //   3. otherwise        -> ASK about quitting; `Y` answers it
+    //
+    // Each press does one thing and says what the next one would do, so "Escape" is learnable as a
+    // single idea — back out of where you are — rather than as a key whose meaning you have to
+    // predict before pressing it.
     if keyboard.just_pressed(KeyCode::Escape) {
         if chooser.creating.is_some() {
             chooser.creating = None;
             chooser.problem = None;
         } else {
-            exit.write(AppExit::Success);
+            chooser.ask = Some(Ask::Quit);
         }
     }
     if keyboard.just_pressed(KeyCode::Enter) {
