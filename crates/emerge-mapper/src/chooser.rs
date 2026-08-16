@@ -521,17 +521,32 @@ use bevy::prelude::*;
 /// Modelled here rather than inferred from "is some string non-empty", which is the second census
 /// `keys.rs` keeps deleting: a phase that lives in a handler's `if` cannot be rendered, and the hint
 /// line then lies about what the arrows do.
+/// **Which panel the arrows are in.**
+///
+/// Asked for at the keyboard, and it replaced a worse model: *"the tab worked to bring me down to
+/// the bottom section, but then when I get there, I need to use the arrow keys to move around, not
+/// tab. Tab should move around the different sections."*
+///
+/// The first version made `Focus::Field(Field)` a variant, so `Tab` meant "next field" in the
+/// settings and "go to the settings" everywhere else — one key with two jobs, decided by where you
+/// already were. Now there is one rule with no exceptions: **`Tab` crosses panels, arrows move
+/// inside one.** Typing is a separate flag rather than a fourth variant, because it is a phase this
+/// screen passes through and not a place the arrows can be — the distinction `keys::Stance` exists
+/// to make in the editor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Focus {
     #[default]
     Kits,
     Maps,
-    /// Typing into one of the settings fields. Shadows the arrows, exactly as `Context::Typing` does
-    /// in the editor.
-    Field(Field),
+    Settings,
 }
 
-/// The four settings the chooser exposes, in the order they are shown and `Tab` walks them.
+impl Focus {
+    /// The panels in the order they are drawn, which is the order `Tab` walks them.
+    const ALL: [Focus; 3] = [Focus::Kits, Focus::Maps, Focus::Settings];
+}
+
+/// The four settings the chooser exposes, in the order they are shown and the arrows walk them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
     Name,
@@ -556,6 +571,12 @@ impl Field {
         let i = Field::ALL.iter().position(|f| *f == self).unwrap_or(0);
         Field::ALL[(i + 1) % Field::ALL.len()]
     }
+
+    /// The other way round, for `Shift+Tab`. Wraps, so the cycle has no dead end at either edge.
+    fn prev(self) -> Field {
+        let i = Field::ALL.iter().position(|f| *f == self).unwrap_or(0);
+        Field::ALL[(i + Field::ALL.len() - 1) % Field::ALL.len()]
+    }
 }
 
 /// **What is on the screen, and what `Enter` would do with it.**
@@ -570,6 +591,11 @@ pub struct Chooser {
     pub kit: usize,
     pub map: usize,
     pub focus: Focus,
+    /// Which settings row the arrows are on, while [`Focus::Settings`] has them.
+    pub field: Field,
+    /// **Is the highlighted field taking text?** A phase, not a place: the arrows move between
+    /// fields, and `Enter` starts and ends the typing.
+    pub editing: bool,
     /// What has been typed into the open field, before it is forced or parsed.
     pub raw: String,
     /// A refusal, shown until the next keystroke. Never a substituted value.
@@ -620,6 +646,8 @@ impl Chooser {
             kit,
             map: 0,
             focus: Focus::Kits,
+            field: Field::Name,
+            editing: false,
             raw: String::new(),
             problem: None,
             creating: None,
@@ -654,20 +682,51 @@ impl Chooser {
                     self.map = clamp_step(self.map, delta, n);
                 }
             }
-            Focus::Field(_) => {}
+            // **The arrows walk the settings rows too**, which is the whole of the correction:
+            // moving inside a panel is always the arrows, whichever panel it is.
+            Focus::Settings => {
+                self.field = if delta < 0 {
+                    self.field.prev()
+                } else {
+                    self.field.next()
+                };
+            }
         }
     }
 
-    /// `right` enters the map column, `left` comes back — the same shape the Tiles tab's KIT list
-    /// uses, so the gesture transfers.
-    pub fn across(&mut self, into_maps: bool) {
+    /// **Cross to the next panel, or the previous one** — `Tab`, `Shift+Tab`, and `right`/`left`,
+    /// which are three bindings on one concept rather than three behaviours.
+    ///
+    /// Wraps, and **skips a panel with nothing in it**: the settings have no rows when no map is
+    /// selected and none is being made, and a `Tab` that lands the arrows somewhere they can do
+    /// nothing is the dead key `keys.rs` refuses to ship.
+    pub fn section(&mut self, delta: i32) {
         self.problem = None;
-        match (self.focus, into_maps) {
-            (Focus::Kits, true) if self.current_kit().is_some_and(|k| !k.maps.is_empty()) => {
-                self.focus = Focus::Maps;
+        let at = Focus::ALL
+            .iter()
+            .position(|f| *f == self.focus)
+            .unwrap_or(0);
+        for step in 1..=Focus::ALL.len() {
+            let i = if delta < 0 {
+                (at + Focus::ALL.len() * step - step) % Focus::ALL.len()
+            } else {
+                (at + step) % Focus::ALL.len()
+            };
+            let want = Focus::ALL[i];
+            if self.panel_has_rows(want) {
+                self.focus = want;
+                return;
             }
-            (Focus::Maps, false) => self.focus = Focus::Kits,
-            _ => {}
+        }
+    }
+
+    /// Is there anything in that panel for the arrows to be on?
+    fn panel_has_rows(&self, panel: Focus) -> bool {
+        match panel {
+            // The kit list is never empty — `Catalog::scan` refuses a root with no kits — and the
+            // map panel always draws a row, the instruction when there are no maps.
+            Focus::Kits | Focus::Maps => true,
+            Focus::Settings => self.creating.is_some() || self.current_map().is_some(),
         }
     }
 
@@ -796,10 +855,10 @@ mod screen_tests {
     #[test]
     fn changing_kit_lands_on_a_map_row_that_exists() {
         let mut c = chooser(Some("site"));
-        c.across(true);
+        c.section(1);
         c.step(1);
         assert_eq!(c.map, 1, "walked to the second map");
-        c.across(false);
+        c.section(-1);
         c.step(1); // -> site_v2, which has no maps at all
         assert_eq!(
             c.map, 0,
@@ -807,23 +866,70 @@ mod screen_tests {
         );
     }
 
-    /// `right` enters the map column and `left` comes back — and an empty kit has nothing to enter,
-    /// so the arrows stay where they can do something.
+    /// **`Tab` crosses panels; the arrows never do.** The rule asked for at the keyboard: *"tab
+    /// should move around the different sections"*, and inside one, *"I need to use the arrow keys
+    /// to move around, not tab."*
     #[test]
-    fn the_map_column_cannot_be_entered_when_it_is_empty() {
+    fn tab_crosses_panels_and_the_arrows_stay_inside_one() {
+        let mut c = chooser(Some("site"));
+        assert_eq!(c.focus, Focus::Kits);
+        c.section(1);
+        assert_eq!(c.focus, Focus::Maps);
+        c.section(1);
+        assert_eq!(
+            c.focus,
+            Focus::Settings,
+            "the third panel is a panel like the others"
+        );
+        c.section(1);
+        assert_eq!(c.focus, Focus::Kits, "and it wraps");
+        c.section(-1);
+        assert_eq!(c.focus, Focus::Settings, "backwards too");
+
+        // An arrow never changes panel — that was the defect.
+        let before = c.focus;
+        c.step(1);
+        c.step(-1);
+        assert_eq!(
+            c.focus, before,
+            "the arrows move inside the panel, never out of it"
+        );
+    }
+
+    /// **A panel with nothing in it is skipped**, because landing the arrows where they can do
+    /// nothing is the dead key `keys.rs` refuses to ship. `site_v2` has no maps and no map selected,
+    /// so it has no settings to show.
+    #[test]
+    fn a_panel_with_no_rows_is_skipped() {
         let mut c = chooser(Some("site_v2"));
-        c.across(true);
+        c.section(1);
+        assert_eq!(
+            c.focus,
+            Focus::Maps,
+            "the map panel always draws a row — the instruction"
+        );
+        c.section(1);
         assert_eq!(
             c.focus,
             Focus::Kits,
-            "site_v2 has no maps, so right does nothing"
+            "no map is selected, so there are no settings to walk into"
         );
+    }
 
+    /// The settings rows are walked by the arrows, wrapping, like every other panel.
+    #[test]
+    fn the_arrows_walk_the_settings_rows() {
         let mut c = chooser(Some("site"));
-        c.across(true);
-        assert_eq!(c.focus, Focus::Maps);
-        c.across(false);
-        assert_eq!(c.focus, Focus::Kits);
+        c.section(1);
+        c.section(1);
+        assert_eq!(c.focus, Focus::Settings);
+        assert_eq!(c.field, Field::Name);
+        c.step(1);
+        assert_eq!(c.field, Field::Bounds);
+        c.step(-1);
+        assert_eq!(c.field, Field::Name);
+        c.step(-1);
+        assert_eq!(c.field, Field::Note, "and it wraps backwards");
     }
 
     /// **The launch line, which is the whole output of this screen.** The root kit passes no
@@ -901,9 +1007,10 @@ mod screen_tests {
         );
     }
 
-    /// `Tab` walks the four fields and wraps — a fixed cycle, in the order they are drawn.
+    /// The four settings are a fixed cycle in the order they are drawn — walked by the **arrows**,
+    /// since `Tab` crosses panels. Wraps, so neither end is a dead stop.
     #[test]
-    fn tab_walks_the_fields_in_the_order_they_are_shown() {
+    fn the_field_cycle_runs_in_the_order_they_are_shown() {
         let mut f = Field::Name;
         let mut seen = vec![f];
         for _ in 0..4 {
@@ -921,6 +1028,38 @@ mod screen_tests {
             ],
             "four fields, then back to the first"
         );
+    }
+
+    /// The same cycle backwards. Stepping one way then the other must land where you started, which
+    /// is the property an off-by-one in either direction would break.
+    #[test]
+    fn the_field_cycle_runs_backwards_too() {
+        let mut f = Field::Note;
+        let mut seen = vec![f];
+        for _ in 0..4 {
+            f = f.prev();
+            seen.push(f);
+        }
+        assert_eq!(
+            seen,
+            vec![
+                Field::Note,
+                Field::Origin,
+                Field::Bounds,
+                Field::Name,
+                Field::Note
+            ],
+            "backwards from the last, wrapping past the first"
+        );
+
+        for f in Field::ALL {
+            assert_eq!(
+                f.next().prev(),
+                f,
+                "{f:?}: forward then back is where you were"
+            );
+            assert_eq!(f.prev().next(), f, "{f:?}: back then forward is too");
+        }
     }
 }
 
@@ -1002,8 +1141,7 @@ impl Chooser {
             .collect();
 
         let kit = self.current_kit();
-        let maps_header =
-            kit.map_or_else(|| "MAPS".to_owned(), |k| format!("MAPS IN {}", k.label));
+        let maps_header = kit.map_or_else(|| "MAPS".to_owned(), |k| format!("MAPS IN {}", k.label));
         let maps = match kit {
             // §1.4: an unmet condition is an instruction, never a report.
             Some(k) if k.maps.is_empty() => vec![Row {
@@ -1092,9 +1230,11 @@ impl Chooser {
             (None, None) => return ("SETTINGS".to_owned(), Vec::new()),
         };
 
-        let live = |f: Field| self.focus == Focus::Field(f);
+        let live = |f: Field| self.focus == Focus::Settings && self.field == f;
+        // The caret shows only while typing — a highlighted row you have not opened yet is still
+        // showing its value, not an empty edit box.
         let value = |f: Field, settled: String| -> String {
-            if live(f) {
+            if live(f) && self.editing {
                 format!("{}_", self.raw)
             } else {
                 settled
@@ -1111,7 +1251,10 @@ impl Chooser {
                         name
                     },
                 ),
-                tone: tone_for(live(Field::Name), self.creating.is_some() && self.raw.is_empty()),
+                tone: tone_for(
+                    live(Field::Name),
+                    self.creating.is_some() && self.raw.is_empty(),
+                ),
             },
             Row {
                 left: Field::Bounds.label().to_owned(),
@@ -1142,13 +1285,16 @@ impl Chooser {
     /// key not listed, because it teaches something untrue.
     pub fn hint(&self) -> &'static str {
         match self.focus {
-            Focus::Field(_) => "type    Enter next field    Esc back",
-            _ if self.creating.is_some() => "Enter make it    Tab fields    Esc cancel",
-            Focus::Kits if self.current_kit().is_some_and(|k| k.maps.is_empty()) => {
-                "up/down kit    N new map    Esc quit"
+            _ if self.editing => "type    Enter keep    Esc cancel",
+            Focus::Settings if self.creating.is_some() => {
+                "up/down field    Enter edit    Tab panel    Ctrl+Enter make it    Esc cancel"
             }
-            Focus::Kits => "up/down kit    right maps    Enter open    N new map    Esc quit",
-            Focus::Maps => "up/down map    left kits    Enter open    Tab settings    N new map",
+            Focus::Settings => "up/down field    Enter edit    Tab panel    Esc quit",
+            Focus::Kits if self.current_kit().is_some_and(|k| k.maps.is_empty()) => {
+                "up/down kit    Tab panel    N new map    Esc quit"
+            }
+            Focus::Kits => "up/down kit    Tab panel    Enter open    N new map    Esc quit",
+            Focus::Maps => "up/down map    Tab panel    Enter open    N new map    Esc quit",
         }
     }
 }
@@ -1259,6 +1405,8 @@ impl Plugin for ChooserPlugin {
             kit: self.chooser.kit,
             map: self.chooser.map,
             focus: self.chooser.focus,
+            field: self.chooser.field,
+            editing: self.chooser.editing,
             raw: self.chooser.raw.clone(),
             problem: self.chooser.problem.clone(),
             creating: self.chooser.creating.clone(),
@@ -1361,10 +1509,11 @@ fn spawn_screen(mut commands: Commands) {
                     p.spawn((Node::default(), MapList));
                 });
             });
-            root.spawn(panel(COL * 2.0 + crate::chrome::PAD)).with_children(|p| {
-                p.spawn((header("SETTINGS"), SettingsHeader));
-                p.spawn((Node::default(), SettingsList));
-            });
+            root.spawn(panel(COL * 2.0 + crate::chrome::PAD))
+                .with_children(|p| {
+                    p.spawn((header("SETTINGS"), SettingsHeader));
+                    p.spawn((Node::default(), SettingsList));
+                });
             root.spawn((
                 Text::new(String::new()),
                 TextFont::from_font_size(12.0),
@@ -1478,28 +1627,35 @@ fn paint_chooser(
 /// **The field takes the keyboard first.** Mirrors `build.rs`'s name prompt, including the drain:
 /// while no field is open the stream is cleared, so the keystroke that *opens* one cannot become its
 /// first character (the `xseam` bug this crate already paid for once).
-fn type_into_field(mut events: MessageReader<KeyboardInput>, mut chooser: ResMut<Chooser>) {
-    let Focus::Field(field) = chooser.focus else {
+fn type_into_field(
+    mut events: MessageReader<KeyboardInput>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut chooser: ResMut<Chooser>,
+) {
+    if !chooser.editing {
         events.clear();
         return;
-    };
+    }
+    let field = chooser.field;
+    let _ = &keyboard;
     for event in events.read() {
         if !event.state.is_pressed() {
             continue;
         }
         match &event.logical_key {
+            // **`Enter` keeps it and stops typing** — it does not jump to the next field. Moving
+            // between fields is the arrows now, and a commit that also moved would be the same key
+            // doing two jobs, which is what this screen's `Tab` was just corrected for.
             Key::Enter => {
-                commit_field(&mut chooser, field);
+                if commit_field(&mut chooser, field) {
+                    chooser.editing = false;
+                }
                 return;
             }
             Key::Escape => {
                 chooser.raw.clear();
                 chooser.problem = None;
-                chooser.focus = if chooser.creating.is_some() {
-                    Focus::Field(Field::Name)
-                } else {
-                    Focus::Maps
-                };
+                chooser.editing = false;
                 return;
             }
             Key::Backspace => {
@@ -1517,7 +1673,11 @@ fn type_into_field(mut events: MessageReader<KeyboardInput>, mut chooser: ResMut
 
 /// Parse and store one field, or refuse it by name. **Nothing is substituted** — a value that will
 /// not parse leaves the old one alone and says why.
-fn commit_field(chooser: &mut Chooser, field: Field) {
+///
+/// Answers **whether it committed**, and deliberately does not decide where the keyboard goes next:
+/// `Enter` and `Tab` advance, `Shift+Tab` goes back, and a refusal keeps you on the field whichever
+/// key you pressed. Choosing the destination in here made that one behaviour with three callers.
+fn commit_field(chooser: &mut Chooser, field: Field) -> bool {
     let raw = chooser.raw.trim().to_owned();
     // Editing an existing map writes that file; making one fills in a draft first.
     let existing = chooser.creating.is_none();
@@ -1533,9 +1693,9 @@ fn commit_field(chooser: &mut Chooser, field: Field) {
                     note,
                 }
             }
-            MapSummary::Unreadable(_) => return,
+            MapSummary::Unreadable(_) => return false,
         },
-        (None, None) => return,
+        (None, None) => return false,
     };
 
     match field {
@@ -1544,7 +1704,7 @@ fn commit_field(chooser: &mut Chooser, field: Field) {
             if name.is_empty() {
                 chooser.problem =
                     Some("a map needs a name — snake_case, starting with a letter".to_owned());
-                return;
+                return false;
             }
             draft.name = name;
         }
@@ -1553,13 +1713,13 @@ fn commit_field(chooser: &mut Chooser, field: Field) {
                 chooser.problem = Some(format!(
                     "`{raw}` is not three numbers — type them like `32 4 32`"
                 ));
-                return;
+                return false;
             };
             if field == Field::Bounds {
                 if t.0 <= 0.0 || t.1 <= 0.0 || t.2 <= 0.0 {
                     chooser.problem =
                         Some("a map's bounds must all be positive — it is a volume".to_owned());
-                    return;
+                    return false;
                 }
                 draft.bounds = t;
             } else {
@@ -1575,14 +1735,14 @@ fn commit_field(chooser: &mut Chooser, field: Field) {
         // cannot disagree about what a map is.
         if let Err(e) = write_settings(chooser, &draft) {
             chooser.problem = Some(e);
-            return;
+            return false;
         }
     } else {
         chooser.creating = Some(draft);
     }
     chooser.raw.clear();
     chooser.problem = None;
-    chooser.focus = Focus::Field(field.next());
+    true
 }
 
 /// Apply edited settings to the map on disk, then rescan so the list describes the file rather than
@@ -1662,34 +1822,40 @@ fn drive_chooser(
     out: Res<ChoiceOut>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    if matches!(chooser.focus, Focus::Field(_)) {
+    // Typing owns the keyboard; `type_into_field` ran first and has already consumed it.
+    if chooser.editing {
         return;
     }
+    // **Arrows move inside a panel. `Tab` crosses between them.** One rule, no exceptions — the
+    // correction asked for at the keyboard, replacing a `Tab` that meant "next field" in the
+    // settings and "go to the settings" everywhere else.
     if keyboard.just_pressed(KeyCode::ArrowUp) {
         chooser.step(-1);
     }
     if keyboard.just_pressed(KeyCode::ArrowDown) {
         chooser.step(1);
     }
+    let shifted = keyboard.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    if keyboard.just_pressed(KeyCode::Tab) {
+        chooser.section(if shifted { -1 } else { 1 });
+    }
+    // `left`/`right` are the same verb, not a second one: on a column of rows they have no
+    // inside-the-panel meaning, so they cross, and an author who reaches for them is not wrong.
     if keyboard.just_pressed(KeyCode::ArrowRight) {
-        chooser.across(true);
+        chooser.section(1);
     }
     if keyboard.just_pressed(KeyCode::ArrowLeft) {
-        chooser.across(false);
+        chooser.section(-1);
     }
     if keyboard.just_pressed(KeyCode::KeyN) {
         chooser.creating = Some(Draft::default());
         chooser.raw.clear();
         chooser.problem = None;
-        chooser.focus = Focus::Field(Field::Name);
-    }
-    // **`Tab` edits whatever is in hand** — the draft, or the selected map. It did nothing at all on
-    // an existing map in the first version, which left three of the four settings unreachable.
-    if keyboard.just_pressed(KeyCode::Tab)
-        && (chooser.creating.is_some() || chooser.current_map().is_some())
-    {
-        chooser.raw.clear();
-        chooser.focus = Focus::Field(Field::Name);
+        chooser.field = Field::Name;
+        chooser.focus = Focus::Settings;
+        // Straight into the name, because a new map has nothing else worth looking at yet and the
+        // name is the one thing it cannot be saved without.
+        chooser.editing = true;
     }
     if keyboard.just_pressed(KeyCode::Escape) {
         if chooser.creating.is_some() {
@@ -1700,7 +1866,18 @@ fn drive_chooser(
         }
     }
     if keyboard.just_pressed(KeyCode::Enter) {
-        if let Some(draft) = chooser.creating.clone() {
+        // **`Ctrl+Enter` makes the map**, because plain `Enter` in this panel now means "edit this
+        // row". Two verbs on one panel need two keys; overloading `Enter` by whether the name
+        // happens to be filled in is the kind of state-decides-the-verb rule this screen just lost.
+        let commit_new = keyboard.any_pressed([
+            KeyCode::ControlLeft,
+            KeyCode::ControlRight,
+            KeyCode::SuperLeft,
+            KeyCode::SuperRight,
+        ]);
+        if let Some(draft) = chooser.creating.clone()
+            && commit_new
+        {
             let Some(dir) = chooser.current_kit().map(|k| k.dir.clone()) else {
                 chooser.problem = Some("no kit selected".to_owned());
                 return;
@@ -1722,6 +1899,13 @@ fn drive_chooser(
             }
             return;
         }
+        // In the settings, `Enter` opens the highlighted row for typing.
+        if chooser.focus == Focus::Settings {
+            chooser.raw.clear();
+            chooser.problem = None;
+            chooser.editing = true;
+            return;
+        }
         match chooser.launch_args() {
             Err(e) => chooser.problem = Some(e),
             Ok(args) => {
@@ -1733,7 +1917,6 @@ fn drive_chooser(
         }
     }
 }
-
 
 #[cfg(test)]
 mod render_tests {
@@ -1853,6 +2036,39 @@ mod render_tests {
         assert!(
             screen.contains("N new map"),
             "and the live verb is still there:\n{screen}"
+        );
+    }
+
+    /// **The settings hint says which key does which job**, because neither has a visual affordance
+    /// — ExposeHK's own caveat about techniques with "no visual representation to aid their
+    /// discovery". If the line does not distinguish moving-inside from crossing-between, the
+    /// distinction this panel was just rebuilt around is invisible.
+    #[test]
+    fn the_settings_hint_separates_moving_from_crossing() {
+        let mut c = chooser_with(vec![kit(
+            Some("site"),
+            "site",
+            1,
+            vec![MapEntry {
+                name: "hall".into(),
+                path: PathBuf::from("hall.map.ron"),
+                summary: MapSummary::Read {
+                    placements: 0,
+                    stamps: 0,
+                    bounds: (4.0, 3.0, 4.0),
+                },
+            }],
+        )]);
+        c.focus = Focus::Settings;
+        c.field = Field::Bounds;
+        let hint = c.hint();
+        assert!(
+            hint.contains("up/down field"),
+            "the arrows are what move here: {hint}"
+        );
+        assert!(
+            hint.contains("Tab panel"),
+            "and Tab is what crosses: {hint}"
         );
     }
 }
