@@ -210,6 +210,14 @@ impl Plugin for ComposePlugin {
                 (rebuild.after(keys::Phase::Act))
                     .run_if(in_state(crate::screen::Screen::Editor)),
             )
+            // **After the rebuild**, so the geometry it reads describes the rows that are actually
+            // on screen. Ungated by mode for the same reason `rebuild` is — the panel keeps itself
+            // true off-tab, and a follower that stopped would hand it back scrolled to a stale row.
+            .add_systems(
+                Update,
+                (keep_compose_selection_on_screen.after(rebuild))
+                    .run_if(in_state(crate::screen::Screen::Editor)),
+            )
             // The pointer as a second way into both lists — same selection the arrows drive.
             // Observers rather than screen-gated systems: they fire on rows that only the Kit
             // door ever spawns, so the screen is already implied by the entity.
@@ -238,6 +246,69 @@ fn clamp_selection(project: Res<Project>, mut state: ResMut<ComposeState>) {
     if state.selected != want {
         state.selected = want;
         state.member = 0;
+    }
+}
+
+/// **The compose body follows whichever list has the arrows.**
+///
+/// Both lists live in ONE scroll area — `rebuild` builds the compositions and the selected group's
+/// members into the same `ComposeBody` — so there is one thing to scroll and the question is only
+/// which row to reveal. `Pane` answers it, and it is part of the key: moving focus from a group at
+/// the top to a member far below is a move the eye has to be carried through, exactly like moving
+/// within one list.
+///
+/// It had none. The rows became `list_row`s that the pointer and the arrows share, and the body
+/// became scrollable, without anything to keep the highlight on screen — the same defect
+/// `RigList` had, arriving by a different route. `every_list_follows_its_selection` is what found
+/// it; this is the third list that ratchet has now caught.
+///
+/// Keyed through `chrome::Follow` rather than `is_changed`, for the reason that file records:
+/// `ComposeState` carries a status note written most frames, so a change-gated follower would
+/// re-arm every frame and never fire.
+fn keep_compose_selection_on_screen(
+    state: Res<ComposeState>,
+    comp_rows: Query<(&CompRow, &ComputedNode, &UiGlobalTransform)>,
+    member_rows: Query<(&MemberRow, &ComputedNode, &UiGlobalTransform)>,
+    mut lists: Query<
+        (&ComputedNode, &UiGlobalTransform, &mut ScrollPosition),
+        (With<ComposeBody>, Without<CompRow>, Without<MemberRow>),
+    >,
+    mut follow: Local<crate::chrome::Follow<(Pane, usize)>>,
+) {
+    let want = match state.focus {
+        Pane::Groups => (Pane::Groups, state.selected),
+        Pane::Members => (Pane::Members, state.member),
+    };
+    if !follow.should_scroll(Some(want)) {
+        return;
+    }
+    // A UI node's transform is its CENTRE, so the edges are the half-size either side. No match
+    // means the index is momentarily past the rows — `clamp_selection` fixes that on the next
+    // project change, and scrolling to a row that is not drawn is not a thing to invent.
+    let row = match state.focus {
+        Pane::Groups => comp_rows
+            .iter()
+            .find(|(r, _, _)| r.0 == state.selected)
+            .map(|(_, n, t)| (t.translation.y, n.size.y * 0.5)),
+        Pane::Members => member_rows
+            .iter()
+            .find(|(r, _, _)| r.0 == state.member)
+            .map(|(_, n, t)| (t.translation.y, n.size.y * 0.5)),
+    };
+    let Some((row_mid, row_half)) = row else {
+        return;
+    };
+    for (list, list_tf, mut scroll) in &mut lists {
+        // Physical in, logical out — `ComputedNode` and `UiGlobalTransform` are physical pixels,
+        // `ScrollPosition` is logical.
+        if let Some(want) = crate::chrome::scroll_to_reveal(
+            (row_mid, row_half),
+            (list_tf.translation.y, list.size.y * 0.5),
+            scroll.0.y,
+            list.inverse_scale_factor,
+        ) {
+            scroll.0.y = want;
+        }
     }
 }
 

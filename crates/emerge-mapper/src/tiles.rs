@@ -3404,6 +3404,11 @@ fn spawn_tiles_panel(mut commands: Commands) {
         // taller than the panel. Bounded and scrollable beats running off the bottom edge, which is
         // where the "no facing is derived" note was going. The one builder, plus this pane's own
         // gap to the summary above it.
+        //
+        // FOLLOW-OK: content, not a list. `build_detail` and the candidate block draw sections and
+        // prose lines — there is no row here the arrows walk, so there is no selection to keep on
+        // screen. The scroll exists for HEIGHT, and the pane above it (`CandidateList`) is the one
+        // with a selection and has `keep_selection_on_screen`.
         crate::chrome::scroll_list(p, (DetailPane, crate::notice::CopyPane(TILES_PANEL_TABS)))
             .entry::<Node>()
             .and_modify(|mut n| n.margin.top = Val::Px(8.0));

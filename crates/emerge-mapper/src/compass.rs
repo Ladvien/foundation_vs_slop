@@ -42,9 +42,11 @@ const ARM: f32 = 2.0;
 /// **The conventional axis colours** — X red, Y green, Z blue, as every DCC tool from Blender to
 /// Maya to Unity draws them. Deliberately NOT this editor's own palette: an author arrives already
 /// knowing what a red arm means, and spending that knowledge is free.
-const X_AXIS: Color = Color::srgb(0.91, 0.30, 0.33);
-const Y_AXIS: Color = Color::srgb(0.45, 0.78, 0.35);
-const Z_AXIS: Color = Color::srgb(0.31, 0.55, 0.93);
+// The doc above is the whole argument, and naming these in `chrome` would invite a future sweep to
+// harmonise them with the palette — the one thing they must never do.
+const X_AXIS: Color = Color::srgb(0.91, 0.30, 0.33); // CHROME-OK: DCC convention, not our palette
+const Y_AXIS: Color = Color::srgb(0.45, 0.78, 0.35); // CHROME-OK: DCC convention, not our palette
+const Z_AXIS: Color = Color::srgb(0.31, 0.55, 0.93); // CHROME-OK: DCC convention, not our palette
 
 /// The three axes, in the order the arms are spawned — read by the update system through
 /// [`CompassArm::0`], so the two cannot disagree about which arm is which.
@@ -142,6 +144,10 @@ fn spawn(mut commands: Commands) {
                 .with_children(|dot| {
                     dot.spawn((
                         Text::new(*name),
+                        // This letter sits ON the axis dot, so it is read against X_AXIS/Y_AXIS/
+                        // Z_AXIS and never against a panel; an ink picked to contrast with
+                        // `PANEL_BG` would be the wrong contrast here.
+                        // CHROME-OK: read against the axis dot, not against a panel.
                         TextColor(Color::srgb(0.10, 0.10, 0.10)),
                         TextFont::from_font_size(9.0),
                         Pickable::IGNORE,

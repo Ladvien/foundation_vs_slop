@@ -4239,7 +4239,7 @@ fn spawn_screen(
                 row_gap: Val::Px(crate::chrome::GAP_ROW * 2.0),
                 ..default()
             },
-            BackgroundColor(Color::srgb(0.035, 0.033, 0.030)),
+            BackgroundColor(crate::chrome::VOID),
         ))
         .with_children(|root| {
             root.spawn((
@@ -4309,9 +4309,13 @@ fn spawn_screen(
                         });
                 });
             });
+            // **The same size as the hint line below it**, and on the scale. It was 12, which is
+            // off the 9/10/11/13/15/18 scale entirely — and the emphasis it was reaching for is
+            // already carried by `DANGER`. Colour is how this editor shouts; size is what type
+            // role a thing has, and these two bottom lines have the same one.
             root.spawn((
                 Text::new(String::new()),
-                TextFont::from_font_size(12.0),
+                TextFont::from_font_size(11.0),
                 TextColor(crate::chrome::DANGER),
                 ProblemLine,
             ));

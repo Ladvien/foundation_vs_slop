@@ -63,13 +63,42 @@ fn every_scrollable_list_has_something_that_follows_its_selection() {
 
     let mut markers: Vec<(String, String)> = Vec::new();
     for (file, text) in &src {
-        for line in text.lines() {
+        let lines: Vec<&str> = text.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            // **`scroll_list` takes content, not only lists**, and the two want different things.
+            // A pane whose HEIGHT is variable — the tiles detail block is a size, a layer, four
+            // rows of chips and however many sentences its findings need — scrolls because it
+            // would otherwise run off the bottom edge, and it has no selection for anything to
+            // follow. Wiring a follower to it would be a system with nothing to key on.
+            //
+            // So the exemption is stated at the spawn, in the register `SORT-OK` and `CHROME-OK`
+            // already use here. Read from the whole comment block above the call rather than one
+            // line up: the reason is a paragraph, and a rule that forced it onto the last line
+            // would decide where the prose ends. Anything that does not say `FOLLOW-OK:` is a
+            // list, and a list must follow its selection.
+            let exempt = line.contains("FOLLOW-OK:")
+                || lines[..i]
+                    .iter()
+                    .rev()
+                    .take_while(|l| l.trim_start().starts_with("//"))
+                    .any(|l| l.contains("FOLLOW-OK:"));
+            if exempt {
+                continue;
+            }
             let Some(rest) = line.split_once("scroll_list(").map(|(_, r)| r) else {
                 continue;
             };
-            // `scroll_list(p, RigList)` — the second argument is the marker.
+            // `scroll_list(p, RigList)` — the second argument is the marker. It may also be a
+            // BUNDLE: `scroll_list(p, (DetailPane, CopyPane(..)))`, where the marker to follow is
+            // the first component. Splitting on ',' alone yielded `(DetailPane`, which matches no
+            // `With<..>` anywhere and so reported a real pane under a name that does not exist.
             let Some(arg) = rest.split(',').nth(1) else { continue };
-            let marker = arg.trim().trim_end_matches(&[')', ';'][..]).trim().to_owned();
+            let marker = arg
+                .trim()
+                .trim_start_matches('(')
+                .trim_end_matches(&[')', ';'][..])
+                .trim()
+                .to_owned();
             if marker.is_empty() || marker.starts_with("marker") {
                 continue; // the definition itself
             }
