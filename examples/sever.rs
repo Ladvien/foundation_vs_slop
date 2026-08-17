@@ -51,6 +51,25 @@ struct AimMarker;
 #[derive(Resource)]
 struct Granularity(usize);
 
+/// Marks the line that reports what the last blow did.
+#[derive(Component)]
+struct HudStatus;
+
+/// What to say about the last blow.
+///
+/// **This exists because the demo silently dead-ends without it.** Once everything reachable from
+/// one aim point has been severed, every further keypress is a legitimate no-op — the blow lands, it
+/// reaches bonds, and nothing is left for it to break. On screen that is indistinguishable from a
+/// dropped keypress, and a play session ended with thirty presses that appeared to do nothing.
+#[derive(Resource)]
+struct Status(String);
+
+impl Default for Status {
+    fn default() -> Self {
+        Status("hit it: 1 projectile  2 slash  3 blade  4 blast  5 pull".into())
+    }
+}
+
 /// How hard the drawn fragments are rounded — index into [`SOFTENINGS`].
 ///
 /// **On a key because it is worth seeing back to back.** At `0.0` the pieces keep the hard dihedral
@@ -73,8 +92,9 @@ fn main() {
         .insert_resource(Aim(Vec3::new(0.0, 0.25, 0.0)))
         .insert_resource(Granularity(GRANULARITIES.len() - 1))
         .insert_resource(Soften(2))
+        .init_resource::<Status>()
         .add_systems(Startup, setup)
-        .add_systems(Update, (aim_marker, strike, integrate))
+        .add_systems(Update, (aim_marker, strike, integrate, hud))
         .run();
 }
 
@@ -101,6 +121,54 @@ fn setup(world: &mut World) {
     world.insert_resource(materials);
     world.insert_resource(damage);
     body::stand(world, granularity);
+    spawn_hud(world);
+}
+
+/// **An on-screen legend, because without one the feature set is invisible.**
+///
+/// Everything this example can do lives on keys, and a window that opens with no text tells you
+/// none of it. Watching someone use it: they pressed the number keys — the obvious ones — never
+/// found the aim marker, never found `G` or `T`, and concluded it had broken when the subject ran
+/// out of pieces to lose.
+fn spawn_hud(world: &mut World) {
+    world.spawn((
+        Text::new(
+            "arrows / WASD  aim\n             1 projectile   2 slash   3 blade   4 blast   5 pull\n             G granularity   T soften   R reset",
+        ),
+        TextFont { font_size: FontSize::Px(15.0), ..default() },
+        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.85)),
+        Node { position_type: PositionType::Absolute, top: px(12), left: px(14), ..default() },
+    ));
+    world.spawn((
+        HudStatus,
+        Text::new(""),
+        TextFont { font_size: FontSize::Px(15.0), ..default() },
+        TextColor(Color::srgba(1.0, 0.92, 0.55, 0.95)),
+        Node { position_type: PositionType::Absolute, bottom: px(14), left: px(14), ..default() },
+    ));
+}
+
+/// Keep the status line current: what the last blow did, and the state of the two dials.
+fn hud(
+    status: Res<Status>,
+    granularity: Res<Granularity>,
+    soften: Res<Soften>,
+    standing: Query<(), With<body::Attached>>,
+    mut line: Query<&mut Text, With<HudStatus>>,
+) {
+    let text = format!(
+        "{}\n{} of {} standing  |  soften {:.2}  |  granularity {}",
+        status.0,
+        standing.iter().count(),
+        GRANULARITIES[granularity.0],
+        SOFTENINGS[soften.0],
+        GRANULARITIES[granularity.0],
+    );
+    for mut t in &mut line {
+        if t.0 != text {
+            t.0 = text.clone();
+        }
+    }
 }
 
 /// Move the aim marker, and keep the sphere on it.
@@ -181,6 +249,14 @@ fn strike(world: &mut World) {
         };
         world.insert_resource(damage);
         body::stand(world, granularity);
+        let (g, t) = (GRANULARITIES[granularity], SOFTENINGS[world.resource::<Soften>().0]);
+        world.resource_mut::<Status>().0 = if rounder {
+            format!("soften {t:.2} - re-baked; the colliders are identical either way")
+        } else if coarser {
+            format!("granularity {g} - same bake, read at a different frontier")
+        } else {
+            "reset".into()
+        };
         return;
     }
 
@@ -198,7 +274,25 @@ fn strike(world: &mut World) {
 
     if let Some(blow) = blow {
         let at = world.resource::<Aim>().0;
-        body::strike(world, blow, at);
+        let out = body::strike(world, blow, at);
+        // **A blow that severs nothing new is a legitimate outcome, and has to say so.** Everything
+        // reachable from this aim point is already gone; the fix is to move the aim or reset, and
+        // nothing on screen conveys that unless it is written down.
+        let said = match (out.newly, out.off) {
+            (0, _) if out.reached == 0 => {
+                format!("{}: landed on nothing - the aim is off the body", blow.label())
+            }
+            (0, _) => format!(
+                "{}: nothing left to break here. Move the aim (arrows) or reset (R)",
+                blow.label()
+            ),
+            (n, 0) => format!(
+                "{}: severed {n} bond(s), but nothing came loose yet. Hit it again",
+                blow.label()
+            ),
+            (n, off) => format!("{}: severed {n} bond(s), {off} fragment(s) came off", blow.label()),
+        };
+        world.resource_mut::<Status>().0 = said;
     }
 }
 

@@ -365,24 +365,40 @@ pub fn spawn_fragment(world: &mut World, id: FragmentId, launch: Option<(Vec3, V
     });
 }
 
+/// What one blow actually did — enough for a caller to tell "nothing happened" from "nothing
+/// happened *yet*", which are different and look identical on screen without it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Outcome {
+    /// Bonds the region touched at all.
+    pub reached: usize,
+    /// Bonds whose severity cleared the threshold.
+    pub gave_way: usize,
+    /// Of those, how many were still intact before this blow.
+    pub newly: usize,
+    /// Fragments that stopped being connected to the body.
+    pub off: usize,
+}
+
 /// **The whole feature in one function.** Pick a region, threshold the reach it comes back with,
 /// sever what gave way, and re-run island detection to see what is no longer holding on.
-///
-/// Returns how many fragments came loose.
-pub fn strike(world: &mut World, blow: Blow, at: Vec3) -> usize {
+pub fn strike(world: &mut World, blow: Blow, at: Vec3) -> Outcome {
     let standing: Vec<(Entity, FragmentId)> =
         world.query::<(Entity, &Attached)>().iter(world).map(|(e, a)| (e, a.0)).collect();
     if standing.is_empty() {
-        return 0;
+        return Outcome::default();
     }
+    let mut outcome = Outcome::default();
 
     // Which fragments stopped being connected to the body. Scoped so every borrow of `Damage` and
     // `Baked` has ended before anything is spawned.
     let leaving: Vec<(Entity, FragmentId)> = {
-        let Some(mut damage) = world.remove_resource::<Damage>() else { return 0 };
+        let Some(mut damage) = world.remove_resource::<Damage>() else { return Outcome::default() };
         let reach = blow.reach(&damage.bonds, at);
         let gave_way = reach.above(GIVES_WAY);
         let newly = damage.broken.sever_all(&gave_way);
+        outcome.reached = reach.len();
+        outcome.gave_way = gave_way.len();
+        outcome.newly = newly;
         info!(
             "{} at {:.2},{:.2},{:.2} — reached {} bonds, {} gave way ({newly} newly)",
             blow.label(),
@@ -424,7 +440,8 @@ pub fn strike(world: &mut World, blow: Blow, at: Vec3) -> usize {
     if !leaving.is_empty() {
         info!("  {} fragment(s) came off", leaving.len());
     }
-    leaving.len()
+    outcome.off = leaving.len();
+    outcome
 }
 
 /// Thrown away from where the blow landed, with deterministic variation from the crate's own frozen

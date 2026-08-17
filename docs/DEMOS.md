@@ -44,6 +44,12 @@ The clip is scripted. Run it yourself and you aim:
   R               reset
 ```
 
+The window carries that legend on screen, and a status line at the bottom reporting what the last
+blow did plus the state of both dials — **because without it the feature set is invisible.** Watching
+someone use an earlier build: they pressed the number keys, never found the aim marker or `G` or `T`,
+and concluded it had broken when the subject ran out of pieces to lose. A blow that severs nothing
+new is a legitimate outcome and now says so.
+
 **`T` is the one to press first.** At `0.0` the fragments keep the hard dihedral edges a plane cut
 leaves behind, and that is the visual language of ice and cleaved stone however good the fracture
 underneath is. One press and the same cuts read as torn.
