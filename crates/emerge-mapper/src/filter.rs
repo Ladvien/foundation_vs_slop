@@ -16,7 +16,7 @@ use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, Button as UiButton};
 
-use crate::chrome::{ACCENT, DIM, ROW_BG, SLOT_BG, TEXT};
+use crate::chrome::{ACCENT, CHIP_PAD, DIM, FOCUS_BG, ROW_BG, ROW_HOVER, TEXT};
 
 /// Which list a box narrows.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
@@ -131,7 +131,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands, pane: Pane) {
             FilterBox(pane),
             Node {
                 width: Val::Percent(100.0),
-                padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
+                padding: CHIP_PAD,
                 flex_shrink: 0.0,
                 ..default()
             },
@@ -202,8 +202,24 @@ pub fn keys(mut events: MessageReader<KeyboardInput>, mut filters: ResMut<Filter
 pub fn refresh(
     filters: Res<Filters>,
     mut texts: Query<(&FilterText, &mut Text, &mut TextColor)>,
-    mut boxes: Query<(&FilterBox, &mut BackgroundColor)>,
+    mut boxes: Query<(&FilterBox, &Hovered, &mut BackgroundColor)>,
 ) {
+    // The fill answers to the pointer as well as to focus, so it repaints every frame — hover
+    // cannot wait for `Filters` to change. The `!=` guard keeps the steady state a comparison.
+    // Focus beats hover; hover is `chrome::ROW_HOVER`'s signifier that the box takes a click.
+    for (which, hovered, mut bg) in &mut boxes {
+        let want = if filters.focus == Some(which.0) {
+            FOCUS_BG
+        } else if hovered.0 {
+            ROW_HOVER
+        } else {
+            ROW_BG
+        };
+        if bg.0 != want {
+            bg.0 = want;
+        }
+    }
+    // The text, unlike the fill, only changes when the filter does.
     if !filters.is_changed() {
         return;
     }
@@ -220,16 +236,6 @@ pub fn refresh(
         }
         if colour.0 != want_colour {
             colour.0 = want_colour;
-        }
-    }
-    for (which, mut bg) in &mut boxes {
-        let want = if filters.focus == Some(which.0) {
-            SLOT_BG
-        } else {
-            ROW_BG
-        };
-        if bg.0 != want {
-            bg.0 = want;
         }
     }
 }

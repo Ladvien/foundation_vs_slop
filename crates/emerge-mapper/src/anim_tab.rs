@@ -23,7 +23,7 @@ use bevy::ui_widgets::{Activate, Button as UiButton};
 use emerge_core::rig_check::{Level, Staleness};
 use emerge_core::rigs::{Playback, Rigs};
 
-use crate::chrome::{ACCENT, DANGER, DIM, LABEL, ROW_BG, ROW_SELECTED, TEXT};
+use crate::chrome::{ACCENT, DANGER, DIM, LABEL, PAD, ROW_BG, ROW_SELECTED, TEXT};
 use crate::tiles::{AnimRoot, Mode};
 
 /// How many manifest snapshots the bench keeps. The undo unit is the whole file's text — writes are
@@ -328,23 +328,15 @@ fn spawn_panels(mut commands: Commands) {
             BenchLine,
         ));
         // The slot table scrolls: a rig has up to ten slots and each is two lines with its measured
-        // number under the declared one.
-        p.spawn((
-            Node {
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(2.0),
-                margin: UiRect::top(Val::Px(8.0)),
-                flex_grow: 1.0,
-                min_height: Val::Px(0.0),
-                overflow: Overflow::scroll_y(),
-                ..default()
-            },
-            bevy::ui_widgets::ScrollArea::default(),
-            SlotPane,
-            // The declared-beside-measured table — the block an author asking about a gait is
-            // looking at, and the one worth handing to somebody else verbatim.
-            crate::notice::CopyPane(&[crate::tiles::Mode::Anim]),
-        ));
+        // number under the declared one. The declared-beside-measured table is the block an author
+        // asking about a gait is looking at, and the one worth handing to somebody else verbatim —
+        // hence the `CopyPane`.
+        crate::chrome::scroll_list(
+            p,
+            (SlotPane, crate::notice::CopyPane(&[crate::tiles::Mode::Anim])),
+        )
+        .entry::<Node>()
+        .and_modify(|mut n| n.margin.top = Val::Px(8.0));
         // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
         // the panel, and an auto margin in a column absorbs the free space above it — so
         // placed any earlier it pushes every sibling after it down with it.
@@ -360,11 +352,7 @@ fn spawn_panels(mut commands: Commands) {
     )
     .insert(AnimRoot)
     .with_children(|p| {
-        p.spawn((
-            Text::new("RIGS"),
-            TextColor(LABEL),
-            TextFont::from_font_size(10.0),
-        ));
+        crate::chrome::list_heading(p, "RIGS");
         crate::filter::spawn(p, crate::filter::Pane::Rigs);
         crate::chrome::scroll_list(p, RigList);
     });
@@ -786,22 +774,7 @@ fn rebuild_list(
                 if !filters.keeps(pane, name) {
                     continue;
                 }
-                p.spawn((
-                    UiButton,
-                    Hovered::default(),
-                    RigRow(ix),
-                    Node {
-                        width: Val::Percent(100.0),
-                        padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
-                        ..default()
-                    },
-                    BackgroundColor(if ix == bench.selected {
-                        ROW_SELECTED
-                    } else {
-                        ROW_BG
-                    }),
-                ))
-                .with_children(|row| {
+                crate::chrome::list_row(p, ix == bench.selected, RigRow(ix)).with_children(|row| {
                     row.spawn((
                         Text::new((*name).to_owned()),
                         TextColor(TEXT),
@@ -902,32 +875,26 @@ fn rebuild_slots(
                     if report.worst == Level::Ok {
                         continue;
                     }
-                    // The severity-rail shape (`tiles.rs`): a tinted left border, the severity as
-                    // a WORD as well as a hue, and the first finding as the remedy line.
-                    let (word, tint) = match report.worst {
-                        Level::Bad => ("blocking", DANGER),
-                        _ => ("worth checking", LABEL),
-                    };
+                    // The one severity rail, through the one map — this used to be a 3 px dialect
+                    // whose every non-blocking verdict rendered LABEL, so "worth checking" here and
+                    // "worth checking" on the Tiles findings wore different inks (unified
+                    // 2026-08-17). `rig_check`'s middle tier is worded "worth checking", so it IS
+                    // the vocabulary's Warn.
+                    let (tint, word) = crate::chrome::severity_style(match report.worst {
+                        Level::Bad => emerge_core::import::Severity::Blocking,
+                        _ => emerge_core::import::Severity::Warn,
+                    });
                     let first = report
                         .findings
                         .iter()
                         .find(|f| f.level == report.worst)
                         .map(|f| f.text.clone())
                         .unwrap_or_default();
-                    p.spawn((
-                        UiButton,
-                        Hovered::default(),
-                        JumpRow(ix),
-                        Node {
-                            flex_direction: FlexDirection::Column,
-                            padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
-                            border: UiRect::left(Val::Px(3.0)),
-                            margin: UiRect::top(Val::Px(4.0)),
-                            ..default()
-                        },
-                        BorderColor::all(tint),
-                        BackgroundColor(ROW_BG),
-                    ))
+                    crate::chrome::severity_rail(
+                        p,
+                        tint,
+                        (UiButton, Hovered::default(), JumpRow(ix), BackgroundColor(ROW_BG)),
+                    )
                     .with_children(|row| {
                         row.spawn(Node {
                             flex_direction: FlexDirection::Row,
@@ -1009,7 +976,9 @@ fn rebuild_slots(
                                 TextColor(DANGER),
                                 TextFont::from_font_size(9.0),
                                 Node {
-                                    margin: UiRect::left(Val::Px(12.0)),
+                                    // One panel inset of indent — `PAD`, not a bare 12, so the
+                                    // provenance block steps in by the same unit the panel does.
+                                    margin: UiRect::left(Val::Px(PAD)),
                                     ..default()
                                 },
                             ));
@@ -1078,28 +1047,18 @@ fn rebuild_slots(
                     ));
                     // The transient adopt-exclude chip — gaits only, since adopt writes nothing
                     // else. The durable form is `keep:` in the manifest; this is "not this once".
+                    // `CHIP_PAD` like every other chip (its 4/1 was the last padding outlier;
+                    // unified 2026-08-17), keeping its quieter 9 px word.
                     if matches!(slot.playback, Playback::Gait { .. }) {
-                        row.spawn((
-                            UiButton,
-                            Hovered::default(),
+                        crate::chrome::chip(
+                            row,
                             SkipChip(i),
-                            Node {
-                                padding: UiRect::axes(Val::Px(4.0), Val::Px(1.0)),
-                                ..default()
-                            },
-                            BackgroundColor(if excluded.contains(&i) {
-                                ROW_SELECTED
-                            } else {
-                                ROW_BG
-                            }),
-                        ))
-                        .with_children(|chip| {
-                            chip.spawn((
-                                Text::new("skip"),
-                                TextColor(if excluded.contains(&i) { TEXT } else { DIM }),
-                                TextFont::from_font_size(9.0),
-                            ));
-                        });
+                            "skip",
+                            9.0,
+                            if excluded.contains(&i) { TEXT } else { DIM },
+                            if excluded.contains(&i) { ROW_SELECTED } else { ROW_BG },
+                            Color::NONE,
+                        );
                     }
                 });
                 // **One sub-line per slot, not three.** The note, the asset's own clip name
@@ -1161,15 +1120,9 @@ fn rebuild_slots(
             // tolerance policy already cites. Every Note and Bad still prints in full.
             let findings = report.map(|r| r.findings.as_slice()).unwrap_or_default();
             if !findings.is_empty() {
-                p.spawn((
-                    Text::new("MEASURED".to_owned()),
-                    TextColor(LABEL),
-                    TextFont::from_font_size(10.0),
-                    Node {
-                        margin: UiRect::top(Val::Px(8.0)),
-                        ..default()
-                    },
-                ));
+                // A real `section`, like "PLOTS" thirty lines down — two heading styles in one
+                // pane was the 2026-08-17 audit's clearest type drift.
+                crate::chrome::section(p, "MEASURED");
                 let ok = findings.iter().filter(|f| f.level == Level::Ok).count();
                 if ok > 0 {
                     p.spawn((

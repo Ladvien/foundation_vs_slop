@@ -30,7 +30,7 @@ use bevy::prelude::*;
 
 use emerge_core::composition::{self, Band, Composition, Envelope};
 
-use crate::chrome::{ACCENT, DANGER, DIM, LABEL, TEXT};
+use crate::chrome::{ACCENT, DANGER, DIM, TEXT};
 use crate::keys::{self, Action};
 use crate::project::Project;
 use crate::tiles::{ComposeRoot, Mode};
@@ -125,11 +125,32 @@ impl Default for ComposeState {
     }
 }
 
-/// One line of the panel. Rebuilt wholesale when anything it reads changes.
-///
-/// Carries nothing: the whole block is despawned and respawned together, so a line has no identity
-/// worth keeping. An index field would be a hook for a click handler that does not exist yet, which
-/// is a stub.
+/// One row of the panel, typed — `docs/ui.md` §3.1's rule, applied to the last tab that rendered
+/// strings: the builders say WHAT a row is and the renderer owns how each kind looks, so a heading,
+/// a selectable row, prose and a railed refusal can never again differ only by wording and indent.
+enum Line {
+    /// A block heading — `chrome::section`, margins and all.
+    Section(String),
+    /// Prose; leading spaces become layout in [`spawn_line`].
+    Prose(String, Color),
+    /// A composition row: filled when selected, starred when armed, clickable.
+    Comp { ix: usize, text: String, selected: bool, armed: bool },
+    /// A member row: filled when the seating cursor is on it, clickable.
+    Member { ix: usize, text: String, at: bool },
+    /// A severity-railed block — the first line reads first, in the tint.
+    Rail { tint: Color, lines: Vec<(String, Color)> },
+}
+
+/// A clickable composition row, carrying its index. The panel's rows are rebuilt wholesale, so the
+/// index is re-derived every rebuild and cannot go stale between clicks.
+#[derive(Component, Clone, Copy)]
+struct CompRow(usize);
+
+/// A clickable member row, carrying its index into the selected composition's members.
+#[derive(Component, Clone, Copy)]
+struct MemberRow(usize);
+
+/// The despawn marker every rebuilt row carries. Rebuilt wholesale when anything it reads changes.
 #[derive(Component)]
 struct ComposeLine;
 
@@ -184,10 +205,16 @@ impl Plugin for ComposePlugin {
             )
             // Not gated on the mode: the armed group is shown on the Map tab too, and a panel that
             // stops updating when you leave it is a panel that lies the moment you come back.
-            .add_systems(Update,
+            .add_systems(
+                Update,
                 (rebuild.after(keys::Phase::Act))
                     .run_if(in_state(crate::screen::Screen::Editor)),
-            );
+            )
+            // The pointer as a second way into both lists — same selection the arrows drive.
+            // Observers rather than screen-gated systems: they fire on rows that only the Kit
+            // door ever spawns, so the screen is already implied by the entity.
+            .add_observer(on_comp_row_click)
+            .add_observer(on_member_row_click);
     }
 }
 
@@ -252,25 +279,19 @@ fn spawn_compose_panel(mut commands: Commands) {
         // Harmless while this context had three rows; step 3 took it to eight, and with Global's
         // twelve the group list was pushed off the bottom of the screen. Found by an author trying to
         // read it, which is the only way a layout bug is ever found.
-        crate::chrome::section(p, "COMPOSITIONS");
-        p.spawn((
-            Node {
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(2.0),
-                flex_grow: 1.0,
-                min_height: Val::Px(0.0),
-                overflow: Overflow::scroll_y(),
-                ..default()
-            },
-            ComposeBody,
-            crate::notice::CopyPane(&[Mode::Compose]),
-        ));
+        // No static heading here: `rebuild` writes the COMPOSITIONS section itself, with the focus
+        // affordance riding it — a fixed twin above it was the audit's double-heading finding.
+        //
+        // The one builder, not a hand copy of it. The copy this replaced had every field of
+        // `scroll_list` except `ScrollArea` — and `bevy_ui_widgets` only scrolls `With<ScrollArea>`,
+        // so the longest generated pane in the editor clipped its overflow and the wheel did
+        // nothing. `tests/headless.rs::every_pane_that_clips_can_scroll` pins the class.
+        crate::chrome::scroll_list(p, (ComposeBody, crate::notice::CopyPane(&[Mode::Compose])));
         // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
         // the panel, and an auto margin in a column absorbs the free space above it — so
         // placed any earlier it pushes every sibling after it down with it.
         crate::chrome::problem_log(p, &[Mode::Compose]);
     });
-
 }
 
 /// **What the tile set costs the solver**, as a line the panel can draw.
@@ -924,8 +945,9 @@ pub struct StagedCarousel(pub Carousel);
 /// The envelope of a group that is not the focal one.
 ///
 /// [`ACCENT`] at half luminance: the same hue, so a reader sees one kind of thing at two weights,
-/// rather than a second colour to learn.
-const ENVELOPE_IDLE: Color = Color::srgb(0.45, 0.33, 0.12);
+/// rather than a second colour to learn. **Derived, not transcribed** — this was a hand-halved
+/// copy of `ACCENT`'s channels, which a change to `ACCENT` would have silently desynchronised.
+const ENVELOPE_IDLE: Color = crate::chrome::scaled(crate::chrome::ACCENT, 0.5);
 
 /// One group's id, floating over its slot. Carries the slot's index into the carousel.
 #[derive(Component)]
@@ -1196,7 +1218,7 @@ fn draw_stage(
                 ),
                 UVec2::new(cells.0, cells.1),
                 Vec2::splat(step),
-                crate::editor::GRID_LINE,
+                crate::chrome::GRID_LINE,
             )
             .outer_edges();
         // The member being seated, ringed where it stands.
@@ -1278,6 +1300,10 @@ fn place_labels(
     ui_scale: Res<UiScale>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<crate::view::MainCamera>>>,
     mut labels: Query<(&SlotLabel, &Text, &mut Node)>,
+    ui_nodes: Query<
+        (&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform),
+        With<bevy::picking::hover::Hovered>,
+    >,
 ) {
     let Some(camera) = camera.filter(|_| *mode == Mode::Compose) else {
         for (_, _, mut node) in &mut labels {
@@ -1295,6 +1321,23 @@ fn place_labels(
             cam.world_to_viewport(cam_tf, COMPOSE_STAGE + Vec3::new(slot.at.0, 0.0, slot.at.1))
                 .ok()
                 .map(|p| (p, advance))
+        });
+        // **A label the panel covers is taken down, not drawn through.** The projection knows
+        // nothing of panel geometry, so a slot near the screen edge landed its label half behind
+        // the controls panel — an orphan glyph at the panel's edge (captured, 2026-08-17 audit).
+        // The panels' rects are already the one answer to "is this screen point on the interface"
+        // — `view::over_ui`, geometry off the same `Hovered` roots every other reader uses — so
+        // ask it for the label's two ends and its middle rather than restating a panel width here.
+        let placed = placed.filter(|(p, advance)| {
+            let half = text.0.chars().count() as f32 * *advance * 0.5;
+            let factor = cam.target_scaling_factor().unwrap_or(1.0);
+            ![-half, 0.0, half].into_iter().any(|dx| {
+                crate::view::over_ui(
+                    Some(Vec2::new(p.x + dx, p.y + LABEL_DROP)),
+                    factor,
+                    ui_nodes.iter(),
+                )
+            })
         });
         match placed {
             // Centred by measuring the string, which works because the shipped face is monospace —
@@ -1435,23 +1478,23 @@ fn rebuild(
     }
 
     let comps = &project.compositions.compositions;
-    let mut rows: Vec<(String, Color)> = Vec::new();
+    let mut lines: Vec<Line> = Vec::new();
 
-    // **The two modal blocks first**, because while one is open it is the only thing the keyboard
-    // reaches, and a field you cannot see is a field you cannot finish.
-    // The name field is not drawn here any more — it is `chrome::NameBox`, centred over the
-    // viewport, shared with the Map's own capture verb. Two places asking for the same thing made one
-    // act look like two.
-    if state.focus == Pane::Groups {
-        rows.push((format!("{}  <- arrows", Pane::Groups.label()), ACCENT));
-    }
+    // The one COMPOSITIONS heading, with the focus affordance riding it — the panel used to draw a
+    // static section AND a second ACCENT twin of it when the list had focus, the audit's
+    // double-heading finding. The name field is not drawn here at all — it is `chrome::NameBox`,
+    // centred over the viewport, shared with the Map's own capture verb.
+    lines.push(Line::Section(format!(
+        "COMPOSITIONS{}",
+        if state.focus == Pane::Groups { "  <- arrows" } else { "" }
+    )));
     // **Where you are in the list, and how to move.** The stage shows the focal group among its
     // neighbours, but not how many there are or how far in you have got — and `status.note` says it
     // on the keypress and is then replaced by the next message, which is the wrong lifetime for it.
     if !comps.is_empty() {
-        rows.push((
+        lines.push(Line::Prose(
             format!(
-                "  {} of {}   {} / {}",
+                "{} of {}   {} / {}",
                 state.selected.min(comps.len() - 1) + 1,
                 comps.len(),
                 keys::chord(Action::CarouselPrev),
@@ -1461,10 +1504,13 @@ fn rebuild(
         ));
     }
     if !budget.line.is_empty() {
-        rows.push((budget.line.clone(), if budget.over { DANGER } else { DIM }));
+        lines.push(Line::Prose(
+            budget.line.clone(),
+            if budget.over { DANGER } else { DIM },
+        ));
     }
     if comps.is_empty() {
-        rows.push((
+        lines.push(Line::Prose(
             "No groups. The project's `compositions.ron` defines them — one collection, so a tile \
              may seat any bound kit's pieces. A project with none stamps nothing, which is not a \
              broken one."
@@ -1474,63 +1520,198 @@ fn rebuild(
     }
 
     for (i, c) in comps.iter().enumerate() {
-        let armed = state.armed.as_deref() == Some(c.id.as_str());
-        let marker = match (i == state.selected, armed) {
-            (true, true) => ">*",
-            (true, false) => "> ",
-            (false, true) => " *",
-            (false, false) => "  ",
-        };
         let envelope = match c.envelope {
             Envelope::Anchored => "anchored".to_owned(),
             Envelope::Bounded { size } => format!("bounded {:.1}x{:.1}x{:.1}", size.0, size.1, size.2),
         };
-        rows.push((
-            format!("{marker}{}  —  {} member(s), {envelope}", c.id, c.members.len()),
-            if i == state.selected { ACCENT } else { TEXT },
-        ));
+        lines.push(Line::Comp {
+            ix: i,
+            text: format!("{}  —  {} member(s), {envelope}", c.id, c.members.len()),
+            selected: i == state.selected,
+            armed: state.armed.as_deref() == Some(c.id.as_str()),
+        });
     }
 
     if let Some(c) = comps.get(state.selected) {
-        rows.push((String::new(), TEXT));
-        rows.push((
-            format!(
-                "MEMBERS OF `{}`{}",
-                c.id,
-                if state.focus == Pane::Members { "  <- arrows" } else { "" }
-            ),
-            if state.focus == Pane::Members { ACCENT } else { LABEL },
-        ));
+        lines.push(Line::Section(format!(
+            "MEMBERS OF `{}`{}",
+            c.id,
+            if state.focus == Pane::Members { "  <- arrows" } else { "" }
+        )));
         let at = state.member.min(c.members.len().saturating_sub(1));
         for (i, m) in c.members.iter().enumerate() {
-            // The seating cursor, in the same `> ` shape the composition list above uses — one marker
-            // shape for "the thing a verb will act on", read the same way in both lists.
-            let marker = if i == at { "> " } else { "  " };
-            rows.push((
-                format!("{marker}{}", describe_member(m)),
-                if i == at { ACCENT } else { TEXT },
-            ));
+            lines.push(Line::Member { ix: i, text: describe_member(m), at: i == at });
         }
-        affordances(&mut rows, c);
-        detail(&mut rows, c, comps, &project);
+        affordances(&mut lines, c);
+        detail(&mut lines, c, comps, &project);
     }
 
     // The receipt only. The refusal is the block under the title — see `chrome::Status`.
     if !state.status.note_text().is_empty() {
-        rows.push((String::new(), TEXT));
-        rows.push((state.status.note_text().to_owned(), ACCENT));
+        lines.push(Line::Prose(state.status.note_text().to_owned(), ACCENT));
     }
 
     commands.entity(root).with_children(|p| {
-        for (text, colour) in rows {
-            p.spawn((
-                Text::new(text),
-                TextColor(colour),
-                TextFont::from_font_size(11.0),
-                ComposeLine,
-            ));
+        for line in lines {
+            match line {
+                Line::Section(text) => {
+                    crate::chrome::section(p, &text).insert(ComposeLine);
+                }
+                Line::Prose(text, colour) => spawn_line(p, &text, colour),
+                Line::Comp { ix, text, selected, armed } => {
+                    crate::chrome::list_row(p, selected, (CompRow(ix), ComposeLine)).with_children(
+                        |row| {
+                            row.spawn((
+                                Text::new(text),
+                                TextColor(TEXT),
+                                TextFont::from_font_size(ROW_PX),
+                            ));
+                            if armed {
+                                // The armed mark in its own ink — the same `*` the stage labels
+                                // carry for "this is the one a stamp places".
+                                row.spawn((
+                                    Text::new("  *"),
+                                    TextColor(ACCENT),
+                                    TextFont::from_font_size(ROW_PX),
+                                ));
+                            }
+                        },
+                    );
+                }
+                Line::Member { ix, text, at } => {
+                    crate::chrome::list_row(p, at, (MemberRow(ix), ComposeLine)).with_children(
+                        |row| {
+                            row.spawn((
+                                Text::new(text),
+                                TextColor(TEXT),
+                                TextFont::from_font_size(ROW_PX),
+                            ));
+                        },
+                    );
+                }
+                Line::Rail { tint, lines } => {
+                    crate::chrome::severity_rail(p, tint, ComposeLine).with_children(|block| {
+                        for (text, colour) in &lines {
+                            spawn_line(block, text, *colour);
+                        }
+                    });
+                }
+            }
         }
     });
+}
+
+/// A click selects the composition, the way a click selects a row in every other list — the arrows
+/// keep working exactly as before; this adds the pointer as a second way in, not a second meaning.
+fn on_comp_row_click(
+    activate: On<bevy::ui_widgets::Activate>,
+    rows: Query<&CompRow>,
+    mut state: ResMut<ComposeState>,
+) {
+    let Ok(row) = rows.get(activate.entity) else {
+        return;
+    };
+    state.selected = row.0;
+    state.focus = Pane::Groups;
+}
+
+/// A click puts the seating cursor on a member and hands the arrows to the member list.
+fn on_member_row_click(
+    activate: On<bevy::ui_widgets::Activate>,
+    rows: Query<&MemberRow>,
+    mut state: ResMut<ComposeState>,
+) {
+    let Ok(row) = rows.get(activate.entity) else {
+        return;
+    };
+    state.member = row.0;
+    state.focus = Pane::Members;
+}
+
+/// The body's one font size. Named because [`spawn_line`] derives an advance from it.
+const ROW_PX: f32 = 11.0;
+
+/// A row's leading indent, in spaces, and what is left. The pane states its structure as leading
+/// spaces (`"    "` under OFFERS, `" ".repeat(7)` in the face table, the hex STALE lines); this is
+/// where that convention is read back so the layout can honour it.
+fn split_indent(text: &str) -> (usize, &str) {
+    let rest = text.trim_start_matches(' ');
+    (text.len() - rest.len(), rest)
+}
+
+/// **One row: the indent as width, the text beside it, wrapping under itself.**
+///
+/// A bare `Text` per row wraps its continuation to column zero, which throws away the leading-space
+/// indent — a long fault message or hex STALE line restarted at the left margin, mid-scheme
+/// (captured, 2026-08-17 audit). `chrome::problem_log_line` is the precedent and states both halves:
+/// the gutter must not be in the wrapping column, and `min_width: 0` is load-bearing because a flex
+/// item will not shrink below its min-content width by default.
+///
+/// The indent becomes a **width-only spacer node**, not a `Text` of spaces: `notice::collect_text`
+/// harvests every non-blank `Text` under the pane for `Cmd+C`, and a text gutter would split each
+/// row into two copied lines. The advance is the same monospace fact [`LABEL_CHAR_W`] states for
+/// the world labels, scaled from [`LABEL_PX`] to [`ROW_PX`].
+fn spawn_line(p: &mut ChildSpawnerCommands, text: &str, colour: Color) {
+    let (indent, content) = split_indent(text);
+    // No stated width: the body is a column whose default `align_items: Stretch` already hands
+    // every row the pane's full width. `Val::Percent` here is worse than redundant — inside the
+    // scroll pane's measure pass a percent can resolve against nothing and collapse the row.
+    p.spawn((
+        Node {
+            flex_direction: FlexDirection::Row,
+            ..default()
+        },
+        ComposeLine,
+    ))
+    .with_children(|row| {
+        if indent > 0 {
+            row.spawn(Node {
+                min_width: Val::Px(indent as f32 * LABEL_CHAR_W * ROW_PX / LABEL_PX.0),
+                flex_shrink: 0.0,
+                ..default()
+            });
+        }
+        row.spawn((
+            Node {
+                // `flex_grow` hands the text the row's remaining width as a DEFINITE size, and
+                // `min_width: 0` lets it shrink below its longest line. Measured in the live
+                // window (uidump, 2026-08-17): without the grow, the text item's flex base
+                // resolved to zero width and every row laid out one glyph per line, clipped —
+                // an empty-looking pane over 38 healthy rows.
+                flex_grow: 1.0,
+                min_width: Val::Px(0.0),
+                ..default()
+            },
+            Text::new(content.to_owned()),
+            TextColor(colour),
+            TextFont::from_font_size(ROW_PX),
+            // The default, stated: this is the column that wraps, against the spacer that never
+            // does.
+            TextLayout::new(Justify::Left, LineBreak::WordOrCharacter),
+        ));
+    });
+}
+
+#[cfg(test)]
+mod line_tests {
+    use super::split_indent;
+
+    /// The split is byte-exact on the shapes the pane actually emits, and the indent is spaces
+    /// ONLY — the `>`/`*` cursor markers stay in the wrapping column, because they are content
+    /// (the copy harvest keeps them) and two characters of drift on a wrapped member row is not
+    /// the failure the spacer exists for.
+    #[test]
+    fn the_indent_is_leading_spaces_and_nothing_else() {
+        assert_eq!(split_indent(""), (0, ""));
+        assert_eq!(split_indent("    "), (4, ""));
+        assert_eq!(split_indent("no indent"), (0, "no indent"));
+        assert_eq!(split_indent("> member"), (0, "> member"));
+        assert_eq!(split_indent("  1 of 2"), (2, "1 of 2"));
+        assert_eq!(split_indent("    meal over table"), (4, "meal over table"));
+        assert_eq!(split_indent("        eat: diner"), (8, "eat: diner"));
+        // The face table: 4-space block indent plus `{:>5}` padding, one column either way.
+        assert_eq!(split_indent("      eat: n 0.00..1.00"), (6, "eat: n 0.00..1.00"));
+    }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1809,14 +1990,13 @@ fn describe_member(m: &composition::Member) -> String {
 /// exactly the distinction `map::Location`'s own note is about: *a table plus four chairs is one
 /// affordance with four seats, not four affordances*. Without this block an author reading a composition
 /// sees three meshes and no reason they belong together.
-fn affordances(rows: &mut Vec<(String, Color)>, c: &Composition) {
+fn affordances(lines: &mut Vec<Line>, c: &Composition) {
     if c.locations.is_empty() {
         return;
     }
-    rows.push((String::new(), TEXT));
-    rows.push(("OFFERS".to_owned(), LABEL));
+    lines.push(Line::Section("OFFERS".to_owned()));
     for l in &c.locations {
-        rows.push((format!("    {} over {}", l.id, l.props.join(", ")), TEXT));
+        lines.push(Line::Prose(format!("    {} over {}", l.id, l.props.join(", ")), TEXT));
         for i in &l.interactions {
             let roles: Vec<String> = i
                 .roles
@@ -1834,20 +2014,21 @@ fn affordances(rows: &mut Vec<(String, Color)>, c: &Composition) {
                     format!("{} {:?} {}-{}{seat} needs {needs}", r.name, r.kind, r.min, r.max)
                 })
                 .collect();
-            rows.push((format!("        {}: {}", i.verb, roles.join("; ")), DIM));
+            lines.push(Line::Prose(format!("        {}: {}", i.verb, roles.join("; ")), DIM));
         }
     }
 }
 
 /// The three blocks that exist so the tool can explain itself: stale, interface, faults.
-fn detail(rows: &mut Vec<(String, Color)>, c: &Composition, comps: &[Composition], project: &Project) {
-    rows.push((String::new(), TEXT));
-
+fn detail(lines: &mut Vec<Line>, c: &Composition, comps: &[Composition], project: &Project) {
     // **STALE, with the numbers.** Naming the member and both fingerprints is the difference between
     // a badge that sends someone to the right file and one that only says something is wrong.
     match composition::stale_members(c, comps, &project.library) {
         Ok(report) if report.is_empty() => {
-            rows.push(("UP TO DATE — every member matches what it was built against".to_owned(), DIM));
+            lines.push(Line::Prose(
+                "UP TO DATE — every member matches what it was built against".to_owned(),
+                DIM,
+            ));
         }
         Ok(report) => {
             // **Two different facts, said differently.** A member nobody has measured has nothing to
@@ -1862,14 +2043,16 @@ fn detail(rows: &mut Vec<(String, Color)>, c: &Composition, comps: &[Composition
                 .filter(|s| s.freshness == composition::Freshness::Unrecorded)
                 .collect();
             if !drifted.is_empty() {
-                rows.push((
+                // A railed block, like every other refusal that stays true — the rail's inset
+                // replaces the old hand-indented hex rows.
+                let mut rail = vec![(
                     format!("STALE — {} member(s) changed underneath this composition", drifted.len()),
                     DANGER,
-                ));
+                )];
                 for s in drifted {
-                    rows.push((
+                    rail.push((
                         format!(
-                            "    `{}` was {:#018x}, is now {:#018x}",
+                            "`{}` was {:#018x}, is now {:#018x}",
                             s.member,
                             s.recorded.unwrap_or_default(),
                             s.measured
@@ -1877,9 +2060,10 @@ fn detail(rows: &mut Vec<(String, Color)>, c: &Composition, comps: &[Composition
                         DANGER,
                     ));
                 }
+                lines.push(Line::Rail { tint: DANGER, lines: rail });
             }
             if !unrecorded.is_empty() {
-                rows.push((
+                lines.push(Line::Prose(
                     format!(
                         "UNRECORDED — {} member(s) have never been measured, so nothing can be said \
                          about drift yet",
@@ -1889,17 +2073,19 @@ fn detail(rows: &mut Vec<(String, Color)>, c: &Composition, comps: &[Composition
                 ));
             }
         }
-        Err(e) => rows.push((format!("cannot check staleness: {e}"), DANGER)),
+        Err(e) => lines.push(Line::Prose(format!("cannot check staleness: {e}"), DANGER)),
     }
 
-    rows.push((String::new(), TEXT));
+    lines.push(Line::Prose(String::new(), TEXT));
     match composition::interface(c, comps, &project.library, project.lattice.face_bands) {
-        Ok(None) => rows.push((
+        Ok(None) => lines.push(Line::Prose(
             "ANCHORED — claims no tile, so it has no boundary for anything to abut".to_owned(),
             DIM,
         )),
         Ok(Some(iface)) => {
-            rows.push(("DERIVED INTERFACE — read off the members, never authored".to_owned(), LABEL));
+            lines.push(Line::Section(
+                "DERIVED INTERFACE — read off the members, never authored".to_owned(),
+            ));
             for (dir, name) in [
                 (emerge_core::wfc::N, "north"),
                 (emerge_core::wfc::E, "east"),
@@ -1911,25 +2097,26 @@ fn detail(rows: &mut Vec<(String, Color)>, c: &Composition, comps: &[Composition
                     // side that speaks three ways rather than three sides.
                     let label =
                         if i == 0 { format!("{name:>5}: ") } else { " ".repeat(7) };
-                    rows.push((format!("    {label}{line}"), TEXT));
+                    lines.push(Line::Prose(format!("    {label}{line}"), TEXT));
                 }
             }
             if iface.is_clean() {
-                rows.push((
+                lines.push(Line::Prose(
                     "    clean — this composition can constrain a neighbour".to_owned(),
                     DIM,
                 ));
             } else {
-                rows.push((
+                let mut rail = vec![(
                     format!("{} FAULT(S) — members disagree about a face", iface.faults.len()),
                     DANGER,
-                ));
+                )];
                 for f in &iface.faults {
-                    rows.push((format!("    {}", f.message), DANGER));
+                    rail.push((f.message.clone(), DANGER));
                 }
+                lines.push(Line::Rail { tint: DANGER, lines: rail });
             }
         }
-        Err(e) => rows.push((format!("cannot derive an interface: {e}"), DANGER)),
+        Err(e) => lines.push(Line::Prose(format!("cannot derive an interface: {e}"), DANGER)),
     }
 }
 

@@ -30,6 +30,12 @@ use crate::keys::{self, Context};
 pub const PANEL_BG: Color = Color::srgb(0.058, 0.054, 0.047);
 /// A row at rest.
 pub const ROW_BG: Color = Color::srgb(0.098, 0.092, 0.082);
+/// A row (or chip, or field) under the pointer and not yet chosen. **One name.** This value lived
+/// as an unnamed literal in the map palette and the tab strip — byte-identical, twice — which is
+/// this module's founding failure one more time. One step above [`ROW_BG`], well short of
+/// [`ROW_SELECTED`]: hover is a signifier that the thing is actionable (Norman's term, via
+/// Seinfeld et al. 2020, `10.1080/07370024.2020.1724790` §3.1), not a claim that it is chosen.
+pub const ROW_HOVER: Color = Color::srgb(0.16, 0.15, 0.14);
 /// A row that is armed, selected, or otherwise the one being acted on. **One name.** This was
 /// `ROW_ARMED` in the map tab and `ROW_SELECTED` in the tiles tab, at the same value — two names for
 /// one idea is two things to keep in step.
@@ -78,9 +84,61 @@ pub const LABELED: Color = Color::srgb(0.50, 0.76, 0.46);
 /// Empty preview tile, so an un-baked row reads as "not yet" rather than as a hole in the panel.
 /// `thumbs.rs` carries a third copy of this value as `BACKDROP`, for the booth's own background.
 pub const SLOT_BG: Color = Color::srgb(0.14, 0.135, 0.125);
+/// **A text box that owns the keyboard right now.** The same value as [`SLOT_BG`], and its own name
+/// anyway: "this field is focused" and "this thumbnail is not baked yet" are different sentences,
+/// and a shared constant would weld them — retinting one would retint the other, which nobody
+/// would have chosen (the 2026-08-17 audit's `SLOT_BG`-moonlighting finding).
+pub const FOCUS_BG: Color = Color::srgb(0.14, 0.135, 0.125);
 /// A group heading — quieter than a row, because it is a signpost rather than a thing to click on
 /// most of the time.
 pub const HEADER_BG: Color = Color::srgb(0.075, 0.070, 0.063);
+
+// ── world ink ────────────────────────────────────────────────────────────────────────────────────
+//
+// Gizmo colours the tabs draw INTO the scene — the exception to "nothing here knows what a map is",
+// carried because each is a fact two tabs state: a colour defined per-tab drifted into two names
+// for one value twice before this block existed (the audit's `BOUNDS_LINE == CELLS` finding).
+
+/// The working grid — the map's cell lattice on the Map tab, the seating lattice on Compose.
+///
+/// Derived, not chosen: `bevy_dev_tools`' grid drew `srgb(0.2, 0.2, 0.2)` against a `ClearColor`
+/// of `srgb(0.035, …)`, a separation of about 0.165. The Map's ground slab raised what the lines
+/// are read against to 0.105, so holding that separation puts them here. Warm-neutral rather than
+/// pure grey, because every other colour in this editor is.
+pub const GRID_LINE: Color = Color::srgb(0.270, 0.262, 0.248);
+/// A stated extent, brighter than the grid inside it: the map's bounds wireframe on the Map tab,
+/// the subgrid cell lattice on Tiles. Dim enough not to compete with [`GRID_LINE`], bright enough
+/// to find. One warm grey — previously two names at one value, one per tab.
+pub const BOUNDS_LINE: Color = Color::srgb(0.42, 0.38, 0.30);
+/// The void the panels float over — the clear colour both entry points install. Here because it
+/// was stated twice, byte-for-byte, in `main.rs` and `harness.rs`, and a fact stated more than
+/// once drifts. Darker than [`PANEL_BG`], so a panel reads as a surface laid on nothing.
+pub const VOID: Color = Color::srgb(0.035, 0.033, 0.030);
+
+/// A chrome colour scaled toward black, for a quieter sibling of a named colour — so the derived
+/// value cannot drift from its parent the way `compose`'s hand-halved ACCENT could have.
+pub const fn scaled(colour: Color, k: f32) -> Color {
+    match colour {
+        Color::Srgba(c) => Color::srgb(c.red * k, c.green * k, c.blue * k),
+        // Every chrome colour is authored as sRGB; anything else reaching here is a caller error,
+        // answered loudly in magenta rather than with a silent guess.
+        _ => Color::srgb(1.0, 0.0, 1.0),
+    }
+}
+
+/// A chrome colour as raster bytes, for the CPU-drawn plots — one palette, two encodings, no
+/// hand-transcribed mirror (the audit found three byte copies of chrome colours in `anim_plots`).
+pub const fn ink(colour: Color) -> [u8; 4] {
+    match colour {
+        Color::Srgba(c) => [
+            (c.red * 255.0 + 0.5) as u8,
+            (c.green * 255.0 + 0.5) as u8,
+            (c.blue * 255.0 + 0.5) as u8,
+            255,
+        ],
+        _ => [255, 0, 255, 255],
+    }
+}
 
 // ── layout ───────────────────────────────────────────────────────────────────────────────────────
 
@@ -132,11 +190,29 @@ pub const GAP_ROW: f32 = 5.0;
 /// Between blocks. Several times [`GAP_TIGHT`], which is the whole point.
 pub const GAP_GROUP: f32 = 16.0;
 
+/// **A chip's (and a compact list row's) inset.** The 6 × 3 pair was an undeclared constant at
+/// twelve sites in five files before it had this name — the exact drift this module's header
+/// describes. The vertical 3 is [`GAP_TIGHT`] on purpose: a chip's own padding and the gap to its
+/// neighbour read as one rhythm. Do not shrink it — the padding is most of a chip's click target
+/// (Fitts: selection time grows as the target narrows), and 1 px of vertical padding made a row of
+/// chips "a solid bar of text rather than a row of things".
+pub const CHIP_PAD: UiRect = UiRect::axes(Val::Px(6.0), Val::Px(GAP_TIGHT));
+/// A text field's inner inset — tighter than [`CHIP_PAD`] because a field's box is already drawn
+/// by its fill, and the caret needs the width more than the text needs air.
+pub const FIELD_PAD: UiRect = UiRect::axes(Val::Px(4.0), Val::Px(2.0));
+/// A text field's floor. An unstated height lays out at 7 px while empty — this fact was restated
+/// at five sites as a bare `18.0` before it had a name.
+pub const MIN_FIELD_H: f32 = 18.0;
+/// The panel layer. [`panel_root`] uses it, and so must any other absolute root that has to share
+/// the panels' plane — between equal indices the UI stack breaks the tie by spawn order, which is
+/// how the cost readout vanished behind two tabs' panels (2026-08-17 audit).
+pub const PANEL_Z: i32 = 100;
+
 /// A block heading: quiet, and separated from what came before it.
 ///
 /// The separation is the work — a heading with the same gap above it as below is a label that could
 /// belong to either side.
-pub fn section(parent: &mut ChildSpawnerCommands, label: &str) {
+pub fn section<'a>(parent: &'a mut ChildSpawnerCommands, label: &str) -> EntityCommands<'a> {
     parent.spawn((
         Text::new(label.to_owned()),
         TextColor(LABEL),
@@ -145,7 +221,7 @@ pub fn section(parent: &mut ChildSpawnerCommands, label: &str) {
             margin: UiRect::top(Val::Px(GAP_GROUP)).with_bottom(Val::Px(GAP_TIGHT)),
             ..default()
         },
-    ));
+    ))
 }
 
 /// Which edge a panel is pinned to.
@@ -197,7 +273,7 @@ pub fn panel_root<'a>(
     commands.spawn((
         node,
         BackgroundColor(PANEL_BG),
-        GlobalZIndex(100),
+        GlobalZIndex(PANEL_Z),
         Hovered::default(),
     ))
 }
@@ -504,7 +580,12 @@ pub fn problem_log_line(parent: &mut ChildSpawnerCommands, text: &str, colour: C
                 TextLayout::new(Justify::Left, LineBreak::NoWrap),
             ));
             row.spawn((
+                // `flex_grow` hands the text the row's remaining width as a DEFINITE size —
+                // without it a wrapping text item's flex base can resolve to zero width and lay
+                // out one glyph per line, clipped to nothing (measured live in the Compose pane,
+                // 2026-08-17). `min_width: 0` is what then lets it shrink below its longest word.
                 Node {
+                    flex_grow: 1.0,
                     min_width: Val::Px(0.0),
                     ..default()
                 },
@@ -666,7 +747,10 @@ pub fn scroll_to_reveal(
     ((scroll_y - want).abs() > 0.5).then_some(want)
 }
 
-pub fn scroll_list(parent: &mut ChildSpawnerCommands, marker: impl Bundle) {
+pub fn scroll_list<'a>(
+    parent: &'a mut ChildSpawnerCommands,
+    marker: impl Bundle,
+) -> EntityCommands<'a> {
     parent.spawn((
         Node {
             flex_direction: FlexDirection::Column,
@@ -678,12 +762,212 @@ pub fn scroll_list(parent: &mut ChildSpawnerCommands, marker: impl Bundle) {
         },
         ScrollArea::default(),
         marker,
+    ))
+}
+
+// ── the row vocabulary ───────────────────────────────────────────────────────────────────────────
+//
+// The builders below were each written AFTER their shape had been hand-rolled at least three times
+// (the 2026-08-17 audit counted 8 label/value rows, 7 list rows, 5 chip variants, 6 text fields, 3
+// list headings and 2 severity-rail dialects). Each one returns or takes just enough for the call
+// sites that exist — a parameter with no caller is a stub, which is why several return
+// `EntityCommands` for the caller to finish rather than trying to hold every variation.
+
+/// **A list panel's heading** — "PLACE", "RIGS": the word at the top of a whole panel, over its
+/// filter and list. One step louder than [`section`] (10 vs 9) because it heads the panel, not a
+/// block within one — the two roles the 2026-08-17 type-role decision named.
+pub fn list_heading(parent: &mut ChildSpawnerCommands, text: &str) {
+    parent.spawn((
+        Text::new(text.to_owned()),
+        TextColor(LABEL),
+        TextFont::from_font_size(10.0),
     ));
 }
 
-// A `LABEL  value` row builder belongs here too — the shape is repeated four times across the two
-// tabs, differing only in the label column's width. It is not written yet because nothing has been
-// moved onto it, and a builder with no caller is a stub.
+/// **The fixed label column of a `LABEL  value` row** — the shape the audit found hand-rolled
+/// eight times, differing only in this width. 10 px [`LABEL`], never wrapping, never shrinking:
+/// the label is what keeps the values aligned, so it must hold its column.
+pub fn row_label(row: &mut ChildSpawnerCommands, width: f32, label: &str) {
+    row.spawn((
+        Node {
+            width: Val::Px(width),
+            flex_shrink: 0.0,
+            ..default()
+        },
+        Text::new(label.to_owned()),
+        TextColor(LABEL),
+        TextFont::from_font_size(10.0),
+        TextLayout::new(Justify::Left, LineBreak::NoWrap),
+    ));
+}
+
+/// **The value beside a [`row_label`]** — 11 px, one step louder than its label, which is the
+/// role map's one value size (the audit found 10/11 and 10/10 coexisting; 10/11 won).
+pub fn row_value(row: &mut ChildSpawnerCommands, text: impl Into<String>, colour: Color, marker: impl Bundle) {
+    row.spawn((
+        Text::new(text.into()),
+        TextColor(colour),
+        TextFont::from_font_size(11.0),
+        marker,
+    ));
+}
+
+/// **A chip** — one small clickable word. [`CHIP_PAD`] and a permanent 1 px border whose COLOUR
+/// asks the questions (a ghost proposal lights it [`SUGGEST`]; everything else runs [`Color::NONE`]),
+/// so a chip never changes size when its state does.
+pub fn chip<'a>(
+    parent: &'a mut ChildSpawnerCommands,
+    marker: impl Bundle,
+    label: &str,
+    px: f32,
+    ink: Color,
+    fill: Color,
+    border: Color,
+) -> EntityCommands<'a> {
+    let mut c = parent.spawn((
+        bevy::ui_widgets::Button,
+        Hovered::default(),
+        marker,
+        Node {
+            padding: CHIP_PAD,
+            border: UiRect::all(Val::Px(1.0)),
+            ..default()
+        },
+        BorderColor::all(border),
+        BackgroundColor(fill),
+    ));
+    c.with_children(|chip| {
+        chip.spawn((
+            Text::new(label.to_owned()),
+            TextColor(ink),
+            TextFont::from_font_size(px),
+            TextLayout::new(Justify::Left, LineBreak::NoWrap),
+        ));
+    });
+    c
+}
+
+/// The fill a list row returns to when the pointer leaves it. Carried on every [`list_row`] so ONE
+/// system can give the whole editor's lists their hover state — the rebuilt lists are painted
+/// inside change-gated `rebuild_*` systems that never see mouse motion, which is why hover was
+/// deferred until the shared builder existed (the 2026-08-17 hover-scope decision).
+#[derive(Component, Clone, Copy)]
+pub struct RowRest(pub Color);
+
+/// **A selectable list row** — full width, [`CHIP_PAD`] inset, [`ROW_SELECTED`] when it is the one
+/// being acted on, [`ROW_HOVER`] under the pointer. Returns the row for the caller to fill; what a
+/// row holds is the tab's business, that it looks like every other row is not.
+pub fn list_row<'a>(
+    parent: &'a mut ChildSpawnerCommands,
+    selected: bool,
+    marker: impl Bundle,
+) -> EntityCommands<'a> {
+    let rest = if selected { ROW_SELECTED } else { ROW_BG };
+    parent.spawn((
+        bevy::ui_widgets::Button,
+        Hovered::default(),
+        marker,
+        RowRest(rest),
+        Node {
+            width: Val::Percent(100.0),
+            padding: CHIP_PAD,
+            ..default()
+        },
+        BackgroundColor(rest),
+    ))
+}
+
+/// Selection beats hover, hover beats rest — the same priority every hand-rolled repainter uses
+/// (`editor::style_rows`, `tiles::style_tabs`), stated once for every [`list_row`] in the editor.
+fn style_list_rows(mut rows: Query<(&RowRest, &Hovered, &mut BackgroundColor)>) {
+    for (rest, hovered, mut bg) in &mut rows {
+        let want = if hovered.0 && rest.0 == ROW_BG { ROW_HOVER } else { rest.0 };
+        if bg.0 != want {
+            bg.0 = want;
+        }
+    }
+}
+
+/// **A text field's box** — [`MIN_FIELD_H`] floor, [`FIELD_PAD`] inset, [`ROW_BG`] fill, with its
+/// readout text spawned inside. The audit found this shape six times with three paddings.
+pub fn text_field<'a>(
+    parent: &'a mut ChildSpawnerCommands,
+    width: Val,
+    field: impl Bundle,
+    px: f32,
+    initial: (String, Color),
+    readout: impl Bundle,
+) -> EntityCommands<'a> {
+    let mut boxed = parent.spawn((
+        bevy::ui_widgets::Button,
+        Hovered::default(),
+        field,
+        Node {
+            width,
+            min_height: Val::Px(MIN_FIELD_H),
+            padding: FIELD_PAD,
+            flex_shrink: 0.0,
+            ..default()
+        },
+        BackgroundColor(ROW_BG),
+    ));
+    boxed.with_children(|f| {
+        f.spawn((
+            Text::new(initial.0),
+            TextColor(initial.1),
+            TextFont::from_font_size(px),
+            readout,
+        ));
+    });
+    boxed
+}
+
+/// **What a field's readout shows**: the live keystrokes with a caret while focused, the committed
+/// value otherwise. The `{raw}_` + [`ACCENT`] idiom was written five times before it had one home;
+/// the caret is what makes "empty because you cleared it" distinguishable from "empty".
+pub fn field_text(editing: Option<&str>, idle: (String, Color)) -> (String, Color) {
+    match editing {
+        Some(raw) => (format!("{raw}_"), ACCENT),
+        None => idle,
+    }
+}
+
+/// **One severity's tint and word, for every rail in the editor.** Two tabs printed the same words
+/// under forked maps (tiles: Warn→ACCENT, Note→DIM; anim: everything-not-blocking→LABEL) — same
+/// vocabulary, three colours, which is the drift this module exists to stop. The word and the hue
+/// travel together so no site can pair "worth checking" with the wrong ink.
+pub fn severity_style(severity: emerge_core::import::Severity) -> (Color, &'static str) {
+    match severity {
+        emerge_core::import::Severity::Blocking => (DANGER, "blocking"),
+        emerge_core::import::Severity::Warn => (ACCENT, "worth checking"),
+        emerge_core::import::Severity::Note => (DIM, "note"),
+    }
+}
+
+/// **A severity rail** — the tinted left border that makes a finding's weight visible before it is
+/// read. 2 px (the tiles dialect; the decision of 2026-08-17), [`GAP_TIGHT`] breathing room, a
+/// [`GAP_ROW`] gap to the next. Returns the block for the caller to fill — the severity word first,
+/// by convention, in the same tint. A clickable rail (anim's jump rows) adds `Button`/`Hovered`
+/// and a fill through `marker`.
+pub fn severity_rail<'a>(
+    parent: &'a mut ChildSpawnerCommands,
+    tint: Color,
+    marker: impl Bundle,
+) -> EntityCommands<'a> {
+    parent.spawn((
+        Node {
+            flex_direction: FlexDirection::Column,
+            border: UiRect::left(Val::Px(2.0)),
+            padding: UiRect::left(Val::Px(7.0))
+                .with_top(Val::Px(GAP_TIGHT))
+                .with_bottom(Val::Px(GAP_TIGHT)),
+            margin: UiRect::bottom(Val::Px(GAP_ROW)),
+            ..default()
+        },
+        BorderColor::all(tint),
+        marker,
+    ))
+}
 
 /// **The name box** — the centred prompt for naming a new composition.
 ///
@@ -967,7 +1251,17 @@ pub struct ChromePlugin;
 impl Plugin for ChromePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShowingFor>()
-            .add_systems(OnEnter(crate::screen::Screen::Editor), (spawn_shortcuts_overlay, spawn_name_box))
+            .add_systems(
+                OnEnter(crate::screen::Screen::Editor),
+                (spawn_shortcuts_overlay, spawn_name_box),
+            )
+            // Every list row's hover, in one place — the rows themselves are spawned by
+            // change-gated rebuilds that never see mouse motion.
+            //
+            // **Ungated by screen**, unlike the systems below it: the menu draws rows too, and the
+            // query simply matches nothing on a screen that has none. Gating it would be a second
+            // place that has to know which screens have lists.
+            .add_systems(Update, style_list_rows)
             // `flash_live_rows` after the rebuild, so a row spawned this frame is lit this frame
             // rather than one frame late — which for a tap is the difference between a readout and
             // a flicker.

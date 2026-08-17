@@ -40,22 +40,26 @@ pub(crate) const PLOT_H: u32 = 192;
 pub(crate) const TRACE_W: u32 = 712;
 pub(crate) const TRACE_H: u32 = 448;
 
-/// The displayed (logical) sizes the pane's `Node`s use.
-pub(crate) const SHOW_W: f32 = 356.0;
+/// The displayed (logical) sizes the pane's `Node`s use. The width is the controls panel's inner
+/// width — **derived**, so widening the panel widens the plots instead of leaving them at a stale
+/// 356 (the dependency was real and undeclared before; the audit's `SHOW_W` finding).
+pub(crate) const SHOW_W: f32 = crate::chrome::TILES_CONTROLS_W - 2.0 * crate::chrome::PAD;
 pub(crate) const SHOW_PLOT_H: f32 = 96.0;
 pub(crate) const SHOW_TRACE_H: f32 = 224.0;
 
-/// Plot background — `chrome::SLOT_BG`'s hue as bytes.
-const BG: [u8; 4] = [36, 34, 32, 255];
-/// Axis and grid ink, a step above the background.
+/// Plot background — `chrome::SLOT_BG`, through the one bridge, not a hand-transcribed byte copy
+/// that a palette edit would silently strand.
+const BG: [u8; 4] = crate::chrome::ink(crate::chrome::SLOT_BG);
+/// Axis and grid ink, a step above the background. Genuinely plot-only — no chrome analogue.
 const GRID: [u8; 4] = [70, 68, 64, 255];
-/// The root-motion threshold line — `chrome::DANGER`'s hue.
-const DANGER_INK: [u8; 4] = [219, 92, 77, 255];
+/// The root-motion threshold line — `chrome::DANGER`, bridged.
+const DANGER_INK: [u8; 4] = crate::chrome::ink(crate::chrome::DANGER);
 
 /// One color per gait slot, raster and legend alike — the table is the contract between them.
-/// Entry 0 is `chrome::ACCENT`'s hue; the rest are distinct hues at comparable value.
+/// Entry 0 is `chrome::ACCENT`, bridged; the rest are a deliberately separate categorical palette
+/// (series need distinguishability, not brand), at comparable value.
 pub(crate) const SLOT_COLORS: [[u8; 4]; 8] = [
-    [230, 168, 61, 255],
+    crate::chrome::ink(crate::chrome::ACCENT),
     [86, 180, 190, 255],
     [170, 120, 220, 255],
     [120, 190, 110, 255],
@@ -582,7 +586,7 @@ fn paint_trace(handle: &Handle<Image>, slots: &[SlotCurves], ab: bool, images: &
 
     for s in slots {
         let ink = slot_color(s.rank);
-        let dim = [ink[0] / 3, ink[1] / 3, ink[2] / 3, 255];
+        let dim = dim_ink(s.rank);
         // The path: swing dimmed, contact full.
         for i in 0..s.trace.len() {
             let a = to_px(s.trace[i]);

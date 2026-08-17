@@ -868,7 +868,7 @@ dependencies = [
 [[package]]
 name = "bevy_autogib"
 version = "0.1.0"
-source = "git+https://github.com/Ladvien/bevy_autogib?rev=ba3b13b#ba3b13bf55f72be8eb718eb7d54a00140fe242c6"
+source = "git+https://github.com/Ladvien/bevy_autogib?rev=0cfee6e#0cfee6e06f5b5d3b3862bebe113331abeba6d5e0"
 dependencies = [
  "bevy",
  "isomesh",

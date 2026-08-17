@@ -41,3 +41,4 @@ Both are gitignored. Neither is a signal that the player wants attention — the
 - The PNGs are **gitignored** (ephemeral debug artifacts); only this `CLAUDE.md` is committed.
 - Produced by `src/region_capture.rs` (`RegionCapturePlugin`), a dev-only tool stripped from release builds. The capture plays a short "snap" and never touches the simulation.
 - Older captures may be stale — a region the player pointed at earlier may already be resolved. When in doubt, ask which capture they mean.
+- Consult Bevy documentation often. It can be found at codex_fs/offline_reference_docs/bevy-0.19-book/

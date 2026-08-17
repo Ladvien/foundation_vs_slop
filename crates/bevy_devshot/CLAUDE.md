@@ -23,6 +23,7 @@ The whole API is one `Path::exists` per frame. Keep it that way — a watcher th
 ## Rules
 
 - **Bevy 0.19 is pinned.** Read the vendored source (`~/.cargo/registry/src/index.crates.io-*/bevy-0.19.0/`, and its `examples/`), not bevy.org — that documents `main` and has been wrong for this pin more than once.
+- Consult Bevy documentation often. It can be found at codex_fs/offline_reference_docs/bevy-0.19-book/
 - **A missing `Res<T>` panics its system in 0.19**; it does not skip. Take `Option<Res<T>>`, or `init_resource` it in the plugin that registers the reader.
 - **All run conditions are evaluated — there is no short-circuit.** A bare `Res<T>` in a `.run_if(..)` closure panics whenever that resource is absent, even behind an earlier condition that returned false.
 - **No `unwrap()`.** A failed capture must report, not crash the game it was only observing.

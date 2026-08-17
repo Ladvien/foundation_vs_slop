@@ -29,6 +29,7 @@ No Bevy dependency exists here, and none may be added.
 - **No `unwrap()`**, no `expect` on parsed data. Every input to this crate is a file somebody wrote by hand; malformed input is an error to report, not a panic.
 - **One path per feature.** No fallbacks, no legacy shims, no stub placeholders — do not write a degraded result on a solver failure, and do not silently default a missing field.
 - Leave academic paper references in comments where a paper informed the code.
+- Consult Bevy documentation often. It can be found at codex_fs/offline_reference_docs/bevy-0.19-book/
 
 ## In the monorepo
 

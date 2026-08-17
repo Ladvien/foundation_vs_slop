@@ -28,6 +28,7 @@ No Bevy dependency exists here, and none should be added.
 
 - **No `unwrap()`**, no `expect` on caller data. A search that runs for forty minutes must not die on an index.
 - **One path per feature.** No fallbacks, no legacy shims, no stub placeholders — a QD run with two execution paths produces an archive nobody can explain.
+- Consult Bevy documentation often. It can be found at codex_fs/offline_reference_docs/bevy-0.19-book/
 
 ## In the monorepo
 

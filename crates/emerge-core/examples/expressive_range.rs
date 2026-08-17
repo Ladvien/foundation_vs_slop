@@ -42,6 +42,11 @@ const CELL: f32 = 1.0;
 const BLOCKS: [usize; 5] = [64, 128, 256, 512, 1024];
 /// Stop when two **disjoint** blocks agree this closely. Nested blocks would halve it exactly.
 const STABLE_TV: f32 = 0.05;
+/// §4.7 (amendment, pre-registered 2026-08-17): a block certifies stability only when its
+/// histogram holds at least this many solves — the uniform expectation of one per bin, derived
+/// from the fixed grid alone. TV between two empty histograms is 0 **by definition**, which is how
+/// FVS-R-9's sweep "stabilised" at the smallest size while nothing had reached the plane at all.
+const EVAL_FLOOR: u32 = BINS as u32;
 
 /// The committed floor on normalised entropy (§4.5, row 4a).
 const ENTROPY_FLOOR: f32 = 0.25;
@@ -164,24 +169,23 @@ fn main() {
     for n in BLOCKS {
         let a = histogram(&mut cache, &g, &faces, 1..=n as u64, source);
         let b = histogram(&mut cache, &g, &faces, n as u64 + 1..=2 * n as u64, source);
+        // §4.7: an under-populated block cannot certify stability, whatever TV would read — the
+        // agreement of two blank histograms is a fact about blankness, not about the generator.
+        if a.total() < EVAL_FLOOR || b.total() < EVAL_FLOOR {
+            println!(
+                "  n = {n:>5} vs {n:>5}   below the evaluability floor ({} / {} in-histogram, \
+                 need {EVAL_FLOOR} each) — cannot certify stability (§4.7)",
+                a.total(),
+                b.total()
+            );
+            continue;
+        }
         let tv = range::total_variation(&a.bins, &b.bins);
-        // **§4.6: two blocks agreeing is convergence only if one of them holds a sample.** The total
-        // variation between two EMPTY histograms is 0 by definition, so before this the sweep stopped
-        // at its first block having measured nothing and reported "stable". Pre-registered 2026-08-11,
-        // before the enclosure run — FVS-R-18.
-        let measured = a.total() + b.total() > 0;
-        let stable = measured && tv <= STABLE_TV;
-        println!(
-            "  n = {n:>5} vs {n:>5}   TV = {tv:.4}{}",
-            if stable {
-                "   <- stable"
-            } else if !measured {
-                "   (both blocks empty — not convergence)"
-            } else {
-                ""
-            }
-        );
-        if stable {
+        // §4.6's own guard — "two empty blocks agreeing is not convergence" — is subsumed by the
+        // §4.7 floor above: no block under EVAL_FLOOR reaches this line, so a measured sample is
+        // guaranteed here and a second check would be a second path to the same refusal.
+        println!("  n = {n:>5} vs {n:>5}   TV = {tv:.4}{}", if tv <= STABLE_TV { "   <- stable" } else { "" });
+        if tv <= STABLE_TV {
             chosen = Some((n, tv));
             break;
         }
@@ -207,10 +211,9 @@ fn main() {
     println!("  in the histogram      {:>5}", run.total());
     if run.total() == 0 {
         println!(
-            "\n  NOTE: the histogram is EMPTY, so the stopping rule was satisfied by two blank blocks\n  \
-             agreeing rather than by a converged shape. TV between two empty histograms is 0 by\n  \
-             definition. The run length above is not evidence of stability — it is evidence that\n  \
-             nothing reached the plane at all, and no larger run would change that."
+            "\n  OUTCOME: EMPTY HISTOGRAM — its own terminal outcome (§4.6). No stability and no\n  \
+             convergence is claimed: nothing reached the (enclosure, opening density) plane, and\n  \
+             no larger run would change that. Rows 4a/4b below are not evaluated."
         );
     }
 
@@ -229,8 +232,10 @@ fn main() {
 
     let med_enc = median(&run.enclosures);
     let med_open = median(&run.openings);
-    let entropy = range::normalised_entropy(&run.bins);
-    let top = range::max_bin_share(&run.bins);
+    // §4.6: the concentration rows are statements about a distribution, so below the evaluability
+    // floor there is nothing for them to be about — H = 0 fired 4a vacuously while a 0% max share
+    // passed 4b, a disagreement over no data, and this is what retires it.
+    let rows4 = run.total() >= EVAL_FLOOR;
 
     println!("\nROWS 1, 2, 4a, 4b{}", if gate_fired { "  (gated — read nothing into these)" } else { "" });
     println!(
@@ -245,14 +250,9 @@ fn main() {
         med_open.unwrap_or(f32::NAN)
     );
     println!("    opening density < 0.5");
-    // **§4.6: a concentration statistic over zero samples is undefined, so it is not evaluated.**
-    // Before this, entropy read 0 and FIRED while max-bin share read 0 and PASSED — two verdicts about
-    // how mass is distributed, with no mass. `n/a` is not a pass.
-    let empty = run.total() == 0;
-    if empty {
-        println!("  H / ln {BINS} < {ENTROPY_FLOOR}                n/a     (the histogram is empty)");
-        println!("  max bin share > {:.0}%             n/a", MAX_BIN_CEILING * 100.0);
-    } else {
+    let (entropy, top) = if rows4 {
+        let entropy = range::normalised_entropy(&run.bins);
+        let top = range::max_bin_share(&run.bins);
         println!(
             "  H / ln {BINS} < {ENTROPY_FLOOR}                {}   ({entropy:.3})",
             verdict(entropy < ENTROPY_FLOOR)
@@ -263,7 +263,15 @@ fn main() {
             verdict(top > MAX_BIN_CEILING),
             top * 100.0
         );
-    }
+        (entropy, top)
+    } else {
+        println!(
+            "  4a, 4b                          not evaluated — histogram below the evaluability \
+             floor ({} < {EVAL_FLOOR}, §4.7)",
+            run.total()
+        );
+        (f32::NAN, f32::NAN)
+    };
     println!(
         "\n  bins occupied {} of {BINS} — a LOWER BOUND on reachability, measured by sampling and",
         run.bins.iter().filter(|&&c| c > 0).count()
@@ -276,11 +284,12 @@ fn main() {
     println!("\n{}", "=".repeat(78));
     let any = med_enc.is_some_and(|m| m < 0.15)
         || (med_enc.is_some_and(|m| m > 0.95) && med_open.is_some_and(|o| o < 0.5))
-        || (!empty && entropy < ENTROPY_FLOOR)
-        || (!empty && top > MAX_BIN_CEILING)
+        || (rows4 && entropy < ENTROPY_FLOOR)
+        || (rows4 && top > MAX_BIN_CEILING)
         || gate_fired;
     println!("VERDICT: {}", if any { "the approach FAILS at least one committed row" } else { "no committed row fires" });
     // §4.6's own outcome, reported beside the rows rather than inferred from them.
+    let empty = run.total() == 0;
     if empty {
         println!(
             "OUTCOME: the histogram is EMPTY — the generator did not reach the plane. That is the\n\
@@ -584,16 +593,17 @@ fn heatmap(bins: &[u32]) {
 }
 
 fn dump(run: &Run, source: Generator) {
-    // **A separate file per generator.** The WFC counts are committed evidence for a verdict that has
-    // already been written down; a constraint run overwriting them would quietly replace the thing
-    // the verdict was read from.
+    // **A separate file per generator, in build output.** The committed WFC counts are evidence for
+    // a verdict already written down — this used to write straight into that dated file and one run
+    // DID silently overwrite it (restored from git). A judged run copies its file beside its dated
+    // report by hand, which is the editorial act committing evidence should be.
     let name = match source {
-        Generator::Wfc => "2026-08-10-expressive-range.bins.ron".to_owned(),
-        Generator::Constraint => "2026-08-10-expressive-range.constraint.bins.ron".to_owned(),
-        Generator::Rooms => "2026-08-11-expressive-range.rooms.bins.ron".to_owned(),
+        Generator::Wfc => "expressive_range.wfc.bins.ron",
+        Generator::Constraint => "expressive_range.constraint.bins.ron",
+        Generator::Rooms => "expressive_range.rooms.bins.ron",
     };
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/research")
+        .join("../../target")
         .join(name);
     let rows: Vec<String> = (0..RANGES)
         .map(|ex| {

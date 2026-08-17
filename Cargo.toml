@@ -130,7 +130,15 @@ bevy_speech_bubbles = { path = "crates/bevy_speech_bubbles" }
 # The `test-harness` feature above forwards `bevy_autogib/strict-order`; a git dependency forwards
 # features exactly as a path dependency does, and that forward is what keeps the vertex-soup tie check
 # alive in a release-built harness.
-bevy_autogib = { git = "https://github.com/Ladvien/bevy_autogib", rev = "ba3b13b" }
+#
+# **Bumped ba3b13b → 0cfee6e at the 2026-08-17 merge**, which is where the arrow's direction stops
+# being theoretical. `main` had meanwhile pulled the crate's AG-017..AG-023 line back INTO
+# `crates/bevy_autogib` and fixed it to pass this repo's gates; that vendored copy is gone again and
+# the same work arrives the way every other dependency's does — by moving the pin. What the bump
+# carries: the region-query hit model (AG-017), the fragment-adjacency match (AG-016), one bake
+# across granularities (AG-015), the halving and sub-pixel-face fixes (AG-018/19), and the demo,
+# recordings and on-screen controls (AG-020..023).
+bevy_autogib = { git = "https://github.com/Ladvien/bevy_autogib", rev = "0cfee6e" }
 # The agent debugger's companion Bevy plugin — custom BRP methods for screenshots and headless input
 # injection. **Optional, pulled in only by the `debugger` feature**, so it is absent from the resolved
 # dependency graph of every default, release and determinism build.

@@ -27,6 +27,7 @@ That is what keeps feet planted through a walk→run crossover — a transition 
 ## Rules
 
 - **Bevy 0.19 is pinned.** Read the vendored source (`~/.cargo/registry/src/index.crates.io-*/bevy-0.19.0/`, and its `examples/`), not bevy.org — that documents `main` and has been wrong for this pin more than once.
+- Consult Bevy documentation often. It can be found at codex_fs/offline_reference_docs/bevy-0.19-book/
 - **A missing `Res<T>` panics its system in 0.19**; it does not skip. Take `Option<Res<T>>`.
 - **All run conditions are evaluated — there is no short-circuit.** A bare `Res<T>` in a `.run_if(..)` closure panics whenever that resource is absent, even behind an earlier condition that returned false.
 - **No `unwrap()`.** A missing clip index or an unrigged GLB is an error to report; this crate's code already says `error!`, which is why it declares `bevy_log` itself.

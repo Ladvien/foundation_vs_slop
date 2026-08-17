@@ -63,6 +63,7 @@ Scripts live in `guides/` as JSON, not as constants in the source: an agent post
 ## Rules
 
 - **Bevy 0.19 is pinned.** Read the vendored source (`~/.cargo/registry/src/index.crates.io-*/bevy-0.19.0/`, and its `examples/`), not bevy.org — that documents `main` and has been wrong for this pin more than once.
+- Consult Bevy documentation often. It can be found at codex_fs/offline_reference_docs/bevy-0.19-book/
 - **A missing `Res<T>` panics its system**; take `Option<Res<T>>` or `init_resource` it. **All run conditions are evaluated** — a bare `Res<T>` inside a `.run_if(..)` closure panics even behind an earlier condition that returned false.
 - **`Single<..>` silently skips its system on a non-unique match**, so any second camera breaks every `Single<.., With<Camera3d>>`. Filter positively on a named marker.
 - **No `unwrap()`.** Everything here is user input or a file on disk.

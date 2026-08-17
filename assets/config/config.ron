@@ -431,6 +431,14 @@
         min_pieces: 6,
         max_pieces: 40,       // upper clamp — bounds mesh + entity growth
         min_fraction: 0.18,   // stop cutting a piece below this fraction of the whole mesh's extent
+        // The Tier A/B rewrite's dials (autogib AG-017..AG-023, merged 2026-08-17), at the crate's
+        // own defaults. NOT yet wired as evolvable genes — flagged at merge, a design decision.
+        max_depth: 12,        // cuts from proxy cell to finest fragment — the hierarchy's memory bound
+        plane_jitter: 0.35,   // how far a cut plane may slide off centre
+        size_spread: 0.5,     // how much the largest-first cut order may be nudged
+        weak_axis: 0.75,      // how hard to cut across the narrow dimension
+        cap_relief: 0.30,     // how much the drawn cut face is crumpled
+        soften: 0.5,          // how much the drawn fragment is rounded
     ),
 
     // =============================================================================================

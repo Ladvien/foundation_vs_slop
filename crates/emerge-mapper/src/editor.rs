@@ -22,7 +22,8 @@ use bevy::ui_widgets::{Activate, Button as UiButton};
 use emerge_core::map::Placed;
 
 use crate::chrome::{
-    ACCENT, DANGER, DIM, HEADER_BG, LABEL, LIST_W, PANEL_BG, ROW_BG, ROW_SELECTED, SLOT_BG, TEXT,
+    ACCENT, BOUNDS_LINE, CHIP_PAD, DANGER, DIM, FOCUS_BG, GRID_LINE, HEADER_BG, LABEL, LIST_W,
+    PANEL_BG, PANEL_Z, ROW_BG, ROW_HOVER, ROW_SELECTED, SLOT_BG, TEXT,
 };
 use crate::keys::{self, Action};
 use crate::project::{OpenMap, Project};
@@ -42,8 +43,8 @@ const YAW_STEP: f32 = 15.0;
 /// Where a descriptor with no `kind` goes. Named rather than hidden: an untagged piece is work to do,
 /// and a palette that quietly omitted it would be a palette missing pieces.
 const UNSORTED: &str = "unsorted";
-/// The map's edge. Dim enough not to compete with the grid, bright enough to find.
-const BOUNDS_LINE: Color = Color::srgb(0.42, 0.38, 0.30);
+// The bounds wireframe and the grid lines are `chrome::{BOUNDS_LINE, GRID_LINE}` — world ink two
+// tabs state, so the values live with the palette rather than drifting here and in `tiles`.
 
 /// **The editable area's own ground.** Lighter than the void it sits in — `ClearColor` here is
 /// `srgb(0.035, 0.033, 0.030)`, so this reads as a slab laid on nothing rather than as a tint.
@@ -51,15 +52,9 @@ const BOUNDS_LINE: Color = Color::srgb(0.42, 0.38, 0.30);
 /// A wireframe box said where the bounds were and an author still had to trace it with their eye to
 /// tell inside from outside; `Map::bounds` is the thing every refusal in `fill` and `flood` is about,
 /// and it was the one piece of state the world did not show.
-const BOUNDS_FILL: Color = Color::srgb(0.105, 0.100, 0.092);
+const BOUNDS_FILL: Color = Color::srgb(0.105, 0.100, 0.092); // CHROME-OK: world ink — the slab under this map, read against chrome::VOID, no panel role
 
-/// **The map's grid lines.**
-///
-/// Derived, not chosen: `bevy_dev_tools`' grid drew `srgb(0.2, 0.2, 0.2)` against the `ClearColor`
-/// of `srgb(0.035, ...)`, a separation of about 0.165. [`BOUNDS_FILL`] raised the ground it is read
-/// against to 0.105, so holding that separation puts the lines here. Warm-neutral rather than pure
-/// grey, because every other colour in this editor is.
-pub(crate) const GRID_LINE: Color = Color::srgb(0.270, 0.262, 0.248);
+// The map grid's line is `chrome::GRID_LINE` — world ink two tabs state, one value in the palette.
 /// **The dressing rungs' lines, quieter than the module's.**
 ///
 /// A minor line that reads as loud as a major one is not a second scale, it is noise: the eye has to
@@ -67,10 +62,10 @@ pub(crate) const GRID_LINE: Color = Color::srgb(0.270, 0.262, 0.248);
 /// they are the same ladder and a colour change would say they were not.
 /// **A cell a pending layout would take.**
 ///
-/// The same slate `chrome::PROPOSAL` uses for the VLM labeler's machine-proposed state, and for the
+/// The same slate `chrome::SUGGEST` uses for the VLM labeler's machine-proposed state, and for the
 /// same reason its note gives: a proposal is *a question*, so it must read as neither an answer
 /// (amber, a live edit of yours) nor an alarm (red, something wrong).
-pub(crate) const PROPOSAL_LINE: Color = Color::srgb(0.42, 0.55, 0.68);
+pub(crate) const PROPOSAL_LINE: Color = Color::srgb(0.42, 0.55, 0.68); // CHROME-OK: world ink — a pending layout's cell gizmo, SUGGEST's role in the world
 
 /// The **least** the slab drops below the datum, metres — enough to beat z-fighting against a piece
 /// lying at `y_offset: 0.0`. See [`ground_drop`], which is usually deeper.
@@ -102,14 +97,14 @@ pub fn ground_drop(project: &Project,
 
 /// The removal marker. Red because it is the one destructive tool here, and translucent because the
 /// thing it covers is the thing being asked about — an opaque marker would hide the answer.
-const REMOVE_TINT: Color = Color::srgba(0.86, 0.20, 0.16, 0.38);
+const REMOVE_TINT: Color = Color::srgba(0.86, 0.20, 0.16, 0.38); // CHROME-OK: world ink — a translucent tool tint over geometry, not panel text
 
 /// The clone tool's marker tint — cool where removal is hot, because the two rectangles make
 /// opposite promises and an author reads the colour before the status line.
-const CLONE_TINT: Color = Color::srgba(0.20, 0.55, 0.86, 0.32);
+const CLONE_TINT: Color = Color::srgba(0.20, 0.55, 0.86, 0.32); // CHROME-OK: world ink — see REMOVE_TINT
 
 /// The target lock's tint — gold: neither removal's threat nor clone's copy, just "this one".
-const TARGET_TINT: Color = Color::srgba(0.90, 0.72, 0.20, 0.35);
+const TARGET_TINT: Color = Color::srgba(0.90, 0.72, 0.20, 0.35); // CHROME-OK: world ink — see REMOVE_TINT
 /// How far the marker floats above the floor, metres. Enough to beat z-fighting against a floor tile
 /// it is lying exactly on top of, small enough to still read as flat on the ground.
 const MARKER_LIFT: f32 = 0.02;
@@ -1010,22 +1005,31 @@ impl Plugin for EditorPlugin {
 
 // ── chrome ───────────────────────────────────────────────────────────────────────────────────────
 
-/// The cost readout, in its own root anchored bottom right.
+/// The cost readout, in its own root — top right, in the tab strip's band.
 ///
-/// Separate from the panel rather than a row in it: it is about the *scene*, not about the tool, and
-/// it belongs where the eye goes last rather than in the middle of the controls.
+/// Separate from the panel rather than a row in it: it is about the *scene*, not about the tool.
+///
+/// **The strip band is the one horizontal run no tab claims.** This root is unmarked on purpose
+/// (`apply_mode` skips it — the scene's cost does not stop being true on another tab), so it needs
+/// a spot that is free in every mode. Bottom-right was not one: every tab's list panel is `LIST_W`
+/// at `right: MARGIN`, z-order between two roots on the same `PANEL_Z` layer is spawn order, and the
+/// readout was painted over on Anim and painted over the candidate list's bottom row on Tiles
+/// (captured, 2026-08-17 audit). Dodging left of the list collided with the 380px controls panel
+/// instead the moment the window was narrow — measured, not guessed. Every panel starts below
+/// `TAB_STRIP_BOTTOM` and the strip itself is pinned left, so the band's right end is claimed by
+/// nothing at any window width.
 fn spawn_cost_readout(mut commands: Commands) {
     commands
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                right: Val::Px(12.0),
-                bottom: Val::Px(10.0),
+                right: Val::Px(crate::chrome::MARGIN),
+                top: Val::Px(crate::chrome::MARGIN),
                 padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
                 ..default()
             },
             BackgroundColor(PANEL_BG),
-            GlobalZIndex(100),
+            GlobalZIndex(PANEL_Z),
             // Nothing here is clickable, and a readout that eats clicks is a readout that steals the
             // corner of the map underneath it.
             Pickable::IGNORE,
@@ -1262,84 +1266,46 @@ fn spawn_panel(mut commands: Commands) {
                     ..default()
                 })
                 .with_children(|row| {
-                    row.spawn((
-                        Node {
-                            width: Val::Px(62.0),
-                            flex_shrink: 0.0,
-                            ..default()
-                        },
-                        Text::new(field.label()),
-                        TextColor(LABEL),
-                        TextFont::from_font_size(10.0),
-                    ));
-                    row.spawn((
-                        Text::new(""),
-                        TextColor(TEXT),
-                        TextFont::from_font_size(11.0),
-                        field,
-                    ));
+                    crate::chrome::row_label(row, 62.0, field.label());
+                    crate::chrome::row_value(row, "", TEXT, field);
                 });
             }
         });
 
         // **Map size.** Stated, adjustable, and drawn in the world — an edge nothing shows is an
         // edge nobody believes. It is also what gives the flood fill somewhere to stop.
-        p.spawn((Node {
+        p.spawn(Node {
             flex_direction: FlexDirection::Column,
             row_gap: Val::Px(2.0),
-            margin: UiRect::top(Val::Px(8.0)),
             ..default()
-        },))
-            .with_children(|s| {
-                s.spawn((
-                    Text::new("MAP SIZE  (m)"),
-                    TextColor(LABEL),
-                    TextFont::from_font_size(10.0),
-                ));
-                for axis in [Axis::X, Axis::Y, Axis::Z] {
-                    s.spawn(Node {
-                        flex_direction: FlexDirection::Row,
-                        align_items: AlignItems::Center,
-                        column_gap: Val::Px(4.0),
-                        ..default()
-                    })
-                    .with_children(|row| {
-                        row.spawn((
-                            Node {
-                                width: Val::Px(14.0),
-                                flex_shrink: 0.0,
-                                ..default()
-                            },
-                            Text::new(axis.label()),
-                            TextColor(LABEL),
-                            TextFont::from_font_size(11.0),
-                        ));
-                        // **A field, not a pair of nudges.** Stepping to 48 m from 32 was four clicks
-                        // and no way to say the number; the author knows the size they want, so the
-                        // control should let them state it. Click to focus, type digits, Enter to keep.
-                        row.spawn((
-                            UiButton,
-                            Hovered::default(),
-                            SizeField(axis),
-                            Node {
-                                width: Val::Px(56.0),
-                                padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)),
-                                flex_shrink: 0.0,
-                                ..default()
-                            },
-                            BackgroundColor(ROW_BG),
-                        ))
-                        .with_children(|f| {
-                            f.spawn((
-                                Text::new(""),
-                                TextColor(TEXT),
-                                TextFont::from_font_size(11.0),
-                                SizeReadout(axis),
-                            ));
-                        });
-                    });
-                }
-            });
+        })
+        .with_children(|s| {
+            // A real `section`, not a hand-rolled 10 px twin — the block's separation now comes
+            // from the heading's own margins (the 2026-08-17 type-role decision).
+            crate::chrome::section(s, "MAP SIZE  (m)");
+            for axis in [Axis::X, Axis::Y, Axis::Z] {
+                s.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(4.0),
+                    ..default()
+                })
+                .with_children(|row| {
+                    crate::chrome::row_label(row, 14.0, axis.label());
+                    // **A field, not a pair of nudges.** Stepping to 48 m from 32 was four clicks
+                    // and no way to say the number; the author knows the size they want, so the
+                    // control should let them state it. Click to focus, type digits, Enter to keep.
+                    crate::chrome::text_field(
+                        row,
+                        Val::Px(56.0),
+                        SizeField(axis),
+                        11.0,
+                        (String::new(), TEXT),
+                        SizeReadout(axis),
+                    );
+                });
+            }
+        });
 
         // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
         // the panel, and an auto margin in a column absorbs the free space above it — so
@@ -1377,11 +1343,7 @@ fn spawn_palette_panel(mut commands: Commands) {
     // sit over the tiles tab offering pieces that tab cannot place.
     .insert(crate::tiles::MapRoot)
     .with_children(|p| {
-        p.spawn((
-            Text::new("PLACE"),
-            TextColor(LABEL),
-            TextFont::from_font_size(10.0),
-        ));
+        crate::chrome::list_heading(p, "PLACE");
         crate::filter::spawn(p, crate::filter::Pane::Palette);
         crate::chrome::scroll_list(p, PaletteList);
     });
@@ -1417,7 +1379,7 @@ fn rebuild_palette(
                     CategoryHeader(category.clone()),
                     Node {
                         width: Val::Percent(100.0),
-                        padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
+                        padding: CHIP_PAD,
                         flex_direction: FlexDirection::Row,
                         column_gap: Val::Px(6.0),
                         margin: UiRect::top(Val::Px(4.0)),
@@ -1842,33 +1804,27 @@ fn size_edit_keys(
 }
 
 fn refresh_size(
-
     open: Res<OpenMap>,
     edit: Res<SizeEdit>,
     mut readouts: Query<(&SizeReadout, &mut Text, &mut TextColor)>,
-    mut fields: Query<(&SizeField, &mut BackgroundColor)>,
+    mut fields: Query<(&SizeField, &Hovered, &mut BackgroundColor)>,
 ) {
     for (readout, mut text, mut colour) in &mut readouts {
         // While a field is being typed into it shows what has been typed, with a caret — so the
         // number on screen is always the number Enter would commit, never the one being replaced.
         let editing = match &edit.active {
-            Some((axis, raw)) if *axis == readout.0 => Some(raw),
+            Some((axis, raw)) if *axis == readout.0 => Some(raw.as_str()),
             _ => None,
         };
-        let (want, want_colour) = match editing {
-            Some(raw) => (format!("{raw}_"), ACCENT),
-            None => {
-                let v = readout.0.get(open.map.bounds);
-                // Whole metres now that the field only accepts them. A map loaded with a fractional
-                // bound still reads truthfully rather than being silently rounded on screen.
-                let text = if (v - v.round()).abs() < 1e-3 {
-                    format!("{v:.0}")
-                } else {
-                    format!("{v:.1}")
-                };
-                (text, TEXT)
-            }
+        let v = readout.0.get(open.map.bounds);
+        // Whole metres now that the field only accepts them. A map loaded with a fractional
+        // bound still reads truthfully rather than being silently rounded on screen.
+        let idle = if (v - v.round()).abs() < 1e-3 {
+            format!("{v:.0}")
+        } else {
+            format!("{v:.1}")
         };
+        let (want, want_colour) = crate::chrome::field_text(editing, (idle, TEXT));
         if text.0 != want {
             text.0 = want;
         }
@@ -1877,9 +1833,17 @@ fn refresh_size(
         }
     }
 
-    for (field, mut bg) in &mut fields {
+    for (field, hovered, mut bg) in &mut fields {
         let focused = matches!(&edit.active, Some((axis, _)) if *axis == field.0);
-        let want = if focused { SLOT_BG } else { ROW_BG };
+        // Focus beats hover: while a field is being typed into, the pointer resting on it is not
+        // news. Hover is `chrome::ROW_HOVER`'s signifier — this is clickable, and not yet chosen.
+        let want = if focused {
+            FOCUS_BG
+        } else if hovered.0 {
+            ROW_HOVER
+        } else {
+            ROW_BG
+        };
         if bg.0 != want {
             bg.0 = want;
         }
@@ -2171,7 +2135,7 @@ fn style_rows(
         let want = if state.brush == Some(row.0) {
             ROW_SELECTED
         } else if hovered.0 {
-            Color::srgb(0.16, 0.15, 0.14)
+            ROW_HOVER
         } else {
             ROW_BG
         };

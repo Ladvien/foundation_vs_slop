@@ -2184,7 +2184,7 @@ pub fn draw_build_grid(
                     gizmos.line(
                         stage + Vec3::new(x, 0.0, -size.2 * 0.5),
                         stage + Vec3::new(x, 0.0, size.2 * 0.5),
-                        crate::editor::GRID_LINE,
+                        crate::chrome::GRID_LINE,
                     );
                 }
                 if f.1 > ON_STOP {
@@ -2198,7 +2198,7 @@ pub fn draw_build_grid(
                     gizmos.line(
                         stage + Vec3::new(-size.0 * 0.5, 0.0, z),
                         stage + Vec3::new(size.0 * 0.5, 0.0, z),
-                        crate::editor::GRID_LINE,
+                        crate::chrome::GRID_LINE,
                     );
                 }
             }
@@ -2232,7 +2232,7 @@ pub fn draw_build_grid(
             Isometry3d::new(stage, Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
             UVec2::new(nx, nz),
             Vec2::splat(unit),
-            crate::editor::GRID_LINE,
+            crate::chrome::GRID_LINE,
         );
     }
 }

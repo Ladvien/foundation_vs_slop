@@ -25,12 +25,13 @@
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use bevy::ui_widgets::{Activate, Button as UiButton, ScrollArea};
+use bevy::ui_widgets::{Activate, Button as UiButton};
 use emerge_core::descriptor::{Descriptor, mount_label, mount_options};
 use emerge_core::import::{self, Candidate, Severity};
 
 use crate::chrome::{
-    ACCENT, DANGER, DIM, HEADER_BG, LABEL, MUTED, PANEL_BG, ROW_BG, ROW_SELECTED, TEXT,
+    ACCENT, CHIP_PAD, DANGER, DIM, HEADER_BG, LABEL, MARGIN, MIN_FIELD_H, MUTED, PANEL_BG,
+    ROW_BG, ROW_HOVER, ROW_SELECTED, TEXT,
 };
 use crate::keys::{self, Action};
 use crate::project::Project;
@@ -1212,7 +1213,7 @@ fn header_button(row: &mut ChildSpawnerCommands, header: FillHeader, glyph: &str
         header,
         Node {
             min_width: Val::Px(20.0),
-            min_height: Val::Px(18.0),
+            min_height: Val::Px(MIN_FIELD_H),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
             ..default()
@@ -2315,7 +2316,7 @@ fn refresh_cells(
     cell_edit: Res<CellEdit>,
     note_edit: Res<NoteEdit>,
     scale_edit: Res<ScaleEdit>,
-    mut cells: Query<(&CellButton, &CellLayer, &mut BackgroundColor)>,
+    mut cells: Query<(&CellButton, &CellLayer, &Hovered, &mut BackgroundColor)>,
     mut glyphs: Query<
         (&CellGlyph, &CellLayer, &mut Text, &mut TextColor),
         (
@@ -2373,9 +2374,17 @@ fn refresh_cells(
     let empty = emerge_core::descriptor::Subgrid::default();
     let grid = d.subgrid.as_ref().unwrap_or(&empty);
 
-    for (button, layer, mut bg) in &mut cells {
+    for (button, layer, hovered, mut bg) in &mut cells {
         let selected = cell_edit.at == Some((button.0, layer.0, button.1));
-        let want = if selected { ROW_SELECTED } else { ROW_BG };
+        // Selection beats hover; hover is `chrome::ROW_HOVER`'s signifier that the cell is a
+        // click target, which a 20 px square otherwise says nothing about.
+        let want = if selected {
+            ROW_SELECTED
+        } else if hovered.0 {
+            ROW_HOVER
+        } else {
+            ROW_BG
+        };
         if bg.0 != want {
             bg.0 = want;
         }
@@ -2421,13 +2430,13 @@ fn refresh_cells(
         }
     }
 
-    let (note_text, note_tint) = match &note_edit.active {
-        Some((_, raw)) => (format!("{raw}_"), ACCENT),
-        None => match d.note.as_deref() {
+    let (note_text, note_tint) = crate::chrome::field_text(
+        note_edit.active.as_ref().map(|(_, raw)| raw.as_str()),
+        match d.note.as_deref() {
             Some(n) if !n.is_empty() => (n.to_owned(), TEXT),
             _ => ("describe it\u{2026}".to_owned(), LABEL),
         },
-    };
+    );
     for (mut text, mut colour) in &mut notes {
         if text.0 != note_text {
             text.0 = note_text.clone();
@@ -2442,17 +2451,18 @@ fn refresh_cells(
     // else touched the pane — the same reason the note and the cell tokens are refreshed here.
     //
     // Off the *measurement* layer, matching what the field writes and what `rebuild_detail` shows.
-    let width_text = match &scale_edit.active {
-        Some((_, raw)) => format!("{raw}_"),
-        None => match state
+    let (width_text, width_tint) = crate::chrome::field_text(
+        scale_edit.active.as_ref().map(|(_, raw)| raw.as_str()),
+        match state
             .editing(&project.measured)
             .and_then(emerge_core::descriptor::placed_footprint)
         {
-            Some((w, _)) => format!("{w:.2}"),
-            None => "--".to_owned(),
+            Some((w, _)) => (format!("{w:.2}"), TEXT),
+            // LABEL, matching what `rebuild_detail` paints for the same fact — the repaint used to
+            // say TEXT here, a micro-fork the shared helper closes.
+            None => ("--".to_owned(), LABEL),
         },
-    };
-    let width_tint = if scale_edit.typing() { ACCENT } else { TEXT };
+    );
     for (mut text, mut colour) in &mut widths {
         if text.0 != width_text {
             text.0 = width_text.clone();
@@ -2465,15 +2475,17 @@ fn refresh_cells(
     // The wall-height caret, on the same argument as the two above: `rebuild_detail` only runs on
     // `resource_changed::<ImportState>`, so without this the digits would not appear until something
     // else touched the pane.
-    let height_text = match &height_edit.active {
-        Some((_, raw)) => format!("{raw}_"),
-        None => state
-            .editing(&project.measured)
-            .and_then(|e| e.mount.as_ref())
-            .and_then(emerge_core::descriptor::mount_height)
-            .map_or_else(|| "--".to_owned(), |h| format!("{h:.2}")),
-    };
-    let height_tint = if height_edit.typing() { ACCENT } else { TEXT };
+    let (height_text, height_tint) = crate::chrome::field_text(
+        height_edit.active.as_ref().map(|(_, raw)| raw.as_str()),
+        (
+            state
+                .editing(&project.measured)
+                .and_then(|e| e.mount.as_ref())
+                .and_then(emerge_core::descriptor::mount_height)
+                .map_or_else(|| "--".to_owned(), |h| format!("{h:.2}")),
+            TEXT,
+        ),
+    );
     for (mut text, mut colour) in &mut heights {
         if text.0 != height_text {
             text.0 = height_text.clone();
@@ -2844,11 +2856,25 @@ pub(crate) struct Tab(pub(crate) Mode);
 
 /// The tab's name, so the active one can be lit without touching its key.
 #[derive(Component)]
-pub(crate) struct TabLabel;
+pub struct TabLabel;
 
 /// The tab's shortcut, styled a step quieter than the name.
 #[derive(Component)]
 struct TabKey;
+
+/// The tab's badge — the anim bench's stale count, in its own text so it can hold its own colour.
+///
+/// Its own node rather than a suffix on [`TabLabel`], because `style_tabs` owns every label's
+/// `TextColor` per frame (active/inactive), so a colour written into the label is stomped on the
+/// next frame. The badge carries no `TabLabel`, so the frame-owner never touches it — the same
+/// division that keeps [`TabKey`] a step quieter than the name.
+///
+/// `DANGER`, and only the count: a persistent peripheral element wants medium intensity, not
+/// maximum (Lewandowska, Dziśko & Jankowski 2022, `10.1038/s41598-022-16284-2` — high contrast is
+/// burst-only, and habituation appears at low contrast only), and the word and the count are the
+/// non-colour channels `docs/ui.md` §1.3 requires; the hue is the redundant one.
+#[derive(Component)]
+pub struct TabBadge;
 
 /// Root of the tiles panel, shown and hidden with the mode.
 #[derive(Component)]
@@ -2963,14 +2989,15 @@ struct ScanSummary;
 struct ActionLine;
 
 /// The measured footprint — what the placement rules reserve.
-const FOOTPRINT: Color = Color::srgb(0.35, 0.72, 0.85);
+const FOOTPRINT: Color = Color::srgb(0.35, 0.72, 0.85); // CHROME-OK: world ink — the stage's measurement gizmos are a categorical palette, not panel chrome
 /// The grid cells it occupies. Where this and the footprint differ is the tiling slack.
-const CELLS: Color = Color::srgb(0.42, 0.38, 0.30);
+/// The Map tab's bounds wireframe is the same warm grey — one value, one name, in chrome.
+const CELLS: Color = crate::chrome::BOUNDS_LINE;
 /// The volume, so a height is seen rather than only read.
-const EXTENT: Color = Color::srgb(0.24, 0.42, 0.50);
+const EXTENT: Color = Color::srgb(0.24, 0.42, 0.50); // CHROME-OK: world ink — see FOOTPRINT
 /// The stage floor and the plumb line up to a wall-mounted piece — dimmer than anything describing
 /// the piece itself, because it is the reference rather than the subject.
-const GROUND: Color = Color::srgb(0.30, 0.28, 0.26);
+const GROUND: Color = Color::srgb(0.30, 0.28, 0.26); // CHROME-OK: world ink — a stage floor; NEAR ROW_SELECTED by coincidence, distinct on purpose
 
 pub struct TilesPlugin;
 
@@ -3167,8 +3194,8 @@ fn spawn_tab_strip(mut commands: Commands, door: Option<Res<Door>>) {
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                left: Val::Px(12.0),
-                top: Val::Px(12.0),
+                left: Val::Px(MARGIN),
+                top: Val::Px(MARGIN),
                 flex_direction: FlexDirection::Row,
                 column_gap: Val::Px(2.0),
                 ..default()
@@ -3226,6 +3253,18 @@ fn spawn_tab_strip(mut commands: Commands, door: Option<Res<Door>>) {
                         TextLayout::new(Justify::Left, LineBreak::NoWrap),
                         TabLabel,
                     ));
+                    // Empty until the anim bench has something stale to say — see [`TabBadge`].
+                    tab.spawn((
+                        Text::new(String::new()),
+                        TextColor(DANGER),
+                        TextFont::from_font_size(10.0),
+                        TextLayout::new(Justify::Left, LineBreak::NoWrap),
+                        Node {
+                            margin: UiRect::left(Val::Px(7.0)),
+                            ..default()
+                        },
+                        TabBadge,
+                    ));
                 });
             }
         });
@@ -3260,7 +3299,7 @@ fn style_tabs(
         let want_bg = if active {
             PANEL_BG
         } else if hovered.0 {
-            Color::srgb(0.16, 0.15, 0.14)
+            ROW_HOVER
         } else {
             ROW_BG
         };
@@ -3363,21 +3402,11 @@ fn spawn_tiles_panel(mut commands: Commands) {
         // **The detail scrolls.** A candidate's block is a size, a layer, four rows of tag chips and
         // however many sentences its findings need — variable, and for a mesh with several findings
         // taller than the panel. Bounded and scrollable beats running off the bottom edge, which is
-        // where the "no facing is derived" note was going.
-        p.spawn((
-            Node {
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(2.0),
-                margin: UiRect::top(Val::Px(8.0)),
-                flex_grow: 1.0,
-                min_height: Val::Px(0.0),
-                overflow: Overflow::scroll_y(),
-                ..default()
-            },
-            ScrollArea::default(),
-            DetailPane,
-            crate::notice::CopyPane(TILES_PANEL_TABS),
-        ));
+        // where the "no facing is derived" note was going. The one builder, plus this pane's own
+        // gap to the summary above it.
+        crate::chrome::scroll_list(p, (DetailPane, crate::notice::CopyPane(TILES_PANEL_TABS)))
+            .entry::<Node>()
+            .and_modify(|mut n| n.margin.top = Val::Px(8.0));
 
         p.spawn((
             Text::new(""),
@@ -5857,9 +5886,9 @@ fn drive_preview(
 /// Where they differ is exactly the gap-or-overlap the findings describe in words, and a number in a
 /// sentence is much easier to skip than a line that plainly does not meet its neighbour.
 /// The subgrid lattice, over the staged tile.
-const LATTICE: Color = Color::srgb(0.38, 0.34, 0.46);
+const LATTICE: Color = Color::srgb(0.38, 0.34, 0.46); // CHROME-OK: world ink — see FOOTPRINT
 /// A cell an author has said something about — solid, an edge, or an anchor.
-const LATTICE_SET: Color = Color::srgb(0.62, 0.52, 0.82);
+const LATTICE_SET: Color = Color::srgb(0.62, 0.52, 0.82); // CHROME-OK: world ink — see FOOTPRINT
 
 /// **Draw the tile's internal lattice.**
 ///
@@ -6237,11 +6266,7 @@ fn rebuild_candidates(
             }
             // **What is already a tile**, above what could become one. Both halves are "configuring
             // the tiles", and an editor that can add but not remove makes a mistyped import permanent.
-            p.spawn((
-                Text::new(format!("IN LIBRARY  ({in_library})")),
-                TextColor(LABEL),
-                TextFont::from_font_size(9.0),
-            ));
+            crate::chrome::section(p, &format!("IN LIBRARY  ({in_library})"));
             for d in project
                 .library
                 .descriptors
@@ -6257,35 +6282,18 @@ fn rebuild_candidates(
                 // glance that says whether a mesh can build anything yet; on the Tiles tab every
                 // row is green by construction, which is the point of the split.
                 let judged = composable(d, Some(&suggestions));
-                p.spawn((
-                    UiButton,
-                    Hovered::default(),
-                    LibraryRow(d.id.clone()),
-                    Node {
-                        width: Val::Percent(100.0),
-                        padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
-                        ..default()
+                crate::chrome::list_row(p, selected, LibraryRow(d.id.clone())).with_children(
+                    |row| {
+                        row.spawn((
+                            Text::new(d.id.clone()),
+                            TextColor(if judged { crate::chrome::LABELED } else { TEXT }),
+                            TextFont::from_font_size(10.0),
+                        ));
                     },
-                    BackgroundColor(if selected { ROW_SELECTED } else { ROW_BG }),
-                ))
-                .with_children(|row| {
-                    row.spawn((
-                        Text::new(d.id.clone()),
-                        TextColor(if judged { crate::chrome::LABELED } else { TEXT }),
-                        TextFont::from_font_size(10.0),
-                    ));
-                });
+                );
             }
 
-            p.spawn((
-                Text::new(format!("NOT YET IMPORTED  ({not_imported})")),
-                TextColor(LABEL),
-                TextFont::from_font_size(9.0),
-                Node {
-                    margin: UiRect::top(Val::Px(6.0)),
-                    ..default()
-                },
-            ));
+            crate::chrome::section(p, &format!("NOT YET IMPORTED  ({not_imported})"));
             if state.candidates.is_empty() {
                 p.spawn((
                     Text::new(if state.scanned {
@@ -6334,7 +6342,7 @@ fn rebuild_candidates(
                     ExcludedHeader,
                     Node {
                         width: Val::Percent(100.0),
-                        padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
+                        padding: CHIP_PAD,
                         flex_direction: FlexDirection::Row,
                         column_gap: Val::Px(6.0),
                         margin: UiRect::top(Val::Px(8.0)),
@@ -6488,25 +6496,11 @@ fn draw_pack(
                 let Some(c) = state.candidates.get(ix) else {
                     continue;
                 };
-                p.spawn((
-                    UiButton,
-                    Hovered::default(),
-                    CandidateRow(ix),
-                    Node {
-                        width: Val::Percent(100.0),
-                        padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
-                        flex_direction: FlexDirection::Row,
-                        ..default()
-                    },
-                    BackgroundColor(if ix == state.selected {
-                        ROW_SELECTED
-                    } else {
-                        ROW_BG
-                    }),
-                ))
+                crate::chrome::list_row(p, ix == state.selected, CandidateRow(ix))
                 .with_children(|row| {
                     // The severity mark first, so a list of 300 can be skimmed for the ones that
-                    // need attention rather than read.
+                    // need attention rather than read. The tint comes from the one severity map,
+                    // so the mark here and the rail in the detail pane cannot disagree.
                     row.spawn((
                         Node {
                             width: Val::Px(14.0),
@@ -6519,9 +6513,8 @@ fn draw_pack(
                             _ => "",
                         }),
                         TextColor(match c.worst() {
-                            Some(Severity::Blocking) => DANGER,
-                            Some(Severity::Warn) => ACCENT,
-                            _ => LABEL,
+                            Some(s) => crate::chrome::severity_style(s).0,
+                            None => LABEL,
                         }),
                         TextFont::from_font_size(11.0),
                     ));
@@ -6768,35 +6761,23 @@ fn rebuild_detail(
             // says what a piece *is* and the tags say what it *offers*; neither can carry "the one
             // with the cracked screen", which is the sort of thing a later reader — human or model —
             // needs to tell two crates apart.
-            let (note_text, note_tint) = match &note_edit.active {
-                Some((_, raw)) => (format!("{raw}_"), ACCENT),
-                None => match d.note.as_deref() {
+            let (note_text, note_tint) = crate::chrome::field_text(
+                note_edit.active.as_ref().map(|(_, raw)| raw.as_str()),
+                match d.note.as_deref() {
                     Some(n) if !n.is_empty() => (n.to_owned(), TEXT),
                     _ => ("describe it\u{2026}".to_owned(), LABEL),
                 },
-            };
-            p.spawn((
-                UiButton,
-                Hovered::default(),
+            );
+            crate::chrome::text_field(
+                p,
+                Val::Auto,
                 NoteField,
-                Node {
-                    // Stated, because the text is empty until somebody types — an unstated height
-                    // lays this out at 7 logical px (`docs/ui.md` §5).
-                    min_height: Val::Px(18.0),
-                    padding: UiRect::axes(Val::Px(4.0), Val::Px(2.0)),
-                    margin: UiRect::bottom(Val::Px(crate::chrome::GAP_ROW)),
-                    ..default()
-                },
-                BackgroundColor(ROW_BG),
-            ))
-            .with_children(|f| {
-                f.spawn((
-                    Text::new(note_text),
-                    TextColor(note_tint),
-                    TextFont::from_font_size(10.0),
-                    NoteReadout,
-                ));
-            });
+                10.0,
+                (note_text, note_tint),
+                NoteReadout,
+            )
+            .entry::<Node>()
+            .and_modify(|mut n| n.margin.bottom = Val::Px(crate::chrome::GAP_ROW));
 
             // **The proposal header** — machine-proposed, human-unconfirmed, and it says so with
             // its provenance and its verbs. Everything below in `SUGGEST` is part of this question.
@@ -6866,6 +6847,9 @@ fn rebuild_detail(
                     ));
                 }
                 // Vocabulary the model wanted and could not have — a human's decision, elsewhere.
+                // Still SUGGEST, not DIM: the header's contract is that everything in this block
+                // is part of the machine-proposed question, and this line is no less a proposal
+                // for pointing at a different door.
                 for t in &s.token_proposals {
                     p.spawn((
                         Text::new(format!(
@@ -6873,7 +6857,7 @@ fn rebuild_detail(
                              slop/llm/vocab_proposals.ron",
                             t.token, t.axis, t.why
                         )),
-                        TextColor(DIM),
+                        TextColor(crate::chrome::SUGGEST),
                         TextFont::from_font_size(9.0),
                     ));
                 }
@@ -6926,21 +6910,8 @@ fn rebuild_detail(
                         ..default()
                     })
                     .with_children(|row| {
-                        row.spawn((
-                            Node {
-                                width: Val::Px(48.0),
-                                flex_shrink: 0.0,
-                                ..default()
-                            },
-                            Text::new(label),
-                            TextColor(LABEL),
-                            TextFont::from_font_size(10.0),
-                        ));
-                        row.spawn((
-                            Text::new(value),
-                            TextColor(TEXT),
-                            TextFont::from_font_size(11.0),
-                        ));
+                        crate::chrome::row_label(row, 48.0, label);
+                        crate::chrome::row_value(row, value, TEXT, ());
                     });
                 }
             }
@@ -6959,13 +6930,13 @@ fn rebuild_detail(
             // Not `placed` — that name is already the layered *descriptor* in this scope, and
             // shadowing it here would have handed the lattice code below a footprint tuple.
             let placed_fp = emerge_core::descriptor::placed_footprint(d);
-            let (width_text, width_tint) = match &scale_edit.active {
-                Some((_, raw)) => (format!("{raw}_"), ACCENT),
-                None => match placed_fp {
+            let (width_text, width_tint) = crate::chrome::field_text(
+                scale_edit.active.as_ref().map(|(_, raw)| raw.as_str()),
+                match placed_fp {
                     Some((w, _)) => (format!("{w:.2}"), TEXT),
                     None => ("--".to_owned(), LABEL),
                 },
-            };
+            );
             // What the number means, spelled out. The multiplier shown is `align.scale` — the render
             // factor mapping the authored mesh onto this extent — because a resize BAKES: the extent
             // is rewritten and the scale composes (`bake_width`), so the extent itself is always the
@@ -6984,29 +6955,14 @@ fn rebuild_detail(
                 ..default()
             })
             .with_children(|row| {
-                row.spawn((
-                    UiButton,
-                    Hovered::default(),
+                crate::chrome::text_field(
+                    row,
+                    Val::Px(62.0),
                     ScaleField,
-                    Node {
-                        width: Val::Px(62.0),
-                        // Stated, because the text is empty the moment somebody clicks in — an
-                        // unstated height lays this out at 7 logical px (`docs/ui.md` §5).
-                        min_height: Val::Px(18.0),
-                        padding: UiRect::axes(Val::Px(4.0), Val::Px(2.0)),
-                        flex_shrink: 0.0,
-                        ..default()
-                    },
-                    BackgroundColor(ROW_BG),
-                ))
-                .with_children(|f| {
-                    f.spawn((
-                        Text::new(width_text),
-                        TextColor(width_tint),
-                        TextFont::from_font_size(11.0),
-                        ScaleReadout,
-                    ));
-                });
+                    11.0,
+                    (width_text, width_tint),
+                    ScaleReadout,
+                );
                 row.spawn((
                     Text::new(width_note),
                     TextColor(LABEL),
@@ -7023,24 +6979,16 @@ fn rebuild_detail(
                 ..default()
             })
             .with_children(|row| {
-                row.spawn((
-                    Node {
-                        width: Val::Px(48.0),
-                        flex_shrink: 0.0,
-                        ..default()
-                    },
-                    // **"mount", not "layer".** The subgrid below has its own `layer y` picker, and
-                    // one panel saying "layer" twice about two different things is the confusion the
-                    // key census already fixed on its side (`Action::CycleMount`).
-                    Text::new("mount"),
-                    TextColor(LABEL),
-                    TextFont::from_font_size(10.0),
-                ));
-                row.spawn((
-                    Text::new(mount_label(d.mount.as_ref())),
-                    TextColor(if d.mount.is_some() { TEXT } else { ACCENT }),
-                    TextFont::from_font_size(11.0),
-                ));
+                // **"mount", not "layer".** The subgrid below has its own `layer y` picker, and
+                // one panel saying "layer" twice about two different things is the confusion the
+                // key census already fixed on its side (`Action::CycleMount`).
+                crate::chrome::row_label(row, 48.0, "mount");
+                crate::chrome::row_value(
+                    row,
+                    mount_label(d.mount.as_ref()),
+                    if d.mount.is_some() { TEXT } else { ACCENT },
+                    (),
+                );
                 // The proposed mount rides the same row, when it differs — one line, one fact.
                 if let Some(m) = proposal.as_ref().and_then(|e| e.suggestion.mount.as_ref()) {
                     if d.mount.as_ref() != Some(m) {
@@ -7058,15 +7006,11 @@ fn rebuild_detail(
             // Drawn only when the mount carries a height — `mount_height` is the one place that
             // decides which those are, so this cannot drift from the schema. A dead field beside
             // `on floor` would be the panel asking a question with no answer.
-            if let Some(now) = d
-                .mount
-                .as_ref()
-                .and_then(emerge_core::descriptor::mount_height)
-            {
-                let (height_text, height_tint) = match &height_edit.active {
-                    Some((_, raw)) => (format!("{raw}_"), ACCENT),
-                    None => (format!("{now:.2}"), TEXT),
-                };
+            if let Some(now) = d.mount.as_ref().and_then(emerge_core::descriptor::mount_height) {
+                let (height_text, height_tint) = crate::chrome::field_text(
+                    height_edit.active.as_ref().map(|(_, raw)| raw.as_str()),
+                    (format!("{now:.2}"), TEXT),
+                );
                 p.spawn(Node {
                     flex_direction: FlexDirection::Row,
                     align_items: AlignItems::Center,
@@ -7074,39 +7018,15 @@ fn rebuild_detail(
                     ..default()
                 })
                 .with_children(|row| {
-                    row.spawn((
-                        Node {
-                            width: Val::Px(48.0),
-                            flex_shrink: 0.0,
-                            ..default()
-                        },
-                        Text::new("height"),
-                        TextColor(LABEL),
-                        TextFont::from_font_size(10.0),
-                    ));
-                    row.spawn((
-                        UiButton,
-                        Hovered::default(),
+                    crate::chrome::row_label(row, 48.0, "height");
+                    crate::chrome::text_field(
+                        row,
+                        Val::Px(62.0),
                         MountHeightField,
-                        Node {
-                            width: Val::Px(62.0),
-                            // Stated: the text is empty the moment somebody clicks in, and an
-                            // unstated height lays this out at 7 logical px (`docs/ui.md` §5).
-                            min_height: Val::Px(18.0),
-                            padding: UiRect::axes(Val::Px(4.0), Val::Px(2.0)),
-                            flex_shrink: 0.0,
-                            ..default()
-                        },
-                        BackgroundColor(ROW_BG),
-                    ))
-                    .with_children(|f| {
-                        f.spawn((
-                            Text::new(height_text),
-                            TextColor(height_tint),
-                            TextFont::from_font_size(11.0),
-                            MountHeightReadout,
-                        ));
-                    });
+                        11.0,
+                        (height_text, height_tint),
+                        MountHeightReadout,
+                    );
                     row.spawn((
                         Text::new("  m up the wall, from the map floor"),
                         TextColor(LABEL),
@@ -7254,7 +7174,7 @@ fn rebuild_detail(
                                             CellLayer(y),
                                             Node {
                                                 min_width: Val::Px(20.0),
-                                                min_height: Val::Px(18.0),
+                                                min_height: Val::Px(MIN_FIELD_H),
                                                 justify_content: JustifyContent::Center,
                                                 align_items: AlignItems::Center,
                                                 ..default()
@@ -7334,78 +7254,41 @@ fn rebuild_detail(
                         (verb, cell_edit.at.and_then(|a| grid.at(a))),
                         (CellVerb::Solid, Some(c)) if c.solid
                     );
-                    chips
-                        .spawn((
-                            UiButton,
-                            Hovered::default(),
-                            verb,
-                            Node {
-                                padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
-                                ..default()
-                            },
-                            BackgroundColor(if on { ROW_SELECTED } else { ROW_BG }),
-                        ))
-                        .with_children(|chip| {
-                            chip.spawn((
-                                Text::new(verb.label().to_owned()),
-                                TextColor(if verb == CellVerb::Clear {
-                                    DANGER
-                                } else {
-                                    TEXT
-                                }),
-                                TextFont::from_font_size(10.0),
-                            ));
-                        });
+                    crate::chrome::chip(
+                        chips,
+                        verb,
+                        verb.label(),
+                        10.0,
+                        if verb == CellVerb::Clear { DANGER } else { TEXT },
+                        if on { ROW_SELECTED } else { ROW_BG },
+                        Color::NONE,
+                    );
                 }
 
                 // **Turning the mesh sits beside the lattice, because it reshapes it.** A quarter
                 // turn about X or Z swaps the piece's height with a floor axis, so the grid above
                 // changes shape — putting these anywhere else would hide the cause of that.
                 for axis in [RotateAxis::X, RotateAxis::Y, RotateAxis::Z] {
-                    chips
-                        .spawn((
-                            UiButton,
-                            Hovered::default(),
-                            axis,
-                            Node {
-                                padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
-                                margin: UiRect::left(Val::Px(crate::chrome::GAP_ROW)),
-                                ..default()
-                            },
-                            BackgroundColor(ROW_BG),
-                        ))
-                        .with_children(|chip| {
-                            chip.spawn((
-                                Text::new(axis.label()),
-                                TextColor(LABEL),
-                                TextFont::from_font_size(10.0),
-                            ));
-                        });
+                    crate::chrome::chip(chips, axis, axis.label(), 10.0, LABEL, ROW_BG, Color::NONE)
+                        .entry::<Node>()
+                        .and_modify(|mut n| n.margin.left = Val::Px(crate::chrome::GAP_ROW));
                 }
 
                 // **Occupancy from the mesh, on its own chip.** Nobody hand-marks a lattice this
                 // size, so the cells have to come off the geometry — but this is a button and never
                 // runs on import, because it overwrites hand-authored cells and an author who tuned
                 // a lattice must not lose it to re-importing.
-                chips
-                    .spawn((
-                        UiButton,
-                        Hovered::default(),
-                        ScanMeshButton,
-                        Node {
-                            padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
-                            margin: UiRect::left(Val::Px(crate::chrome::GAP_ROW)),
-                            ..default()
-                        },
-                        BackgroundColor(ROW_BG),
-                    ))
-                    .with_children(|chip| {
-                        chip.spawn((
-                            Text::new("rescan mesh"),
-                            TextColor(ACCENT),
-                            TextFont::from_font_size(10.0),
-                        ));
-                    });
+                crate::chrome::chip(
+                    chips,
+                    ScanMeshButton,
+                    "rescan mesh",
+                    10.0,
+                    ACCENT,
+                    ROW_BG,
+                    Color::NONE,
+                )
+                .entry::<Node>()
+                .and_modify(|mut n| n.margin.left = Val::Px(crate::chrome::GAP_ROW));
             });
 
             // Tag chips, one row per axis. Every token the project has, lit when this piece carries
@@ -7447,39 +7330,21 @@ fn rebuild_detail(
                         // visibly a question, not a selection. A token both held and proposed is
                         // simply held; agreement is not news.
                         let ghost = !on && proposed.iter().any(|t| t == name);
-                        chips
-                            .spawn((
-                                UiButton,
-                                Hovered::default(),
-                                TagChip { axis, token: ix },
-                                Node {
-                                    // A chip is a click target, and 1 px of vertical padding made a
-                                    // row of them a solid bar of text rather than a row of things.
-                                    padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
-                                    border: if ghost {
-                                        UiRect::all(Val::Px(1.0))
-                                    } else {
-                                        UiRect::ZERO
-                                    },
-                                    ..default()
-                                },
-                                BorderColor::all(crate::chrome::SUGGEST),
-                                BackgroundColor(if on { ROW_SELECTED } else { ROW_BG }),
-                            ))
-                            .with_children(|chip| {
-                                chip.spawn((
-                                    Text::new(name.to_owned()),
-                                    TextColor(if on {
-                                        TEXT
-                                    } else if ghost {
-                                        crate::chrome::SUGGEST
-                                    } else {
-                                        LABEL
-                                    }),
-                                    TextFont::from_font_size(10.0),
-                                    TextLayout::new(Justify::Left, LineBreak::NoWrap),
-                                ));
-                            });
+                        crate::chrome::chip(
+                            chips,
+                            TagChip { axis, token: ix },
+                            name,
+                            10.0,
+                            if on {
+                                TEXT
+                            } else if ghost {
+                                crate::chrome::SUGGEST
+                            } else {
+                                LABEL
+                            },
+                            if on { ROW_SELECTED } else { ROW_BG },
+                            if ghost { crate::chrome::SUGGEST } else { Color::NONE },
+                        );
                     }
                 });
             }
@@ -7503,21 +7368,15 @@ fn rebuild_detail(
                         ..default()
                     })
                     .with_children(|row| {
-                        row.spawn((
-                            Node {
-                                width: Val::Px(48.0),
-                                flex_shrink: 0.0,
-                                ..default()
-                            },
-                            Text::new(label.to_owned()),
-                            TextColor(LABEL),
-                            TextFont::from_font_size(10.0),
-                        ));
-                        row.spawn((
-                            Text::new(if now.is_empty() { "-".to_owned() } else { now }),
-                            TextColor(TEXT),
-                            TextFont::from_font_size(10.0),
-                        ));
+                        crate::chrome::row_label(row, 48.0, label);
+                        // 11 px like every other value beside a label — this pane rendered 10/10
+                        // until the 2026-08-17 type-role decision unified the pair at 10/11.
+                        crate::chrome::row_value(
+                            row,
+                            if now.is_empty() { "-".to_owned() } else { now },
+                            TEXT,
+                            (),
+                        );
                         if let Some(prop) = prop {
                             row.spawn((
                                 Text::new(format!("  -> proposed: {prop}")),
@@ -7566,24 +7425,8 @@ fn rebuild_detail(
                     },
                 ));
                 for f in findings {
-                    let (tint, word) = match f.severity {
-                        Severity::Blocking => (DANGER, "blocking"),
-                        Severity::Warn => (ACCENT, "worth checking"),
-                        Severity::Note => (DIM, "note"),
-                    };
-                    p.spawn((
-                        Node {
-                            flex_direction: FlexDirection::Column,
-                            border: UiRect::left(Val::Px(2.0)),
-                            padding: UiRect::left(Val::Px(7.0))
-                                .with_top(Val::Px(crate::chrome::GAP_TIGHT))
-                                .with_bottom(Val::Px(crate::chrome::GAP_TIGHT)),
-                            margin: UiRect::bottom(Val::Px(crate::chrome::GAP_ROW)),
-                            ..default()
-                        },
-                        BorderColor::all(tint),
-                    ))
-                    .with_children(|block| {
+                    let (tint, word) = crate::chrome::severity_style(f.severity);
+                    crate::chrome::severity_rail(p, tint, ()).with_children(|block| {
                         block.spawn((
                             Text::new(word),
                             TextColor(tint),
