@@ -330,6 +330,40 @@ Each of these otherwise gets decided by whatever the code happens to do, after t
 
 ---
 
+### 4.6 Amendment — pre-registered 2026-08-17, before any second run (FVS-R-18)
+
+FVS-R-9's run (`docs/research/2026-08-10-expressive-range.md`) exposed two blind spots in this
+section, and §4's own discipline said they had to be **recorded then, amended before the next run** —
+never patched while looking at the output they would judge. This is that amendment. It moves **no
+committed threshold** (0.15, 0.95/0.5, 20%, 0.25, 50% all stand); it defines *evaluability*, which §4
+never addressed because every rule above silently assumed the histogram would contain something.
+
+**What the run exposed.** All 128 solves converged and all 128 produced zero enclosed regions, so the
+histogram was empty — and two things followed that §4 did not anticipate. The stopping rule was
+satisfied at the smallest block size, because total variation between two empty histograms is 0 **by
+definition**: the sweep reported stability when what it had measured was that nothing reached the
+plane at all. And rows 4a and 4b returned opposite vacuous verdicts on the same nothing — `H = 0`
+fires 4a's `< 0.25` while a max-bin share of 0% passes 4b — a disagreement about no distribution.
+
+**Rule 1 — the evaluability floor, `N_min = K = 36` in-histogram solves per block.** Derived from the
+fixed grid alone (the uniform expectation of one solve per bin), so it is committable today without
+touching any run's output — the same property every number in §4.5 was chosen for. A block whose
+histogram holds fewer than `N_min` solves **cannot certify stability**: it does not enter the TV
+comparison, whatever TV against it would read. A sweep that reaches the cap without two disjoint
+blocks both at the floor agreeing at TV ≤ 0.05 makes **no stability claim** — it reports the cap as
+the budget it is.
+
+**Rule 2 — an empty histogram is its own terminal outcome, and rows 4a/4b are conditional.** A run
+whose final histogram holds zero solves reports the outcome **`empty histogram`**, beside its
+`no_enclosed_region` and failure counts — never "converged", "stable", or a row-by-row verdict. Below
+the floor (including empty), rows 4a and 4b print `not evaluated — histogram below the evaluability
+floor` and contribute nothing to the verdict, which retires the vacuous-fire/vacuous-pass
+disagreement instead of adjudicating it. Rows 1 and 2 are unchanged: their medians are over per-solve
+values, not the histogram, and row 1 firing on an all-zero run is the criterion working.
+
+Encoded in `crates/emerge-core/examples/expressive_range.rs` in the same commit as this text, so the
+next run cannot re-make the mistake by rerunning the old harness.
+
 ## 5. Withdrawn from the four-move recommendation
 
 | Claim | Status |
