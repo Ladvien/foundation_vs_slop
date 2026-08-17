@@ -32,7 +32,7 @@ use serde_json::Value;
 
 use crate::build::Build;
 use crate::keys::{self, Live};
-use crate::project::Project;
+use crate::project::{OpenMap, Project};
 
 /// Registers the editor's checkpoint vocabulary.
 ///
@@ -106,8 +106,10 @@ impl Plugin for GuidePlugin {
         //
         // Prefer this over `the open tile is saved` in any script that authors more than one thing.
         let kit_tiles = app.register_system(
-            move |args: In<Value>, project: Res<Project>| {
-                project.compositions.compositions.len() as u64 >= arg_u64(&args.0, "n", 1)
+            move |args: In<Value>, project: Option<Res<Project>>| {
+                project.is_some_and(|p| {
+                    p.compositions.compositions.len() as u64 >= arg_u64(&args.0, "n", 1)
+                })
             },
         );
 
@@ -115,12 +117,14 @@ impl Plugin for GuidePlugin {
         // save untouched, so a checkpoint reading it would pass while nothing had been written.
         // Weak on its own -- see `kit_tiles` -- and kept for single-tile scripts, where there is no
         // older tile to be confused with.
-        let saved = app.register_system(|_: In<Value>, build: Res<Build>, project: Res<Project>| {
+        let saved = app.register_system(|_: In<Value>, build: Res<Build>, project: Option<Res<Project>>| {
+            let Some(project) = project else { return false };
             build.open.as_ref().is_some_and(|c| {
                 project.compositions.compositions.iter().any(|s| s.id == c.id && s.members == c.members)
             })
         });
-        let unsaved = app.register_system(|_: In<Value>, build: Res<Build>, project: Res<Project>| {
+        let unsaved = app.register_system(|_: In<Value>, build: Res<Build>, project: Option<Res<Project>>| {
+            let Some(project) = project else { return false };
             build.open.as_ref().is_some_and(|c| {
                 !project
                     .compositions
@@ -212,8 +216,15 @@ impl Plugin for GuidePlugin {
         );
         // The Map's count, on `kit_tiles`' argument: monotonic, so revisiting old work cannot
         // re-satisfy a step that asks for new rows.
-        let map_placements = app.register_system(move |args: In<Value>, project: Res<Project>| {
-            project.map.placements.len() as u64 >= arg_u64(&args.0, "n", 1)
+        //
+        // **`Option<Res<OpenMap>>` on every map checkpoint, because only one door has a map.**
+        // `args::Opened::insert_into` removes `OpenMap` for the Kit and Rigs doors, and in Bevy 0.19
+        // a missing `Res<T>` fails the system rather than skipping it — so watching a script that
+        // crosses from the Tiles tab into the map (`build_a_room`, `room_from_nothing`,
+        // `branch_verbs` all do) killed the exercise at that step instead of simply not passing it
+        // yet. No map is "not there yet", which is exactly what a checkpoint answers `false` to.
+        let map_placements = app.register_system(move |args: In<Value>, open: Option<Res<OpenMap>>| {
+            open.is_some_and(|o| o.map.placements.len() as u64 >= arg_u64(&args.0, "n", 1))
         });
         // **Stamps, which `map_placements` deliberately cannot see.** A stamped tile is a reference
         // in `Map::stamps`, never rows in `Map::placements` — that is the whole of "editing a
@@ -222,8 +233,8 @@ impl Plugin for GuidePlugin {
         // step of it would have to be a judgement call. Counted separately rather than folded into
         // `map_placements`, because "I placed five pieces" and "I placed five tiles" are different
         // claims and a script that meant one should not pass on the other.
-        let map_tiles = app.register_system(move |args: In<Value>, project: Res<Project>| {
-            project.map.stamps.len() as u64 >= arg_u64(&args.0, "n", 1)
+        let map_tiles = app.register_system(move |args: In<Value>, open: Option<Res<OpenMap>>| {
+            open.is_some_and(|o| o.map.stamps.len() as u64 >= arg_u64(&args.0, "n", 1))
         });
         // **Kept, not merely gone.** A discarded proposal also answers `is_none`, so the keep half
         // of the door is the pair: no proposal waiting AND the map carrying at least `n` solver
@@ -231,18 +242,25 @@ impl Plugin for GuidePlugin {
         let proposal_kept = app.register_system(
             move |args: In<Value>,
                   proposal: Res<crate::editor::Proposal>,
-                  project: Res<Project>| {
+                  open: Option<Res<OpenMap>>| {
                 proposal.0.is_none()
-                    && (project.map.stamps.len() + project.map.placements.len()) as u64
-                        >= arg_u64(&args.0, "n", 1)
+                    && open.is_some_and(|o| {
+                        (o.map.stamps.len() + o.map.placements.len()) as u64
+                            >= arg_u64(&args.0, "n", 1)
+                    })
             },
         );
         let map_saved =
-            app.register_system(|_: In<Value>, project: Res<Project>| !project.dirty);
+            app.register_system(|_: In<Value>, open: Option<Res<OpenMap>>| {
+                open.is_some_and(|o| !o.dirty)
+            });
         // **On the measured lattice, which is what accepting a derivation writes** — so this is
         // "the tokens landed", never "a proposal exists"; `edges are staged` is that one.
         let mesh_declares_edge = app.register_system(
-            |args: In<Value>, state: Res<crate::tiles::ImportState>, project: Res<Project>| {
+            |args: In<Value>,
+             state: Res<crate::tiles::ImportState>,
+             project: Option<Res<Project>>| {
+                let Some(project) = project else { return false };
                 let id = args
                     .0
                     .get("id")

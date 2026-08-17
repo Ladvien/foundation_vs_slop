@@ -51,8 +51,11 @@ pub struct DebugCapturePlugin;
 
 impl Plugin for DebugCapturePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_capture_camera)
-            .add_systems(Update, mirror_main_camera);
+        app.add_systems(OnEnter(crate::screen::Screen::Editor), spawn_capture_camera)
+            .add_systems(Update,
+                (mirror_main_camera)
+                    .run_if(in_state(crate::screen::Screen::Editor)),
+            );
     }
 }
 

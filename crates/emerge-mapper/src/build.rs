@@ -1132,7 +1132,7 @@ pub fn refit_tile(
     // **property of the tile**, not an event in its history — `docs/ui.md` §3.2, show the state where
     // the state lives. It is one line in the TILE block now, true exactly while it is on screen, and
     // it costs the alert budget (§3.4) nothing.
-    refit(&mut build, &project.library, project.map.bounds.1);
+    refit(&mut build, &project.library, project.lattice.cell_height);
 }
 
 /// **Every BUILD verb, in one system.**
@@ -1469,7 +1469,7 @@ pub fn build_keys(
             );
             return;
         }
-        let divisor = project.policy.snap_divisor;
+        let divisor = project.lattice.snap_divisor;
         let depth = build.depth;
         let was = build
             .open
@@ -1512,7 +1512,7 @@ pub fn build_keys(
     if pressed(Action::BuildRung) {
         build.depth = (build.depth + 1) % DEPTHS;
         let n = project
-            .policy
+            .lattice
             .snap_divisor
             .saturating_pow(build.depth)
             .max(1);
@@ -1672,17 +1672,14 @@ pub fn build_keys(
             );
             return;
         }
-        let tile = save(&build, &mut project);
-        let map = project.save();
-        match (tile, map) {
-            (Ok(said), Ok(())) => state.status.note(format!("{said}. The map is saved too")),
-            (Ok(said), Err(e)) => state.status.problem(format!("{said}. MAP NOT SAVED: {e}")),
-            (Err(e), Ok(())) => state
-                .status
-                .problem(format!("the map is saved. TILE NOT SAVED: {e}")),
-            (Err(t), Err(m)) => state
-                .status
-                .problem(format!("NOTHING SAVED — tile: {t}; map: {m}")),
+        // **Saving a tile saves the tile.** It used to save the open map in the same breath, back
+        // when every door had one behind it — a convenience for an author who had just stamped the
+        // thing they were editing. The Tiles door has no map, so the second half of that pair has
+        // nothing to write, and a verb whose name is "save the tile" doing two writes was already
+        // more than it said. The Maps door still saves the map, on its own key.
+        match save(&build, &mut project) {
+            Ok(said) => state.status.note(said),
+            Err(e) => state.status.problem(format!("TILE NOT SAVED: {e}")),
         }
         return;
     }
@@ -1800,7 +1797,7 @@ pub fn naming_keys(
                         .problem("a tile needs a name — type one, or Esc to leave it".to_owned());
                     return;
                 }
-                let id = format!("{}/{}", kit_namespace(&project), name);
+                let id = format!("{}/{}", project.namespace, name);
                 if project.compositions.compositions.iter().any(|c| c.id == id) {
                     // Refused by name rather than silently replacing somebody's tile.
                     state
@@ -1854,7 +1851,7 @@ pub fn naming_keys(
 /// Both places that open one go through here, so "what state does a new tile start in" has one
 /// answer rather than two that drift.
 fn open_blank(build: &mut Build, project: &crate::project::Project) {
-    let comp = blank(&next_tile_id(project), project.map.bounds.1);
+    let comp = blank(&next_tile_id(project), project.lattice.cell_height);
     // The editor chose this name, so the save door will ask before it reaches the kit.
     build.provisional = true;
     build.depth = DEFAULT_DEPTH;
@@ -1869,7 +1866,7 @@ fn open_blank(build: &mut Build, project: &crate::project::Project) {
 /// `open_blank`'s twin, and it goes through the same fields for the same reason: "what state does a
 /// new tile start in" has one answer rather than two that drift.
 fn open_named(build: &mut Build, project: &crate::project::Project, id: &str) {
-    let comp = blank(id, project.map.bounds.1);
+    let comp = blank(id, project.lattice.cell_height);
     build.provisional = false;
     build.depth = DEFAULT_DEPTH;
     build.open = Some(comp);
@@ -1907,32 +1904,15 @@ pub fn open_saved(build: &mut Build, comp: Composition) {
     build.opened = build.opened.wrapping_add(1);
 }
 
-/// The next unused `<kit>/tile_n` id, so a new tile opens rather than asking for a name first.
+/// The next unused `<namespace>/tile_n` id, so a new tile opens rather than asking for a name first.
 ///
-/// Named after the kit the project loaded, because a composition id shares a descriptor id's shape —
-/// namespace and all — and a tile that does not carry its kit's name is one nobody can find later.
-pub fn kit_namespace(project: &crate::project::Project) -> String {
-    // **Only a real namespace counts** — `split('/').next()` on an id with no slash answers the
-    // whole id, which once named a fixture's first tile `wall/tile_1` after a wall.
-    project
-        .library
-        .descriptors
-        .first()
-        .and_then(|d| d.id.split_once('/'))
-        .map_or_else(|| "kit".to_owned(), |(ns, _)| ns.to_owned())
-}
-
+/// A composition id shares a descriptor id's shape — namespace and all — and a tile that does not
+/// carry its kit's namespace is one nobody can find later. **The namespace is `Project::namespace`,
+/// resolved once at open**, which is where the rule and its refusals live; this used to derive it
+/// here *and* in `kit_namespace`, both reading `descriptors.first()` and both substituting the
+/// literal `"kit"` — two copies of one answer, and an answer that depended on sort order.
 fn next_tile_id(project: &crate::project::Project) -> String {
-    // **Only a real namespace counts.** `split('/').next()` on an id with no slash answers the whole
-    // id, which named the fixture's first tile `wall/tile_1` after a wall. A kit whose pieces carry no
-    // namespace has none to inherit, and `kit` is the honest stand-in.
-    let kit = project
-        .library
-        .descriptors
-        .first()
-        .and_then(|d| d.id.split_once('/'))
-        .map_or("kit", |(ns, _)| ns)
-        .to_owned();
+    let kit = &project.namespace;
     for n in 1..=project.compositions.compositions.len() + 1 {
         let id = format!("{kit}/tile_{n}");
         if !project.compositions.compositions.iter().any(|c| c.id == id) {
@@ -2162,7 +2142,7 @@ pub fn draw_build_grid(
 
     // A third of a cell — the old unit rung, kept as the orientation grid and as the box drawn for
     // a thing with no mesh of its own.
-    let unit = emerge_core::grid::TILE / project.policy.snap_divisor.max(1) as f32;
+    let unit = emerge_core::grid::TILE / project.lattice.snap_divisor.max(1) as f32;
 
     // **The focused member and the stops its arrows walk.** The ladder is per axis and per piece —
     // a wall's travel is wider across than along — so the drawn lines ARE the reachable positions,
@@ -2182,7 +2162,7 @@ pub fn draw_build_grid(
         };
         if build.placing {
             let n = project
-                .policy
+                .lattice
                 .snap_divisor
                 .saturating_pow(build.depth)
                 .max(1) as i32;
@@ -2801,15 +2781,23 @@ mod tests {
         );
     }
 
-    /// **A tile is as tall as the room it will sit in, and follows that number when it changes.**
+    /// **A tile is as tall as the storey it is built for, and follows that number when it changes.**
     ///
-    /// `blank` takes the height from `map.bounds.1` for the reason `stack::datum` records: a hardcoded
-    /// 2.4 m ceiling hung the lights of a 3.5 m room in mid-air. `refit` then wrote all three axes but
-    /// compared only two, so an author who resized the map on the Map tab and came back kept the old
-    /// height for ever — and every `OnCeiling` fixture in that tile was wrong by the difference, in
-    /// `compositions.ron` and in the game.
+    /// `blank` takes the height from a number rather than a constant for the reason `stack::datum`
+    /// records: a hardcoded 2.4 m ceiling hung the lights of a 3.5 m room in mid-air. `refit` then
+    /// wrote all three axes but compared only two, so an author who changed the height and came back
+    /// kept the old one for ever — and every `OnCeiling` fixture in that tile was wrong by the
+    /// difference, in `compositions.ron` and in the game.
+    ///
+    /// **The number moved on 2026-08-16**, from `map.bounds.1` to `kits.ron`'s
+    /// `Lattice::cell_height`, and that is a deliberate behaviour change rather than a port. A tile
+    /// is a *kit* artifact: taking its height from whichever map was open meant the same kit made
+    /// differently-shaped blank tiles depending on where you came from, and meant nothing at all on
+    /// a door with no map. The cost is real and is the trade being made — a project whose maps have
+    /// different ceiling heights now gets one tile height for all of them, and a kit built for two
+    /// storey heights needs two kits.
     #[test]
-    fn the_envelope_follows_the_maps_height() {
+    fn the_envelope_follows_the_storey_height() {
         let lib = kit();
         let mut b = open("kit/t");
         let floor = lib

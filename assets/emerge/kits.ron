@@ -1,0 +1,16 @@
+(
+    version: 2,
+    note: Some("`site` is not bound yet: the kit was cleared on 2026-08-16 and is being re-authored against the ozea meshes. `the_site_kit_names_every_piece_it_still_owes` lists what it owes. Bind it here once the directory exists."),
+    lattice: (
+        face_bands: 1,
+        snap_divisor: 3,
+        cell_height: 4.0,
+    ),
+    bind: [
+        (
+            namespace: "furniture",
+            dir: "furniture",
+        ),
+    ],
+    authoring: Some("furniture"),
+)

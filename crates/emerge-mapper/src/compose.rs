@@ -143,34 +143,51 @@ impl Plugin for ComposePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ComposeState>()
             .init_resource::<StagedCarousel>()
-            .add_systems(Startup, spawn_compose_panel)
+            .init_resource::<Budget>()
+            .add_systems(Update,
+                (measure_budget.before(rebuild))
+                    .run_if(in_state(crate::screen::Screen::Editor)),
+            )
+            .add_systems(OnEnter(crate::screen::Screen::Editor), spawn_compose_panel)
             // **Before anything reads `selected`, and not gated on the mode.** The list can shrink
             // while another tab is live — capturing on the Map rewrites the whole set — and a reader
             // that clamped for itself is how three of them came to disagree. See `clamp_selection`.
-            .add_systems(Update, clamp_selection.before(keys::Phase::Act))
+            .add_systems(Update,
+                (clamp_selection.before(keys::Phase::Act))
+                    .run_if(in_state(crate::screen::Screen::Editor)),
+            )
             .add_systems(
                 Update,
-                (walk, arm, cycle_focus, step_carousel, pick_slot)
+                ((walk, arm, cycle_focus, step_carousel, pick_slot)
                     .in_set(keys::Phase::Act)
-                    .run_if(in_compose_mode),
+                    .run_if(in_compose_mode),)
+                    .run_if(in_state(crate::screen::Screen::Editor)),
             )
             // Not gated on the mode: the staged strip is despawned when the tab is left, and a
             // system that stops running cannot despawn it.
-            .add_systems(Update, restage_group.after(keys::Phase::Act))
+            .add_systems(Update,
+                (restage_group.after(keys::Phase::Act))
+                    .run_if(in_state(crate::screen::Screen::Editor)),
+            )
             // After the strip is published, so nothing is drawn against last frame's layout.
             .add_systems(
                 Update,
-                draw_stage.after(restage_group).run_if(in_compose_mode),
+                (draw_stage.after(restage_group).run_if(in_compose_mode),)
+                    .run_if(in_state(crate::screen::Screen::Editor)),
             )
             // Labels are NOT gated on the mode: `place_labels` owns their visibility and hides them
             // off-tab, which a system that has stopped running cannot do.
             .add_systems(
                 Update,
-                (rebuild_labels, place_labels).chain().after(restage_group),
+                ((rebuild_labels, place_labels).chain().after(restage_group),)
+                    .run_if(in_state(crate::screen::Screen::Editor)),
             )
             // Not gated on the mode: the armed group is shown on the Map tab too, and a panel that
             // stops updating when you leave it is a panel that lies the moment you come back.
-            .add_systems(Update, rebuild.after(keys::Phase::Act));
+            .add_systems(Update,
+                (rebuild.after(keys::Phase::Act))
+                    .run_if(in_state(crate::screen::Screen::Editor)),
+            );
     }
 }
 
@@ -197,8 +214,11 @@ fn clamp_selection(project: Res<Project>, mut state: ResMut<ComposeState>) {
     }
 }
 
-fn in_compose_mode(mode: Res<Mode>) -> bool {
-    *mode == Mode::Compose
+/// **`Option<Res<..>>`, because `Mode` belongs to a door.** See [`crate::editor::in_map_mode`]: every
+/// run condition is evaluated, so a bare `Res<Mode>` panics on the menu screen where the door — and
+/// its `Mode` — have been dropped.
+fn in_compose_mode(mode: Option<Res<Mode>>) -> bool {
+    mode.is_some_and(|m| *m == Mode::Compose)
 }
 
 fn spawn_compose_panel(mut commands: Commands) {
@@ -251,6 +271,80 @@ fn spawn_compose_panel(mut commands: Commands) {
         crate::chrome::problem_log(p, &[Mode::Compose]);
     });
 
+}
+
+/// **What the tile set costs the solver**, as a line the panel can draw.
+///
+/// `grammar::MAX_PROTOTYPES` is 32 *"because `collapse_grid` packs a domain into a `u32`"*, and
+/// `constraints::AMO_PAIRWISE_MAX` makes the clause count quadratic in it. Every builder pushes four
+/// turns per tile and dedupes by face, so the number an author actually spends is not the number of
+/// tiles they wrote — and until this existed the only way to learn it was to ask for a solve and be
+/// refused. Códices et al. (`10.1109/access.2022.3168832`) argue the general case: a designer avoids
+/// a generator whose limits they cannot see.
+///
+/// Nie et al. (`10.48550/arXiv.2308.07307`) say what the budget really bounds — a *sub-complete*
+/// tileset needs `|T| >= max{|E|²}` per axis pair and is then provably backtrack-free, so 32 over
+/// four turns is about **two edge tokens per axis and not three**. That readout is deliberately not
+/// here: this codebase's faces are `Band` sequences rather than single tokens, so mapping them onto
+/// the paper's edge types is a schema decision, and a wrong `sub-complete: yes` is worse than none.
+///
+/// **Held rather than derived where it is drawn.** `rebuild` runs on every arrow key, and building
+/// the grammar derives an `interface` per tile per quarter turn — work that stopped being bounded by
+/// the cap when the count moved to the end of the build. A number that only changes when the tiles
+/// change is computed when the tiles change.
+#[derive(Resource, Default)]
+pub struct Budget {
+    /// The row, already worded. Empty when the project has no bounded tile and so no budget to spend.
+    pub line: String,
+    /// Over the ceiling — drawn in the refusal colour, since that is what a solve will do.
+    pub over: bool,
+}
+
+/// Recompute [`Budget`], and only when the tiles could have changed.
+fn measure_budget(project: Res<Project>, mut budget: ResMut<Budget>) {
+    if !project.is_changed() {
+        return;
+    }
+    let comps = &project.compositions.compositions;
+    let tiles = comps
+        .iter()
+        .filter(|c| matches!(c.envelope, Envelope::Bounded { .. }))
+        .count();
+    if tiles == 0 {
+        // Not "0 of 32". An anchored group is not a prototype and never was, so a project of nothing
+        // but furniture has no budget to be near — and a zero would read as headroom rather than as
+        // a category that does not apply.
+        *budget = Budget::default();
+        return;
+    }
+    match emerge_core::grammar::from_compositions(
+        comps,
+        &project.library,
+        project.lattice.face_bands,
+        emerge_core::grid::TILE,
+        // The same substitutable rule the generate path passes, so the count an author reads is the
+        // count a solve will spend rather than a second opinion about it.
+        composition::agrees,
+    ) {
+        Ok(c) => {
+            *budget = Budget {
+                line: format!(
+                    "  {} of {} solver prototypes, from {tiles} bounded tile(s)",
+                    c.grammar.len(),
+                    emerge_core::grammar::MAX_PROTOTYPES,
+                ),
+                over: false,
+            };
+        }
+        // The refusal already names the counts and what to do about them, so it is shown verbatim
+        // rather than summarised into something shorter and less useful.
+        Err(e) => {
+            *budget = Budget {
+                line: format!("  {e}"),
+                over: true,
+            };
+        }
+    }
 }
 
 /// Walk the list. Shift steps five, matching every other list in this editor.
@@ -938,6 +1032,11 @@ fn restage_group(
             name: "compose_stage".to_owned(),
             origin: (0.0, 0.0, 0.0),
             bounds: size,
+            // **No lattice here, because a map no longer carries one.** This scratch map exists
+            // to stand the group up exactly as stamping it would; the grid it is read on is the
+            // project's, passed to `interface` and `pitch` directly rather than smuggled through
+            // a map that would then be a second place to state it.
+            palette: Vec::new(),
             placements: Vec::new(),
             stamps: Vec::new(),
             locations: Vec::new(),
@@ -1321,6 +1420,7 @@ fn rebuild(
     mut commands: Commands,
     state: Res<ComposeState>,
     project: Res<Project>,
+    budget: Res<Budget>,
     body: Query<Entity, With<ComposeBody>>,
     lines: Query<Entity, With<ComposeLine>>,
 ) {
@@ -1360,10 +1460,14 @@ fn rebuild(
             DIM,
         ));
     }
+    if !budget.line.is_empty() {
+        rows.push((budget.line.clone(), if budget.over { DANGER } else { DIM }));
+    }
     if comps.is_empty() {
         rows.push((
-            "No groups. `compositions.ron` beside library.ron defines them; a project with none is \
-             a project that stamps nothing, not a broken one."
+            "No groups. The project's `compositions.ron` defines them — one collection, so a tile \
+             may seat any bound kit's pieces. A project with none stamps nothing, which is not a \
+             broken one."
                 .to_owned(),
             DIM,
         ));
@@ -1645,7 +1749,7 @@ pub fn flushed(
 /// Seats are multiples of this from the envelope's centre in X/Z and its floor in Y, so the centre is
 /// always a seat and nudging out and back returns exactly.
 pub fn seat_step(project: &Project, level: emerge_core::grid::SnapLevel) -> f32 {
-    level.pitch(project.policy.snap_divisor)
+    level.pitch(project.lattice.snap_divisor)
 }
 
 /// The authoring grid, rounded the way [`crate::editor`] rounds it. One rule, two callers.
@@ -1789,7 +1893,7 @@ fn detail(rows: &mut Vec<(String, Color)>, c: &Composition, comps: &[Composition
     }
 
     rows.push((String::new(), TEXT));
-    match composition::interface(c, comps, &project.library, project.policy.face_bands) {
+    match composition::interface(c, comps, &project.library, project.lattice.face_bands) {
         Ok(None) => rows.push((
             "ANCHORED — claims no tile, so it has no boundary for anything to abut".to_owned(),
             DIM,
@@ -2200,6 +2304,7 @@ mod paint_tests {
             name: "m".to_owned(),
             origin: (0.0, 0.0, 0.0),
             bounds: (8.0, 2.4, 8.0),
+            palette: Vec::new(),
             placements: Vec::new(),
             stamps: Vec::new(),
             locations: Vec::new(),

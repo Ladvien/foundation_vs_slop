@@ -3098,3 +3098,224 @@ deletes by anchor containment, so widening the drawing without changing the test
 and changing the test changes what gets deleted. That is a design call, not a drawing bug. The
 inconsistency is real though, and visible inside one function — `drive_removal`'s *single-piece*
 branch already outlines `cell_extents` while its drag branch outlines anchors.
+
+## FVS-R-35 · Deleting a kit did not ask who needs it — DONE 2026-08-16
+
+`Chooser::confirm_delete` is `remove_dir_all`, and the only thing it refused was the **root** kit —
+*"`assets/emerge` itself … `remove_dir_all` on it would take the whole library."* Correct as far as
+it went, and it did not go far enough: it had no idea that `src/site/kit.rs:38` names a
+**subdirectory** in a `&'static str`. So the verb took `assets/emerge/site/`, `site_greybox/` and
+`site_v2/`, the game's ability to boot, and 51 tests, and nothing said a word.
+
+**The general problem it exposed is worth more than the incident.** A content scan finds maps and
+compositions; it cannot read Rust source. So the editor could not see its own most important
+dependent, and no amount of scanning `assets/emerge` would ever have changed that.
+
+*Shipped:* `chooser::dependents` asks **not "is anything using this kit" but "is this kit the last
+provider"** — the distinction forced by `site/` and `site_greybox/` defining the *identical* 45 ids.
+Removing one of two directories that provide the same pieces strands nothing; removing the only one
+strands every reference. `chooser::strands` formats the refusal in the terse register the root-kit
+guard was cut down to: which kit, how many files, the first three named, the rest counted.
+
+**Two readers, because there are two formats and one belongs to another crate.** Maps and
+`compositions.ron` are *parsed*, so a `note:` mentioning `site/wall` stays prose rather than becoming
+a dependency. `assets/site/kit_*.ron` is read as text: `SiteKit`'s schema lives in the game,
+`emerge-mapper` does not depend on the game and must not start, and a quoted-id match over a file
+that is a list of quoted ids is worth more than the coupling.
+
+**The scan runs on a keypress and reads every map in the project**, which is the opposite of the
+trade `read_kit` makes when it parses only `library.ron` *"for a list nobody has chosen from yet"* —
+and it is the right way round. Listing is cheap because it happens constantly; deleting is thorough
+because it happens once and cannot be undone.
+
+Four tests, beside the existing lifecycle group: a kit a map elsewhere names is refused **and the
+refusal names the file**; a kit another directory re-skins still goes; the refusal names three and
+counts the rest; and `the_game_kit_file_is_a_dependent_no_content_scan_would_find`. 57 chooser tests
+and 276 lib tests green, no existing test moved.
+
+This is stage 3 of `docs/2026-08-16-collections.md` arriving as a bug rather than a feature, so it
+was built as stage 3 rather than patched. The rest of that staging is FVS-R-36 through -41.
+
+## FVS-R-37 · Nothing in the suite had ever had two kits — DONE 2026-08-16
+
+`tests/fixtures/mod.rs` made only `dir/assets/emerge`, and `build()` wrote the library, the
+compositions and the map into that one directory. So all 276 lib tests and every headless one
+exercised a **single-kit** world, and multi-kit behaviour was pinned by exactly one asset-contract
+test — `the_chooser_sees_the_shipped_kits`, which hardcodes four kit names and asserts *"exactly one
+kit has `flag.is_none()`"*. That is the shape of the current layout stated as a guarantee, which is
+fine as a guarantee and useless as a foundation.
+
+*Shipped:* `Fixture::kit(name, pack, ids)` writes a kit beside the root one — a `library.ron` and the
+`project.ron` `policy::layered_library` requires of every kit, and no `compositions.ron`, since its
+absence and an empty one mean the same thing. **Ids are written verbatim, which is the point:**
+calling it twice with the same ids and different names builds a **re-skin pair**, two directories
+providing one namespace, which is what `site/` and `site_greybox/` are on disk and the case every
+question about deleting, binding or resolving a kit turns on.
+
+`descriptor_row` came out of `sunk_descriptor` as a free function so both callers share one row
+shape, and it names the mesh after the id's **last segment** — `site/floor` writes `ozea/floor.glb`,
+never a `site/` subdirectory. The namespace lives in the id and never in the mesh path, which is the
+shipped kits' actual shape.
+
+Held by `two_kits_can_provide_one_namespace_and_both_open`, which also asserts the other half: a kit
+is **one directory, not a layer over the root** — the root kit's `lamp` must *not* resolve inside
+`site`, because `layered_library` reads exactly one directory and a test letting the root leak in
+would pin the opposite of the design.
+
+## FVS-R-36 · A kit's namespace was inferred from its first descriptor — DONE 2026-08-16
+
+`build::kit_namespace` read `project.library.descriptors.first()`, split on `/`, and substituted the
+literal `"kit"` when that found nothing. **Three faults in one expression.** The answer depended on
+which piece happened to sort first, which is not a property anybody authored. A library that
+disagreed with itself was never noticed. And `"kit"` is a namespace nobody chose that collides across
+every unnamespaced kit — `assets/emerge/compositions.ron` still carries a `kit/tile_1` from it.
+
+`next_tile_id` carried a **second copy** of the same expression, comment and all, so there were two
+definitions of one answer.
+
+**The old behaviour was right in spirit and that mattered to the fix.** `assets/emerge/site_v2/` held
+pieces named `site/*` and correctly minted `site/tile_n`, because a directory is a *skin* and the
+namespace is the *interface* it implements — `site/` and `site_greybox/` provide the identical 45
+ids. So the library must win when it has a namespace; the bug was how it was read, not that it was
+read.
+
+*Shipped:* `emerge_core::library::Library::namespace() -> Result<Option<&str>, String>` — engine-free
+schema logic, one definition, reading **every** id. `Ok(None)` is a state and not a failure: the root
+library's 75 pieces are all flat. A library in two namespaces is refused, naming the piece that
+disagreed and both namespaces.
+
+`Project::namespace` resolves it once at open, on the argument `emerge_dir` already makes — *"so
+nothing downstream carries an `Option` or rebuilds this path."* The library answers when its ids
+carry a namespace and the directory answers when they do not: one rule over a genuine dichotomy, not
+a fallback, and neither branch produces a name nobody chose. A mixed library is now refused **at
+load**, before anything can decide it by sort order.
+
+Four tests, two in each crate. The two headless ones use FVS-R-37's new fixture and would have been
+unwritable a day earlier: a kit directory named `greybox` whose pieces are `site/*` answers `site`,
+and a kit whose pieces are flat answers `emerge` — its own directory. The two shipped tile-naming
+tests moved from `kit/corner_north` to `emerge/corner_north`; they were pinning the stub.
+
+## FVS-R-38 · The lattice settings were per-kit and a kit has no lattice — DONE 2026-08-16
+
+`face_bands` and `snap_divisor` lived in `project.ron` because a kit *was* a project — one directory
+holding a library, a policy, its tiles and its maps. Both describe a **lattice**, and a map has
+exactly one. So the moment a map can draw on two kits, two kits disagreeing about either has no local
+answer: their faces are indexed on different lattices and cannot be compared, adjacency quietly stops
+meaning anything, and **both values are legal**, so nothing says a word.
+
+*Shipped:* both are `Map` fields. `MAP_VERSION` → 3, `POLICY_VERSION` → 2, `MAX_DIVISIONS` and the
+two range checks moved with them, and the docs moved verbatim rather than being rewritten from
+memory — including the `divisions`→`face_bands` rename argument, which is still the point.
+
+**The migration was one-shot with no shim, and the two schemas' own rules made it cheap in opposite
+directions.** `POLICY_VERSION` is an **equality**, so every `project.ron` had to be edited and was.
+`MAP_VERSION` is a **floor**, so a map written before the move reads as exactly what it already
+meant — `#[serde(default)]` and nothing else, which is the property the floor was adopted for when
+`Stamped` arrived.
+
+**The check that left with them is the part worth reading.** `layered_library` was *"the one loader,
+so there is no path on which the check is skipped"*, and that property is real and was worth
+preserving. `Library::validate_lattices` now belongs to each loader that **holds a map** —
+`Project::open` for the editor, `EmergeWorld::with_compositions` for the game — and deliberately not
+to `src/site/kit.rs`, which opens a kit for the hub's own layout and never reads an edge token. That
+is a consumer the check does not apply to, not a path that skips it, and it is written down at all
+three sites.
+
+Two follow-ons found by doing it. `composition::interface` builds a scratch map to resolve its
+members' heights, and that scratch map's `face_bands` **is** the caller's `per_tile` — reading a
+tile's faces on a different lattice from the map it will be stamped onto is "the ghost is the
+contract" broken at the schema, so it is now named rather than defaulted. And the Tiles tab told
+authors the number came *"from project.ron"*, which after the move is a row sending somebody to edit
+a file that no longer holds it.
+
+Measured after: **2,542 passed, 57 failed, and every one of the 57 names the missing site kit**
+(FVS-R-39). The move introduced none of them.
+
+## FVS-R-40 · The prototype budget was invisible until it refused — DONE 2026-08-16
+
+`MAX_PROTOTYPES` is 32 *"because `collapse_grid` packs a domain into a `u32`"*, and
+`constraints::AMO_PAIRWISE_MAX` makes the clause count quadratic in it. Every builder pushes four
+turns per tile and dedupes by face, so **the number an author spends is not the number of tiles they
+wrote** — and the only way to learn it was to ask for a solve and be refused.
+
+*Shipped:* a row on the Compose tab, under the position line: `3 of 32 solver prototypes, from 2
+bounded tile(s)`. Over the ceiling it shows the refusal verbatim, in `DANGER`, because that message
+already names the counts and what to do about them.
+
+**Two things had to change first.** `from_compositions` refused the moment the 33rd prototype
+appeared, so its message could say *"more than 32"* and nothing else — an author over budget was told
+they were over and not by how much, which leaves "narrow the set" without a target. It is now counted
+at the **end** of the build and names the totals, which is what `declared` already did and the reason
+it did it. And the row is a `Budget` resource behind its own `project.is_changed()` gate rather than
+derived in `rebuild`: `rebuild` runs on every arrow key, and building the grammar derives an
+`interface` per tile per quarter turn — work that stopped being bounded by the cap the moment the
+count moved to the end.
+
+**The sub-completeness half was deliberately not built, and the reason is a schema question.** Nie et
+al. (`10.48550/arXiv.2308.07307`) show what the budget really bounds: a *sub-complete* tileset needs
+`|T| >= max{|E|²}` per axis pair and is then **provably backtrack-free**, so 32 across four turns is
+about **two edge tokens per axis and not three** — stricter again in 3-D. But this codebase's faces
+are `Band` **sequences**, not single tokens, so mapping them onto the paper's edge types is a
+decision nobody has taken, and a wrong `sub-complete: yes` is worse than no answer at all. Written
+down at the field so the next person does not have to re-derive why it is missing.
+
+Held by `the_compose_tab_shows_what_the_tiles_cost_the_solver` (two symmetric tiles dedupe to one
+prototype apiece, plus `Empty`, which is 3) and `a_project_with_no_tiles_shows_no_budget` — **not**
+"0 of 32", because an `Anchored` group claims no tile and a zero would read as headroom in a category
+that does not apply.
+
+## FVS-R-41 · A composition could not be reused outside the kit it was authored in — DONE 2026-08-16
+
+The point of the whole thread. `Compositions::FILE` was written beside `library.ron` inside a kit
+directory and `Project::open` loaded exactly **one** kit — so a tile authored in `site` was invisible
+to every map opened on `furniture`, and a tile naming pieces from both could not be validated at all,
+because neither kit's library could answer for the other's.
+
+**It was stages 4, 5 and 6 at once, and they genuinely do not separate.** Pooling compositions needs
+merged libraries; merging needs deciding which directory provides a namespace when two do — `site/`
+and `site_greybox/` define the identical 45 ids, deliberately — and that decision is **binding**,
+which had no home. Giving it one changes what `--kit` means, at which point maps have to leave the
+kit directories too.
+
+*Shipped:*
+
+- **`emerge_core::kits`** — `kits.ron` at the project root binds namespace → directory, and
+  `bound_library` reads the bound set, layers each kit with **its own** policy (patches are local:
+  `Policy::apply` refuses a rule that matches nothing) and merges the results into the one library a
+  map resolves against. **Declared, then verified** against `Library::namespace` — declared-only
+  drifts, derived-only cannot express the skin pair, since both directories answer `site`.
+- **Compositions are the project's**, validated against the merge, which is the only library that can
+  answer for a tile seating two kits' pieces.
+- **Maps are the project's**, in `assets/emerge/maps/`. A subdirectory on purpose: `.gitignore`
+  carries `assets/emerge/*.map.ron` to keep stray scratch maps out, and that rule is one level deep.
+- **The project root stopped being a kit.** `assets/emerge/library.ron` and `project.ron` moved to
+  `assets/emerge/furniture/`, which is what that directory always held.
+
+**`--kit` changed meaning rather than disappearing**, and that is the move that made stage 6
+reachable. It used to select the *only* kit loaded — exactly what made cross-kit tiles impossible. It
+now names the **authoring** kit: where an imported mesh lands and what a new tile is called. Every
+bound kit loads either way, so it is not a filter on what can be placed, and the map list stopped
+being a property of the selected kit.
+
+**Nothing new guards the merge.** Two directories bound to one namespace is refused by
+`Kits::validate` naming both skins; a duplicate id is refused by `Library::validate`, which already
+said *"a map references descriptors by id, so a duplicate makes every reference to it ambiguous"*.
+The rule that was already there catches the exact mistake binding exists to prevent.
+
+**Three things fell out of doing it, each a real defect avoided.** `commit_measured` had to rebuild
+the *merge* rather than replace the library, or the first import in a session would look like it had
+deleted every other kit's pieces. `confirm_delete` had to unbind **before** removing the directory,
+so a refusal costs nothing and a project is never left naming a kit that is not there. And the
+chooser stopped resetting the map selection on a kit change — there is one list now, so there is no
+index to invalidate, and resetting would move the row an author is reading out from under them.
+
+Held by `a_tile_can_seat_two_kits_pieces_and_a_map_can_stamp_it` — the *Done when*, asserted directly:
+two kits, one tile naming a piece from each, expanded through the same `composition::expand` the
+game's loader uses. Plus `a_re_skin_pair_binds_one_at_a_time_and_either_resolves`, which pins that
+binding both at once is refused **by name**, and that swapping the skin is editing one line.
+
+**One-shot migration, no shim** — and it was cheap in a way that will not repeat: the per-kit
+`compositions.ron` files had already been deleted, so stage 5 had nothing to move.
+
+Measured after: **2,550 passed, 57 failed, and every one of the 57 names the missing site kit**
+(FVS-R-39). The split introduced none of them.

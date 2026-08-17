@@ -1,9 +1,0 @@
-(
-    version: 2,
-    name: "untitled_map",
-    origin: (0.0, 0.0, 0.0),
-    bounds: (10.0, 4.0, 10.0),
-    placements: [],
-    locations: [],
-    note: Some("site_v2's working map. Authored in emerge-mapper; open it with `cargo run -p emerge-mapper --kit site_v2`. An existing map carries its OWN bounds, so changing `map::default_bounds` does nothing to this file once it exists."),
-)

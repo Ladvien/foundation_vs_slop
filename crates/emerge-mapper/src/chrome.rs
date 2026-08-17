@@ -86,6 +86,14 @@ pub const HEADER_BG: Color = Color::srgb(0.075, 0.070, 0.063);
 
 /// Where the panels start, below the tab strip. One number, so no two panels can disagree about it
 /// and leave a tab half-covered.
+/// **The editor's interface scale**, and the one `main` starts the application at.
+///
+/// Named here rather than written as `1.2` in two places, because there is now a second screen that
+/// legitimately runs at a different one: the menu multiplies `UiScale` by the display's scale factor
+/// so its offscreen capture rasterises sharp (`chooser::fit_capture_to_window`), and hands this back
+/// on the way out. Two owners of one value need one name for it.
+pub const EDITOR_UI_SCALE: f32 = 1.2;
+
 pub const TAB_STRIP_BOTTOM: f32 = 46.0;
 /// The gap every panel keeps from the window edge.
 pub const MARGIN: f32 = 12.0;
@@ -576,6 +584,57 @@ pub fn key_census(parent: &mut ChildSpawnerCommands, contexts: &[Context], stanc
 /// system shares (`tiles::keep_selection_on_screen`, `editor::keep_palette_selection_on_screen`).
 ///
 /// Extracted when the palette gained the same correction the candidates list had (F-9,
+/// **Arms when the SELECTION changes — not when the resource holding it does.**
+///
+/// Every list that follows its highlight needs the same two-step: notice the selection moved, then
+/// scroll *next* frame, because the rows are rebuilt on that same change and this frame's
+/// `ComputedNode` still describes the previous layout.
+///
+/// # Why this is a type and not two lines in each system
+///
+/// The two lines were `if state.is_changed() { pending = true; return; }`, written twice, and both
+/// were quietly broken: `is_changed` is true whenever **anything** touches the resource, and both
+/// `EditorState` and `ImportState` are written most frames — a status line, a hover, a preview
+/// watchdog. So the flag was re-armed every frame and the correction never ran.
+///
+/// Reported from the keyboard twice. First on 2026-08-14 — *"if I arrow down and the scroll view, it
+/// just goes off the screen. The scroll doesn't actually happen."* — and again on 2026-08-16, *"I
+/// still have the same bug."* Both times the headless test passed, because in a test nothing else
+/// writes the resource, so `is_changed` goes false on the next frame and the correction fires. The
+/// test was measuring a world that only exists in tests.
+///
+/// Keyed on the selection itself, this cannot happen: unrelated writes are invisible to it, and the
+/// only thing that arms it is the thing it exists to follow.
+pub struct Follow<K> {
+    last: Option<K>,
+    pending: bool,
+}
+
+// A manual impl, because `#[derive(Default)]` would demand `K: Default` and a selection has no
+// meaningful zero — `None` is "nothing selected", which is what this starts at.
+impl<K> Default for Follow<K> {
+    fn default() -> Self {
+        Follow { last: None, pending: false }
+    }
+}
+
+impl<K: PartialEq> Follow<K> {
+    /// Give it this frame's selection; it answers whether to scroll **now**.
+    ///
+    /// `false` on the frame the selection moves (the layout is still last frame's), `true` on the
+    /// one after, and `false` for ever until it moves again — so the scroll position is written once
+    /// per move rather than sixty times a second, which is what keeps `ScrollPosition`'s change
+    /// detection meaningful for anything else reading it.
+    pub fn should_scroll(&mut self, now: Option<K>) -> bool {
+        if self.last != now {
+            self.last = now;
+            self.pending = true;
+            return false;
+        }
+        std::mem::take(&mut self.pending)
+    }
+}
+
 /// 2026-08-14): two hand-copied versions of fold geometry is how the two lists drift a half-pixel
 /// apart, and the arithmetic is the testable part — fold detection, the physical→logical
 /// conversion, the clamp, and the dead-band all hold in a unit test, where the pixel scroll itself
@@ -908,20 +967,27 @@ pub struct ChromePlugin;
 impl Plugin for ChromePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShowingFor>()
-            .add_systems(Startup, (spawn_shortcuts_overlay, spawn_name_box))
+            .add_systems(OnEnter(crate::screen::Screen::Editor), (spawn_shortcuts_overlay, spawn_name_box))
             // `flash_live_rows` after the rebuild, so a row spawned this frame is lit this frame
             // rather than one frame late — which for a tap is the difference between a readout and
             // a flicker.
             .add_systems(
                 Update,
-                (drive_shortcuts_overlay, flash_live_rows)
+                ((drive_shortcuts_overlay, flash_live_rows)
                     .chain()
-                    .in_set(keys::Phase::Act),
+                    .in_set(keys::Phase::Act),)
+                    .run_if(in_state(crate::screen::Screen::Editor)),
             )
             // **After `Phase::Text`, not in it.** The field consumes the keystroke there; painting
             // before it would show the box one character behind what has been typed.
-            .add_systems(Update, paint_name_box.after(keys::Phase::Text))
-            .add_systems(Update, light_the_back_button);
+            .add_systems(Update,
+                (paint_name_box.after(keys::Phase::Text))
+                    .run_if(in_state(crate::screen::Screen::Editor)),
+            )
+            .add_systems(Update,
+                (light_the_back_button)
+                    .run_if(in_state(crate::screen::Screen::Editor)),
+            );
     }
 }
 
@@ -1017,7 +1083,41 @@ fn drive_shortcuts_overlay(
 
 #[cfg(test)]
 mod scroll_tests {
-    use super::scroll_to_reveal;
+    use super::{scroll_to_reveal, Follow};
+
+    /// **The arming rule, which is the half that was broken for two days.**
+    ///
+    /// `scroll_to_reveal`'s arithmetic was always right and always tested; nothing ever called it,
+    /// because the flag that should have said "now" was re-armed every frame by an unrelated write.
+    /// So this tests the flag, not the sums.
+    #[test]
+    fn a_follower_arms_on_the_selection_and_fires_exactly_once() {
+        let mut f: Follow<usize> = Follow::default();
+
+        // The frame the selection appears: do NOT scroll — the rows were rebuilt this frame and the
+        // geometry still describes the previous layout.
+        assert!(!f.should_scroll(Some(3)), "the move frame reads stale layout");
+        // The next frame, with the selection unchanged: scroll, once.
+        assert!(f.should_scroll(Some(3)), "the frame after is when the rows are real");
+        assert!(!f.should_scroll(Some(3)), "and it does not write every frame after that");
+        assert!(!f.should_scroll(Some(3)));
+
+        // Moving again re-arms the same two-step.
+        assert!(!f.should_scroll(Some(4)));
+        assert!(f.should_scroll(Some(4)));
+
+        // **The regression itself**: unrelated churn must not touch this. A resource-keyed follower
+        // saw `is_changed` every frame — a status line, a hover, a preview watchdog — re-armed
+        // itself, and never fired. Nothing here can observe that, which is the point.
+        assert!(!f.should_scroll(Some(4)), "still quiet however busy the resource is");
+
+        // Losing the selection arms too, so a list that had a highlight and now has none does not
+        // scroll to a row that is gone.
+        assert!(!f.should_scroll(None));
+        assert!(f.should_scroll(None));
+    }
+
+
 
     /// A row already inside the fold asks for nothing — the common case, and the one that keeps a
     /// change-detected `ScrollPosition` from being touched sixty times a second.
@@ -1282,9 +1382,17 @@ pub fn light_the_back_button(
 
 pub fn shortcut_hint(parent: &mut ChildSpawnerCommands) {
     parent.spawn((
+        // **The way out is named here, not only on the button above it.**
+        //
+        // The button says `‹ kits & maps` at 11px and this line said `Hold K for shortcuts` at 10px,
+        // and an author looking for the exit found neither — they pressed `Esc` three times instead,
+        // which is the one key deliberately wired to mean "not that" rather than "out". Naming the
+        // chord where the eye already goes for keys is ExposeHK's rehearsal argument: the novice
+        // path and the expert path are the same path.
         Text::new(format!(
-            "Hold {} for shortcuts",
-            keys::chord(keys::Action::Shortcuts)
+            "Hold {} for shortcuts   ·   {} back to kits & maps",
+            keys::chord(keys::Action::Shortcuts),
+            keys::chord(keys::Action::MainMenu),
         )),
         TextColor(LABEL),
         TextFont::from_font_size(10.0),

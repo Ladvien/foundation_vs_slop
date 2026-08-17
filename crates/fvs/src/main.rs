@@ -84,10 +84,12 @@ COMMANDS:
         --research-room   Boot straight into the WFC dungeon dev room (F6 debug panel).
         --release         Build with optimisations.
 
-    edit [name]       Open the map editor on assets/emerge/<name>.map.ron.
+    edit [name]       Open the map editor on assets/emerge/maps/<name>.map.ron.
                       A name that does not exist yet is a new map. Defaults to `untitled_map`.
-        --kit <name>      Open a kit under assets/emerge/ instead of the default furniture
-                          library — `--kit site` is the 45-piece architectural set.
+        --kit <name>      Which kit new meshes and new tiles land in. EVERY kit `kits.ron`
+                          binds is loaded either way — that is what lets one tile seat two
+                          kits' pieces — so this chooses where work goes, not what you can
+                          place. Defaults to the project's `authoring` kit.
         --fullscreen      Borderless fullscreen.
         --release         Build with optimisations.
 
@@ -225,10 +227,11 @@ fn edit(args: &[String]) -> Result<ExitCode, String> {
     let mut args = args.to_vec();
     let fullscreen = take_flag(&mut args, "--fullscreen");
     let release = take_flag(&mut args, "--release");
-    // A kit is a directory under `assets/emerge/` holding a library and its policy layer: the
-    // default is furniture, `--kit site` is the 45-piece architectural set. Forwarded rather than
-    // interpreted — `Project::open` is what decides whether the kit exists, and duplicating that
-    // check here would be a second answer to one question.
+    // A kit is a directory under `assets/emerge/` holding a library and its policy layer. This says
+    // which one NEW work lands in; every bound kit is loaded regardless, so it is not a filter on
+    // what can be placed. Forwarded rather than interpreted — `Project::open` is what decides
+    // whether the kit is bound, and duplicating that check here would be a second answer to one
+    // question.
     let kit = take_value(&mut args, "--kit")?;
     // Whatever is left is the map name — one positional, and a second is a typo rather than a map
     // called "break room" with a space in it (names are snake_case; the editor forces that anyway).

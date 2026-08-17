@@ -42,6 +42,7 @@
 //! argument parsing and the app; everything else lives here, where `tests/` can reach it.
 
 pub mod anim_cache;
+pub mod args;
 pub mod anim_plots;
 pub mod anim_stage;
 pub mod anim_tab;
@@ -65,6 +66,7 @@ pub mod label_booth;
 pub mod labels;
 pub mod notice;
 pub mod project;
+pub mod screen;
 pub mod stages;
 pub mod thumbs;
 pub mod tiles;

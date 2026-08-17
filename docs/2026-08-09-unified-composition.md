@@ -162,9 +162,16 @@ restrictions on their diagonal neighbors."* Four tiles can each satisfy every ed
 disagree where they meet. Corner tiles are also *"easier to tile"* and halve the memory. This is the
 same place CGA's 1-D component points at — two independent sources on one gap.
 
-**Not open access**; the abstract above is from CrossRef. `paper_download` failed on 2026-08-09 with no
-OA PDF found. Worth getting through another route before the interface format is fixed, because whether
-a token lives on an edge or a corner is a schema decision and not an easy one to revisit.
+~~**Not open access**; the abstract above is from CrossRef. `paper_download` failed on 2026-08-09 with
+no OA PDF found.~~ **Superseded — it is in the corpus.** Ingested 2026-08-10 from the authors' own copy
+at `graphics.cs.kuleuven.be/publications/LD06AWTCECC/`, converted and indexed; `distill_search` returns
+the passage quoted above verbatim. §3 carries the counting rule — *"a complete set of corner tiles over
+C colors consists of C⁴ tiles"* — and the conversion that makes the two families comparable: *"Every
+corner tile set can be transformed into an equivalent Wang tile set by encoding any combination of two
+corner colors into an edge color (squaring the number of colors). The opposite, however, is in general
+not possible."* That asymmetry is the decision. Read it before the interface format is fixed: whether a
+token lives on an edge or a corner is a schema decision and not an easy one to revisit. Tracked as
+**FVS-R-11**.
 
 ---
 

@@ -117,6 +117,7 @@
             ),
             kind: [
                 "bin",
+                "prop",
             ],
             effects: [],
             look: [
@@ -127,10 +128,10 @@
                 rooms: [
                     "bathroom",
                     "kitchen",
-                    "office",
                     "living",
+                    "office",
                     "hall",
-                    "dining",
+                    "decor",
                 ],
                 group: None,
             ),
@@ -168,12 +169,14 @@
             look: [
                 "brown",
                 "plastic",
+                "blue",
+                "green",
             ],
             placement: (
                 rooms: [
                     "office",
                     "living",
-                    "hall",
+                    "decor",
                 ],
                 group: None,
             ),
@@ -205,18 +208,27 @@
                 sockets: [],
             ),
             kind: [
+                "decor",
                 "plant",
             ],
             effects: [],
-            look: [],
+            look: [
+                "brown",
+                "plastic",
+                "blue",
+                "green",
+            ],
             placement: (
                 rooms: [
+                    "living",
+                    "hall",
+                    "office",
                     "decor",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: None,
+            note: Some("The asset is a decorative potted plant with a low-poly design, suitable for indoor environments."),
         ),
         (
             id: "plant_b",
@@ -250,13 +262,13 @@
             look: [
                 "brown",
                 "worn",
+                "green",
             ],
             placement: (
                 rooms: [
+                    "decor",
                     "living",
                     "office",
-                    "hall",
-                    "decor",
                 ],
                 group: None,
             ),
@@ -381,6 +393,7 @@
             look: [
                 "plastic",
                 "clean",
+                "red",
             ],
             placement: (
                 rooms: [
@@ -562,6 +575,7 @@
                     "living",
                     "office",
                     "hall",
+                    "decor",
                 ],
                 group: None,
             ),
@@ -833,12 +847,14 @@
                 "brown",
                 "orange",
                 "clean",
+                "blue",
             ],
             placement: (
                 rooms: [
                     "living",
-                    "bedroom",
                     "office",
+                    "bedroom",
+                    "hall",
                 ],
                 group: None,
             ),
@@ -881,7 +897,6 @@
             placement: (
                 rooms: [
                     "living",
-                    "decor",
                 ],
                 group: None,
             ),
@@ -920,6 +935,8 @@
                 "brown",
                 "plastic",
                 "clean",
+                "blue",
+                "yellow",
             ],
             placement: (
                 rooms: [
@@ -970,9 +987,7 @@
             placement: (
                 rooms: [
                     "living",
-                    "bedroom",
-                    "office",
-                    "hall",
+                    "decor",
                 ],
                 group: None,
             ),
@@ -1013,6 +1028,7 @@
                 "brown",
                 "plastic",
                 "clean",
+                "blue",
             ],
             placement: (
                 rooms: [
@@ -1138,12 +1154,16 @@
                 sockets: [],
             ),
             kind: [
+                "decor",
                 "storage",
             ],
             effects: [],
             look: [
+                "white",
                 "brown",
                 "clean",
+                "blue",
+                "yellow",
             ],
             placement: (
                 rooms: [
@@ -1236,7 +1256,7 @@
                 group: None,
             ),
             subgrid: None,
-            note: Some("The shelf is designed to stand on the floor and holds various items on its tiers. It is symmetrical along its vertical axis but has a clear front face (east) where items are displayed."),
+            note: Some("The shelf is symmetrical along its vertical axis but has a clear front face (east) where items are displayed. It is designed to stand on the floor and holds various items on its tiers."),
         ),
         (
             id: "vanity",
@@ -1390,6 +1410,7 @@
             ),
             kind: [
                 "container",
+                "decor",
                 "prop",
             ],
             effects: [],
@@ -1405,7 +1426,7 @@
                 group: None,
             ),
             subgrid: None,
-            note: Some("the barrel has a radioactive symbol and appears to be made of metal with a weathered surface"),
+            note: Some("the barrel is cylindrical and symmetric, with no distinct front; the radioactive symbol is visible on the side"),
         ),
         (
             id: "barrel_acid_b",
@@ -1431,12 +1452,14 @@
             ),
             kind: [
                 "container",
+                "decor",
                 "prop",
             ],
             effects: [],
             look: [
                 "plastic",
                 "worn",
+                "yellow",
             ],
             placement: (
                 rooms: [
@@ -1484,7 +1507,6 @@
                     "decor",
                     "hall",
                     "office",
-                    "kitchen",
                 ],
                 group: None,
             ),
@@ -1526,9 +1548,6 @@
             placement: (
                 rooms: [
                     "decor",
-                    "hall",
-                    "office",
-                    "kitchen",
                 ],
                 group: None,
             ),
@@ -1570,8 +1589,9 @@
                 rooms: [
                     "hall",
                     "kitchen",
-                    "bathroom",
+                    "living",
                     "office",
+                    "bathroom",
                 ],
                 group: None,
             ),
@@ -1750,7 +1770,7 @@
                 group: Some("bath"),
             ),
             subgrid: None,
-            note: Some("The sink is a freestanding pedestal model with a basin and faucet. The height is measured as 0.00 m, which is likely a placeholder; the actual height is implied by the geometry."),
+            note: Some("The height is measured as 0.00 m, which is likely a placeholder; the actual height is implied by the geometry. The sink is a freestanding pedestal model with a basin and faucet."),
         ),
         (
             id: "bath",
@@ -1792,7 +1812,7 @@
                 group: Some("bath"),
             ),
             subgrid: None,
-            note: Some("The bathtub is a container with a flat top surface that can support objects. It is mounted on the floor and has no height, indicating it is a low-poly representation."),
+            note: Some("The bathtub is a low-poly representation with no height, mounted on the floor. It has a flat top surface that can support objects."),
         ),
         (
             id: "wall_low",
@@ -1831,8 +1851,9 @@
             ],
             placement: (
                 rooms: [
-                    "living",
+                    "decor",
                     "hall",
+                    "living",
                     "office",
                 ],
                 group: None,
@@ -2132,13 +2153,7 @@
             ],
             placement: (
                 rooms: [
-                    "hall",
-                    "living",
-                    "office",
-                    "dining",
-                    "kitchen",
-                    "bedroom",
-                    "bathroom",
+                    "decor",
                 ],
                 group: None,
             ),
@@ -2188,18 +2203,33 @@
                 footprint: Some((0.10000067, 1.0)),
                 height: Some(0.4000001),
             ),
-            mount: None,
+            mount: Some(OnWall(
+                height: 1.8,
+            )),
             clearance: [],
             offers: (
                 surfaces: [],
                 faces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                "structure",
+            ],
             effects: [],
-            look: [],
+            look: [
+                "grey",
+                "metal",
+            ],
             placement: (
-                rooms: [],
+                rooms: [
+                    "decor",
+                    "hall",
+                    "living",
+                    "office",
+                    "kitchen",
+                    "bathroom",
+                    "bedroom",
+                ],
                 group: None,
             ),
             subgrid: Some((
@@ -2216,7 +2246,7 @@
                     ),
                 ],
             )),
-            note: None,
+            note: Some("a structural header piece, likely for a wall opening, with a metallic grey finish. Symmetric in shape, no distinct front."),
         ),
         (
             id: "wall",
@@ -2251,13 +2281,14 @@
             ],
             placement: (
                 rooms: [
-                    "bathroom",
-                    "bedroom",
-                    "dining",
+                    "decor",
                     "hall",
                     "kitchen",
                     "living",
                     "office",
+                    "bathroom",
+                    "bedroom",
+                    "dining",
                 ],
                 group: None,
             ),
@@ -2326,7 +2357,7 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(East),
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((0.051290706, 0.21575937)),
@@ -2353,9 +2384,9 @@
             ],
             placement: (
                 rooms: [
+                    "lab",
                     "kitchen",
                     "office",
-                    "living",
                 ],
                 group: None,
             ),
@@ -2368,7 +2399,7 @@
                     ),
                 ],
             )),
-            note: Some("The rack is designed to hold test tubes and is intended to be placed on a flat surface. It is symmetrical along its length, but the front is defined by the orientation of the test tubes."),
+            note: Some("The rack is symmetrical along its length, but the front is defined by the orientation of the test tubes. It is intended to be placed on a flat surface."),
         ),
         (
             id: "mess_table",
@@ -4613,6 +4644,69 @@
                 ],
             )),
             note: Some("symmetrical cube with no distinct front; reinforced corners suggest durability"),
+        ),
+        (
+            id: "shower",
+            mesh: Some("low_poly_furniture/glb/Bathroom/Shower.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.047096163, -0.030176818)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.6982294, 0.6982294)),
+                height: Some(1.8126979),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "door",
+                "structure",
+            ],
+            effects: [],
+            look: [
+                "grey",
+                "glass",
+            ],
+            placement: (
+                rooms: [
+                    "bathroom",
+                ],
+                group: Some("bath"),
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("a standalone shower unit with a glass door and frame, designed to fit in a bathroom space"),
         ),
     ],
 )

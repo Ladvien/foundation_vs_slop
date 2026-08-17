@@ -158,8 +158,11 @@ impl Plugin for LabelBoothPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShotRig>()
             .add_message::<ShotsReady>()
-            .add_systems(Startup, setup)
-            .add_systems(Update, drive_shots);
+            .add_systems(OnEnter(crate::screen::Screen::Editor), setup)
+            .add_systems(Update,
+                (drive_shots)
+                    .run_if(in_state(crate::screen::Screen::Editor)),
+            );
     }
 }
 

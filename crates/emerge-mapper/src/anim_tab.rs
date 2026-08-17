@@ -165,9 +165,58 @@ struct BenchLine;
 
 pub struct AnimTabPlugin;
 
+/// **The rig list follows its selection**, the same way the palette and the mesh lists do.
+///
+/// It was the one scrollable list with no follower at all: the arrows moved `BenchState::selected`
+/// and the highlight walked off the bottom while the list stood still. Added when the other two were
+/// re-keyed — *"can we fix that and get it pinned across the board?"*, 2026-08-16 — because "across
+/// the board" is only true if the list that never had one gets one too.
+///
+/// Keyed on the selection through `chrome::Follow`, not on `BenchState::is_changed`: this resource
+/// carries a status line and a measurement queue, both written most frames, which is precisely the
+/// churn that made the other two followers dead code.
+fn keep_rig_selection_on_screen(
+    state: Res<BenchState>,
+    rows: Query<(&RigRow, &ComputedNode, &UiGlobalTransform)>,
+    mut lists: Query<
+        (&ComputedNode, &UiGlobalTransform, &mut ScrollPosition),
+        (With<RigList>, Without<RigRow>),
+    >,
+    mut follow: Local<crate::chrome::Follow<usize>>,
+) {
+    if !follow.should_scroll(Some(state.selected)) {
+        return;
+    }
+    // A UI node's transform is its CENTRE, so the edges are the half-size either side.
+    let Some((row_mid, row_half)) = rows
+        .iter()
+        .find(|(r, _, _)| r.0 == state.selected)
+        .map(|(_, n, t)| (t.translation.y, n.size.y * 0.5))
+    else {
+        return;
+    };
+    for (list, list_tf, mut scroll) in &mut lists {
+        // Physical in, logical out — `ComputedNode` and `UiGlobalTransform` are physical pixels,
+        // `ScrollPosition` is logical.
+        if let Some(want) = crate::chrome::scroll_to_reveal(
+            (row_mid, row_half),
+            (list_tf.translation.y, list.size.y * 0.5),
+            scroll.0.y,
+            list.inverse_scale_factor,
+        ) {
+            scroll.0.y = want;
+        }
+    }
+}
+
 impl Plugin for AnimTabPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<BenchState>()
+        app.add_systems(
+            Update,
+            keep_rig_selection_on_screen
+                .run_if(in_state(crate::screen::Screen::Editor)),
+        )
+        .init_resource::<BenchState>()
             .init_resource::<crate::anim_watch::RigWatch>()
             .init_resource::<crate::anim_watch::MeasureQueue>()
             .init_resource::<crate::anim_watch::BenchReports>()
@@ -181,7 +230,7 @@ impl Plugin for AnimTabPlugin {
             // by the REAL machinery, which is the whole reason emerge-anim is a crate.
             .add_plugins(emerge_anim::PoseBlendPlugin)
             .add_systems(
-                Startup,
+                OnEnter(crate::screen::Screen::Editor),
                 (
                     spawn_panels,
                     crate::anim_plots::create_plot_images,
@@ -193,7 +242,7 @@ impl Plugin for AnimTabPlugin {
             )
             .add_systems(
                 Update,
-                (
+                ((
                     load_on_entry,
                     // Ungated: `keys::just_pressed` now refuses an `Anim` binding unless the Anim
                     // tab owns the keyboard, so a run condition here would be the second census
@@ -243,7 +292,8 @@ impl Plugin for AnimTabPlugin {
                         crate::anim_stage::refresh_scrub_ui,
                         crate::anim_plots::drive_plot_hover,
                     ),
-                ),
+                ),)
+                    .run_if(in_state(crate::screen::Screen::Editor)),
             )
             .add_observer(on_rig_click)
             .add_observer(on_jump_click)

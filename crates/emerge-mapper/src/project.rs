@@ -26,6 +26,17 @@ use emerge_core::vocab::{Masks, Vocabularies};
 const EMERGE_DIR: &str = "assets/emerge";
 const VOCAB: &str = "assets/emerge/vocab.ron";
 const LIBRARY_FILE: &str = "library.ron";
+/// **Where maps live** — the project's own directory, not a kit's.
+///
+/// They sat beside the kit that drew them, on the argument that *"a map means nothing without the
+/// library that draws it"*. That was true while a project was one kit. It stopped being true the
+/// moment a map could stamp a tile seating two kits' pieces: the library that draws a map is now the
+/// **merge**, so filing it under one of the kits picks an arbitrary winner.
+///
+/// A subdirectory rather than the project root, and that is load-bearing: `.gitignore` carries
+/// `assets/emerge/*.map.ron` to keep stray test maps out of git, and a map in `maps/` is not matched
+/// by it.
+const MAPS_DIR: &str = "maps";
 
 /// The opened project.
 #[derive(Resource)]
@@ -44,6 +55,16 @@ pub struct Project {
     /// Resolved once, here, so nothing downstream carries an `Option` or rebuilds this path. Maps are
     /// written beside their kit, because a map means nothing without the library that draws it.
     pub emerge_dir: PathBuf,
+    /// **The namespace this kit implements** — the `site` in `site/wall_corner`.
+    ///
+    /// Not the same question as [`Self::emerge_dir`], and that is the whole point: `assets/emerge/site/`
+    /// and `assets/emerge/site_greybox/` are two directories providing the **identical** 45 `site/*`
+    /// ids, so a namespace is an *interface* and a directory is one *implementation* of it. A tile
+    /// authored in either belongs to `site`, because that is what a map naming `site/floor` binds to.
+    ///
+    /// Read from the library when its ids carry a namespace, and from the directory name when they do
+    /// not. Resolved in [`Self::open`], which is where the reasoning and the refusals live.
+    pub namespace: String,
     /// Where [`Self::measured`] came from and where it is written back.
     pub library_path: PathBuf,
     pub vocab: Vocabularies,
@@ -65,16 +86,36 @@ pub struct Project {
     ///
     /// Derived, never written. Rebuilt from `measured` after every edit by `write_library`.
     pub library: Library,
-    /// This project's policy: the patches, and `divisions`.
+    /// **The authoring kit's** policy — the patches and the exclusions it applies to its own pieces.
+    ///
+    /// Per-kit and not merged, because `Policy::apply` refuses a rule that matches nothing: a kit's
+    /// patches name a kit's pieces, so layering one project-wide would refuse to open the moment two
+    /// kits were bound.
     pub policy: emerge_core::policy::Policy,
+    /// **The grid every kit, tile and map in this project shares** — `kits.ron`'s
+    /// [`emerge_core::kits::Lattice`].
+    ///
+    /// Held here rather than on the map, which is where it lived for part of
+    /// 2026-08-16. A map has exactly one lattice, but so does the project, and
+    /// `composition::interface` takes the band count as an argument — so two maps at different
+    /// counts gave the same tile two different adjacency contracts. It is also the only form the
+    /// doors that author tiles can ask, since they have no map open at all.
+    pub lattice: emerge_core::kits::Lattice,
+    /// **Every bound kit, layered**, in `kits.ron` order.
+    ///
+    /// Held so an edit to the authoring kit can rebuild [`Self::library`] without re-reading the
+    /// other kits off disk — `commit_measured` validates before it writes, so the file it would
+    /// re-read is still the old one at the moment the merge is needed.
+    pub kits: Vec<emerge_core::kits::KitLayer>,
     /// Per-descriptor token masks, in library order — resolved once at load so the palette and the
     /// placement rules never re-resolve the same strings.
     pub masks: Vec<Masks>,
-    /// The map being edited, and where it will be written.
-    pub map: Map,
-    pub map_path: PathBuf,
-    /// Whether there are edits not yet on disk.
-    pub dirty: bool,
+    /// **The project's own directory** — `assets/emerge`, the one holding `vocab.ron`, `kits.ron`
+    /// and `compositions.ron`. Not a kit; kits are its subdirectories.
+    pub project_dir: PathBuf,
+    /// **Where every map in this project lives** — see [`MAPS_DIR`]. Held rather than re-derived, so
+    /// a rename follows the name without re-deciding which directory a map belongs to.
+    pub maps_dir: PathBuf,
     /// **Descriptor ids whose resolved form changed since the Map last redrew**, and which therefore
     /// have placements standing on screen built from an older shape.
     ///
@@ -97,56 +138,90 @@ pub struct Project {
 
 impl Project {
     /// Read a project, or say exactly what is wrong with it.
-    pub fn open(root: &Path, map_name: &str, kit: Option<&str>) -> Result<Project, String> {
-        // Forced, not checked: whatever was typed on the command line becomes the one spelling before
-        // anything else sees it, so there is no path through this program on which a map has a name
-        // the filesystem and the schema disagree about.
-        let name = naming::to_snake_case(map_name);
-        if name.is_empty() {
-            return Err(format!(
-                "`{map_name}` leaves nothing usable as a name. Names are snake_case — lowercase \
-                 letters, digits and single underscores, starting with a letter."
-            ));
-        }
+    pub fn open(root: &Path, kit: Option<&str>) -> Result<Project, String> {
+        // **The binding is the project's, not a kit's.** `kits.ron` says which directory provides
+        // which namespace — `site/` and `site_greybox/` both provide `site/*`, so this is a question
+        // no directory can answer about itself. See `emerge_core::kits`.
+        let project_dir = root.join(EMERGE_DIR);
+        let kits_path = project_dir.join(emerge_core::kits::KITS_FILE);
+        let kits = emerge_core::kits::Kits::parse(&read(&kits_path)?)
+            .map_err(|e| format!("{}: {e}", kits_path.display()))?;
 
-        // The kit name is forced into a plain directory name the same way the map name is, so
-        // `--kit ../../etc` cannot walk out of the project.
-        let emerge_dir = match kit {
+        // **`--kit` chooses where new work lands, not what the palette can show.**
+        //
+        // It used to select the *only* kit loaded, which is what made a tile authored in one kit
+        // invisible to every map in another. Every bound kit is loaded now — that is the whole
+        // feature — so this answers a smaller and more useful question: which kit an imported mesh
+        // joins, and which namespace a new tile is named in.
+        //
+        // Forced into a plain directory name the same way the map name is, so `--kit ../../etc`
+        // cannot walk out of the project.
+        let authoring = match kit {
             Some(k) => {
-                let k = naming::to_snake_case(k);
-                if k.is_empty() {
+                let forced = naming::to_snake_case(k);
+                if forced.is_empty() {
                     return Err(format!(
-                        "`{}` leaves nothing usable as a kit name. A kit is a directory under \
-                         `{EMERGE_DIR}` — snake_case, like `site`.",
-                        kit.unwrap_or_default()
+                        "`{k}` leaves nothing usable as a kit name. A kit is a directory under \
+                         `{EMERGE_DIR}` — snake_case, like `site`."
                     ));
                 }
-                let dir = root.join(EMERGE_DIR).join(&k);
-                if !dir.join(LIBRARY_FILE).is_file() {
+                if !kits.bind.iter().any(|b| b.dir == forced) {
                     return Err(format!(
-                        "no kit `{k}`: {} has no {LIBRARY_FILE}. Kits are directories under \
-                         `{EMERGE_DIR}`.",
-                        dir.display()
+                        "no kit `{forced}` in this project. {} binds {}. Add it there, or open one \
+                         of those.",
+                        kits_path.display(),
+                        kits.bind
+                            .iter()
+                            .map(|b| format!("`{}`", b.dir))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ));
                 }
-                dir
+                forced
             }
-            None => root.join(EMERGE_DIR),
+            None => kits.authoring.clone().ok_or_else(|| {
+                format!(
+                    "{} binds no kit, so there is nothing to open. Make one from the menu — the \
+                     `+ new kit` row — and it becomes where new work lands.",
+                    kits_path.display()
+                )
+            })?,
         };
 
         let vocab_path = root.join(VOCAB);
         let vocab = Vocabularies::parse(&read(&vocab_path)?)
             .map_err(|e| format!("{}: {e}", vocab_path.display()))?;
 
-        // Measurements, then this game's policy over them — `emerge_core::policy` owns the order so
-        // the editor and the game cannot end up with differently-layered libraries. All three layers
-        // come back because this editor writes the bottom one and reads `divisions` off the middle.
-        let emerge_core::policy::Layered {
-            measured,
+        // Every bound kit, each layered with its **own** policy, merged into the one library a map
+        // resolves against — plus the project's compositions, validated against that merge because
+        // it is the only library that can answer for a tile seating two kits' pieces.
+        let bound = emerge_core::kits::bound_library(&project_dir, &kits)?;
+        let emerge_core::kits::Bound {
+            kits: layers,
             library,
-            policy,
             compositions,
-        } = emerge_core::policy::layered_library(&emerge_dir)?;
+        } = bound;
+
+        // Present by construction: `Kits::validate` refuses an `authoring` that names no bind, and
+        // the check above refuses a `--kit` that names none either.
+        let layer = layers
+            .iter()
+            .find(|l| l.dir.file_name().is_some_and(|n| n == authoring.as_str()))
+            .ok_or_else(|| {
+                format!(
+                    "{}: `{authoring}` is bound but was not loaded, which cannot happen — the \
+                     binding and the loader disagree.",
+                    kits_path.display()
+                )
+            })?;
+        let emerge_dir = layer.dir.clone();
+        let measured = layer.measured.clone();
+        let policy = layer.policy.clone();
+        // **The namespace comes from the binding, which was verified against the library.**
+        // `Library::namespace` is what does the verifying (`kits::bound_library`), so this is the
+        // one answer rather than a second derivation of it — and it is the only form that can name
+        // `site` for a directory called `site_greybox`.
+        let namespace = layer.namespace.clone();
         let library_path = emerge_dir.join(LIBRARY_FILE);
 
         // The two-sided pass over the whole set, at open. A prop that rests on a class nothing offers
@@ -163,48 +238,26 @@ impl Project {
         // naming the composition, the member and the axis.
         vocab
             .check_slots(&compositions.compositions)
-            .map_err(|e| format!("{}: {e}", emerge_dir.join("compositions.ron").display()))?;
+            .map_err(|e| {
+                format!(
+                    "{}: {e}",
+                    project_dir
+                        .join(emerge_core::composition::Compositions::FILE)
+                        .display()
+                )
+            })?;
 
-        let map_path = emerge_dir.join(naming::map_file_name(&name));
-        // A map that does not exist yet is a new map, not an error: this is how an author starts one.
-        // A map that exists and does not parse IS an error — silently replacing it with an empty one
-        // would destroy their work on the first save.
-        let map = if map_path.is_file() {
-            let loaded: Map =
-                Map::parse(&read(&map_path)?).map_err(|e| format!("{}: {e}", map_path.display()))?;
-            // A map's name and its file have to agree, or a rename leaves two files answering to one
-            // name and nobody can say which is the level.
-            if loaded.name != name {
-                return Err(format!(
-                    "{} calls itself `{}`. A map's name IS its file — rename the file to \
-                     `{}` or open it under its own name.",
-                    map_path.display(),
-                    loaded.name,
-                    naming::map_file_name(&loaded.name)
-                ));
-            }
-            loaded
-        } else {
-            Map {
-                version: MAP_VERSION,
-                name: name.clone(),
-                note: Some(format!("Authored in emerge-mapper. Library: {}.", library_path.display())),
-                ..Map::default()
-            }
-        };
+        let maps_dir = project_dir.join(MAPS_DIR);
 
         // Counts come from the one census, never from a `.len()` written here — see
         // `emerge_core::census` for the drift that discipline exists to prevent.
         let catalog = emerge_core::census::of_catalog(&library, &compositions.compositions);
-        let counted = emerge_core::census::of_map(&map);
         info!(
-            "project: {} — {} descriptor(s), {} composition(s), {} placement(s), {} stamp(s), map {}",
+            "project: {} — {} descriptor(s), {} composition(s), {} bound kit(s)",
             root.display(),
             catalog.descriptors,
             catalog.compositions,
-            counted.placements,
-            counted.stamps,
-            map_path.display()
+            layers.len(),
         );
 
         let triangles = library
@@ -222,6 +275,9 @@ impl Project {
         Ok(Project {
             root: root.to_path_buf(),
             emerge_dir,
+            namespace,
+            lattice: kits.lattice,
+            kits: layers,
             library_path,
             vocab,
             measured,
@@ -229,9 +285,8 @@ impl Project {
             library,
             policy,
             masks,
-            map,
-            map_path,
-            dirty: false,
+            project_dir,
+            maps_dir,
             touched: Vec::new(),
             triangles,
         })
@@ -245,42 +300,123 @@ impl Project {
         &self,
         d: &emerge_core::descriptor::Descriptor,
     ) -> Result<(u32, u32, u32), String> {
-        emerge_core::descriptor::divisions(d, self.policy.face_bands)
+        emerge_core::descriptor::divisions(d, self.lattice.face_bands)
     }
 
-    /// Write the map. Atomic, so a crash mid-write cannot leave half a level on disk.
+    /// **The merged library, with the authoring kit's layer swapped for `layered`.**
     ///
-    /// Serialized by an ordinary serializer with no comment-preserving pass, because an emerge map
-    /// keeps its prose in `note:` fields — see `emerge_core::map`. That is the whole reason the
-    /// decision was made that way.
-    pub fn save(&mut self) -> Result<(), String> {
-        self.map.validate()?;
-        // **The save gate has to ask the question the game will ask.** `validate` checks the map's
-        // own shape and stops there; it does not expand stamps, so a map whose group no longer
-        // resolves passed this door and was written with a cheerful "saved" — and then failed at
-        // `FVS_EMERGE_MAP` load with "the map has holes". The editor saying saved while the game says
-        // broken is the exact drift the shared `emerge-core` validation exists to prevent.
-        if !self.map.stamps.is_empty() {
-            emerge_core::composition::expand(
-                &self.map,
-                &self.map.stamps,
-                &self.compositions.compositions,
-                &self.library,
-            )
-            .map_err(|e| format!("not saved — the game could not load this: {e}"))?;
+    /// [`Self::library`] is every bound kit concatenated, so an edit to the kit being authored
+    /// cannot simply replace it — doing that dropped every other kit's pieces out of the palette
+    /// the moment a mesh was imported. Rebuilt from [`Self::kits`] rather than re-read from disk,
+    /// because `commit_measured` validates *before* it writes and the file on disk is still the old
+    /// one at the moment the merge is wanted.
+    ///
+    /// Validated on the way out, so a rename or an import that collides with another bound kit is
+    /// refused here — at the commit door — rather than at the next open.
+    pub fn merged_with(&self, layered: &Library) -> Result<Library, String> {
+        let mut descriptors = Vec::new();
+        for k in &self.kits {
+            if k.dir == self.emerge_dir {
+                descriptors.extend(layered.descriptors.iter().cloned());
+            } else {
+                descriptors.extend(k.library.descriptors.iter().cloned());
+            }
         }
-        // Follow a rename. The path is derived rather than remembered, so the file a map is in is
-        // always the file its name says it is.
-        // Beside the kit it was authored with, not at the project root's default — a map written
-        // where its library is not is a map that opens against the wrong tiles.
-        self.map_path = self
-            .emerge_dir
-            .join(naming::map_file_name(&self.map.name));
-        let text = ron::ser::to_string_pretty(&self.map, ron::ser::PrettyConfig::default())
-            .map_err(|e| format!("map: serialize: {e}"))?;
-        emerge_core::ron_surgery::save_atomic(&self.map_path, &text)?;
-        self.dirty = false;
-        Ok(())
+        let merged = Library {
+            version: emerge_core::library::LIBRARY_VERSION,
+            note: self.library.note.clone(),
+            descriptors,
+        };
+        merged.validate().map_err(|e| {
+            format!("{e} — another bound kit already defines it, so this edit would make every \
+                     reference to that id ambiguous.")
+        })?;
+        Ok(merged)
+    }
+
+    /// **Which kit defines this piece** — by the library it is in, never by reading its id.
+    ///
+    /// The first version split the id on `/` and took the prefix. That is wrong for every kit that
+    /// ships: the furniture library's 75 ids are flat (`lamp_tall`, not `furniture/lamp_tall`), so
+    /// every one of them belonged to no kit, the palette filter matched nothing, and the whole
+    /// selection was inert — ticking changed a label and offered exactly the same rows. Found by
+    /// driving the shipped project rather than a fixture, which is the only place the flat ids are.
+    ///
+    /// `KitLayer::namespace` is the **bound** namespace, so it answers for a flat library too, and
+    /// it survives a re-skin: `site_greybox` bound as `site` reports `site`, which is what a map
+    /// naming `site/floor` means.
+    pub fn kit_of(&self, id: &str) -> Option<&str> {
+        self.kits
+            .iter()
+            .find(|k| k.library.get(id).is_some())
+            .map(|k| k.namespace.as_str())
+    }
+
+    /// **Every map in this project that places `id`**, by name, in a stable order.
+    ///
+    /// # It used to ask the open map, which was the wrong map
+    ///
+    /// Removing a piece from a kit is refused while something still places it, and that guard read
+    /// `project.map` — *the one map the author happened to have open*. So removing a piece used by
+    /// **another** map in the same project was allowed, and the damage showed up later as that map
+    /// refusing to resolve, with nothing pointing at the edit that caused it.
+    ///
+    /// The doors made the narrow version impossible rather than merely wrong: the Kits door has no
+    /// open map to ask. Asking the project is the answer that was always correct, and it is
+    /// affordable because removal is a keypress, not a frame.
+    ///
+    /// A map that will not parse is **named as unreadable rather than skipped**. Skipping it would
+    /// mean a broken file silently withdrew its vote, which is how a guard quietly stops guarding.
+    pub fn maps_that_place(&self, id: &str) -> Result<Vec<String>, String> {
+        let dir = match std::fs::read_dir(&self.maps_dir) {
+            Ok(d) => d,
+            // No `maps/` yet is a project nobody has made a map in — no votes, not an error.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(format!("{}: {e}", self.maps_dir.display())),
+        };
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for entry in dir {
+            let path = entry.map_err(|e| format!("{}: {e}", self.maps_dir.display()))?.path();
+            if path.to_string_lossy().ends_with(".map.ron") {
+                paths.push(path);
+            }
+        }
+        // Sorted, so the message an author reads names them in the same order every time.
+        paths.sort();
+
+        let mut out = Vec::new();
+        for path in paths {
+            let text = read(&path)?;
+            let map = match Map::parse(&text) {
+                Ok(m) => m,
+                Err(e) => {
+                    return Err(format!(
+                        "{} will not parse, so it cannot be asked whether it places `{id}`: {e}",
+                        path.display()
+                    ));
+                }
+            };
+            let placed = map.placements.iter().any(|p| p.descriptor == id);
+            // A stamp reaches descriptors through its composition's members, so a map that only
+            // stamps still votes — otherwise a piece seated inside every tile would read as unused.
+            let stamped = map.stamps.iter().any(|s| {
+                self.compositions
+                    .compositions
+                    .iter()
+                    .find(|c| c.id == s.of)
+                    .is_some_and(|c| {
+                        c.members.iter().any(|m| match &m.body {
+                            emerge_core::composition::Body::Descriptor { id: d, .. } => d == id,
+                            emerge_core::composition::Body::Composition { .. }
+                            | emerge_core::composition::Body::Slot { .. } => false,
+                        })
+                    })
+            });
+            if placed || stamped {
+                out.push(map.name);
+            }
+        }
+        Ok(out)
     }
 
     /// Re-measure the per-entry triangle counts after the library changes.
@@ -337,8 +473,11 @@ impl Project {
         proposed.compositions.sort_by(|a, b| a.id.cmp(&b.id));
         emerge_core::composition::validate(&proposed.compositions, &self.library)?;
 
+        // **The project's collection, not the authoring kit's.** A tile may seat `site/wall` beside
+        // `lab/bench`, so it belongs to neither kit — filing it under whichever one happened to be
+        // open is what made a tile authored in one kit invisible to every map in another.
         let path = self
-            .emerge_dir
+            .project_dir
             .join(emerge_core::composition::Compositions::FILE);
         let text = proposed.to_ron()?;
         emerge_core::ron_surgery::save_atomic(&path, &text)
@@ -350,4 +489,182 @@ impl Project {
 
 fn read(path: &Path) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// **The map being edited** — the Maps door's subject, and nothing else's.
+///
+/// # Why this is not on [`Project`]
+///
+/// It was, until the editor split into one door per entity. Four of the five doors — Kits, Tiles,
+/// Compose and Rigs — author things that outlive any particular map, and a `Project` that carried
+/// one forced each of them to name a map they would never read or write. Any name picked there is
+/// arbitrary, and an arbitrary value that nothing reads is exactly the kind of thing that is still
+/// sitting there when somebody later writes code that *does* read it.
+///
+/// The measurement that made the cut cheap: of ~270 map-field accesses in this crate, **234 were in
+/// `editor.rs`** — the module that *is* the Maps door — and `dirty = true` was written in that one
+/// file and nowhere else. The Meshes and Tiles doors commit straight to disk through
+/// `tiles::commit_measured` and [`Project::commit_composition`], so the map is the only thing this
+/// editor ever holds unsaved.
+#[derive(Resource)]
+pub struct OpenMap {
+    /// The map itself.
+    pub map: Map,
+    /// Where it will be written.
+    pub map_path: PathBuf,
+    /// Whether there are edits not yet on disk.
+    pub dirty: bool,
+}
+
+impl OpenMap {
+    /// Open a map by **name**, or start one under that name.
+    ///
+    /// The name is forced into snake_case rather than checked, so there is no path through this
+    /// program on which a map has a name the filesystem and the schema disagree about.
+    pub fn open(project: &Project, map_name: &str) -> Result<OpenMap, String> {
+        let name = naming::to_snake_case(map_name);
+        if name.is_empty() {
+            return Err(format!(
+                "`{map_name}` leaves nothing usable as a name. Names are snake_case — lowercase \
+                 letters, digits and single underscores, starting with a letter."
+            ));
+        }
+        let map_path = project.maps_dir.join(naming::map_file_name(&name));
+        // A map that does not exist yet is a new map, not an error: this is how an author starts one.
+        // A map that exists and does not parse IS an error — silently replacing it with an empty one
+        // would destroy their work on the first save.
+        let map = if map_path.is_file() {
+            let loaded: Map = Map::parse(&read(&map_path)?)
+                .map_err(|e| format!("{}: {e}", map_path.display()))?;
+            // A map's name and its file have to agree, or a rename leaves two files answering to one
+            // name and nobody can say which is the level.
+            if loaded.name != name {
+                return Err(format!(
+                    "{} calls itself `{}`. A map's name IS its file — rename the file to \
+                     `{}` or open it under its own name.",
+                    map_path.display(),
+                    loaded.name,
+                    naming::map_file_name(&loaded.name)
+                ));
+            }
+            loaded
+        } else {
+            Map {
+                version: MAP_VERSION,
+                name: name.clone(),
+                note: Some(format!(
+                    "Authored in emerge-mapper. Library: {}.",
+                    project.library_path.display()
+                )),
+                ..Map::default()
+            }
+        };
+
+        let counted = emerge_core::census::of_map(&map);
+        info!(
+            "map: {} — {} placement(s), {} stamp(s)",
+            map_path.display(),
+            counted.placements,
+            counted.stamps
+        );
+
+        Ok(OpenMap { map, map_path, dirty: false })
+    }
+
+    /// Write the map. Atomic, so a crash mid-write cannot leave half a level on disk.
+    ///
+    /// Serialized by an ordinary serializer with no comment-preserving pass, because an emerge map
+    /// keeps its prose in `note:` fields — see `emerge_core::map`. That is the whole reason the
+    /// decision was made that way.
+    pub fn save(&mut self, project: &Project) -> Result<(), String> {
+        self.map.validate()?;
+        // **The save gate has to ask the question the game will ask.** `validate` checks the map's
+        // own shape and stops there; it does not expand stamps, so a map whose group no longer
+        // resolves passed this door and was written with a cheerful "saved" — and then failed at
+        // `FVS_EMERGE_MAP` load with "the map has holes". The editor saying saved while the game says
+        // broken is the exact drift the shared `emerge-core` validation exists to prevent.
+        if !self.map.stamps.is_empty() {
+            emerge_core::composition::expand(
+                &self.map,
+                &self.map.stamps,
+                &project.compositions.compositions,
+                &project.library,
+            )
+            .map_err(|e| format!("not saved — the game could not load this: {e}"))?;
+        }
+        // Follow a rename. The path is derived rather than remembered, so the file a map is in is
+        // always the file its name says it is.
+        //
+        // In the project's `maps/`, not beside a kit. It used to be beside the kit it was authored
+        // with, on the argument that a map written where its library is not opens against the wrong
+        // tiles — which was right while a project was one kit and is now the opposite of right: the
+        // library that draws a map is the merge of every bound kit, so filing it under one of them
+        // picks a winner arbitrarily.
+        self.map_path = project.maps_dir.join(naming::map_file_name(&self.map.name));
+        let text = ron::ser::to_string_pretty(&self.map, ron::ser::PrettyConfig::default())
+            .map_err(|e| format!("map: serialize: {e}"))?;
+        emerge_core::ron_surgery::save_atomic(&self.map_path, &text)?;
+        self.dirty = false;
+        Ok(())
+    }
+
+
+    /// **The namespaces this map's content already names** — derived every time, never stored.
+    ///
+    /// Placements name a descriptor directly; a stamp names a composition, whose members name
+    /// descriptors, so both are walked. `emerge_core::census` makes the same argument for counts and
+    /// this is the same discipline: a set that could be cached is a set that can be wrong, and this
+    /// one decides whether a checkbox is allowed to be unticked.
+    pub fn namespaces_in_use(&self, project: &Project) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        let mut add = |id: &str| {
+            if let Some(k) = project.kit_of(id) {
+                out.insert(k.to_owned());
+            }
+        };
+        for p in &self.map.placements {
+            add(&p.descriptor);
+        }
+        for stamp in &self.map.stamps {
+            let Some(c) = project
+                .compositions
+                .compositions
+                .iter()
+                .find(|c| c.id == stamp.of)
+            else {
+                continue;
+            };
+            for m in &c.members {
+                match &m.body {
+                    emerge_core::composition::Body::Descriptor { id, .. }
+                    | emerge_core::composition::Body::Composition { id } => add(id.as_str()),
+                    emerge_core::composition::Body::Slot { .. } => {}
+                }
+            }
+        }
+        out
+    }
+
+
+    /// **What the palette offers**: the author's choice, plus whatever the map already uses.
+    ///
+    /// [`emerge_core::map::Map::palette`] empty means *all bound kits* — the state a new map starts
+    /// in, and what every map written before the field existed already meant.
+    ///
+    /// **The union with [`Self::namespaces_in_use`] is what makes this safe to edit.** Unticking a
+    /// kit whose pieces are already on the map would otherwise hide the rows that describe them: the
+    /// map would still load and still draw, and the author would be unable to find, re-place or
+    /// match the pieces in front of them. Folding the in-use set back in means the checkbox cannot
+    /// do damage, which is the whole reason it is allowed to be a checkbox.
+    pub fn palette_namespaces(&self, project: &Project) -> std::collections::BTreeSet<String> {
+        if self.map.palette.is_empty() {
+            return project.kits.iter().map(|k| k.namespace.clone()).collect();
+        }
+
+        let mut out: std::collections::BTreeSet<String> =
+            self.map.palette.iter().cloned().collect();
+        out.extend(self.namespaces_in_use(project));
+        out
+    }
+
 }

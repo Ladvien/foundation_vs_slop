@@ -18,12 +18,11 @@
 // numbers about this facility — and when those pieces migrate to descriptors, their scaling belongs
 // here rather than in the measurements.
 (
-    version: 1,
+    version: 2,
     note: Some("SCP-9191 containment site. Nothing in the emerge library is re-proportioned for this facility yet; the Site kit's 2.4 m walls and 2.0 m doorways land here when those pieces migrate."),
-    // How finely each authoring tile divides, for every piece's lattice. 1 means a subunit is
-    // `grid::SNAP` itself -- the half-metre grid these kits are already authored on, on which a
-    // 3 m wall is 6 divisions across and a 2.4 m one is 5 layers tall. Raising it refines every
-    // piece in the project by the same factor, which is what keeps two faces comparable.
-    face_bands: 1,
+    // `face_bands` and `snap_divisor` left this file on 2026-08-16 for `Map::face_bands` and
+    // `Map::snap_divisor`. They describe a LATTICE, and a kit does not have one -- a map has exactly
+    // one. Two kits on one map disagreeing about how finely a face is read index their faces
+    // differently, so adjacency stops meaning anything, silently, with both values legal.
     patches: [],
 )

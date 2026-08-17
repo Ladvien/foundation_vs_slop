@@ -70,9 +70,12 @@ pub struct CompassPlugin;
 
 impl Plugin for CompassPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn)
+        app.add_systems(OnEnter(crate::screen::Screen::Editor), spawn)
             // `Update`, not `FixedUpdate`: this is chrome, and it follows a camera that eases.
-            .add_systems(Update, (follow_the_camera, place_by_tab));
+            .add_systems(Update,
+                ((follow_the_camera, place_by_tab))
+                    .run_if(in_state(crate::screen::Screen::Editor)),
+            );
     }
 }
 

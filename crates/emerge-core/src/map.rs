@@ -67,8 +67,14 @@ use crate::placement::ir::Guard;
 /// Bumped whenever the shape below changes. A file numbered above this is refused; at or below it is
 /// read and re-saved here. See the module note on why that is a floor rather than an equality.
 ///
-/// `2` added [`Map::stamps`].
-pub const MAP_VERSION: u32 = 2;
+/// `2` added [`Map::stamps`]. `3` took `face_bands` and `snap_divisor` off the kit's policy, where
+/// they described a lattice a *kit* does not have. `4` added [`Map::palette`], whose empty default
+/// is what every earlier map already meant. **`5` gave the two lattice fields up again**, to
+/// [`crate::kits::Lattice`]: a map does have exactly one lattice, but so does the project, and a
+/// tile's adjacency contract cannot depend on which map happens to be open. That one is a
+/// *removal*, so `deny_unknown_fields` means a map still carrying them is refused by name rather
+/// than read with them ignored — which is the loud failure this schema's rules are for.
+pub const MAP_VERSION: u32 = 5;
 
 /// One authored world.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -105,6 +111,28 @@ pub struct Map {
     /// things above the floor and the ceiling height is what decides where.
     #[serde(default = "default_bounds")]
     pub bounds: (f32, f32, f32),
+    /// **Which kits' pieces this map offers**, by namespace — the `site` in `site/wall_corner`.
+    ///
+    /// # A filter on the palette, and never on what loads
+    ///
+    /// This does **not** decide what the map can resolve. Every kit the project binds is loaded
+    /// whatever this says, so a piece already placed always resolves and a composition may still
+    /// seat two kits' pieces. It decides only what an author is *offered* while building.
+    ///
+    /// That separation is the whole design: a setting that could strand a placement is a setting
+    /// that breaks a map by being edited, and `Project::palette` folds the namespaces the content
+    /// already names back in for exactly that reason. **Unticking a kit cannot break anything**,
+    /// which is what lets it be a checkbox rather than a decision.
+    ///
+    /// # Empty means all of them
+    ///
+    /// Not "none" — a map offering nothing is a map nobody can build. Empty is also what every map
+    /// written before this field existed already meant, so the `#[serde(default)]` needs no
+    /// migration, and it is the state a new map starts in: Liapis' *user fatigue* is a named failure
+    /// mode of tools that "require a very specific input" before they do anything
+    /// (`10.1145/3402942.3402946`), and ticking every kit to get a palette would be exactly that.
+    #[serde(default)]
+    pub palette: Vec<String>,
     pub placements: Vec<Placed>,
     /// **Compositions this map stamps** — a reference each, never the rows they stand for.
     ///
@@ -136,6 +164,7 @@ impl Default for Map {
             name: String::new(),
             origin: (0.0, 0.0, 0.0),
             bounds: default_bounds(),
+            palette: Vec::new(),
             placements: Vec::new(),
             stamps: Vec::new(),
             locations: Vec::new(),
@@ -163,6 +192,7 @@ fn paint_is_zero(v: &i8) -> bool {
 ///
 /// Not zero. A zero-sized map is a map every placement is outside of, so the first thing an author
 /// would do is see every piece flagged — a default should be somewhere to start work, not a puzzle.
+/// The most a map may divide one tile.
 fn default_bounds() -> (f32, f32, f32) {
     // **Ten metres square, four tall.** It was 32 x 32, which is 1,024 cells of floor an author
     // has to pan across before the map reads as a place rather than a plain — and the grid at the
@@ -635,12 +665,38 @@ impl Map {
 mod tests {
     use super::*;
 
+    /// **A map still carrying the lattice fields is refused by name, not read with them ignored.**
+    ///
+    /// `face_bands` and `snap_divisor` left this schema at version 5 for
+    /// [`crate::kits::Lattice`] — a map has exactly one lattice, but so does the project, and a
+    /// tile's adjacency contract cannot depend on which map happens to be open.
+    ///
+    /// A *removal* is the one schema change the version floor cannot absorb quietly: an old file
+    /// carrying the fields would parse with them silently dropped, and the author would never learn
+    /// that the number they set stopped meaning anything. `deny_unknown_fields` is what makes that
+    /// loud, and this pins it — the shipped maps were migrated in the same commit.
+    #[test]
+    fn a_map_still_carrying_the_moved_lattice_is_refused_by_name() {
+        let stale = r#"(version: 4, name: "m", origin: (0.0, 0.0, 0.0), face_bands: 2, placements: [], locations: [])"#;
+        let e = Map::parse(stale).err().unwrap_or_default();
+        assert!(e.contains("face_bands"), "the refusal names the field: {e}");
+
+        let stale = r#"(version: 4, name: "m", origin: (0.0, 0.0, 0.0), snap_divisor: 4, placements: [], locations: [])"#;
+        let e = Map::parse(stale).err().unwrap_or_default();
+        assert!(e.contains("snap_divisor"), "the refusal names the field: {e}");
+
+        // And one written before they ever arrived still opens, meaning exactly what it meant.
+        let before = r#"(version: 2, name: "m", origin: (0.0, 0.0, 0.0), placements: [], locations: [])"#;
+        Map::parse(before).unwrap_or_else(|e| panic!("a pre-lattice map still opens: {e}"));
+    }
+
     fn table_map() -> Map {
         Map {
             version: MAP_VERSION,
             name: "galley".into(),
             origin: (0.0, 0.0, 0.0),
             bounds: default_bounds(),
+            palette: Vec::new(),
             stamps: Vec::new(),
             placements: vec![
                 Placed {

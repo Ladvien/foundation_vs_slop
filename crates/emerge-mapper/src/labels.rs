@@ -171,19 +171,27 @@ impl Plugin for LabelsPlugin {
             .init_resource::<LabelGeneration>()
             .init_resource::<LabelTasks>()
             .init_resource::<LabelQueue>()
-            .add_systems(Startup, warm_cache)
+            .add_systems(OnEnter(crate::screen::Screen::Editor), warm_cache)
             .add_systems(
                 Update,
-                (
-                    suggest_labels.in_set(crate::keys::Phase::Act),
-                    suggest_all.in_set(crate::keys::Phase::Act),
+                ((
+                    // **The question answers first and swallows its key**, so `Enter` cannot both
+                    // choose an answer and reach the candidate list underneath it.
+                    answer_overwrite.in_set(crate::keys::Phase::Act),
+                    suggest_labels
+                        .in_set(crate::keys::Phase::Act)
+                        .after(answer_overwrite),
+                    suggest_all
+                        .in_set(crate::keys::Phase::Act)
+                        .after(answer_overwrite),
                     drive_batch,
                     spawn_request,
                     poll_tasks,
                     watch_sentinel,
                     save_cache.run_if(resource_changed::<LabelGeneration>),
                     paint_labels_badge.run_if(resource_changed::<LabelGeneration>),
-                ),
+                ),)
+                    .run_if(in_state(crate::screen::Screen::Editor)),
             );
     }
 }
@@ -646,6 +654,15 @@ fn record_proposals(root: &std::path::Path, entry: &Entry, asset: &str) {
 
 // ── the batch ────────────────────────────────────────────────────────────────────────────────────
 
+/// **What `Shift+L` found in scope, waiting on an answer.** See [`LabelQueue::ask`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct Overwrite {
+    /// Pieces with no judgement at all — what `Esc` walks.
+    pub unjudged: Vec<EditTarget>,
+    /// Every piece in scope, judged or not — what `Enter` walks.
+    pub all: Vec<EditTarget>,
+}
+
 /// The walk `Shift+L` runs: targets still to photograph, and how big the walk was when it
 /// started — the progress line's denominator.
 #[derive(Resource, Default)]
@@ -663,6 +680,13 @@ pub struct LabelQueue {
     /// **What is being photographed and asked about right now**, for the panel. The status line
     /// carried this and nothing else did, so it was gone the moment anything else wrote a note.
     current: Option<String>,
+    /// **The question `Shift+L` asks when the scope already holds judged pieces.**
+    ///
+    /// `Enter` re-labels everything in scope; `Esc` takes only the unjudged. Asked for at the
+    /// keyboard, 2026-08-16 — *"there should be a Shift+L prompt that asks if we want to overwrite
+    /// existing labels, then it should do all meshes."* No question is raised when nothing in scope
+    /// is judged, because there is nothing to overwrite and a prompt with one real answer is noise.
+    pub(crate) ask: Option<Overwrite>,
     /// **Held, not abandoned.** A walk of several hundred meshes is minutes of photography and
     /// inference, and stopping it to look at something must not mean doing that work twice.
     /// Asked for at the keyboard, 2026-08-15: *"there should be a way to pause... we don't want to
@@ -700,7 +724,28 @@ impl LabelQueue {
 /// empty, or no description. (Mount is deliberately not in the test — `unset` is common on
 /// candidates and the per-item `L` covers it.)
 pub(crate) fn needs_labels(d: &emerge_core::descriptor::Descriptor) -> bool {
-    d.kind.is_empty() || d.effects.is_empty() || d.look.is_empty() || d.note.is_none()
+    d.kind.is_empty() && d.effects.is_empty() && d.look.is_empty() && d.note.is_none()
+}
+
+/// **Judged well enough to build a tile from** — a different question, and it took a contradiction
+/// to notice.
+///
+/// This and [`needs_labels`] were one predicate on purpose: *"what the labeler still owes you"* and
+/// *"what you cannot build with yet"* were held to be the same fact so they could not drift. They
+/// are not the same fact, and the day that showed it was 2026-08-16, from two directions at once:
+///
+/// - The batch's side: an empty `effects` is the **correct** answer for most props — `vlm.rs` tells
+///   the model so in as many words — yet it counted as owing an answer, so every judged crate was
+///   re-photographed for ever. Asked for at the keyboard: *"if anything is marked, then it shouldn't
+///   be relabeled."*
+/// - The palette's side: a mesh carrying only a `kind` has been judged in that sense and is still
+///   nothing you can compose with — no description, nothing saying how it sits.
+///
+/// So: **any mark means judged** (stop asking), and **a name and a description mean usable** (start
+/// offering). `effects` is deliberately absent from this one, for the reason above — requiring it
+/// would keep every crate and barrel out of the palette permanently.
+pub(crate) fn judged_enough_to_build_with(d: &emerge_core::descriptor::Descriptor) -> bool {
+    !d.kind.is_empty() && d.note.is_some()
 }
 
 /// `Shift+L`: walk everything missing judgement fields through the labeler — or, when a walk is
@@ -717,6 +762,10 @@ pub(crate) fn suggest_all(
     filters: Res<crate::filter::Filters>,
 ) {
     if !crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::SuggestAll) {
+        return;
+    }
+    // A question is already on screen; `Shift+L` must not stack a second one under it.
+    if queue.ask.is_some() {
         return;
     }
     // **A second press HOLDS the walk; it does not throw it away.** Cancelling meant re-photographing
@@ -778,7 +827,11 @@ pub(crate) fn suggest_all(
     let scope = filters.text(pane).to_owned();
     let mut targets: Vec<EditTarget> = Vec::new();
     for d in &project.measured.descriptors {
-        if needs_labels(d) && d.mesh.is_some() && filters.keeps(pane, &d.id) {
+        // **The exclusion applies to what is already imported too.** It was checked for candidates
+        // and not for library rows, so a piece imported before its pack was excluded kept costing a
+        // GPU slot on every walk — the one thing `exclude` exists to stop.
+        let excluded = d.mesh.as_deref().is_some_and(|m| project.policy.excludes(m));
+        if !excluded && needs_labels(d) && d.mesh.is_some() && filters.keeps(pane, &d.id) {
             targets.push(EditTarget::Library(d.id.clone()));
         }
     }
@@ -795,6 +848,40 @@ pub(crate) fn suggest_all(
         }
     }
     targets.retain(|t| suggestions.get(t).is_none() && !tasks.holds(t));
+
+    // **Everything in scope, judged or not** — the set `Enter` re-labels. Gathered beside the
+    // unjudged set rather than derived from it, because "judged" is a property of the piece and
+    // "already proposed this session" is a property of the run: a piece holding a staged proposal
+    // is out of both, since re-photographing it would throw away an answer nobody has looked at.
+    let mut everything: Vec<EditTarget> = Vec::new();
+    for d in &project.measured.descriptors {
+        let excluded = d.mesh.as_deref().is_some_and(|m| project.policy.excludes(m));
+        if !excluded && d.mesh.is_some() && filters.keeps(pane, &d.id) {
+            everything.push(EditTarget::Library(d.id.clone()));
+        }
+    }
+    for c in &state.candidates {
+        if !c.blocked() && !project.policy.excludes(&c.mesh) && filters.keeps(pane, &c.mesh) {
+            everything.push(EditTarget::Candidate(c.mesh.clone()));
+        }
+    }
+    everything.retain(|t| suggestions.get(t).is_none() && !tasks.holds(t));
+
+    // **Only ask when there is something to overwrite.** `everything` minus `targets` is the judged
+    // set; empty means every piece in scope is unjudged and the question has one real answer.
+    let judged = everything.len().saturating_sub(targets.len());
+    if judged > 0 {
+        state.status.note(format!(
+            "{} piece(s) in scope already have labels. Enter re-labels all {} — Esc labels only \
+             the {} unjudged.",
+            judged,
+            everything.len(),
+            targets.len()
+        ));
+        queue.ask = Some(Overwrite { unjudged: targets, all: everything });
+        return;
+    }
+
     if targets.is_empty() {
         // **Say which set was empty.** "Nothing is missing labels" is a lie when a filter is on and
         // the unfiltered library is full of unjudged meshes.
@@ -819,6 +906,42 @@ pub(crate) fn suggest_all(
             queue.total
         )
     });
+}
+
+/// **Answer the overwrite question**: `Enter` re-labels everything in scope, `Esc` takes only the
+/// unjudged pieces.
+///
+/// Runs **before** `suggest_all` and before the Meshes tab's own `Enter`, and swallows the key
+/// either way — a question that let its answer fall through to "add this candidate to the library"
+/// would be the `xseam` shape this crate has paid for twice (`keys.rs`).
+pub(crate) fn answer_overwrite(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<crate::keys::Live>,
+    mut state: ResMut<crate::tiles::ImportState>,
+    mut queue: ResMut<LabelQueue>,
+) {
+    let Some(ask) = queue.ask.clone() else { return };
+    let yes = crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::Accept);
+    let no = crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::Cancel);
+    if !yes && !no {
+        return;
+    }
+    queue.ask = None;
+    let targets = if yes { ask.all } else { ask.unjudged };
+    if targets.is_empty() {
+        state
+            .status
+            .note("nothing to label — every piece in scope already has labels".to_owned());
+        return;
+    }
+    queue.total = targets.len();
+    queue.queue = targets.into_iter().collect();
+    queue.paused = false;
+    queue.auto_apply = true;
+    state.status.note(format!(
+        "labeling {} piece(s)... Shift+L holds it",
+        queue.total
+    ));
 }
 
 /// Feed the booth one subject at a time — fully serial, matching the one-subject booth and the
@@ -1336,22 +1459,45 @@ mod tests {
         assert!(refused.is_err());
     }
 
-    /// The batch's membership test: any empty judgement axis or a missing note qualifies; a fully
-    /// judged piece does not. Mount is deliberately not in the test.
+    /// **Anything marked means judged — an empty axis is an answer, not a gap.**
+    ///
+    /// This was the opposite: *any* of the four fields being empty meant "needs labels". That put
+    /// the test in direct contradiction with what the labeler is told to return — `vlm.rs` instructs
+    /// the model that for `effects`, *"MOST OBJECTS HAVE NONE — a barrel, a crate, a chair, a table
+    /// do nothing to the world. Leave this EMPTY"*. So every correctly judged prop came back empty
+    /// on that axis, failed the test, and was re-photographed on every walk, for ever.
+    ///
+    /// Reported at the keyboard, 2026-08-16: *"if anything is marked, then it shouldn't be
+    /// relabeled."* Re-labelling is now a thing you ask for — see [`LabelQueue::ask`].
     #[test]
-    fn needs_labels_is_any_missing_judgement() {
-        let mut d = emerge_core::descriptor::Descriptor::default();
-        assert!(needs_labels(&d), "an unlabeled piece needs labels");
-        d.kind = vec!["light".to_owned()];
-        d.effects = vec!["emit".to_owned()];
-        d.look = vec!["metal".to_owned()];
-        d.note = Some("a lamp".to_owned());
-        assert!(!needs_labels(&d), "a fully judged piece does not");
-        d.look.clear();
-        assert!(needs_labels(&d), "one empty axis is enough");
-        d.look = vec!["metal".to_owned()];
-        d.mount = None;
-        assert!(!needs_labels(&d), "mount is not part of the test");
+    fn needs_labels_is_nothing_marked_at_all() {
+        let d = emerge_core::descriptor::Descriptor::default();
+        assert!(needs_labels(&d), "a piece with no judgement at all needs labels");
+
+        // Each axis on its own is enough to count as judged.
+        for mark in [0, 1, 2, 3] {
+            let mut d = emerge_core::descriptor::Descriptor::default();
+            match mark {
+                0 => d.kind = vec!["light".to_owned()],
+                1 => d.effects = vec!["emit".to_owned()],
+                2 => d.look = vec!["metal".to_owned()],
+                _ => d.note = Some("a lamp".to_owned()),
+            }
+            assert!(!needs_labels(&d), "one mark is enough: axis {mark}");
+        }
+
+        // **The case the old rule got wrong**, stated as its own assertion because it is the whole
+        // reason this changed: a prop the model judged and correctly gave no effects.
+        let judged = emerge_core::descriptor::Descriptor {
+            kind: vec!["prop".to_owned()],
+            look: vec!["wood".to_owned()],
+            note: Some("a crate".to_owned()),
+            ..Default::default()
+        };
+        assert!(
+            judged.effects.is_empty() && !needs_labels(&judged),
+            "a crate that does nothing to the world is judged, not unjudged"
+        );
     }
 
     #[test]

@@ -512,6 +512,62 @@ pub fn load_site_kit(kit_path: &str, project_dir: &str) -> Result<SiteKit, Strin
 mod tests {
     use super::*;
 
+    /// **What the `site/*` namespace still owes, named all at once.**
+    ///
+    /// An **asset-contract** test — the deliberate exception to *"tests do not read the shipped
+    /// assets"*, because the assertion **is** a fact about what ships.
+    ///
+    /// It exists because 51 tests currently fail with the same sentence about one missing file, and
+    /// none of them says what would fix it. `SiteKit::resolve` refuses on the *first* unknown id, so
+    /// re-authoring the kit meant learning the next thing owed one `cargo test` at a time. This names
+    /// every one of them in a single sorted list, which is a work queue rather than a failure.
+    ///
+    /// **The ids are read out of the file's text**, not out of [`KitIds`]. That struct is 45 named
+    /// fields, so enumerating it here would be a second hand-maintained copy of the kit's contract —
+    /// and the 46th piece would silently not be checked. `chooser::dependents` reads the same file
+    /// the same way for the same reason.
+    ///
+    /// **A missing kit directory is reported, never panicked on.** *"The kit is not there yet"* is
+    /// the honest first state of re-authoring, and it is exactly when this list is most wanted. The
+    /// editor already makes the directory in one keystroke — `N` on the chooser's KITS column, which
+    /// is the flow this is a checklist for — so nothing here creates it.
+    #[test]
+    fn the_site_kit_names_every_piece_it_still_owes() {
+        let text = std::fs::read_to_string(SITE_KIT_PATH)
+            .unwrap_or_else(|e| panic!("{SITE_KIT_PATH}: {e}"));
+        let mut wanted: Vec<String> = text
+            .split('"')
+            .filter(|s| s.starts_with("site/"))
+            .map(str::to_owned)
+            .collect();
+        wanted.sort();
+        wanted.dedup();
+        assert!(
+            !wanted.is_empty(),
+            "{SITE_KIT_PATH} names no `site/*` piece at all, which cannot be right"
+        );
+
+        let have: Vec<String> =
+            match emerge_core::policy::layered_library(std::path::Path::new(SITE_PROJECT_DIR)) {
+                Ok(l) => l.library.descriptors.iter().map(|d| d.id.clone()).collect(),
+                Err(_) => Vec::new(),
+            };
+        let owed: Vec<&String> = wanted.iter().filter(|w| !have.contains(w)).collect();
+
+        assert!(
+            owed.is_empty(),
+            "`{SITE_PROJECT_DIR}` owes {} of the {} pieces `{SITE_KIT_PATH}` names. Re-author them \
+             on the Meshes tab against the ozea meshes — walls 2.40 m, doorways 2.00 m — and this \
+             list shrinks. Still owed:\n  {}",
+            owed.len(),
+            wanted.len(),
+            owed.iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        );
+    }
+
     fn shipped() -> SiteKit {
         load_site_kit(SITE_KIT_PATH, SITE_PROJECT_DIR).expect("the shipped Ozea kit must load")
     }

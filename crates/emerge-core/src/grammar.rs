@@ -1676,12 +1676,6 @@ pub fn from_compositions(
             if seen_faces.iter().any(|f| *f == iface.faces) {
                 continue;
             }
-            if prototypes.len() >= MAX_PROTOTYPES {
-                return Err(format!(
-                    "composition grammar: more than {MAX_PROTOTYPES} tiles once turned, which is \
-                     what the solver packs a domain into. Narrow the set before solving."
-                ));
-            }
             seen_faces.push(iface.faces.clone());
             prototypes.push(Prototype::Composed { composition: c.id.clone(), yaw });
             interfaces.push(Some(iface));
@@ -1705,6 +1699,26 @@ pub fn from_compositions(
                 weights.push(share);
             }
         }
+    }
+
+    // **Counted after building, not stopped at the ceiling.** This used to refuse the moment the
+    // 33rd prototype appeared, which meant the message could say *"more than 32"* and nothing else —
+    // an author over budget was told they were over and not by how much, so "narrow the set" had no
+    // target. `declared` was already checked at the end for exactly that reason, and the two now
+    // agree. Building past the cap costs one more `interface` derivation per tile and buys the only
+    // number that makes the refusal actionable.
+    if prototypes.len() > MAX_PROTOTYPES {
+        return Err(format!(
+            "composition grammar: {} prototypes, over the {MAX_PROTOTYPES} the solver's domain \
+             holds. That is {} distinct turned tiles from {} composition(s) — narrow the selection \
+             rather than raising the cap, which is a `u32` the dungeon generator shares.",
+            prototypes.len(),
+            prototypes.len() - 1,
+            compositions
+                .iter()
+                .filter(|c| matches!(c.envelope, crate::composition::Envelope::Bounded { .. }))
+                .count()
+        ));
     }
 
     let n = prototypes.len();

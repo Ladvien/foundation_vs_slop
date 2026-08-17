@@ -45,12 +45,12 @@
 mod common;
 
 /// `util.rs` defines the sanctioned helpers, so its own `sort_unstable_by_key` calls ARE the primitives.
-/// `util.rs` defines the sanctioned helpers, so its own `sort_unstable_by_key` calls ARE the primitives.
 ///
-/// `bevy_autogib`'s `bake.rs` is here for exactly the same reason and no other: it carries a deliberate
-/// second copy of `sort_total_by_key_at`, because a leaf crate cannot import the game's. The copy is the
-/// checked primitive, not an unannotated sort — see the note on it, and `crates/bevy_autogib/CLAUDE.md`.
-const EXEMPT_FILES: &[&str] = &["src/util.rs", "crates/bevy_autogib/src/bake.rs"];
+/// `bevy_autogib/src/bake.rs` was the only other entry, for the same reason — a leaf crate cannot
+/// import the game's `sort_total_by_key_at`, so it carries a checked copy. It came out with the
+/// crate itself (`f6ddc0f`): an exemption naming a file no walk reaches is dead weight that reads
+/// like coverage, which is the same silent-drift failure `common::source_roots` exists to prevent.
+const EXEMPT_FILES: &[&str] = &["src/util.rs"];
 
 #[test]
 fn every_sort_declares_its_determinism_contract() {

@@ -38,6 +38,7 @@ use bevy::asset::AssetId;
 use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 use bevy::prelude::*;
 use emerge_core::descriptor::Descriptor;
+use emerge_core::kits::Lattice;
 use emerge_core::library::Library;
 use emerge_core::map::Map;
 use emerge_core::smart::{self, Actor, Booking, Cast, RoleMasks, Seat, Unfilled};
@@ -70,8 +71,13 @@ impl EmergeWorld {
     ///
     /// Refuses rather than loading half of it: a map that names a descriptor nothing defines is a map
     /// with holes, and the piece silently failing to appear is how nobody finds out.
-    pub fn new(library: Library, map: Map, vocab: Vocabularies) -> Result<EmergeWorld, String> {
-        Self::with_compositions(library, map, vocab, &[])
+    pub fn new(
+        library: Library,
+        map: Map,
+        vocab: Vocabularies,
+        lattice: Lattice,
+    ) -> Result<EmergeWorld, String> {
+        Self::with_compositions(library, map, vocab, &[], lattice)
     }
 
     /// The same, for a map that stamps compositions.
@@ -90,6 +96,7 @@ impl EmergeWorld {
         mut map: Map,
         vocab: Vocabularies,
         compositions: &[emerge_core::composition::Composition],
+        lattice: Lattice,
     ) -> Result<EmergeWorld, String> {
         let masks = library.resolve(&vocab)?;
         // **Expand first, then validate once.** Validating before expansion checks a map that is not
@@ -105,6 +112,17 @@ impl EmergeWorld {
             map.locations.extend(expanded.locations);
         }
         map.validate()?;
+        // **The lattice check runs here, on the game's side too.** It used to live inside
+        // `policy::layered_library`, which is one loader for both readers and therefore had no path
+        // that skipped it. `face_bands` moved out of per-kit policy on 2026-08-16 — a kit has no
+        // lattice — so the check moved to the loaders that hold one. This is the game's;
+        // `Project::open` is the editor's. `src/site/kit.rs` deliberately makes neither call: it
+        // opens a kit for the hub's own layout and never reads an edge token.
+        //
+        // **Passed in rather than read off the map**, since the same day's second correction: the
+        // lattice is the *project's* (`kits.ron`), because a tile's adjacency contract cannot depend
+        // on which map happens to be open. See `emerge_core::kits::Lattice`.
+        library.validate_lattices(lattice.face_bands)?;
         let known: Vec<&str> = library.descriptors.iter().map(|d| d.id.as_str()).collect();
         let missing: Vec<&str> = map
             .placements
@@ -638,6 +656,7 @@ mod tests {
                 ..Map::default()
             },
             Vocabularies::default(),
+            Lattice::default(),
         )
     }
 
@@ -746,6 +765,7 @@ mod tests {
                 capabilities: Vocabulary::of(&[("eat", "can take a meal")]),
                 ..Vocabularies::default()
             },
+            Lattice::default(),
         )
         .unwrap_or_else(|e| panic!("{e}"))
     }
@@ -825,7 +845,7 @@ mod tests {
         second.id = "galley_table_2".into();
         second.props = vec!["t2".into()];
         world.map.locations.push(second);
-        let world = EmergeWorld::new(world.library, world.map, world.vocab)
+        let world = EmergeWorld::new(world.library, world.map, world.vocab, Lattice::default())
             .unwrap_or_else(|e| panic!("{e}"));
 
         let mut smart = SmartObjects::default();
@@ -869,7 +889,7 @@ mod tests {
         far.id = "galley_table_2".into();
         far.props = vec!["t2".into()];
         world.map.locations.push(far);
-        let world = EmergeWorld::new(world.library, world.map, world.vocab)
+        let world = EmergeWorld::new(world.library, world.map, world.vocab, Lattice::default())
             .unwrap_or_else(|e| panic!("{e}"));
 
         let smart = SmartObjects::default();
@@ -886,7 +906,7 @@ mod tests {
     fn a_misspelled_capability_is_refused_at_load() {
         let mut world = galley(2);
         world.map.locations[0].interactions[0].roles[0].requires = vec!["eeat".into()];
-        let err = EmergeWorld::new(world.library, world.map, world.vocab)
+        let err = EmergeWorld::new(world.library, world.map, world.vocab, Lattice::default())
             .err()
             .unwrap_or_default();
         assert!(err.contains("galley_table_1/eat"), "{err}");

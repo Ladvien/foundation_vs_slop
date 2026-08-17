@@ -14,6 +14,7 @@
 use bevy::prelude::*;
 use emerge_bevy::{draw_yaw, origin_of, EmergePlugin, EmergeWorld, Placement};
 use emerge_core::descriptor::{Descriptor, Extent, Face};
+use emerge_core::kits::Lattice;
 use emerge_core::library::{Library, LIBRARY_VERSION};
 use emerge_core::map::{Map, Placed};
 use emerge_core::vocab::Vocabularies;
@@ -68,6 +69,7 @@ fn main() {
         Library { version: LIBRARY_VERSION, note: None, descriptors: vec![descriptor("crate", None)] },
         Map { name: "broken".into(), placements: vec![placed("a", "ghost", (0.0, 0.0), 0.0)], ..Map::default() },
         Vocabularies::default(),
+        Lattice::default(),
     );
     match broken {
         Ok(_) => println!("unexpected: a map naming an undefined descriptor loaded"),
@@ -97,7 +99,7 @@ fn main() {
         ..Map::default()
     };
 
-    let world = match EmergeWorld::new(library, map, Vocabularies::default()) {
+    let world = match EmergeWorld::new(library, map, Vocabularies::default(), Lattice::default()) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("the example's own library and map disagree: {e}");

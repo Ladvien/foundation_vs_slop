@@ -56,12 +56,13 @@ impl Plugin for NoticePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Showing>().add_systems(
             Update,
-            (
+                ((
                 (dismiss, copy_out).in_set(keys::Phase::Act),
                 // After the verbs, so a problem raised this frame is on screen this frame.
                 paint_notices.after(keys::Phase::Act),
-            ),
-        );
+            ),)
+                    .run_if(in_state(crate::screen::Screen::Editor)),
+            );
     }
 }
 

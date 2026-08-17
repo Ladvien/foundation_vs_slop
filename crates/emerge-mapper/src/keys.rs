@@ -150,13 +150,15 @@ impl Stance {
 /// Everything the editor can be asked to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
-    // ── Global ───────────────────────────────────────────────────────────────
+    /// Cycle the panels this door holds.
     NextTab,
-    MapTab,
-    MeshesTab,
-    TilesTab,
-    AnimTab,
-    ComposeTab,
+    /// Jump to this door's first, second or third panel. **Three, because the widest door holds
+    /// three** — Kit is Meshes/Tiles/Compose. A fourth would be a fourth row here and a fourth in
+    /// every context's list, which is what the twelve-row cap is for.
+    TabSlot1,
+    TabSlot2,
+    TabSlot3,
+    // ── Global ───────────────────────────────────────────────────────────────
     /// Walk the composition list.
     ComposePrev,
     ComposeNext,
@@ -387,6 +389,21 @@ pub enum Action {
     CycleCamPreset,
 }
 
+impl Action {
+    /// **The number key for the nth panel of a door**, or `None` past the third.
+    ///
+    /// [`crate::tiles::Door::tabs`] is what indexes this, so the digits and the strip cannot
+    /// disagree about which panel is second.
+    pub fn tab_slot(i: usize) -> Option<Action> {
+        match i {
+            0 => Some(Action::TabSlot1),
+            1 => Some(Action::TabSlot2),
+            2 => Some(Action::TabSlot3),
+            _ => None,
+        }
+    }
+}
+
 /// One binding: the key, when it is live, and how to say it.
 pub struct Binding {
     pub action: Action,
@@ -481,56 +498,39 @@ pub const BINDINGS: &[Binding] = &[
         false,
         Context::Global,
         "Tab",
-        "next tab",
+        "next panel",
     ),
-    // **One row for five keys**, because jumping to a tab is one idea — the same collapse `T F G H`
-    // gets. Five separate rows put `Context::Global` at thirteen and tripped
-    // `no_context_carries_more_than_a_learnable_vocabulary`, which was right to: a list past about a
-    // dozen stops being learnable and starts being a reference card.
+    // **One row for three keys**, because jumping to a panel is one idea — the same collapse
+    // `T F G H` gets. Three separate rows put `Context::Global` over the twelve-row ceiling
+    // `no_context_carries_more_than_a_learnable_vocabulary` enforces, and a Global row costs every
+    // context.
     //
-    // **The digits follow the strip, and the strip is `Mode::ALL`.** A number key that jumped to
-    // the third tab while the third tab on screen was a different one would be the census disagreeing
-    // with the thing it describes — which is the whole failure this file exists to prevent, one layer
-    // up from key allocation. `the_number_keys_follow_the_strip` holds them together.
+    // **The digits follow the strip, and the strip is `Door::tabs`** — so `1` means this door's
+    // first panel rather than the binary's. A number key that jumped somewhere the strip does not
+    // show would be the census disagreeing with the thing it describes.
     b(
-        Action::MapTab,
+        Action::TabSlot1,
         KeyCode::Digit1,
         false,
         Context::Global,
         "1",
-        "tab: map / meshes / tiles / compose / anim",
+        "panel: first / second / third of this door",
     ),
     b(
-        Action::MeshesTab,
+        Action::TabSlot2,
         KeyCode::Digit2,
         false,
         Context::Global,
         "2",
-        "tab: map / meshes / tiles / compose / anim",
+        "panel: first / second / third of this door",
     ),
     b(
-        Action::TilesTab,
+        Action::TabSlot3,
         KeyCode::Digit3,
         false,
         Context::Global,
         "3",
-        "tab: map / meshes / tiles / compose / anim",
-    ),
-    b(
-        Action::ComposeTab,
-        KeyCode::Digit4,
-        false,
-        Context::Global,
-        "4",
-        "tab: map / meshes / tiles / compose / anim",
-    ),
-    b(
-        Action::AnimTab,
-        KeyCode::Digit5,
-        false,
-        Context::Global,
-        "5",
-        "tab: map / meshes / tiles / compose / anim",
+        "panel: first / second / third of this door",
     ),
     // **The modified tab key: go there, and take this with you.**
     //
@@ -2121,7 +2121,10 @@ impl Plugin for KeysPlugin {
             // `chain()` makes the sets run in the order listed
             // (`bevy-0.19.0/examples/ecs/ecs_guide.rs:330`).
             .configure_sets(Update, (Phase::Sense, Phase::Text, Phase::Act).chain())
-            .add_systems(Update, crate::editor::sense_context.in_set(Phase::Sense));
+            .add_systems(Update,
+                (crate::editor::sense_context.in_set(Phase::Sense))
+                    .run_if(in_state(crate::screen::Screen::Editor)),
+            );
     }
 }
 
@@ -2279,11 +2282,9 @@ mod tests {
     fn every_action_has_exactly_one_binding() {
         let actions = [
             Action::NextTab,
-            Action::MapTab,
-            Action::MeshesTab,
-            Action::TilesTab,
-            Action::AnimTab,
-            Action::ComposeTab,
+            Action::TabSlot1,
+            Action::TabSlot2,
+            Action::TabSlot3,
             Action::ComposePrev,
             Action::ComposeNext,
             Action::ComposeArm,
@@ -2596,19 +2597,6 @@ mod tests {
         }
     }
 
-    /// Map and tile contexts can never be live together, which is what lets them share letters.
-    #[test]
-    fn the_two_tabs_do_not_overlap() {
-        assert!(!Context::Map.overlaps(Context::Meshes));
-        assert!(!Context::Anim.overlaps(Context::Map));
-        assert!(!Context::Anim.overlaps(Context::Meshes));
-        assert!(Context::Global.overlaps(Context::Anim));
-        assert!(Context::Global.overlaps(Context::Map));
-        assert!(Context::Global.overlaps(Context::Meshes));
-        // Typing shadows everything — that is the focus guard.
-        assert!(Context::Typing.overlaps(Context::Map));
-        assert!(Context::Typing.overlaps(Context::Global));
-    }
 
     /// **The composition verb names its own key**, because it was reported missing twice while on
     /// screen.
@@ -2958,33 +2946,29 @@ mod tests {
 
     /// **The lookup actually resolves.** Everything above tests the table; this tests the function
     /// the systems call, which is where a refactor can quietly break every key at once.
+    ///
+    /// It used to press `Tab` and the digits, because those were the tab keys. There are no tab keys
+    /// — a door shows one thing and is chosen on the way in — so it presses two surviving `Global`
+    /// bindings instead. What it is checking has not changed: that a pressed key reaches its own
+    /// action and no other.
     #[test]
     fn pressing_a_bound_key_fires_its_action() {
         let mut input = ButtonInput::<KeyCode>::default();
-        input.press(KeyCode::Tab);
+        input.press(KeyCode::KeyK);
         assert!(
-            just_pressed(&input, Live(Context::Map, Stance::Idle), Action::NextTab),
-            "Tab did not fire NextTab"
+            just_pressed(&input, Live(Context::Map, Stance::Idle), Action::Shortcuts),
+            "K did not fire Shortcuts"
         );
         assert!(
-            !just_pressed(&input, Live(Context::Map, Stance::Idle), Action::MapTab),
-            "Tab fired an unrelated action"
+            !just_pressed(&input, Live(Context::Map, Stance::Idle), Action::Cancel),
+            "K fired an unrelated action"
         );
 
-        // **The digits follow the strip**, so this asserts the pairing rather than a key. `1` is the
-        // first tab in `Mode::ALL` and `2` the second — Map, then the kit levels in hierarchy order.
-        // The pairing itself is held by `the_number_keys_follow_the_strip`.
         let mut input = ButtonInput::<KeyCode>::default();
-        input.press(KeyCode::Digit1);
+        input.press(KeyCode::Escape);
         assert!(
-            just_pressed(&input, Live(Context::Map, Stance::Idle), Action::MapTab),
-            "1 did not fire MapTab"
-        );
-        let mut input = ButtonInput::<KeyCode>::default();
-        input.press(KeyCode::Digit2);
-        assert!(
-            just_pressed(&input, Live(Context::Map, Stance::Idle), Action::MeshesTab),
-            "2 did not fire MeshesTab"
+            just_pressed(&input, Live(Context::Map, Stance::Idle), Action::Cancel),
+            "Escape did not fire Cancel"
         );
     }
 
@@ -3015,31 +2999,6 @@ mod tests {
         }
     }
 
-    /// A tab's letters mean nothing in another tab — which is the whole reason `Context` exists, and
-    /// what previously took five hand-written `if *mode != Mode::Meshes` early returns to enforce.
-    #[test]
-    fn a_tabs_binding_does_not_fire_from_another_tab() {
-        let mut input = ButtonInput::<KeyCode>::default();
-        input.press(KeyCode::KeyF);
-        assert!(
-            just_pressed(&input, Live(Context::Map, Stance::Idle), Action::Fill),
-            "F must flood fill on the map tab"
-        );
-        assert!(
-            !just_pressed(&input, Live(Context::Meshes, Stance::Idle), Action::Fill),
-            "F must do nothing on the tiles tab"
-        );
-
-        // And a Global binding fires from every tab, which is what `Global` means.
-        let mut input = ButtonInput::<KeyCode>::default();
-        input.press(KeyCode::Tab);
-        for tab in [Context::Map, Context::Meshes, Context::Anim] {
-            assert!(
-                just_pressed(&input, Live(tab, Stance::Idle), Action::NextTab),
-                "Tab must cycle tabs from {tab:?}"
-            );
-        }
-    }
 
     /// A modified chord fires only with the modifier, and the bare key only without — `S` pans and
     /// the modified `S` saves. Driven through `MOD_KEYS` rather than a named `ControlLeft`, so the

@@ -127,12 +127,18 @@ impl Plugin for ViewPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Rig>()
             .init_resource::<Pointer>()
-            .add_systems(Startup, setup)
+            .add_systems(OnEnter(crate::screen::Screen::Editor), setup)
             // **Before anything acts on it.** `Phase::Sense` is where this editor decides who owns an
             // input for the frame — the keyboard already does — so the pointer is read once, there,
             // and every spatial system downstream sees one answer.
-            .add_systems(Update, sense_pointer.in_set(keys::Phase::Sense))
-            .add_systems(Update, drive.in_set(keys::Phase::Act));
+            .add_systems(Update,
+                (sense_pointer.in_set(keys::Phase::Sense))
+                    .run_if(in_state(crate::screen::Screen::Editor)),
+            )
+            .add_systems(Update,
+                (drive.in_set(keys::Phase::Act))
+                    .run_if(in_state(crate::screen::Screen::Editor)),
+            );
     }
 }
 

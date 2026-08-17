@@ -126,7 +126,25 @@ pub fn install_font(app: &mut App, root: &Path) -> Result<(), String> {
 /// `root` is the project directory — the same argument the binary takes, and the asset root, because
 /// a descriptor's `mesh` path is relative to the project.
 pub fn build_headless(root: &Path, map: &str, kit: Option<&str>) -> Result<App, String> {
-    let project = crate::project::Project::open(root, map, kit)?;
+    build_headless_at(root, map, kit, crate::tiles::Mode::default())
+}
+
+/// **The same editor, opened on a named panel.**
+///
+/// The caller names the **panel** it wants and the door follows (`Door::showing`), because every
+/// `Mode` belongs to exactly one door — asking for both would be two facts that can disagree. A test
+/// that wants the Tiles panel gets the Kit door with Tiles showing.
+pub fn build_headless_at(
+    root: &Path,
+    map: &str,
+    kit: Option<&str>,
+    mode: crate::tiles::Mode,
+) -> Result<App, String> {
+    let door = crate::tiles::Door::showing(mode);
+    let project = crate::project::Project::open(root, kit)?;
+    // **The map is its own resource**, because four of the five doors do not have one — see
+    // `project::OpenMap`. The headless harness stands up the Maps door, which does.
+    let open_map = crate::project::OpenMap::open(&project, map)?;
     let mut app = App::new();
 
     // **The injected-pointer resource, without the plugin that owns it.**
@@ -180,6 +198,16 @@ pub fn build_headless(root: &Path, map: &str, kit: Option<&str>) -> Result<App, 
             .disable::<bevy::audio::AudioPlugin>(),
     )
     .insert_resource(project)
+    .insert_resource(open_map)
+    // **Before the plugins**, so `TilesPlugin`'s `init_resource` leaves both alone. The panel is
+    // derived rather than passed: a door opens on its first tab (`Door::opens_on`), so there is no
+    // second place to state where the Kit door starts.
+    .insert_resource(door)
+    .insert_resource(mode)
+    // **Straight into the door.** This entry point IS a door — the menu is the other screen, and it
+    // is what `Screen::default()` gives. Inserting the state rather than initialising it runs
+    // `OnEnter(Editor)` on the first transition, which is where every former `Startup` spawn lives.
+    .insert_state(crate::screen::Screen::Editor)
     .insert_resource(ClearColor(Color::srgb(0.035, 0.033, 0.030)))
     .insert_resource(UiScale(1.2));
 
