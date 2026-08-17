@@ -31,6 +31,7 @@ It was lifted out of a GPL-3.0 sibling so that a permissively-licensed quality-d
 - **No `unwrap()`**, no `expect` on caller data. `below(0)` is a caller bug and fails loudly under `debug_assertions` rather than silently returning `0`.
 - **One path per feature.** No fallbacks, no legacy shims, no stub placeholders. Two ways to draw a number is two streams.
 - Keep the surface at three methods. Gaussians, shuffles and weighted picks belong to whoever knows what they mean; built on `raw_u64`/`unit`, they stay visible at the call site.
+- Consult Bevy documentation often. It can be found at codex_fs/offline_reference_docs/bevy-0.19-book/
 
 ## Downstream
 

@@ -1,5 +1,6 @@
 - Use home still and lookup research on whatever you are implementing BEFORE you implement it.  We want SOTA and best practices.  And it is filled with game development research and best practices.
 - Do not use hardbreaks when writing markdown.  Markdown should be easy for humans to read when rendered.
+- Consult Bevy documentation often. It can be found at codex_fs/offline_reference_docs/bevy-0.19-book/
 - When given git commands, it should be for all edittable repos in this project.
 - When creating new features, attempt to use Bevy's plugin pattern as much as possible.  Create separate workspace crates.  Create their own Github repo with idiomatic name.  This is to ensure reusable components are generated during our work. Ensure each respective crate has a warning label of "Vibe Coded" a the top of the README.md. Please refer to [bevy_plugins.md](docs/bevy_plugins.md).  Each separate create must include examples (1-3) demoing the crate.  This is allow inspection of crate behavior without inclusion in this game.  If you discover debugging needs, make recommendations on adding it to this plugin, ever evolving.
 - Do not use unwrap() or anything that'd lead to a panic.  Code safe.  Handle errors.
@@ -13,6 +14,7 @@
 - When items are complete, move them from `BACKLOG.md` to `BACKLOG_ARCHIVE.md`.  DO NOT DELETE `BACKLOG_ARCHIVE.md`.
 - **Setting up a new machine?** `SETUP.md` — prerequisites, the gitignored `.cargo/config.toml` you must write by hand, both test layers, and the agent-debugger install.
 - **Read the vendored Bevy 0.19 source before writing Bevy code** — not bevy.org, which tracks `main`. See "Bevy 0.19" below.
+- Consult Bevy documentation often. It can be found at codex_fs/offline_reference_docs/bevy-0.19-book/
 
 ## Workspace & crates
 
