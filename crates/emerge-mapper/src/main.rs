@@ -90,7 +90,7 @@ fn main() {
                 }),
         )
         .insert_resource(project)
-        .insert_resource(ClearColor(Color::srgb(0.035, 0.033, 0.030)))
+        .insert_resource(ClearColor(emerge_mapper::chrome::VOID))
         // **One knob for the whole interface.** `UiScale` multiplies every `Val::Px` and every font
         // size, so the panels grow together and nothing has to be re-tuned relative to anything else
         // — the alternative is forty constants that drift apart the first time one is missed.

@@ -54,8 +54,9 @@ const FRAMING: f32 = 1.7;
 const MESH_WAIT_FRAMES: u32 = 600;
 
 /// An opaque tile rather than a transparent cut-out, so a row reads the same at rest, hovered and
-/// armed — and so thin or glazed geometry is not composited away to nothing.
-const BACKDROP: Color = Color::srgb(0.14, 0.135, 0.125);
+/// armed — and so thin or glazed geometry is not composited away to nothing. The palette's empty
+/// slot is the same ground under a different role, so the value is stated once, in chrome.
+const BACKDROP: Color = crate::chrome::SLOT_BG;
 
 /// The booth camera. Every other camera query filters positively on `view::MainCamera`, which is what
 /// stops this one breaking them; this marker is just how the baker finds its own camera back.

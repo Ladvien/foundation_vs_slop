@@ -2071,6 +2071,83 @@ fn the_pointer_is_over_the_panel_when_it_is_over_a_row() {
     assert!(!emerge_mapper::view::over_ui(None, 1.0, [].into_iter()));
 }
 
+/// **Every tab carries a badge, and it boots silent.**
+///
+/// The badge is the stale count's own text child, in its own colour, because `style_tabs` owns
+/// every `TabLabel`'s `TextColor` per frame — a `DANGER` written into the label was stomped a
+/// frame later, which is how "the one word here allowed to shout" rendered in the tab's ordinary
+/// grey. The label itself must no longer carry the count: one fact, one node.
+#[test]
+fn the_tab_badge_is_its_own_node_and_boots_empty() {
+    let root = Fixture::new("badge").descriptor("floor", "alpha").build("m");
+    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let badges: Vec<String> = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&bevy::ui::widget::Text, With<emerge_mapper::tiles::TabBadge>>();
+        q.iter(app.world()).map(|t| t.0.clone()).collect()
+    };
+    assert_eq!(badges.len(), 4, "one badge per tab, found {}", badges.len());
+    assert!(
+        badges.iter().all(String::is_empty),
+        "no rig has been measured, so every badge must be silent: {badges:?}"
+    );
+
+    let mut labels = app
+        .world_mut()
+        .query_filtered::<&bevy::ui::widget::Text, With<emerge_mapper::tiles::TabLabel>>();
+    assert!(
+        labels.iter(app.world()).all(|t| !t.0.contains("STALE")),
+        "the count lives on the badge now — a label carrying STALE is the stomped-colour bug back"
+    );
+}
+
+/// **Every pane that clips can scroll.**
+///
+/// `bevy_ui_widgets`' wheel handler only serves `With<ScrollArea>`, so a node with
+/// `overflow-y: scroll` and no `ScrollArea` clips its content and then refuses the wheel — the
+/// overflow is unreachable by any input. The Compose body shipped exactly that: a hand copy of
+/// `chrome::scroll_list` with every field except the one that makes it scrollable, on the longest
+/// generated pane in the editor. This pins the CLASS: any future pane that clips without scrolling
+/// fails here by construction, whichever tab it lands on.
+#[test]
+fn every_pane_that_clips_can_scroll() {
+    use bevy::ui::OverflowAxis;
+    use bevy::ui_widgets::ScrollArea;
+
+    let root = Fixture::new("scrolls").descriptor("floor", "alpha").build("m");
+    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let mut clipping = 0;
+    let mut q = app.world_mut().query::<(Entity, &Node, Option<&ScrollArea>)>();
+    for (entity, node, area) in q.iter(app.world()) {
+        if node.overflow.y != OverflowAxis::Scroll {
+            continue;
+        }
+        clipping += 1;
+        assert!(
+            area.is_some(),
+            "{entity} clips its overflow (overflow-y: scroll) but carries no ScrollArea, so the \
+             wheel cannot reach what it clipped — spawn it through `chrome::scroll_list`"
+        );
+    }
+    // Every tab spawns its panels (hidden) at Startup, so the map palette, both tiles panes, both
+    // anim panes and the compose body are all present. A count collapse means the query stopped
+    // seeing what it claims to check, which would make the assertion above vacuous.
+    assert!(
+        clipping >= 4,
+        "only {clipping} clipping panes found — the scroll panes are not being seen, so this test \
+         proves nothing"
+    );
+}
+
 /// **`Z` and `C` reach the set in hand, not the brush.**
 ///
 /// The turn arithmetic is pinned by `a_turned_set_lands_where_a_turned_stamp_would`; what was not

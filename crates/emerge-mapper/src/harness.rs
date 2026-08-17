@@ -167,7 +167,7 @@ pub fn build_headless(root: &Path, map: &str, kit: Option<&str>) -> Result<App, 
             .disable::<bevy::audio::AudioPlugin>(),
     )
     .insert_resource(project)
-    .insert_resource(ClearColor(Color::srgb(0.035, 0.033, 0.030)))
+    .insert_resource(ClearColor(crate::chrome::VOID))
     .insert_resource(UiScale(1.2));
 
     // **Despawning a light or a mesh must not panic in here.** `backends: None` registers every

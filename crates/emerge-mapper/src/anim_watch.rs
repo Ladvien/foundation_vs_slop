@@ -332,31 +332,37 @@ pub(crate) fn step_measure_queue(
     }
 }
 
-/// Repaint the tab strip's ANIM label with the stale count: `ANIM` or `ANIM (2 STALE)`.
+/// Repaint the ANIM tab's badge with the stale count: nothing, or `2 STALE`.
 ///
 /// In place, never rebuilt — the strip is shared chrome — and on the strip precisely so the fact
 /// survives tab switches: the developer who re-exported from Blender is on no particular tab when
 /// the bench notices.
+///
+/// The badge is its own text child, not a suffix on the label: `style_tabs` owns every
+/// [`crate::tiles::TabLabel`]'s colour per frame, so a `DANGER` written into the label is stomped
+/// a frame later — the word rendered in the tab's ordinary grey, which the pane's own doc calls
+/// the one word here allowed to shout, whispering. See [`crate::tiles::TabBadge`] for the colour
+/// argument (Lewandowska et al. 2022: persistent peripheral signal at medium intensity).
 pub(crate) fn paint_stale_badge(
     reports: Option<Res<BenchReports>>,
     tabs: Query<(&crate::tiles::Tab, &Children)>,
-    mut labels: Query<&mut Text, With<crate::tiles::TabLabel>>,
+    mut badges: Query<&mut Text, With<crate::tiles::TabBadge>>,
 ) {
     let Some(reports) = reports else {
         return;
     };
     let stale = reports.stale_count();
     let want = if stale == 0 {
-        Mode::Anim.label().to_owned()
+        String::new()
     } else {
-        format!("{} ({stale} STALE)", Mode::Anim.label())
+        format!("{stale} STALE")
     };
     for (tab, children) in &tabs {
         if tab.0 != Mode::Anim {
             continue;
         }
         for child in children {
-            if let Ok(mut text) = labels.get_mut(*child) {
+            if let Ok(mut text) = badges.get_mut(*child) {
                 if text.0 != want {
                     text.0 = want.clone();
                 }

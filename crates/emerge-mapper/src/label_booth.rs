@@ -55,7 +55,8 @@ const MESH_WAIT_FRAMES: u32 = 600;
 const CAPTURE_WAIT_FRAMES: u32 = 120;
 
 /// The same opaque backdrop the thumbnails use — the model should see the asset the author sees.
-const BACKDROP: Color = Color::srgb(0.14, 0.135, 0.125);
+/// Through chrome, so "the same" is a fact the compiler holds rather than a promise.
+const BACKDROP: Color = crate::chrome::SLOT_BG;
 
 /// The two view directions, as offsets per unit extent: the palette's proven three-quarter front,
 /// and its mirror — the far side a single thumbnail never shows.

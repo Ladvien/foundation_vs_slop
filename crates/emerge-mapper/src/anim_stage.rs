@@ -17,12 +17,12 @@
 
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use bevy::ui_widgets::{Activate, Button as UiButton};
+use bevy::ui_widgets::Activate;
 
 use emerge_core::rigs::Playback;
 
 use crate::anim_tab::BenchState;
-use crate::chrome::{DIM, LABEL, ROW_BG, ROW_SELECTED, TEXT};
+use crate::chrome::{DIM, LABEL, ROW_BG, ROW_HOVER, ROW_SELECTED, TEXT};
 use crate::tiles::Mode;
 
 /// The bench's staging corner — the third one.
@@ -666,24 +666,38 @@ pub(crate) fn refresh_scrub_ui(
     scrub: Option<Res<BenchScrub>>,
     ab: Option<Res<BenchAb>>,
     cam: Option<Res<BenchCamera>>,
-    mut chips: Query<(&BenchSlotChip, &mut BackgroundColor)>,
-    mut ghost_chips: Query<&mut BackgroundColor, (With<GhostChip>, Without<BenchSlotChip>)>,
+    mut chips: Query<(&BenchSlotChip, &Hovered, &mut BackgroundColor)>,
+    mut ghost_chips: Query<(&Hovered, &mut BackgroundColor), (With<GhostChip>, Without<BenchSlotChip>)>,
     mut lines: Query<&mut Text, With<ScrubLine>>,
 ) {
     let Some(scrub) = scrub else { return };
-    for (chip, mut bg) in &mut chips {
+    // Lit beats hover in both loops; hover is `chrome::ROW_HOVER`'s signifier that the chip is a
+    // click target, not a claim that it is playing.
+    for (chip, hovered, mut bg) in &mut chips {
         let lit = match scrub.solo {
             Some(s) => s == chip.0,
             None => scrub.mixed.contains(&chip.0),
         };
-        let want = if lit { ROW_SELECTED } else { ROW_BG };
+        let want = if lit {
+            ROW_SELECTED
+        } else if hovered.0 {
+            ROW_HOVER
+        } else {
+            ROW_BG
+        };
         if bg.0 != want {
             bg.0 = want;
         }
     }
     let ghost_on = ab.is_some_and(|a| a.0);
-    for mut bg in &mut ghost_chips {
-        let want = if ghost_on { ROW_SELECTED } else { ROW_BG };
+    for (hovered, mut bg) in &mut ghost_chips {
+        let want = if ghost_on {
+            ROW_SELECTED
+        } else if hovered.0 {
+            ROW_HOVER
+        } else {
+            ROW_BG
+        };
         if bg.0 != want {
             bg.0 = want;
         }
@@ -718,23 +732,15 @@ pub(crate) fn spawn_chips(p: &mut ChildSpawnerCommands, rig: &emerge_core::rigs:
                 .as_deref()
                 .map(|n| n.split([' ', '—']).next().unwrap_or(n).to_owned())
                 .unwrap_or_else(|| format!("slot {i}"));
-            row.spawn((
-                UiButton,
-                Hovered::default(),
+            crate::chrome::chip(
+                row,
                 BenchSlotChip(i),
-                Node {
-                    padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
-                    ..default()
-                },
-                BackgroundColor(ROW_BG),
-            ))
-            .with_children(|chip| {
-                chip.spawn((
-                    Text::new(format!("{i} {label}")),
-                    TextColor(TEXT),
-                    TextFont::from_font_size(10.0),
-                ));
-            });
+                &format!("{i} {label}"),
+                10.0,
+                TEXT,
+                ROW_BG,
+                Color::NONE,
+            );
         }
     });
     // The ghost toggle, only where there is something to A/B — a gait-less rig has no measured
@@ -746,23 +752,15 @@ pub(crate) fn spawn_chips(p: &mut ChildSpawnerCommands, rig: &emerge_core::rigs:
             ..default()
         })
         .with_children(|row| {
-            row.spawn((
-                UiButton,
-                Hovered::default(),
+            crate::chrome::chip(
+                row,
                 GhostChip,
-                Node {
-                    padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
-                    ..default()
-                },
-                BackgroundColor(ROW_BG),
-            ))
-            .with_children(|chip| {
-                chip.spawn((
-                    Text::new("ghost (G): play the measured values over the declared"),
-                    TextColor(TEXT),
-                    TextFont::from_font_size(10.0),
-                ));
-            });
+                "ghost (G): play the measured values over the declared",
+                10.0,
+                TEXT,
+                ROW_BG,
+                Color::NONE,
+            );
         });
     }
     p.spawn((
