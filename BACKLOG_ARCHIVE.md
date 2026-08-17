@@ -2969,3 +2969,132 @@ dropping a sconce puts it at 1.8 + 1.0 = 2.8 m, not at the cursor. That is the d
 and it is arguably right for a face mount — the mount owns the height. But it is the same *shape* as
 the original "walls don't line up with where I'm placing it" complaint, and worth a look once tiles
 are being authored for real.
+
+## FVS-R-28 · The Tiles arrows walk the piece's own span, deepened in thirds — DONE 2026-08-14
+
+**Found in the first `bevy_debugger/guide` feedback session** (2026-08-14, `guides/tile_feedback.json`,
+stopped at step 7 of 13 to fix and re-run). The author's verdicts, verbatim: J *"press J once for
+smaller grid, then press J again for even smaller grid, and a third press would reset to original"* —
+against a two-way `Fine`/`Finer` toggle; and on movement: *"it starts in the center, left moves it
+flush left ... press J once, then Left, then it moves between flush (outer grid line) and center"* —
+with Shift-flush explicitly liked and kept. The underlying defect was two coordinate systems: flush
+is off-lattice by construction (0.45 for `site/wall`) and the nudge lattice was tile-centred, so each
+verb's positions were unreachable by the other — the 2026-08-12 "centre unreachable after a flush"
+bug and its mirror image.
+
+**Shipped:** `build::ladder_step` — plain arrows walk stops dividing the span between the tile's
+centre and the flush position `aligned` computes, `divisor^depth` per side, so **centre and flush are
+stops at every depth, exactly** (terminal stops return `±f` bit-exact, not `n * (f/n)`).
+`Build::rung: SnapLevel` became `Build::depth: u32`; `J` cycles span → thirds → ninths → wraps
+(`DEPTHS = 3`). A full-cell piece has no travel and the panel says so
+(`an_arrow_on_a_piece_that_fills_the_axis_says_so`); the drawn grid shows the focused piece's actual
+stops per axis. Lift keeps sub-cell pitches (⅓, ⅑, 1/27 by depth). The Map tab's `J` is untouched.
+Pinned by `the_ladder_reaches_both_centre_and_flush_at_every_depth`; the matrix ratchet's fixtures
+moved to sub-cell pieces because the invariant "an offered key does something" now excludes the
+fills-the-axis note case, which has its own pin.
+
+## FVS-R-29 · The held piece is brighter than a set one — DONE 2026-08-14
+
+Same session, verbatim: *"make the mesh that is not yet set a highlighted color, very subtle. And
+then when we press escape, it will resolve to the mesh's original color and texture."* Chosen shape
+(asked, not assumed): a hue-neutral brightness lift, not a tint. **Shipped:**
+`editor::HeldPiece` marker placed by `drive_build_preview` from the expanded row id
+(`build/<member>`), `editor::brighten_held` in `fade_ghost`'s exact shape — a per-entity material
+**clone**, never the shared asset, `emissive + 0.10`. The resolve on Escape costs nothing: the
+staged tile respawns unmarked on every `Build` change. Pinned by
+`the_held_member_carries_the_highlight_marker_until_released`, which also pins the row-id
+arithmetic — a wrong prefix would mark nothing, silently.
+
+## FVS-R-30 · A judgement card looks like waiting, and stalled its author — DONE 2026-08-14
+
+Same session: the author stalled on the first `checkpoint: null` step — *"I'm stuck on step four.
+After I press j, it doesn't proceed."* The card's `-> yours to judge` line was rendered in the
+title's own gold, two points smaller: camouflage. This is the **second** finding on the same line
+(the first added it at all, PR #95); a warning that shares its palette with the chrome does not
+land. **Shipped** (in `bevy_debugger_bevy`, vendored): the line renders at title size in a colour
+nothing else on the card uses, reworded imperative — *"yours to judge: no key advances this step.
+Answer the agent in chat."* `the_card_says_when_a_step_is_waiting_on_the_person` updated with it.
+
+## FVS-R-31 · Strings that taught dead keys — DONE 2026-08-14
+
+Found preparing the same session, fixed with it: the Tiles arrival note said *"T F G H walk"* (the
+Meshes lattice keys, dead on Tiles since the tab split) — now names up/down/Enter/Cmd+S; the KIT
+strip promised *"left back"* with no `ArrowLeft` bound while browsing — now says `Esc backs out`
+(the census cannot catch prose, which is how both slipped it); `docs/tiles_tab_contract.md`'s
+Placing table still had `left`/`right` walking members (moved to `,`/`.` in b30f8bf) and no KIT row;
+`guides/author_a_tile.json`'s one-cell recovery said *"focus that piece with left and right"* — the
+exact stale instruction the session's own script existed to avoid.
+
+## FVS-R-32 · The shared list panel: follow the arrows, freeze the strip, ghost the pick — DONE 2026-08-14
+
+Three findings from the same guided-feedback sitting, all in the Tiles tab's right-hand list, all
+reported verbatim from the keyboard. **(1) The scroll did not follow the arrow walk** — *"the view
+doesn't follow my selection, it moves off screen."* `keep_selection_on_screen` existed and was gated
+`in_meshes_mode`, two lines under a comment explaining why its sibling uses `in_tiles_panel`: the
+panel is shared, and the gate fix had been applied to one system and missed on the other. Regated,
+plus a `KitRow` arm so the kit walk (`Build::browsing`) follows too — the same defect one list over,
+fixed before it was reported. **(2) The `MESHES | KIT (n)` strip scrolled away with the rows** — it
+was the first child inside the scroll container; it now rides a `ListHeader` node above it, pinned
+by `the_list_tab_strip_sits_outside_the_scroll_container` (asserted on ancestor `overflow`, NOT on
+`ScrollPosition` — 0.19's `Node` requires that on every UI node, so it proves nothing). **(3) The
+picked mesh now ghosts while choosing** — *"when I select a mesh, but haven't yet hit enter ...
+a semitransparent rendering ... Like a preview."* The ghost existed, gated on `Build::placing` —
+shown after a piece was taken, never while one was being picked. The gate is now "not browsing the
+kit"; pinned by `the_picked_mesh_ghosts_before_enter`, including the Browsing exclusion (the kit
+cursor selects a tile, and a mesh ghost under it would preview the wrong kind of thing).
+
+## FVS-R-33 · Click-to-move, one rotate cluster, one grid — DONE 2026-08-14
+
+Three more from the guided sittings, all on the Map tab.
+
+**Click-to-move** (asked: *"if my cursor is clear, click on an object, and it be set to move that
+object on the next click"*). `Tool::Move` (`B`) stays the deliberate arm; when the cursor is clear —
+Place tool, no brush, no armed composition — the click has no other claim on it (`drive_place`'s own
+comment: *"nothing armed places nothing"*), so `drive_move` takes it. One carry, not a second verb:
+same `MoveDrag`, same snap and refusal, same `Esc` peel. `editor::cursor_is_clear` is a named
+predicate so the truth table is pinned — widening it is the regression that would make placing feel
+broken.
+
+**One rotate cluster** (*"it felt weird to have a mesh selected and use R and T to rotate not my
+ghosted selection, but the mesh underneath it"*). `Z`/`C`/`V` aimed the brush while `R`/`T`/`Y`/`U`
+turned what was under the cursor — two clusters, two subjects, neither saying which. The subject now
+follows what is armed (`editor::ghost_is_armed`, the complement of `cursor_is_clear` within Place),
+and `Z`/`C` retire: `Action::AimLeft`/`AimRight` are gone, `AimReset` is `Straighten`, and `V` joins
+the row, which now reads five chords and five phrases. Map census 12 → 11 rows. **The ghost gained a
+tip** (`EditorState::brush_tip`) — it had a yaw and no tip, so `Y`/`U` had nothing to write and
+*could only* act on a piece already down; that asymmetry was half the reported defect. Order inside
+the cluster: a captured set answers first (the click stamps the set), then the ghost, then the piece
+under the cursor. **Known gap:** `fill::box_fill` takes a yaw and no tip, so a box fill with a tipped
+brush lays untipped rows — pre-existing, now reachable.
+
+**One grid at the live rung** (*"a big grid that covers the whole map, and then the small grid that
+appears inside"*). The Map drew the tile rung everywhere plus a bounded fine window at the camera
+focus — the major/minor idiom, and two answers to "where can this land". Now one grid at the live
+rung, matching what the Tiles tab promises. The window existed for a measured reason (the finest rung
+over 32 m is 288 lines each way), so the decision is recorded with its cost: if that reads as a wash
+in use, the fix is the rung's extent or its colour, never a second grid.
+
+Also here: `chrome::scroll_to_reveal` — the fold arithmetic both list-follows now share (six unit
+tests: visible, overshoot both ways, physical→logical, the zero clamp, the sub-pixel dead-band, and
+an over-tall row aligning its top), extracted when the palette gained the correction the candidates
+list already had.
+
+## FVS-R-34 · The fill box outlines cells, not anchors — DONE 2026-08-14
+
+Reported from the keyboard mid-guide: *"the yellowish orange selection... falls in the center of
+each tile. I would expect it to fall on the corners of a tile that it is in."* Exactly right. A drag
+is recorded as two placement **anchors** — where a piece's centre lands — and the outline was drawn
+anchor-to-anchor, so on a cell-sized brush its corners sat at the **centres** of the end cells while
+the fill went on to cover half a cell more on every side. The preview under-drew the commit, which
+is the one thing this editor's previews are held to.
+
+`fill::covered_rect` grows the anchors by half of `cell_extents` — the same extents the fill itself
+steps by, so the outline and the commit cannot disagree. Four cases pinned: three cells corner to
+corner, direction-independence, a drag that never leaves one cell still outlining that whole cell,
+and a non-square brush growing by its own half-extents per axis.
+
+**The removal box has the same anchor-to-anchor arithmetic and was deliberately left alone**: it
+deletes by anchor containment, so widening the drawing without changing the test would over-claim,
+and changing the test changes what gets deleted. That is a design call, not a drawing bug. The
+inconsistency is real though, and visible inside one function — `drive_removal`'s *single-piece*
+branch already outlines `cell_extents` while its drag branch outlines anchors.

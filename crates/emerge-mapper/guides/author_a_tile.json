@@ -20,11 +20,11 @@
       "recovery": "if the list is empty a filter is hiding it: press Backspace until the filter clears"
     },
     {
-      "label": "the arrows should now move the piece",
-      "goal": "this is the bug reported from the keyboard on 2026-08-12: after Enter the arrows went on walking the library while a piece sat waiting to be moved",
+      "label": "the arrows should now address the piece",
+      "goal": "this is the bug reported from the keyboard on 2026-08-12: after Enter the arrows went on walking the library while a piece sat waiting. A floor fills the tile, so the honest answer is a note about the piece, never a walk of the list",
       "do": [
         "press up and down",
-        "watch the piece, not the list"
+        "the panel answers about the piece -- no travel on a full axis -- not the list"
       ],
       "checkpoint": "a piece is in hand",
       "recovery": "press Escape and then Enter again; if the arrows still walk the list, that is the bug back"
@@ -58,7 +58,7 @@
         "if it is bigger than 1 x 1, the line under it names the piece"
       ],
       "checkpoint": "the tile is one cell",
-      "recovery": "focus that piece with left and right, then use the PLAIN arrows to bring it back toward the middle -- not shift, which flushes it to the edge and makes the tile bigger"
+      "recovery": "focus that piece with , and . then use the PLAIN arrows to bring it back toward the middle -- not shift, which flushes it to the edge and makes the tile bigger"
     },
     {
       "label": "save it",

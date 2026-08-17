@@ -129,6 +129,29 @@ pub fn snap_corner(centre: f32, span: f32, pitch: f32) -> f32 {
     (min / pitch).round() * pitch + half
 }
 
+/// **Snap a piece's centre to the lattice**, so the tile's own centre is always reachable.
+///
+/// The counterpart to [`snap_corner`], and the one an author positioning something *inside* a cell
+/// wants. Reachable positions are multiples of `pitch`, which includes zero — so a piece can always
+/// be returned to the middle, and every cell centre is on the lattice at every rung.
+///
+/// **Why both exist.** `snap_corner` aligns a piece's near edge, which is what butts architecture
+/// against a cell boundary; this aligns its middle, which is what centres a lamp in a cell. Neither
+/// subsumes the other and neither is a fallback for the other: they answer different questions and
+/// the caller knows which it is asking.
+///
+/// The failure that produced it: nudging in the tile assembler is *relative*, so a piece keeps
+/// whatever phase it starts on. `shift`+arrow flushes to an absolute edge — 0.40 for a 0.2 m piece in
+/// a 1 m tile — and from there every nudge at the 333 mm rung lands on 0.067 or 0.733. The centre
+/// becomes unreachable, permanently, and the author who asked *"shouldn't the movements include a
+/// centre placement too"* had found exactly that.
+pub fn snap_centre(centre: f32, pitch: f32) -> f32 {
+    if !(pitch.is_finite() && pitch > 0.0) || !centre.is_finite() {
+        return centre;
+    }
+    (centre / pitch).round() * pitch
+}
+
 /// The cell size a span of `span` metres occupies: the nearest whole number of cells, never zero.
 ///
 /// **Nearest, not next-largest.** A 0.55 m bench should tile on 0.5 m rather than 1.0 m — rounding up

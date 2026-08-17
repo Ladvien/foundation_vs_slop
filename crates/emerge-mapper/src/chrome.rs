@@ -553,6 +553,41 @@ pub fn key_census(parent: &mut ChildSpawnerCommands, contexts: &[Context], stanc
 /// `flex_grow` with `min_height: 0`, not `max_height`: a flex item's automatic minimum size is its
 /// content, which would grow the node to fit every row and leave `overflow` with nothing to clip. The
 /// panel must be `full_height` for this to bound anything.
+/// **Where a scroll must move so a row is on screen** — the one arithmetic every list-follow
+/// system shares (`tiles::keep_selection_on_screen`, `editor::keep_palette_selection_on_screen`).
+///
+/// Extracted when the palette gained the same correction the candidates list had (F-9,
+/// 2026-08-14): two hand-copied versions of fold geometry is how the two lists drift a half-pixel
+/// apart, and the arithmetic is the testable part — fold detection, the physical→logical
+/// conversion, the clamp, and the dead-band all hold in a unit test, where the pixel scroll itself
+/// needs a window.
+///
+/// Inputs are **physical** pixels — `ComputedNode` and `UiGlobalTransform`, centre and half-size —
+/// and the answer is the new **logical** `ScrollPosition::y`, or `None` when the row is already
+/// visible or the correction is under half a pixel (the dead-band that keeps a change-detected
+/// write from re-firing layout every frame). A row taller than the list scrolls to its **top**,
+/// the half you read first.
+pub fn scroll_to_reveal(
+    row: (f32, f32),
+    list: (f32, f32),
+    scroll_y: f32,
+    inverse_scale: f32,
+) -> Option<f32> {
+    let (row_top, row_bottom) = (row.0 - row.1, row.0 + row.1);
+    let (top, bottom) = (list.0 - list.1, list.0 + list.1);
+    // Above the fold, or below it. Never both — the above check winning is what sends an
+    // over-tall row to its top.
+    let delta = if row_top < top {
+        row_top - top
+    } else if row_bottom > bottom {
+        row_bottom - bottom
+    } else {
+        return None;
+    };
+    let want = (scroll_y + delta * inverse_scale).max(0.0);
+    ((scroll_y - want).abs() > 0.5).then_some(want)
+}
+
 pub fn scroll_list(parent: &mut ChildSpawnerCommands, marker: impl Bundle) {
     parent.spawn((
         Node {
@@ -911,6 +946,58 @@ fn drive_shortcuts_overlay(
             // who learned the old list finds the rows where they were.
             key_census(p, &[tab.context(), Context::Global], stance);
         });
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::scroll_to_reveal;
+
+    /// A row already inside the fold asks for nothing — the common case, and the one that keeps a
+    /// change-detected `ScrollPosition` from being touched sixty times a second.
+    #[test]
+    fn a_visible_row_asks_for_no_scroll() {
+        // List centred at 200, half 100 → fold [100, 300]. Row at 150, half 10 → inside.
+        assert_eq!(scroll_to_reveal((150.0, 10.0), (200.0, 100.0), 0.0, 1.0), None);
+        // Touching the edges exactly is still inside — flush is not off-screen.
+        assert_eq!(scroll_to_reveal((110.0, 10.0), (200.0, 100.0), 0.0, 1.0), None);
+        assert_eq!(scroll_to_reveal((290.0, 10.0), (200.0, 100.0), 0.0, 1.0), None);
+    }
+
+    /// Walking down past the fold scrolls down by exactly the overshoot; walking up, up.
+    #[test]
+    fn an_off_screen_row_scrolls_by_its_overshoot() {
+        // Row bottom at 320 against a fold ending at 300: 20 px further down.
+        assert_eq!(scroll_to_reveal((310.0, 10.0), (200.0, 100.0), 40.0, 1.0), Some(60.0));
+        // Row top at 80 against a fold starting at 100: 20 px back up.
+        assert_eq!(scroll_to_reveal((90.0, 10.0), (200.0, 100.0), 40.0, 1.0), Some(20.0));
+    }
+
+    /// The answer is logical pixels: a 2x display (inverse scale 0.5) halves the physical delta.
+    #[test]
+    fn the_correction_converts_physical_to_logical() {
+        assert_eq!(scroll_to_reveal((310.0, 10.0), (200.0, 100.0), 40.0, 0.5), Some(50.0));
+    }
+
+    /// The scroll never goes negative — the top of the list is the top.
+    #[test]
+    fn the_scroll_clamps_at_zero() {
+        assert_eq!(scroll_to_reveal((50.0, 10.0), (200.0, 100.0), 10.0, 1.0), Some(0.0));
+    }
+
+    /// A correction under half a pixel is noise, not a scroll — the dead-band that stops a
+    /// float-jittering layout from re-marking the resource changed every frame.
+    #[test]
+    fn a_sub_pixel_correction_is_swallowed() {
+        assert_eq!(scroll_to_reveal((300.3, 0.1), (200.0, 100.0), 0.0, 1.0), None);
+    }
+
+    /// A row taller than the whole list aligns its TOP — the half you read first — rather than
+    /// oscillating between its two unsatisfiable edges.
+    #[test]
+    fn an_over_tall_row_aligns_its_top() {
+        // Row spans [40, 560] against fold [100, 300]: top wins, scroll up by 60.
+        assert_eq!(scroll_to_reveal((300.0, 260.0), (200.0, 100.0), 100.0, 1.0), Some(40.0));
     }
 }
 

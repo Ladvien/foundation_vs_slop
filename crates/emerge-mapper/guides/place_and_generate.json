@@ -1,0 +1,82 @@
+{
+  "steps": [
+    {
+      "label": "open the Map tab",
+      "goal": "the Map is the job: everything the other tabs make exists so this one can place it",
+      "do": [
+        "press 1"
+      ],
+      "checkpoint": "the Map tab is open",
+      "recovery": "if a text field has the keyboard the number types into it: press Escape first"
+    },
+    {
+      "label": "arm a piece and place a few",
+      "goal": "the palette is the left list; the arrows walk it now, Z and C aim the brush, V straightens it, and a click puts the armed piece on the ground",
+      "do": [
+        "walk the palette with up and down -- Shift strides five",
+        "aim with Z or C if you like",
+        "click two or three spots on the ground"
+      ],
+      "checkpoint": "the map has placements",
+      "with": { "n": 2 },
+      "recovery": "if a click lands nothing the panel names why -- a click over the interface places nothing, so aim at the ground"
+    },
+    {
+      "label": "how does placing feel",
+      "goal": "the piece verbs act on what is under the cursor: R and T turn it, Y and U tip it over, brackets lift it, H targets inside a stack, X arms removal",
+      "do": [
+        "try a few of the piece verbs on what you placed",
+        "then say what grated -- keys, the ghost, the feel of it"
+      ],
+      "checkpoint": null,
+      "recovery": "there is nothing to recover here: what grated is the finding"
+    },
+    {
+      "label": "generate from the kit's tiles",
+      "goal": "Cmd+G asks the solver to lay YOUR tiles -- the ones this session authored and repaired -- as a ghosted proposal. Nothing is written yet: keeping it clears unpinned stamps, and your hand placements survive either way",
+      "do": [
+        "press Cmd+G"
+      ],
+      "checkpoint": "a proposal is on the map",
+      "recovery": "if nothing appears the panel names why -- no free cells, or a kit whose tiles the grammar refuses"
+    },
+    {
+      "label": "read the proposal",
+      "goal": "a proposal you cannot tell from placed work is a proposal you cannot judge",
+      "do": [
+        "look at the ghosted layout",
+        "say whether you can tell proposal from placed, and whether the layout reads as rooms"
+      ],
+      "checkpoint": null,
+      "recovery": "there is nothing to recover here: an answer of no is the finding"
+    },
+    {
+      "label": "keep it",
+      "goal": "Enter is the door; the solve becomes stamps on the map",
+      "do": [
+        "press Enter"
+      ],
+      "checkpoint": "the proposal was kept",
+      "with": { "n": 1 },
+      "recovery": "Esc throws it away instead -- if you did that on purpose, say so and generate again"
+    },
+    {
+      "label": "save the map",
+      "goal": "Cmd+S writes the map file; the stamps in it are references to your tiles, so editing a tile later changes every stamp of it",
+      "do": [
+        "press Cmd+S"
+      ],
+      "checkpoint": "the map is saved",
+      "recovery": "if the save is refused the panel names why"
+    },
+    {
+      "label": "what should change on the Map",
+      "goal": "the harvest: this tab has the most verbs and the oldest habits",
+      "do": [
+        "say what you want changed about placing, generating, or the door"
+      ],
+      "checkpoint": null,
+      "recovery": "there is nothing to recover here: the answer is the finding"
+    }
+  ]
+}

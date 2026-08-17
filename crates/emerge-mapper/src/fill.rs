@@ -51,6 +51,30 @@ pub struct Filled {
     pub truncated: bool,
 }
 
+/// **The ground a box fill will cover**, from the two anchors a drag runs between.
+///
+/// A drag is recorded as two *placement anchors* — where a piece's centre lands — and each piece
+/// laid between them covers its own [`cell_extents`] around that centre. So the region is the
+/// anchors grown by half a cell on every side, and a rectangle drawn anchor-to-anchor is half a
+/// cell short all round: on a cell-sized brush its corners sit at the **centres** of the end cells
+/// rather than on the cells' corners.
+///
+/// Reported from the keyboard, 2026-08-14: *"the yellowish orange selection... falls in the center
+/// of each tile. I would expect it to fall on the corners of a tile."* The removal tool had already
+/// written the right answer for the single-piece case — it outlines `cell_extents` around the piece
+/// under the cursor — so this is that same rule, applied to the case that was drawing anchors.
+///
+/// Returns `(x0, z0, x1, z1)`, min corner first.
+pub fn covered_rect(from: (f32, f32), at: (f32, f32), extents: (f32, f32)) -> (f32, f32, f32, f32) {
+    let (hx, hz) = (extents.0 * 0.5, extents.1 * 0.5);
+    (
+        from.0.min(at.0) - hx,
+        from.1.min(at.1) - hz,
+        from.0.max(at.0) + hx,
+        from.1.max(at.1) + hz,
+    )
+}
+
 /// The (x, z) step this brush fills on at `yaw_deg`, rounded to the authoring snap.
 ///
 /// A footprint is recorded before rotation, so a piece turned 90° or 270° presents its depth along X.
@@ -374,6 +398,28 @@ pub fn box_fill(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The fill outline lands on cell corners, not cell centres.**
+    ///
+    /// The drag box was drawn anchor-to-anchor while the fill covers each anchor's whole cell, so
+    /// the preview was half a cell short on every side — reported from the keyboard, 2026-08-14,
+    /// as the box falling *"in the center of each tile"*. A one-cell brush dragged from the middle
+    /// of one cell to the middle of the cell two over covers three whole cells, corner to corner.
+    #[test]
+    fn a_fill_box_outlines_whole_cells() {
+        // Anchors at cell centres on a 1 m grid: (0.5, 0.5) to (2.5, 0.5).
+        let (x0, z0, x1, z1) = covered_rect((0.5, 0.5), (2.5, 0.5), (1.0, 1.0));
+        assert_eq!((x0, z0, x1, z1), (0.0, 0.0, 3.0, 1.0), "three cells, corner to corner");
+
+        // Direction cannot matter: a drag right-to-left covers the same ground.
+        assert_eq!(covered_rect((2.5, 0.5), (0.5, 0.5), (1.0, 1.0)), (0.0, 0.0, 3.0, 1.0));
+
+        // A drag that never leaves one cell still outlines that whole cell, never a zero-area box.
+        assert_eq!(covered_rect((0.5, 0.5), (0.5, 0.5), (1.0, 1.0)), (0.0, 0.0, 1.0, 1.0));
+
+        // A non-square brush grows by its own half-extents on each axis, not by a cell.
+        assert_eq!(covered_rect((1.0, 1.0), (1.0, 1.0), (2.0, 0.5)), (0.0, 0.75, 2.0, 1.25));
+    }
     use emerge_core::descriptor::Extent;
     /// The tile rung, which is what every fill in these tests is driven at — the rung an author is on
     /// unless they are holding a modifier, and the only one a cell-sized piece may use.
