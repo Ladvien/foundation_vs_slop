@@ -23,6 +23,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -62,6 +63,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -99,6 +101,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -136,6 +139,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -173,6 +177,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -210,6 +215,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -247,6 +253,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -284,6 +291,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -319,6 +327,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -357,6 +366,7 @@
                     "support",
                     "worktop",
                 ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -393,6 +403,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -430,6 +441,7 @@
                 surfaces: [
                     "support",
                 ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -465,6 +477,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -500,6 +513,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -537,6 +551,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -577,6 +592,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -617,6 +633,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -658,6 +675,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -697,6 +715,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -732,6 +751,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -767,6 +787,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -803,6 +824,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -840,6 +862,7 @@
                 surfaces: [
                     "support",
                 ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -878,6 +901,7 @@
                     "support",
                     "worktop",
                 ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -916,6 +940,7 @@
                 surfaces: [
                     "support",
                 ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -954,6 +979,7 @@
                 surfaces: [
                     "support",
                 ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -991,6 +1017,7 @@
                 surfaces: [
                     "support",
                 ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -1028,6 +1055,7 @@
                 surfaces: [
                     "support",
                 ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -1066,6 +1094,7 @@
                 surfaces: [
                     "worktop",
                 ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -1101,6 +1130,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -1138,6 +1168,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -1175,6 +1206,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -1211,6 +1243,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -1246,6 +1279,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -1282,6 +1316,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -1318,6 +1353,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -1354,6 +1390,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -1394,6 +1431,7 @@
                     "support",
                     "worktop",
                 ],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -1429,6 +1467,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -1464,6 +1503,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -1499,6 +1539,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [

@@ -2835,6 +2835,17 @@ The original item, for the record:
 
 ### Push 12 — World-building tools: composition-as-tile
 
+**FVS-R-17 · Local adjacency cannot close a boundary — and a constraint over distance closes it.** ✅ *2026-08-11.* FVS-R-9 measured **zero enclosed regions in 128 solves**, and both explanations were falsified rather than argued: the metric can see a room and the room is legal under the learned support, so not vocabulary; and sweeping `Empty` to 0.0 leaves median enclosure at 0.000, so not weight. What was left was the solver's expressiveness.
+  *Shipped:* WFC's greedy collapse replaced on the composition path by a constraint solver — `emerge-core::constraints` (Cooper's Sturgeon API), the `deterministic_solver` back-end crate over `batsat`, core-guided MaxSAT, and `enclosure_rules`. **Re-measured against §4's same committed rows, unedited:** the histogram went from **1 of 2,048 solves reaching the plane to 2,048 of 2,048**, occupied bins from 1 to 17, and for the first time **no committed row fires**.
+  **The control is what makes it attributable:** same solver, kit, region and seeds, differing only in whether the enclosure wish is added. Nothing enclosed without it; something in every solve with it.
+  **Four caveats live in `docs/research/2026-08-10-expressive-range.md` §9 and are not in the verdict line** — row 1 is confirmatory by construction (§4.1 said so in advance), 47% of solves clamp above the opening-density ceiling so row 4b reads as "not measured" rather than "passed", the sweep never stabilised and is reported at the cap, and the metric counts a wall tile as floor so the headline 0.462 overstates the rooms (measured again with floor meaning floor: 0.31–0.75 over 3–8 regions).
+  **The §L3 foundedness machinery was declined, with a proof rather than a shrug:** R1+R2 are Horn, so `¬outside[c]` is sound evidence of genuine enclosure and a *floor* needs no rank encoding — 5,904 variables the plan called the likeliest place to get subtly wrong. It becomes mandatory the moment a wish wants a ceiling.
+  **And the recommended variety mechanism was measured and rejected.** 144 soft unit clauses cost 9,171 ms against 15 ms for the same instance without them, and failed outright at higher targets; the dream is a per-variable *preference* instead, which is the greedy collapse's own sample-propagate-repair with backtracking added. · *Reading:* `docs/research/2026-08-10-{constraint-encodings,solver-choice,pcg-solver-corpus}.md`
+
+**FVS-R-18 · An empty histogram wants to be its own outcome.** ✅ *2026-08-11, pre-registered before the run it governs — which was the whole item.* FVS-R-9 exposed two blind spots in §4 and they were recorded rather than fixed, because amending a criterion after seeing its output is what §4 forbids. Both had one root: an empty histogram was treated as a *value* rather than as a distinct outcome. The stopping rule mistook blankness for convergence (total variation between two empty histograms is 0 by definition, so the sweep stopped at its first block having measured nothing and printed "stable"), and rows 4a and 4b disagreed on an empty histogram while neither meant anything — entropy read 0 and **fired**, max-bin share read 0 and **passed**.
+  *Shipped:* `docs/research/2026-08-09-composition-grammar-decisions.md` §4.6, committed before the enclosure run and implemented in the instrument in the same commit so the pre-registration is real rather than prose. `histogram_empty` is a reportable outcome and, when it holds, *is* the finding; rows 4a and 4b report `n/a`, which is not a pass; and two blocks agreeing counts as convergence only when one holds a sample. The four numeric rows were not touched.
+  **A successor is already recorded and deliberately unfixed:** a *one*-sample histogram has the same disease, and the no-wish arm duly reported entropy 0.000 (fires) and max-bin share 100.0% (fires) about a single point. Fixing that now would be amending a criterion after seeing its output — the exact thing this item existed to stop happening twice — so it waits for the next pre-registration.
+
 - **FVS-R-1 — The composition gallery** · ✅ **LANDED 2026-08-09, as a carousel rather than a contact sheet**
   Scoped as a contact sheet — every composition stood up side by side, spacing a parameter. That was built, looked at, and **rejected by the author in favour of a carousel**: one composition full size and pinned to the stage origin, two miniatures either side at a geometric scale ramp (`1 → 0.55 → 0.30`), stepped by `O`/`P`. The wings deliberately do not wrap, so running out of miniatures is how the stage says which end of the list you are at. A click on a miniature brings it to the middle; `view::cursor_ground` makes that arithmetic rather than a raycast, since the strip lies on the ground plane.
   **`O`/`P` are their own row and not the arrows**, because the arrows belong to whichever of the three lists has focus — stepping while editing a member would otherwise cost `left left up right right`. That row was this context's twelfth: `Context::Compose` is now **at** the ceiling `no_context_carries_more_than_a_learnable_vocabulary` enforces, so the next Compose verb costs a merge or a removal.
@@ -2893,35 +2904,237 @@ The original item, for the record:
   **Three defects found on the way, all live.** `Undo::UnstampedMany` inverted to `Undo::Stamped`, which drains the **tail** — correct only because `stamp_here` appends, and wrong for any mid-list removal: undo put a stamp back at index 3 and redo took the last one off. It inverts to `UnstampAt { indices }` now, the stamp-side twin of `RemoveAt`. The capture anchor averaged over placements alone, so a box holding only stamps divided by zero. And `envelope_size` skipped `Body::Composition`, so a group holding only a nested one derived a height of zero and was refused for enclosing nothing — a true statement about a measurement that never looked; it measures through the reference now and refuses an **anchored** nested member by name rather than folding in a zero.
   *Every assertion mutation-tested.* The nesting test asserts the body KIND and then that the outer stamp puts the inner composition's pieces on the map through the reference — two rows drawn is what proves it resolved rather than parsed. · *Unblocks:* FVS-R-7's fixed tiles, and nesting.
 
-- **FVS-R-19 — The UI audit's seven behavioral defects** · M · ✅ **LANDED 2026-08-17**
-  All seven from `docs/2026-08-17-mapper-ui-audit.md`, each verified in a fresh windowed capture after the fix. The Compose body scrolls (`chrome::scroll_list` replaces the hand copy that dropped `ScrollArea`; `tests/headless.rs::every_pane_that_clips_can_scroll` pins the CLASS — any clipping pane without a `ScrollArea` fails); Compose rows hold their indentation when they wrap (leading spaces become a width-only spacer beside a wrapping text, `problem_log_line`'s shape, with the split pinned by unit tests); stage labels hide whole when any of three probe points lands on a panel (`view::over_ui`, the same geometry every other reader asks — on the shipped project this takes down `break_table`'s label entirely, since it was always half-behind the panel; labels clear of panels are untouched); the ANIM stale count is its own `TabBadge` text child in `DANGER` beside the grey label, so `style_tabs` never stomps it (Lewandowska et al. 2022, `10.1038/s41598-022-16284-2`: persistent peripheral signal at medium intensity; pinned by `the_tab_badge_is_its_own_node_and_boots_empty`); `token_proposals` renders `SUGGEST` per its block's own contract; the tag-chip ghost border states its condition once (width unconditional, colour asks — and chips stopped growing 2 px when a proposal lands); and hover feedback landed on the four per-frame-repainted surfaces (map size fields, subgrid cells, anim stage chips, filter box) through the new `chrome::ROW_HOVER` — **pulled forward from FVS-R-20** — with the rebuilt lists deliberately waiting for R-21's `list_row`.
+## FVS-R-21 · Split the Tiles tab: meshes get their own — DONE 2026-08-11
+
+**FVS-R-26 · Sockets derived from the mesh's own occupancy** ✅ 2026-08-12. `emerge_core::adjacency::derive_edges` reads the boundary of a rasterised lattice and proposes `solid`/`open` per boundary cell — Bad North's profile-matching (Karth & Smith 2019, `10.1145/3337722.3341845`) in the representation this schema already had. **`SubCell::solid` has its first consumer**, five days after `descriptor.rs` recorded that nothing read it (FVS-Q-9, closed *no*): the boundary of a solid lattice *is* the socket a neighbour must match, so the scan that marks the solids proposes the tokens in the same act. Author's three calls, all taken 2026-08-12: binary geometric tokens, refuse-and-name on an undeclared vocabulary, per-mesh scope.
+
+> **Two corrections the work forced, both found rather than reasoned.**
+>
+> **`autoscan_candidate` was staging proposals nobody asked for.** It scans on every selection change, so it put the tab into `Stance::Proposed` and silently changed what `Enter` means while an author was only walking the list — a failing test caught it. `scan_mesh` now *returns* the derivation and only the asked-for `B` stages it, which is the distinction that function's own note already drew between the automatic scan and the requested one.
+>
+> **The vocabulary gate was a second statement of a rule the schema already enforces**, and a mutation test is what proved it: with the hand-written check disabled the refusal test still passed, because `Vocabularies::masks` already refuses an undeclared token — with a better message than the one written here ("Growing a vocabulary is one row in the table — never a second list"). What the pre-check adds is only *when*: without it the write lands in memory and `persist` refuses at save time, leaving the editor showing tokens the project cannot load — the defect `9af92aa` fixed one tab over. So the door applies the edit to a **candidate**, asks the vocabulary about that, and touches the real descriptor only if it passes. One rule, one message, checked before the write.
+
+**FVS-R-19 · A latched rung, not only a held one** ✅ 2026-08-12. The Map latches its rung with `J` like BUILD already did, and `GridSpacing` — a *drawn* grid cycled through `[0.5, 1, 2, 4]` m while the lattice a piece landed on was a held modifier — is deleted. Two of its four steps were lines no piece could ever sit on. `Shift` keeps its one meaning, *one rung finer*, through the new saturating `SnapLevel::finer`, so from the finest rung a modifier can no longer be the largest jump on offer. **One defect found only by looking, and it was introduced by the latch itself:** at the finest rung over a 32 m map the gizmo draws 288 lines each way — a solid wash with no square big enough to point at. Held on `Cmd+Shift` that lasted as long as your fingers did; latched it does not. So the drawing follows the distinction `grid::SnapLevel` already states — the tile is *"the solver's cell"* and the rungs below it are *"a dressing tool"* — and the module draws over the whole map while the dressing rung draws a bounded window at the camera's focus. Major and minor, one ladder, verified in captured frames.
+
+**FVS-R-21 · Split the Tiles tab: meshes get their own.** Decided and shipped 2026-08-11; the full argument and the shape are in `docs/2026-08-11-tile-authoring-handoff.md`. `MESHES -> TILES -> COMPOSE -> MAP -> ANIM`. **The argument is the hierarchy, not crowding** — `docs/research/2026-08-08-kitbashing-guidance.md`: *"A good kit is hierarchical: parts -> sub-assemblies -> assemblies"*, and the editor already gives a tab per level while Tiles carries two. A mesh is a measurement written to `library.ron` and described once; a tile is an arrangement written to `compositions.ron` and built constantly. Crowding is already handled — `Context::Build` gave each half its own twelve rows. **`build::TileMode` and the `C` flip disappear**, which is the point: a tab strip is a mode you cannot forget, so the mode stops needing an indicator. **Known cost, weighed:** I10 of the editor-model guide argues for *fewer* contexts, and this adds one. **The corpus cannot settle it** — a search for information architecture returns Ousterhout and Bass; the HCI gap is recorded in `2026-08-10-snapping-corpus-vetting.md` and Raskin has never been ingested. *Done when:* describing a mesh and assembling a tile are two tabs, `TileMode` is gone, and the library list still serves both.
+
+**How it landed.** `Mode::ALL` is `[Map, Meshes, Tiles, Compose, Anim]` — Map stays first because it is
+the job, which is the argument the original ordering made and which a reorder to pipeline order threw
+away until the stepped tests caught it. `Context::Tiles` is the **Tiles** tab's context and
+`Context::Meshes` the mesh tab's; `build::TileMode`, `Action::EnterBuild` and `Action::LeaveBuild` are
+gone, and with them the `C` flip. All five tab digits share one `does` string so the census stays
+inside its twelve-row Global budget.
+
+**Two bugs the split introduced, both found and pinned rather than shipped:**
+
+- **The problem banner is keyed to a tab, and the two tabs share a panel.** `ProblemBanner(Mode)` and
+  `if banner.0 != tab { continue }` were safe only while every banner sat in a panel `apply_mode` hid
+  for it. The shared panel now carries **two** banners, and the visibility pass **hides** the one that
+  is not live instead of skipping it — otherwise a refusal raised on Tiles went on showing after
+  switching to Meshes. Measured: `Flex` where `None` belongs.
+- **`build_keys` was unordered against `toggle_mode` and `tab_shortcuts`.** All three sat in
+  `Phase::Act`, so whether arriving on the tab opened a tile that frame or the next was Bevy's choice.
+  The tab test passed alone and failed in the suite. `build_keys` is now `.after` both.
+
+*Verified:* `a_refusal_on_the_tiles_tab_is_visible_and_stays_there` fails without either fix (checked
+by reverting each), and the tab test ran green six times consecutively where it had been a coin flip.
+103 test binaries green.
+
+## FVS-R-24 · A tile can say that one member rests on another — DONE 2026-08-11
+
+**FVS-R-24 · A tile cannot say that one member rests on another, and finds out late.** Found 2026-08-11 while verifying the authoring loop; **this is the author's own stated example** — *"a wall mesh over it, and wall mounted light fixture on the wall mesh"* — and it is the one part of that sentence that does not work. `Body::Descriptor` carries `on: Option<String>`, *"a sibling `Member::id` this rests on"*, and **the assembler always writes `None`** (`build.rs:233`, and again at `787`), which means *"find a host outside this group"*. A piece whose descriptor has `Mount::OnFace`/`OnSurface` and no host is refused by `stack::resolve_y` — `a_fixture_with_no_host_recorded_is_refused` (`stack.rs:981`) — and `emerge-bevy` propagates that with `?` (`lib.rs:125`), so **the map refuses to load**. Two gaps, and the second's fix depends on the first's: **(1) no verb sets `on`.** Two shapes, and this is a design call rather than a detail — *automatic*, binding a dropped fixture to the member it is dropped against (fastest, matches "keystrokes are faster", but guesses), or *a verb*, focus a member and name its host (explicit, one more key, and the focus already tracks the last drop). **(2) the refusal is late.** `build_keys` could refuse at drop time the way it now refuses a piece that is not in the library — but if (1) lands as automatic binding, that refusal would be refusing things that should work, so it is not independently safe to build. **The slot path is unaffected and already works**: a `wall-fixture` hole is how a fixture gets into a tile *today*, and the round-trip test covers it end to end. *Done when:* the author's sentence is authorable, and a fixture with nowhere to mount is refused when it is dropped rather than when the map loads.
+
+**Shipped as automatic binding, the author's call** (asked 2026-08-11): a fixture dropped against a
+wall has already said which wall it means by being there, and the requirement for this loop is the
+keyboard. `build::host_for` resolves the host **before the member exists**, so a refusal leaves the
+tile exactly as it was rather than needing the drop undone. Three outcomes, all named:
+
+- **One candidate** → bound. `on: Some("wall")`.
+- **None** → refused at the door naming the class it wanted, and pointing at the other path:
+  *"press Shift+Enter for a hole the generator fills."*
+- **Two or more** → refused naming both, rather than taking the first in some order. A silent pick
+  that a later sort could change is exactly the shape this repo's determinism rules forbid.
+
+**Binding is a plan-only question**, deliberately: a face mount takes its height from the mount, not
+from the cursor, so the layer the fixture is dropped on does not decide which wall it is on.
+
+Proved end to end rather than at the seam it was broken at: the test expands the tile and runs
+`stack::resolve_y` — the two calls the 3-D preview makes, and the exact pair that refused before —
+then asserts the sconce rides its wall's face at the declared 1.8 m. All three tests verified against
+a revert to `on: None`.
+
+**One observation this surfaced, not yet a decision.** `Member::lift` is additive on top of whatever
+the mount resolves to (schema: *"a vertical nudge on top of"*), so walking up three layers and
+dropping a sconce puts it at 1.8 + 1.0 = 2.8 m, not at the cursor. That is the documented behaviour
+and it is arguably right for a face mount — the mount owns the height. But it is the same *shape* as
+the original "walls don't line up with where I'm placing it" complaint, and worth a look once tiles
+are being authored for real.
+
+## FVS-R-28 · The Tiles arrows walk the piece's own span, deepened in thirds — DONE 2026-08-14
+
+**Found in the first `bevy_debugger/guide` feedback session** (2026-08-14, `guides/tile_feedback.json`,
+stopped at step 7 of 13 to fix and re-run). The author's verdicts, verbatim: J *"press J once for
+smaller grid, then press J again for even smaller grid, and a third press would reset to original"* —
+against a two-way `Fine`/`Finer` toggle; and on movement: *"it starts in the center, left moves it
+flush left ... press J once, then Left, then it moves between flush (outer grid line) and center"* —
+with Shift-flush explicitly liked and kept. The underlying defect was two coordinate systems: flush
+is off-lattice by construction (0.45 for `site/wall`) and the nudge lattice was tile-centred, so each
+verb's positions were unreachable by the other — the 2026-08-12 "centre unreachable after a flush"
+bug and its mirror image.
+
+**Shipped:** `build::ladder_step` — plain arrows walk stops dividing the span between the tile's
+centre and the flush position `aligned` computes, `divisor^depth` per side, so **centre and flush are
+stops at every depth, exactly** (terminal stops return `±f` bit-exact, not `n * (f/n)`).
+`Build::rung: SnapLevel` became `Build::depth: u32`; `J` cycles span → thirds → ninths → wraps
+(`DEPTHS = 3`). A full-cell piece has no travel and the panel says so
+(`an_arrow_on_a_piece_that_fills_the_axis_says_so`); the drawn grid shows the focused piece's actual
+stops per axis. Lift keeps sub-cell pitches (⅓, ⅑, 1/27 by depth). The Map tab's `J` is untouched.
+Pinned by `the_ladder_reaches_both_centre_and_flush_at_every_depth`; the matrix ratchet's fixtures
+moved to sub-cell pieces because the invariant "an offered key does something" now excludes the
+fills-the-axis note case, which has its own pin.
+
+## FVS-R-29 · The held piece is brighter than a set one — DONE 2026-08-14
+
+Same session, verbatim: *"make the mesh that is not yet set a highlighted color, very subtle. And
+then when we press escape, it will resolve to the mesh's original color and texture."* Chosen shape
+(asked, not assumed): a hue-neutral brightness lift, not a tint. **Shipped:**
+`editor::HeldPiece` marker placed by `drive_build_preview` from the expanded row id
+(`build/<member>`), `editor::brighten_held` in `fade_ghost`'s exact shape — a per-entity material
+**clone**, never the shared asset, `emissive + 0.10`. The resolve on Escape costs nothing: the
+staged tile respawns unmarked on every `Build` change. Pinned by
+`the_held_member_carries_the_highlight_marker_until_released`, which also pins the row-id
+arithmetic — a wrong prefix would mark nothing, silently.
+
+## FVS-R-30 · A judgement card looks like waiting, and stalled its author — DONE 2026-08-14
+
+Same session: the author stalled on the first `checkpoint: null` step — *"I'm stuck on step four.
+After I press j, it doesn't proceed."* The card's `-> yours to judge` line was rendered in the
+title's own gold, two points smaller: camouflage. This is the **second** finding on the same line
+(the first added it at all, PR #95); a warning that shares its palette with the chrome does not
+land. **Shipped** (in `bevy_debugger_bevy`, vendored): the line renders at title size in a colour
+nothing else on the card uses, reworded imperative — *"yours to judge: no key advances this step.
+Answer the agent in chat."* `the_card_says_when_a_step_is_waiting_on_the_person` updated with it.
+
+## FVS-R-31 · Strings that taught dead keys — DONE 2026-08-14
+
+Found preparing the same session, fixed with it: the Tiles arrival note said *"T F G H walk"* (the
+Meshes lattice keys, dead on Tiles since the tab split) — now names up/down/Enter/Cmd+S; the KIT
+strip promised *"left back"* with no `ArrowLeft` bound while browsing — now says `Esc backs out`
+(the census cannot catch prose, which is how both slipped it); `docs/tiles_tab_contract.md`'s
+Placing table still had `left`/`right` walking members (moved to `,`/`.` in b30f8bf) and no KIT row;
+`guides/author_a_tile.json`'s one-cell recovery said *"focus that piece with left and right"* — the
+exact stale instruction the session's own script existed to avoid.
+
+## FVS-R-32 · The shared list panel: follow the arrows, freeze the strip, ghost the pick — DONE 2026-08-14
+
+Three findings from the same guided-feedback sitting, all in the Tiles tab's right-hand list, all
+reported verbatim from the keyboard. **(1) The scroll did not follow the arrow walk** — *"the view
+doesn't follow my selection, it moves off screen."* `keep_selection_on_screen` existed and was gated
+`in_meshes_mode`, two lines under a comment explaining why its sibling uses `in_tiles_panel`: the
+panel is shared, and the gate fix had been applied to one system and missed on the other. Regated,
+plus a `KitRow` arm so the kit walk (`Build::browsing`) follows too — the same defect one list over,
+fixed before it was reported. **(2) The `MESHES | KIT (n)` strip scrolled away with the rows** — it
+was the first child inside the scroll container; it now rides a `ListHeader` node above it, pinned
+by `the_list_tab_strip_sits_outside_the_scroll_container` (asserted on ancestor `overflow`, NOT on
+`ScrollPosition` — 0.19's `Node` requires that on every UI node, so it proves nothing). **(3) The
+picked mesh now ghosts while choosing** — *"when I select a mesh, but haven't yet hit enter ...
+a semitransparent rendering ... Like a preview."* The ghost existed, gated on `Build::placing` —
+shown after a piece was taken, never while one was being picked. The gate is now "not browsing the
+kit"; pinned by `the_picked_mesh_ghosts_before_enter`, including the Browsing exclusion (the kit
+cursor selects a tile, and a mesh ghost under it would preview the wrong kind of thing).
+
+## FVS-R-33 · Click-to-move, one rotate cluster, one grid — DONE 2026-08-14
+
+Three more from the guided sittings, all on the Map tab.
+
+**Click-to-move** (asked: *"if my cursor is clear, click on an object, and it be set to move that
+object on the next click"*). `Tool::Move` (`B`) stays the deliberate arm; when the cursor is clear —
+Place tool, no brush, no armed composition — the click has no other claim on it (`drive_place`'s own
+comment: *"nothing armed places nothing"*), so `drive_move` takes it. One carry, not a second verb:
+same `MoveDrag`, same snap and refusal, same `Esc` peel. `editor::cursor_is_clear` is a named
+predicate so the truth table is pinned — widening it is the regression that would make placing feel
+broken.
+
+**One rotate cluster** (*"it felt weird to have a mesh selected and use R and T to rotate not my
+ghosted selection, but the mesh underneath it"*). `Z`/`C`/`V` aimed the brush while `R`/`T`/`Y`/`U`
+turned what was under the cursor — two clusters, two subjects, neither saying which. The subject now
+follows what is armed (`editor::ghost_is_armed`, the complement of `cursor_is_clear` within Place),
+and `Z`/`C` retire: `Action::AimLeft`/`AimRight` are gone, `AimReset` is `Straighten`, and `V` joins
+the row, which now reads five chords and five phrases. Map census 12 → 11 rows. **The ghost gained a
+tip** (`EditorState::brush_tip`) — it had a yaw and no tip, so `Y`/`U` had nothing to write and
+*could only* act on a piece already down; that asymmetry was half the reported defect. Order inside
+the cluster: a captured set answers first (the click stamps the set), then the ghost, then the piece
+under the cursor. **Known gap:** `fill::box_fill` takes a yaw and no tip, so a box fill with a tipped
+brush lays untipped rows — pre-existing, now reachable.
+
+**One grid at the live rung** (*"a big grid that covers the whole map, and then the small grid that
+appears inside"*). The Map drew the tile rung everywhere plus a bounded fine window at the camera
+focus — the major/minor idiom, and two answers to "where can this land". Now one grid at the live
+rung, matching what the Tiles tab promises. The window existed for a measured reason (the finest rung
+over 32 m is 288 lines each way), so the decision is recorded with its cost: if that reads as a wash
+in use, the fix is the rung's extent or its colour, never a second grid.
+
+Also here: `chrome::scroll_to_reveal` — the fold arithmetic both list-follows now share (six unit
+tests: visible, overshoot both ways, physical→logical, the zero clamp, the sub-pixel dead-band, and
+an over-tall row aligning its top), extracted when the palette gained the correction the candidates
+list already had.
+
+## FVS-R-34 · The fill box outlines cells, not anchors — DONE 2026-08-14
+
+Reported from the keyboard mid-guide: *"the yellowish orange selection... falls in the center of
+each tile. I would expect it to fall on the corners of a tile that it is in."* Exactly right. A drag
+is recorded as two placement **anchors** — where a piece's centre lands — and the outline was drawn
+anchor-to-anchor, so on a cell-sized brush its corners sat at the **centres** of the end cells while
+the fill went on to cover half a cell more on every side. The preview under-drew the commit, which
+is the one thing this editor's previews are held to.
+
+`fill::covered_rect` grows the anchors by half of `cell_extents` — the same extents the fill itself
+steps by, so the outline and the commit cannot disagree. Four cases pinned: three cells corner to
+corner, direction-independence, a drag that never leaves one cell still outlining that whole cell,
+and a non-square brush growing by its own half-extents per axis.
+
+**The removal box has the same anchor-to-anchor arithmetic and was deliberately left alone**: it
+deletes by anchor containment, so widening the drawing without changing the test would over-claim,
+and changing the test changes what gets deleted. That is a design call, not a drawing bug. The
+inconsistency is real though, and visible inside one function — `drive_removal`'s *single-piece*
+branch already outlines `cell_extents` while its drag branch outlines anchors.
+
+> **ID reconciliation, 2026-08-17.** Two sessions worked the backlog in parallel and both minted
+> FVS-R-19 through R-23 for different items. The origin line's assignments were already pushed, so
+> the UI-audit session's five items were renumbered **R-35..R-39** at merge. The day's commit
+> messages and `docs/2026-08-17-mapper-ui-audit.md`'s original text carry the old numbers; this
+> block is the mapping: 19→35 (defects), 20→36 (chrome vocabulary), 21→37 (builders),
+> 22→38 (Compose rows), 23→39 (census ratchet).
+
+- **FVS-R-35 — The UI audit's seven behavioral defects** · M · ✅ **LANDED 2026-08-17**
+  All seven from `docs/2026-08-17-mapper-ui-audit.md`, each verified in a fresh windowed capture after the fix. The Compose body scrolls (`chrome::scroll_list` replaces the hand copy that dropped `ScrollArea`; `tests/headless.rs::every_pane_that_clips_can_scroll` pins the CLASS — any clipping pane without a `ScrollArea` fails); Compose rows hold their indentation when they wrap (leading spaces become a width-only spacer beside a wrapping text, `problem_log_line`'s shape, with the split pinned by unit tests); stage labels hide whole when any of three probe points lands on a panel (`view::over_ui`, the same geometry every other reader asks — on the shipped project this takes down `break_table`'s label entirely, since it was always half-behind the panel; labels clear of panels are untouched); the ANIM stale count is its own `TabBadge` text child in `DANGER` beside the grey label, so `style_tabs` never stomps it (Lewandowska et al. 2022, `10.1038/s41598-022-16284-2`: persistent peripheral signal at medium intensity; pinned by `the_tab_badge_is_its_own_node_and_boots_empty`); `token_proposals` renders `SUGGEST` per its block's own contract; the tag-chip ghost border states its condition once (width unconditional, colour asks — and chips stopped growing 2 px when a proposal lands); and hover feedback landed on the four per-frame-repainted surfaces (map size fields, subgrid cells, anim stage chips, filter box) through the new `chrome::ROW_HOVER` — **pulled forward from FVS-R-36** — with the rebuilt lists deliberately waiting for R-37's `list_row`.
   **The cost readout ended up top-right in the tab-strip band, not "left of the list" as planned.** The planned dodge collided with the 380 px controls panel the moment the window was narrow — measured in a capture, not guessed. The strip band's right end is the one run no tab claims at any window width; the readout now shows on all four tabs (it never rendered on Map before — z-tie with the palette, lost by spawn order).
-  **A paid-for Bevy 0.19 layout fact, found by measuring the live window** (a temporary `uidump` sentinel logged `ComputedNode`s; headless cannot answer layout — no window, every panel is zero-sized): a wrapping `Text` child inside a flex Row resolves its flex base to **zero width** — the text laid out one glyph per line and clipped to nothing, an empty-looking pane over 38 healthy rows. The fix is `flex_grow: 1.0` + `min_width: 0` on the text item, which hands it the row's remaining width as a definite size. **Watch item for FVS-R-21:** `chrome::problem_log_line`'s text child has the same shape *without* `flex_grow` and has never been seen rendering a long line — check it when the row builders land, and fold the fact into them.
+  **A paid-for Bevy 0.19 layout fact, found by measuring the live window** (a temporary `uidump` sentinel logged `ComputedNode`s; headless cannot answer layout — no window, every panel is zero-sized): a wrapping `Text` child inside a flex Row resolves its flex base to **zero width** — the text laid out one glyph per line and clipped to nothing, an empty-looking pane over 38 healthy rows. The fix is `flex_grow: 1.0` + `min_width: 0` on the text item, which hands it the row's remaining width as a definite size. **Watch item for FVS-R-37:** `chrome::problem_log_line`'s text child has the same shape *without* `flex_grow` and has never been seen rendering a long line — check it when the row builders land, and fold the fact into them.
   *Shipped:* `chrome::ROW_HOVER`, `tiles::TabBadge` (+`TabLabel` made `pub` for the test), `compose::{split_indent, spawn_line, ROW_PX}`, the readout relocation, three new tests. *Verified:* full crate suite + 99 workspace suites green; four-tab windowed captures inspected against the audit's frames.
 
-- **FVS-R-20 — The chrome vocabulary grows to cover what leaked** · S · ✅ **LANDED 2026-08-17**
+- **FVS-R-36 — The chrome vocabulary grows to cover what leaked** · S · ✅ **LANDED 2026-08-17**
   Every leak in the audit's table now has one name, and **every byte value survived** — verified by hand on the bridged colours and by a four-tab windowed capture pass whose panels are pixel-stable against the pre-sweep frames. New words in chrome: `FOCUS_BG` (same value as `SLOT_BG`, its own name — "this field owns the keyboard" and "this thumbnail is not baked" are different sentences a shared constant would weld), `CHIP_PAD` (the 6/3 pair, previously an undeclared constant at twelve sites in five files; vertical half is `GAP_TIGHT` on purpose, and the doc carries the Fitts click-target argument for not shrinking it), `FIELD_PAD`, `MIN_FIELD_H`, `PANEL_Z` (used by `panel_root` and the cost readout — the z-tie that hid the readout is now a named layer). A **world ink** block takes the two-tab gizmo colours: `GRID_LINE` moved in from `editor.rs` (Compose consumes it cross-tab), and `BOUNDS_LINE` is the one warm grey that was `editor::BOUNDS_LINE` and `tiles::CELLS` at one value under two names — tiles keeps `CELLS` as a role alias *of* the chrome constant, so the value cannot drift while the gizmo palette keeps its vocabulary.
   **Two const-fn bridges instead of transcription:** `chrome::scaled` (Compose's `ENVELOPE_IDLE` is now derived `ACCENT × 0.5`, not a hand-halved copy) and `chrome::ink` (chrome → `[u8; 4]` for the CPU-rastered plots — `anim_plots::{BG, DANGER_INK, SLOT_COLORS[0]}` bit-identical to the old bytes, checked by hand; `GRID` and slots 1–7 stay a deliberately separate categorical palette). `SHOW_W` is now derived `TILES_CONTROLS_W − 2·PAD` instead of a silent 356, `dim_ink()` is called at its one re-inlined site, and the inline restatements of `MARGIN` (tab strip), `PAD` (provenance indent) and the z-index are on their names. Literature check: the corpus has no 2D minimum-target-size result (its Fitts material is VR expansion — `10.48550/arXiv.2308.12515`), so `CHIP_PAD`'s doc argues from Fitts's law generally and claims no number.
-  *Deliberately not unified:* the editor size field's 6/2 padding vs `FIELD_PAD`'s 4/2 — making them one value is a visible change, which is FVS-R-21's `text_field` decision, not this sweep's. *Verified:* crate + 99 workspace suites green; four-tab capture pass inspected.
+  *Deliberately not unified:* the editor size field's 6/2 padding vs `FIELD_PAD`'s 4/2 — making them one value is a visible change, which is FVS-R-37's `text_field` decision, not this sweep's. *Verified:* crate + 99 workspace suites green; four-tab capture pass inspected.
 
-- **FVS-R-21 — The missing builders, and the migration that pays for them** · M · ✅ **LANDED 2026-08-17**
+- **FVS-R-37 — The missing builders, and the migration that pays for them** · M · ✅ **LANDED 2026-08-17**
   chrome.rs:554's "not written yet" comment is deleted because the builders exist with callers. **Four type-role decisions were put to the author first and all four recommendations accepted:** block headings become real `section`s while panel-top list heads get their own 10 px `list_heading` ("MEASURED" and "MAP SIZE (m)" dropped to 9 px with true group margins — two heading styles in one Anim pane was the audit's clearest drift); label/value unified at 10/11 (tiles PLACEMENT joined the majority); the severity rail unified on the tiles dialect (2 px, Warn→ACCENT, Note→DIM); and both padding outliers joined their constants (skip chip → `CHIP_PAD`, map-size fields → `FIELD_PAD`).
-  **The builders**, each written against the call sites that exist rather than speculatively parameterized — several return `EntityCommands` for the caller to finish: `list_heading`, `row_label` + `row_value` (the label-column fact stated once; callers keep their row nodes and third children like the `-> proposed:` suffixes), `chip` (one padding, one permanent 1 px border whose COLOUR asks the ghost question — every chip family now shares sizing, extending FVS-R-19's tag-chip fix), `list_row`, `text_field` (+ the pure `field_text` for the `{raw}_` caret idiom, which also closed a micro-fork where the repaint tinted a missing width TEXT while the rebuild said LABEL), `severity_style` (the words and hues travel together; anim's "worth checking" now wears ACCENT — its middle tier is the vocabulary's Warn, decided by the word it already used) and `severity_rail`. `scroll_list` now returns `EntityCommands`, and the last two hand-copied scroll panes (tiles `DetailPane`, anim `SlotPane`) are on it. `problem_log_line`'s text child gained the `flex_grow: 1.0` the R-19 zero-width discovery predicted it was missing.
+  **The builders**, each written against the call sites that exist rather than speculatively parameterized — several return `EntityCommands` for the caller to finish: `list_heading`, `row_label` + `row_value` (the label-column fact stated once; callers keep their row nodes and third children like the `-> proposed:` suffixes), `chip` (one padding, one permanent 1 px border whose COLOUR asks the ghost question — every chip family now shares sizing, extending FVS-R-35's tag-chip fix), `list_row`, `text_field` (+ the pure `field_text` for the `{raw}_` caret idiom, which also closed a micro-fork where the repaint tinted a missing width TEXT while the rebuild said LABEL), `severity_style` (the words and hues travel together; anim's "worth checking" now wears ACCENT — its middle tier is the vocabulary's Warn, decided by the word it already used) and `severity_rail`. `scroll_list` now returns `EntityCommands`, and the last two hand-copied scroll panes (tiles `DetailPane`, anim `SlotPane`) are on it. `problem_log_line`'s text child gained the `flex_grow: 1.0` the R-35 zero-width discovery predicted it was missing.
   **Deliberately not migrated, each for a stated reason:** the map palette rows (8/4 + thumbnails — their own shape), the tiles pack fold-headers (`HEADER_BG` headers, not selectable rows), the subgrid `header_button` spreadsheet headers, the filter box (placeholder semantics and `CHIP_PAD`, a field-chip hybrid), and the anim slot rows (a three-column table, not label/value). Compose's call sites wait for FVS-R-15/R-22 as planned.
-  *Verified:* crate + 99 workspace suites green; four-tab windowed capture pass inspected — aligned columns, uniform chips, section separation, plots bit-identical. · *Unblocks:* FVS-R-23 (the ratchet now pins a migrated state).
-  **Addendum (same day):** the half of FVS-R-19's hover decision that waited for this builder is delivered — `list_row` carries a `RowRest`, and one `chrome::style_list_rows` system gives every migrated list (tiles library/candidate, anim rigs, compose compositions/members) its `ROW_HOVER` state, selection beating hover as everywhere else. The rebuilt lists' rows are painted inside change-gated rebuilds that never see mouse motion, which is why this could not land before the shared builder did.
+  *Verified:* crate + 99 workspace suites green; four-tab windowed capture pass inspected — aligned columns, uniform chips, section separation, plots bit-identical. · *Unblocks:* FVS-R-39 (the ratchet now pins a migrated state).
+  **Addendum (same day):** the half of FVS-R-35's hover decision that waited for this builder is delivered — `list_row` carries a `RowRest`, and one `chrome::style_list_rows` system gives every migrated list (tiles library/candidate, anim rigs, compose compositions/members) its `ROW_HOVER` state, selection beating hover as everywhere else. The rebuilt lists' rows are painted inside change-gated rebuilds that never see mouse motion, which is why this could not land before the shared builder did.
 
-- **FVS-R-23 — The UI census ratchet** · S · ✅ **LANDED 2026-08-17**
+- **FVS-R-39 — The UI census ratchet** · S · ✅ **LANDED 2026-08-17**
   `tests/chrome_census.rs`, on the census-with-a-test pattern (`keys.rs`, `stages::distinct`, `census_is_the_one_counter.rs`), two rules: **panel ink comes from the palette** — a literal `Color::srgb`/`srgba` outside `chrome.rs` fails without a `// CHROME-OK: <why>` marker on or above it (the `SORT-OK` precedent; variable-argument `srgb_u8(r, g, b)` is not a literal and passes) — and **text stays on the scale** — a literal `from_font_size` off 9/10/11/13/15/18 fails until the new size is a stated type-role decision. The scale is pinned as data, so a size already on it needs no marker and the allowlist stays a list of decisions: exactly **nine** `CHROME-OK`s, all world ink (the editor's slab and three tool tints, the tiles stage's five gizmo colours).
   **Landing it surfaced three more leaks, consolidated rather than allowlisted:** both entry points stated the ClearColor byte-for-byte (now `chrome::VOID`), and both photo booths carried the `SLOT_BG` value as their own `BACKDROP` (now aliases, so "the same backdrop the thumbnails use" is a fact the compiler holds). The test-module scan reuses `compose_is_read_only.rs`'s skip-past rule and carries a floor assertion (>5,000 lines seen) so it can never pass by reading nothing.
   **Mutation-tested before trusting:** a planted off-palette colour and a planted 14 px both failed with named file:line, then were removed. *Verified:* crate suite + **100** workspace suites green; Map-tab capture pixel-stable (this item's only runtime changes are value-identical aliases).
 
 - **FVS-R-15 — Compose becomes read-only, and authoring lives on the Map** · L · ✅ **ALREADY LANDED 2026-08-09 (`345cede`), audited complete 2026-08-17**
-  The backlog item outlived its own work — the "items are often already done" pattern, caught by its done-when ratchet already existing and passing. Audited claim-by-claim at HEAD rather than trusted: `tests/compose_is_read_only.rs` is green (both halves — Compose never writes `compositions.ron`, and the Map is the one that writes it, seen by the scan); `Context::Compose`'s census is exactly the post-rollback seven (walk up/down, arm, list-focus left/right, carousel `O`/`P`) with no seat/flush/turn/drop/paint/`N`/undo binding anywhere in `keys.rs`; the record verb is gone *entirely* — `rebuild` derives the interface live, so there is nothing to record; `M` on the Map is `GroupFromSet` ("keep as a composition"), naming through `chrome::NameBox`; and the pure core the item promised to keep (`seated`, `seat_step`, pinned through `site_tiles.rs`) is intact as functions with no bindings. The current Compose captures (2026-08-17, taken during FVS-R-19/21) show the read-only surface. Nothing was built today; the item is moved, not closed by new work. · *Unblocks:* FVS-R-22, now for real.
+  The backlog item outlived its own work — the "items are often already done" pattern, caught by its done-when ratchet already existing and passing. Audited claim-by-claim at HEAD rather than trusted: `tests/compose_is_read_only.rs` is green (both halves — Compose never writes `compositions.ron`, and the Map is the one that writes it, seen by the scan); `Context::Compose`'s census is exactly the post-rollback seven (walk up/down, arm, list-focus left/right, carousel `O`/`P`) with no seat/flush/turn/drop/paint/`N`/undo binding anywhere in `keys.rs`; the record verb is gone *entirely* — `rebuild` derives the interface live, so there is nothing to record; `M` on the Map is `GroupFromSet` ("keep as a composition"), naming through `chrome::NameBox`; and the pure core the item promised to keep (`seated`, `seat_step`, pinned through `site_tiles.rs`) is intact as functions with no bindings. The current Compose captures (2026-08-17, taken during FVS-R-19/21) show the read-only surface. Nothing was built today; the item is moved, not closed by new work. · *Unblocks:* FVS-R-38 (the Compose re-lay), landed the same day.
 
-- **FVS-R-22 — Compose renders rows, not strings** · M · ✅ **LANDED 2026-08-17**
+- **FVS-R-38 — Compose renders rows, not strings** · M · ✅ **LANDED 2026-08-17**
   The last string-rendered pane joins the row vocabulary — `docs/ui.md` §3.1 applied to the tab it was written about. `rebuild`, `affordances` and `detail` now build a typed `Vec<Line>` (`Section` / `Prose` / `Comp` / `Member` / `Rail`) and one renderer owns each kind's look: headings are real `chrome::section`s (the static panel heading is gone, killing the audit's double-COMPOSITIONS finding — the one live heading carries the `<- arrows` focus affordance), the selected composition and the cursor member are **filled `list_row`s** like every other tab (the ASCII `">*"` gutters are deleted; armed is a separate `*` in ACCENT ink), STALE and FAULTS are `severity_rail` blocks whose inset replaces the hand-indented hex rows, blank-`Text` spacers are gone (section margins carry the rhythm), and remaining prose keeps `spawn_line`'s indent-as-layout so nothing wraps to column zero. **Rows are clickable now** — `CompRow`/`MemberRow` observers drive the same `selected`/`member`/`focus` the arrows do, the pointer as a second way in rather than a second meaning, which is what carrying `Hovered`-shaped rows implied all along. `chrome::section` returns `EntityCommands` so rebuilt sections can carry the despawn marker.
-  The look was put to the author with the captured frame ("mock it before building it"); the call came back "whatever is best long term", and long-term is the shared vocabulary — kept. *Verified:* crate suite + 100 workspace suites green; Compose capture inspected — one heading, filled selection, section rhythm, stage label standing clear. FVS-R-19's tactical indent-spacer stays only for prose rows, as that item's archive note predicted.
+  The look was put to the author with the captured frame ("mock it before building it"); the call came back "whatever is best long term", and long-term is the shared vocabulary — kept. *Verified:* crate suite + 100 workspace suites green; Compose capture inspected — one heading, filled selection, section rhythm, stage label standing clear. FVS-R-35's tactical indent-spacer stays only for prose rows, as that item's archive note predicted.
 
 - **FVS-R-18 — An empty histogram wants to be its own outcome** · S · ✅ **LANDED 2026-08-17**
   §4.6 of `docs/research/2026-08-09-composition-grammar-decisions.md`, pre-registered before any second judged run, and encoded in `examples/expressive_range.rs` in the same change so rerunning the old harness cannot re-make the mistake. **No committed threshold moved** — the amendment defines *evaluability*, which §4 never addressed because every rule silently assumed a populated histogram. Rule 1: a block certifies stability only at or above `N_min = K = 36` in-histogram solves (the uniform one-per-bin expectation, derived from the fixed grid alone — the same committable-without-output property every §4.5 number was chosen for); TV against an under-populated block is not computed, and a sweep that caps out makes no stability claim. Rule 2: an empty final histogram is the terminal outcome **`empty histogram`** — never "converged" — and rows 4a/4b are conditional on the floor, which retires their vacuous-fire/vacuous-pass disagreement instead of adjudicating it.

@@ -242,7 +242,7 @@ fn spawn_compose_panel(mut commands: Commands) {
         crate::chrome::title(p, "COMPOSE");
         // Directly under the title, above everything a working author reads — a problem that has to
         // be scrolled to is a problem that gets missed.
-        crate::chrome::problem_banner(p, Mode::Compose);
+        crate::chrome::problem_banner(p, &[Mode::Compose]);
         crate::chrome::shortcut_hint(p);
         // **No inline key census here, and its absence is the fix.**
         //
@@ -262,11 +262,11 @@ fn spawn_compose_panel(mut commands: Commands) {
         // `scroll_list` except `ScrollArea` — and `bevy_ui_widgets` only scrolls `With<ScrollArea>`,
         // so the longest generated pane in the editor clipped its overflow and the wheel did
         // nothing. `tests/headless.rs::every_pane_that_clips_can_scroll` pins the class.
-        crate::chrome::scroll_list(p, (ComposeBody, crate::notice::CopyPane(Mode::Compose)));
+        crate::chrome::scroll_list(p, (ComposeBody, crate::notice::CopyPane(&[Mode::Compose])));
         // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
         // the panel, and an auto margin in a column absorbs the free space above it — so
         // placed any earlier it pushes every sibling after it down with it.
-        crate::chrome::problem_log(p, Mode::Compose);
+        crate::chrome::problem_log(p, &[Mode::Compose]);
     });
 }
 
@@ -281,9 +281,9 @@ fn cycle_focus(
     keys: Res<keys::Live>,
     input: Res<ButtonInput<KeyCode>>,
 ) {
-    let by = if keys::just_pressed(&input, keys.0, Action::ComposeMemberNext) {
+    let by = if keys::just_pressed(&input, *keys, Action::ComposeMemberNext) {
         1
-    } else if keys::just_pressed(&input, keys.0, Action::ComposeMemberPrev) {
+    } else if keys::just_pressed(&input, *keys, Action::ComposeMemberPrev) {
         -1
     } else {
         return;
@@ -301,9 +301,9 @@ fn walk(
     input: Res<ButtonInput<KeyCode>>,
 ) {
     let step = if input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight) { 5 } else { 1 };
-    let by = if keys::just_pressed(&input, keys.0, Action::ComposeNext) {
+    let by = if keys::just_pressed(&input, *keys, Action::ComposeNext) {
         step
-    } else if keys::just_pressed(&input, keys.0, Action::ComposePrev) {
+    } else if keys::just_pressed(&input, *keys, Action::ComposePrev) {
         -step
     } else {
         return;
@@ -346,7 +346,7 @@ fn arm(
     keys: Res<keys::Live>,
     input: Res<ButtonInput<KeyCode>>,
 ) {
-    if !keys::just_pressed(&input, keys.0, Action::ComposeArm) {
+    if !keys::just_pressed(&input, *keys, Action::ComposeArm) {
         return;
     }
     toggle_arm(&mut state, &project);
@@ -640,6 +640,9 @@ fn member_height(
                 )),
             }
         }
+        // **A hole is not tall.** Nothing stands here yet, so there is no height to report and
+        // inventing one would put a number on empty air. Zero is the honest answer for a position.
+        composition::Body::Slot { .. } => Ok(0.0),
     }
 }
 
@@ -1098,7 +1101,7 @@ fn draw_stage(
         }
         // The seating lattice on its floor — `grid::SNAP`, the same quantum `seated` steps by and the
         // Map snaps to. Drawing anything else here would be the drawn-grid-disagrees-with-the-snap bug
-        // that `GridSpacing`'s note records. The focal group is always at scale 1, so this is the
+        // that `editor::Rung`'s note records. The focal group is always at scale 1, so this is the
         // lattice a seat step actually lands on rather than a scaled picture of one.
         let cells = (
             (size.0 / step).round().max(1.0) as u32,
@@ -1278,8 +1281,8 @@ fn step_carousel(
     mut state: ResMut<ComposeState>,
 ) {
     let by = match (
-        keys::just_pressed(&keys, live.0, Action::CarouselNext),
-        keys::just_pressed(&keys, live.0, Action::CarouselPrev),
+        keys::just_pressed(&keys, *live, Action::CarouselNext),
+        keys::just_pressed(&keys, *live, Action::CarouselPrev),
     ) {
         (true, false) => 1i64,
         (false, true) => -1,
@@ -1663,6 +1666,10 @@ pub fn member_footprint(
                 )),
             }
         }
+        // **A hole takes no floor**, so seating it is bounded by the envelope alone. Refusing here
+        // instead would make a slot unseatable, and the author positions it with the same keys as
+        // everything else; answering a real zero is what lets those keys work on it.
+        composition::Body::Slot { .. } => Ok((0.0, 0.0)),
     }
 }
 
@@ -1672,7 +1679,7 @@ pub fn member_footprint(
 ///
 /// Horizontal steps are [`emerge_core::grid::SNAP`] and vertical ones are `SNAP / divisions` — the
 /// exact quanta [`crate::editor`]'s `snap` and `lift_step` already apply to every `Placed`. A second
-/// quantum for the same act is the mistake `GridSpacing`'s note records: the drawn grid said 1.0 m
+/// quantum for the same act is the mistake `editor::Rung`'s note records: the drawn grid said 1.0 m
 /// while the snap was 0.5 m, and an author cannot see which one a piece obeyed.
 ///
 /// # It refuses rather than clamping
@@ -1796,17 +1803,23 @@ pub fn flushed(
     }
 }
 
-/// **One seat step, metres** — `grid::SNAP / seating_divisions`, 125 mm at the default 4.
+/// **One seat step, metres** — a rung of the project's ladder, 333 mm at the default divisor of 3.
 ///
-/// The **seating** number, never the face one. They were a single `policy.divisions` until the split:
-/// edge tokens belong to a face and seating belongs to a volume, and one number serving both meant a
-/// finer seat cost a re-index of every authored token. [`emerge_core::policy::Policy`] carries the
-/// argument.
+/// The **spatial** number, never the face one. Edge tokens belong to a face and space belongs to a
+/// volume; one number serving both meant a finer seat cost a re-index of every authored token.
+/// [`emerge_core::policy::Policy::face_bands`] carries that argument.
 ///
-/// Seats are the multiples of this measured from the envelope's centre in X/Z and its floor in Y, so
-/// the centre is always a seat and nudging out and back returns exactly.
-pub fn seat_step(project: &Project) -> f32 {
-    emerge_core::grid::SNAP / project.policy.seating_divisions.max(1) as f32
+/// # It is the same ladder the Map places on, and that is the change
+///
+/// This used to be `grid::SNAP / seating_divisions` — a second spatial lattice, dividing the
+/// half-metre while the Map's divided the tile. So "divide a tile into four" produced eight seats,
+/// and a member seated inside a tile sat on a grid no click on the Map could reach. One ladder at two
+/// scales is what lets a tile authored today abut a tile authored last month.
+///
+/// Seats are multiples of this from the envelope's centre in X/Z and its floor in Y, so the centre is
+/// always a seat and nudging out and back returns exactly.
+pub fn seat_step(project: &Project, level: emerge_core::grid::SnapLevel) -> f32 {
+    level.pitch(project.policy.snap_divisor)
 }
 
 /// The authoring grid, rounded the way [`crate::editor`] rounds it. One rule, two callers.
@@ -1845,6 +1858,9 @@ fn describe_member(m: &composition::Member) -> String {
             (id.clone(), notes.join(", "))
         }
         composition::Body::Composition { id } => (format!("[{id}]"), "nested".to_owned()),
+        // Angle brackets rather than square, so a hole never reads as a thing that is there — the
+        // list is scanned, and the one property an author needs at a glance is which rows are real.
+        composition::Body::Slot { accepts } => (format!("<{accepts}>"), "open".to_owned()),
     };
     let where_ = format!("({:.1}, {:.1})", m.at.0, m.at.1);
     let yaw = if m.yaw == 0.0 { String::new() } else { format!(" yaw {:.0}", m.yaw) };

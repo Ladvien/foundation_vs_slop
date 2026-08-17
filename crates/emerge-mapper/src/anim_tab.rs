@@ -264,7 +264,7 @@ fn spawn_panels(mut commands: Commands) {
     .insert(AnimRoot)
     .with_children(|p| {
         crate::chrome::title(p, "ANIMATION");
-        crate::chrome::problem_banner(p, crate::tiles::Mode::Anim);
+        crate::chrome::problem_banner(p, &[crate::tiles::Mode::Anim]);
         crate::chrome::shortcut_hint(p);
         p.spawn((
             Text::new(""),
@@ -282,14 +282,14 @@ fn spawn_panels(mut commands: Commands) {
         // hence the `CopyPane`.
         crate::chrome::scroll_list(
             p,
-            (SlotPane, crate::notice::CopyPane(crate::tiles::Mode::Anim)),
+            (SlotPane, crate::notice::CopyPane(&[crate::tiles::Mode::Anim])),
         )
         .entry::<Node>()
         .and_modify(|mut n| n.margin.top = Val::Px(8.0));
         // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
         // the panel, and an auto margin in a column absorbs the free space above it — so
         // placed any earlier it pushes every sibling after it down with it.
-        crate::chrome::problem_log(p, crate::tiles::Mode::Anim);
+        crate::chrome::problem_log(p, &[crate::tiles::Mode::Anim]);
     });
 
     crate::chrome::panel_root(
@@ -520,7 +520,7 @@ fn adopt_measured(
     mut reports: ResMut<crate::anim_watch::BenchReports>,
     mut generation: ResMut<crate::anim_watch::BenchGeneration>,
 ) {
-    if !crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::AdoptMeasured) {
+    if !crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::AdoptMeasured) {
         return;
     }
     // A failed write REPLACES the message — an author told "adopted" by a program that could not
@@ -550,8 +550,8 @@ fn bench_history_keys(
     mut reports: ResMut<crate::anim_watch::BenchReports>,
     mut generation: ResMut<crate::anim_watch::BenchGeneration>,
 ) {
-    let undo = crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::UndoBench);
-    let redo = crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::RedoBench);
+    let undo = crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::UndoBench);
+    let redo = crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::RedoBench);
     if !undo && !redo {
         return;
     }
@@ -638,11 +638,11 @@ fn move_selection(
         1
     };
     let step = if crate::keys::repeating(
-        &keyboard, live.0, crate::keys::Action::NextRig, &mut repeat, dt,
+        &keyboard, *live, crate::keys::Action::NextRig, &mut repeat, dt,
     ) {
         stride
     } else if crate::keys::repeating(
-        &keyboard, live.0, crate::keys::Action::PrevRig, &mut repeat, dt,
+        &keyboard, *live, crate::keys::Action::PrevRig, &mut repeat, dt,
     ) {
         n - stride
     } else {
@@ -686,7 +686,7 @@ fn check_all_keys(
     mut queue: ResMut<crate::anim_watch::MeasureQueue>,
     reports: Res<crate::anim_watch::BenchReports>,
 ) {
-    if !crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::CheckAllRigs) {
+    if !crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::CheckAllRigs) {
         return;
     }
     // Only what is unmeasured: reports persist for the session and the watcher re-measures on a

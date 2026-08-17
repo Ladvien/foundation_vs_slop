@@ -1,0 +1,83 @@
+{
+  "steps": [
+    {
+      "label": "open the Tiles tab",
+      "goal": "everything below happens there, and the key list changes with the tab. The tab opens a blank tile for you, already named after the kit -- N starts another",
+      "do": [
+        "press 3"
+      ],
+      "checkpoint": "the Tiles tab is open",
+      "recovery": "if a text field has the keyboard the number types into it: press Escape first"
+    },
+    {
+      "label": "bring a floor in",
+      "goal": "this is the step everything else rests on, so it is first: a tile with nothing in it has no size and no edges",
+      "do": [
+        "walk the library with up and down",
+        "press Enter on a floor piece"
+      ],
+      "checkpoint": "the tile has a piece in it",
+      "recovery": "if the list is empty a filter is hiding it: press Backspace until the filter clears"
+    },
+    {
+      "label": "the arrows should now address the piece",
+      "goal": "this is the bug reported from the keyboard on 2026-08-12: after Enter the arrows went on walking the library while a piece sat waiting. A floor fills the tile, so the honest answer is a note about the piece, never a walk of the list",
+      "do": [
+        "press up and down",
+        "the panel answers about the piece -- no travel on a full axis -- not the list"
+      ],
+      "checkpoint": "a piece is in hand",
+      "recovery": "press Escape and then Enter again; if the arrows still walk the list, that is the bug back"
+    },
+    {
+      "label": "bring a wall in as well",
+      "goal": "two pieces is where a tile stops being a mesh with extra steps -- and note that the arrows will not walk the library while a piece is in hand",
+      "do": [
+        "press Escape to put the piece down",
+        "walk to a wall with up and down",
+        "press Enter"
+      ],
+      "checkpoint": "the tile has two pieces",
+      "recovery": "if the arrows move the piece instead of the list, Escape did not land: the panel says which of the two states the tab is in"
+    },
+    {
+      "label": "put the wall against one side",
+      "goal": "an edge is derived from what touches the boundary, so a wall floating in the middle derives nothing",
+      "do": [
+        "hold shift and press an arrow",
+        "the piece goes flush against that side"
+      ],
+      "checkpoint": null,
+      "recovery": "if the panel says nothing moved, the piece already fills that axis and it names the axis that would"
+    },
+    {
+      "label": "is the tile still one cell",
+      "goal": "only a one-cell tile can be a solver prototype, and the size is read off the contents: a piece off centre costs DOUBLE its offset, because the tile is centred on its anchor and has to reach that far both ways",
+      "do": [
+        "read the size line at the top of the panel",
+        "if it is bigger than 1 x 1, the line under it names the piece"
+      ],
+      "checkpoint": "the tile is one cell",
+      "recovery": "focus that piece with , and . then use the PLAIN arrows to bring it back toward the middle -- not shift, which flushes it to the edge and makes the tile bigger"
+    },
+    {
+      "label": "save it",
+      "goal": "so the Map palette has it and the next exercise can place it",
+      "do": [
+        "press Cmd+S"
+      ],
+      "checkpoint": "the tile is saved",
+      "recovery": "an empty tile is refused by name; so is an id the vocabulary does not accept"
+    },
+    {
+      "label": "does it look like a tile",
+      "goal": "the last question no checkpoint can answer, and the reason this exercise has a person in it",
+      "do": [
+        "look at the tile in the 3d view",
+        "say what is wrong with it"
+      ],
+      "checkpoint": null,
+      "recovery": "there is nothing to recover here: an answer of no is the finding"
+    }
+  ]
+}

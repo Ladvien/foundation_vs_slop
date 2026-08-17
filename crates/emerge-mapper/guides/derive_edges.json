@@ -1,0 +1,62 @@
+{
+  "steps": [
+    {
+      "label": "open the Meshes tab",
+      "goal": "a mesh's lattice lives here -- what a tile's edges are eventually derived from",
+      "do": [
+        "press 2"
+      ],
+      "checkpoint": "the Meshes tab is open",
+      "recovery": "if a text field has the keyboard the number types into it: press Escape first"
+    },
+    {
+      "label": "select the floor",
+      "goal": "the floor is the one core piece that declares no edges yet, so what B stages next is measurably new",
+      "do": [
+        "press right to focus the IN LIBRARY list",
+        "walk with up and down -- Shift strides five -- to site/floor"
+      ],
+      "checkpoint": "the selected mesh is",
+      "with": { "id": "site/floor" },
+      "recovery": "if the list is empty a filter is hiding it: press Backspace until the filter clears"
+    },
+    {
+      "label": "derive its edges",
+      "goal": "B rescans the solid and stages a derived edge proposal off the subgrid -- staged, not written",
+      "do": [
+        "press B"
+      ],
+      "checkpoint": "edges are staged",
+      "recovery": "if the panel refuses it names the token and vocab.ron -- that refusal is a designed door, and hitting it is itself worth reporting"
+    },
+    {
+      "label": "read the staged proposal",
+      "goal": "the lattice panel shows what B derived, cell by cell",
+      "do": [
+        "look at the staged tokens on the lattice",
+        "say whether they match the mesh you see"
+      ],
+      "checkpoint": null,
+      "recovery": "there is nothing to recover here: a mismatch is the finding"
+    },
+    {
+      "label": "keep the derived edges",
+      "goal": "Enter writes the tokens onto the mesh's measured lattice -- straight to library.ron, no save step",
+      "do": [
+        "press Enter"
+      ],
+      "checkpoint": "the mesh declares an edge",
+      "with": { "id": "site/floor" },
+      "recovery": "Esc throws the proposal away; if Enter refused, the panel names the undeclared token and where to declare it"
+    },
+    {
+      "label": "what should change about deriving",
+      "goal": "the harvest: this loop is mesh to lattice to tile, and it is the least walked of the three",
+      "do": [
+        "say what you want changed about the scan, the staging, or the door"
+      ],
+      "checkpoint": null,
+      "recovery": "there is nothing to recover here: the answer is the finding"
+    }
+  ]
+}

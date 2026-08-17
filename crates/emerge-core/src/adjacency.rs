@@ -121,6 +121,82 @@ pub fn face(g: &Subgrid, dir: Dir, div: (u32, u32, u32)) -> Vec<Option<&str>> {
     out
 }
 
+/// **What a geometrically-derived edge token is called when the cell is filled.**
+///
+/// The pair below are the whole vocabulary a derivation invents, and they are deliberately about
+/// *space* rather than about meaning: `SubCell::edge`'s own note says these are matched by equality,
+/// so a token has to mean exactly one thing or the seam reports a fault nobody can account for.
+/// "There is mesh against this face here" is that kind of thing; "this is a wall" is not.
+pub const EDGE_SOLID: &str = "solid";
+/// The other half of [`EDGE_SOLID`] — nothing of the mesh reaches this boundary cell.
+///
+/// **Stated rather than left as `None`.** A missing token already means something here: [`face`]
+/// hands back `None` for a cell with no `edge`, and `None` matches only `None`. Deriving *both*
+/// halves is what makes a derived lattice say what it means instead of leaning on an absence that
+/// a hand-authored piece uses for "not decided yet".
+pub const EDGE_OPEN: &str = "open";
+
+/// **Read a piece's boundary occupancy as edge tokens** — sockets inferred from the mesh rather than
+/// typed a cell at a time.
+///
+/// # Why this is possible at all
+///
+/// `SubCell::solid` is already rasterised from the GLB by `import::occupancy`, and its own note
+/// records that **nothing reads it to decide anything** — a ruling from FVS-Q-9, which measured it
+/// against `stack::covers` and closed *no*. It was left as *"the author's confirmation that the
+/// lattice lines up with the mesh"*. This is the thing it turns out to be exactly right for: the
+/// question a socket answers is "what does this face present", and a rasterised boundary answers it
+/// without anybody typing.
+///
+/// Karth & Smith 2019 (`10.1145/3337722.3341845`) record the same move in Bad North, which *"learns
+/// which modules can be adjacent by comparing the vertices at the edges of the 3D model and looking
+/// for matching profiles in the shared plane"*. This compares the rasterised profile instead of the
+/// vertices, because a lattice is what this schema already has and `adjacency` already matches faces
+/// cell for cell. Sandhu et al. 2019 name the stake: configuring a constraint system *"can be even
+/// more difficult than creating assets"*.
+///
+/// # What it returns, and what it does not do
+///
+/// One `(cell, token)` per **boundary** cell — the same cells [`face`] reads, unioned over N/E/S/W —
+/// in ascending cell order, deduplicated. A corner cell belongs to two faces and appears once.
+///
+/// **It proposes; it does not write.** Both tokens have to be declared in the project's `edge` axis
+/// before either can be saved, and `Vocabularies::masks` refuses an undeclared one by name. That
+/// refusal is the point rather than an obstacle: `vocab.rs` calls a closed axis *"the honest reading
+/// of 'this project has not decided what its tiles present'"*, and a derivation that quietly widened
+/// the vocabulary would be deciding that on the author's behalf.
+///
+/// Interior cells are untouched, so a piece can carry derived boundaries and hand-authored insides.
+pub fn derive_edges(g: &Subgrid, div: (u32, u32, u32)) -> Vec<((u32, u32, u32), &'static str)> {
+    let (dx, dy, dz) = div;
+    // A degenerate lattice has no boundary, on the same rule [`face`] follows: answer rather than
+    // panic, because this is reached from a measured mesh and not only from a validated file.
+    if dx == 0 || dy == 0 || dz == 0 {
+        return Vec::new();
+    }
+    let mut out: Vec<(u32, u32, u32)> = Vec::new();
+    for y in 0..dy {
+        // The four faces, exactly as `face` indexes them. A corner is in two of these lists and must
+        // not be proposed twice — hence the sort-and-dedup below rather than four appends.
+        for z in 0..dz {
+            out.push((dx - 1, y, z));
+            out.push((0, y, z));
+        }
+        for x in 0..dx {
+            out.push((x, y, 0));
+            out.push((x, y, dz - 1));
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out.into_iter()
+        .map(|at| {
+            let solid = g.at(at).is_some_and(|c| c.solid);
+            (at, if solid { EDGE_SOLID } else { EDGE_OPEN })
+        })
+        .collect()
+}
+
 /// **A piece's world extent**, and the lattice divisions that span it.
 ///
 /// The two are quoted together because neither means anything alone: a cell index is only a position
@@ -579,6 +655,107 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn solid_grid(cells: &[(u32, u32, u32)]) -> Subgrid {
+        Subgrid {
+            cells: cells
+                .iter()
+                .map(|at| SubCell {
+                    at: *at,
+                    solid: true,
+                    ..SubCell::default()
+                })
+                .collect(),
+        }
+    }
+
+    /// **A derived face says what the mesh presents, cell for cell.**
+    ///
+    /// The wall case, which is the one the site kit is made of: a slab filling the near row of a
+    /// 3 x 1 x 3 lattice. Its N face is all mesh and its S face is all air, and a derivation that
+    /// could not tell those apart would be proposing a token that means nothing.
+    #[test]
+    fn a_derived_edge_reads_the_boundary_the_mesh_actually_fills() {
+        let div = (3, 1, 3);
+        let wall = solid_grid(&[(0, 0, 0), (1, 0, 0), (2, 0, 0)]);
+        let derived = derive_edges(&wall, div);
+
+        let token_at = |x, y, z| {
+            derived
+                .iter()
+                .find(|(at, _)| *at == (x, y, z))
+                .map(|(_, t)| *t)
+        };
+        // The N face (z = 0) is the filled row.
+        assert_eq!(token_at(0, 0, 0), Some(EDGE_SOLID));
+        assert_eq!(token_at(1, 0, 0), Some(EDGE_SOLID));
+        assert_eq!(token_at(2, 0, 0), Some(EDGE_SOLID));
+        // The S face (z = 2) is air.
+        assert_eq!(token_at(0, 0, 2), Some(EDGE_OPEN));
+        assert_eq!(token_at(2, 0, 2), Some(EDGE_OPEN));
+
+        // **The middle of the lattice is not a boundary and is not proposed**, so a derivation can
+        // sit on top of hand-authored interior cells without touching them.
+        assert_eq!(token_at(1, 0, 1), None, "the interior cell must not be proposed");
+    }
+
+    /// **Every boundary cell once, in a stable order** — a corner is on two faces and must not be
+    /// proposed twice, or applying the result writes one cell then writes it again.
+    #[test]
+    fn a_derivation_proposes_each_boundary_cell_exactly_once() {
+        let div = (3, 2, 3);
+        let derived = derive_edges(&solid_grid(&[]), div);
+
+        let cells: Vec<(u32, u32, u32)> = derived.iter().map(|(at, _)| *at).collect();
+        let mut sorted = cells.clone();
+        sorted.sort_unstable();
+        assert_eq!(cells, sorted, "ascending, so two machines agree");
+        let mut deduped = sorted.clone();
+        deduped.dedup();
+        assert_eq!(cells, deduped, "a corner belongs to two faces and appears once");
+
+        // 3x3 per layer is 9 cells, of which 1 is interior — 8 boundary, twice for two layers.
+        assert_eq!(cells.len(), 16, "every boundary cell of both layers: {cells:?}");
+        // An empty lattice is all air, so every proposal is the open token — never `None`, which is
+        // what a hand-authored "not decided yet" looks like.
+        assert!(derived.iter().all(|(_, t)| *t == EDGE_OPEN));
+    }
+
+    /// A lattice with no cells on an axis has no boundary, and answers rather than panicking — the
+    /// same rule [`face`] follows, and for the same reason: this is reached from a measured mesh.
+    #[test]
+    fn a_degenerate_lattice_has_nothing_to_derive() {
+        assert!(derive_edges(&solid_grid(&[]), (0, 1, 1)).is_empty());
+        assert!(derive_edges(&solid_grid(&[]), (1, 1, 0)).is_empty());
+    }
+
+    /// **The derived tokens round-trip through `face`**, which is the whole point: a derivation the
+    /// matcher cannot read is a derivation that decides nothing.
+    #[test]
+    fn what_is_derived_is_what_the_matcher_reads() {
+        let div = (2, 1, 2);
+        let mut g = solid_grid(&[(0, 0, 0), (1, 0, 0)]);
+        for (at, token) in derive_edges(&g, div) {
+            match g.cells.iter_mut().find(|c| c.at == at) {
+                Some(c) => c.edge = Some(token.to_owned()),
+                None => g.cells.push(SubCell {
+                    at,
+                    edge: Some(token.to_owned()),
+                    ..SubCell::default()
+                }),
+            }
+        }
+        assert_eq!(
+            face(&g, N, div),
+            vec![Some(EDGE_SOLID), Some(EDGE_SOLID)],
+            "the filled row reads as solid from the north"
+        );
+        assert_eq!(
+            face(&g, S, div),
+            vec![Some(EDGE_OPEN), Some(EDGE_OPEN)],
+            "and the empty row reads as open from the south"
+        );
     }
 
     /// **The inert property, and it must hold without a branch.** Every shipped descriptor has an

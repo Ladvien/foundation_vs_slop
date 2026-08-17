@@ -1,0 +1,20 @@
+[package]
+name = "deterministic_solver"
+version = "0.1.0"
+edition = "2024"
+description = "A Boolean satisfiability back-end that answers the same way every run, on every machine: no clock, no threads, no entropy, and a give-up budget counted in conflicts rather than seconds."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Ladvien/deterministic_solver"
+keywords = ["sat", "solver", "deterministic", "reproducible", "cnf"]
+categories = ["algorithms", "science"]
+publish = false
+
+# **Explicit versions, not `workspace = true`.** This crate is a leaf and is meant to be the thing
+# other crates depend on without inheriting anything, so its manifest has to stand on its own — the
+# same reasoning `det_rng`'s manifest gives.
+[dependencies]
+# MiniSat's algorithm, in Rust, consulting no clock and no entropy source. Chosen over `varisat`
+# (32 transitive crates, no resource limit at all) and `splr` (returns `TimeOut` off `Instant::now()`,
+# and the timeout cannot be disabled) because those two decide *whether they answer* by something
+# other than the problem. See `docs/research/2026-08-10-solver-choice.md` for the measurements.
+batsat = "0.6"

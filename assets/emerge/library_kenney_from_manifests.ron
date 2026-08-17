@@ -23,6 +23,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -63,6 +64,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -100,6 +102,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [
@@ -135,6 +138,7 @@
             clearance: [],
             offers: (
                 surfaces: [],
+                faces: [],
                 sockets: [],
             ),
             kind: [

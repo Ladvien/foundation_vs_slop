@@ -1,0 +1,97 @@
+{
+  "steps": [
+    {
+      "label": "open the Tiles tab with the site kit",
+      "goal": "the site kit is the architectural set, and it is where the solver's content has to come from",
+      "do": [
+        "press 3"
+      ],
+      "checkpoint": "the Tiles tab is open",
+      "recovery": "if the palette shows fridges and beds you are on the furniture kit: restart with --kit site"
+    },
+    {
+      "label": "start the corner tile",
+      "goal": "a corner is where two solid sides meet -- without it the solver can only make corridors",
+      "do": [
+        "press N for a new tile"
+      ],
+      "checkpoint": "the open tile is unsaved",
+      "recovery": "if nothing changes you are not on the Tiles tab: press 3 first"
+    },
+    {
+      "label": "build the corner tile",
+      "goal": "floor plus TWO walls at right angles. The second wall needs R to turn it a quarter before you flush it.",
+      "do": [
+        "bring site/floor in with Enter",
+        "Escape, walk to site/wall, Enter, then shift-arrow it flush",
+        "Enter again for a second wall, press R to turn it, then shift-arrow it flush to an adjacent side"
+      ],
+      "checkpoint": "the tile has turns",
+      "with": {
+        "n": 2
+      },
+      "recovery": "if the size line grows past 1 x 1, the line under it names the piece that did it -- plain arrows bring it back toward the middle"
+    },
+    {
+      "label": "save the corner tile",
+      "goal": "so the kit gains it and the solver can place it",
+      "do": [
+        "press Cmd+S"
+      ],
+      "checkpoint": "the kit has tiles",
+      "with": {
+        "n": 3
+      },
+      "recovery": "an empty tile is refused by name, and so is an id the vocabulary rejects"
+    },
+    {
+      "label": "start the low wall tile",
+      "goal": "a knee-high divider separates space without blocking sight, which a solver cannot express any other way",
+      "do": [
+        "press N for a new tile"
+      ],
+      "checkpoint": "the open tile is unsaved",
+      "recovery": "if nothing changes you are not on the Tiles tab: press 3 first"
+    },
+    {
+      "label": "build the low wall tile",
+      "goal": "floor plus site/wall_low, flushed to one side. Same shape as the wall tile, different piece.",
+      "do": [
+        "bring site/floor in with Enter",
+        "Escape, walk to site/wall_low, Enter",
+        "shift-arrow it flush against a side"
+      ],
+      "checkpoint": "the tile contains",
+      "with": {
+        "ids": [
+          "site/wall_low"
+        ],
+        "n": 1
+      },
+      "recovery": "site/wall_low is 0.20 x 1.00 and flushes exactly the way site/wall does"
+    },
+    {
+      "label": "save the low wall tile",
+      "goal": "so the kit gains it and the solver can place it",
+      "do": [
+        "press Cmd+S"
+      ],
+      "checkpoint": "the kit has tiles",
+      "with": {
+        "n": 4
+      },
+      "recovery": "an empty tile is refused by name, and so is an id the vocabulary rejects"
+    },
+    {
+      "label": "do these four make a room",
+      "goal": "the last question no checkpoint can answer, and the one that decides whether this kit is worth extending",
+      "do": [
+        "press 1 for the Map tab",
+        "fill a region from the composed tiles with Cmd+G",
+        "say whether what comes out looks like architecture"
+      ],
+      "checkpoint": null,
+      "recovery": "there is nothing to recover here -- an answer of no is the finding, and names the tile that is missing"
+    }
+  ]
+}

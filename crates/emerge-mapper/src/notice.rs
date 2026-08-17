@@ -17,7 +17,7 @@
 //!
 //! `bevy_ui` has no selectable text. A refusal an author cannot get out of the window is one that
 //! has to be retyped out of a screenshot before anybody else can help with it — so the verb belongs
-//! wherever a refusal can happen, which is now every tab. It was `Context::Tiles`, copying that
+//! wherever a refusal can happen, which is now every tab. It was `Context::Meshes`, copying that
 //! tab's detail pane.
 
 use bevy::prelude::*;
@@ -25,13 +25,18 @@ use bevy::prelude::*;
 use crate::keys::{self, Action};
 use crate::tiles::Mode;
 
-/// **A panel whose text is worth copying**, and which tab it belongs to.
+/// **A panel whose text is worth copying**, and which tabs it belongs to.
 ///
-/// The tab is on the marker rather than inferred from the panel's visibility, because a hidden
+/// The tabs are on the marker rather than inferred from the panel's visibility, because a hidden
 /// panel's `Text` still exists — `chrome::panel_root` hides with `Display::None`, which keeps the
-/// entities. Asking "is this node drawn" would mean walking ancestors; naming the tab is one field.
+/// entities. Asking "is this node drawn" would mean walking ancestors; naming the tabs is one field.
+///
+/// A list for [`crate::chrome::ProblemBanner`]'s reason: the Meshes and Tiles tabs share one detail
+/// pane, and tagging it `Meshes` made `Cmd+C` on Tiles harvest the status lines and none of the tile
+/// — no id, no envelope, no member list — in an editor where `bevy_ui` offers no other way to get
+/// that text out of the window.
 #[derive(Component, Clone, Copy)]
-pub struct CopyPane(pub Mode);
+pub struct CopyPane(pub &'static [Mode]);
 
 /// What the notice panels currently show, so they are rebuilt on a change and not on a frame.
 ///
@@ -84,17 +89,29 @@ fn paint_notices(
     let tab = *mode;
     let status = match tab {
         Mode::Map => &editor.status,
-        Mode::Tiles => &import.status,
+        // **Both tabs report through `ImportState`.** The Tiles tab's own verbs write there too —
+        // one status line for one file's worth of work, rather than a second channel to keep in step.
+        Mode::Meshes | Mode::Tiles => &import.status,
         Mode::Anim => &bench.status,
         Mode::Compose => &compose.status,
     };
 
     // The banner is a `Text` write guarded on its own content, so it is cheap every frame.
     for (mut node, mut text, banner) in banners.iter_mut() {
-        if banner.0 != tab {
+        // **A banner that is not the live tab's is hidden, not skipped.** Skipping was safe only
+        // while every banner sat in a panel `apply_mode` hid for it — the Meshes and Tiles tabs now
+        // share one panel, so a refusal raised on one would go on showing after switching to the
+        // other. Hiding costs a `Display` compare and stops the panel's own visibility being
+        // load-bearing for whether a stale line is on screen.
+        let mine = banner.0.contains(&tab);
+        let want_display =
+            if mine && status.has_problem() { Display::Flex } else { Display::None };
+        if !mine {
+            if node.display != want_display {
+                node.display = want_display;
+            }
             continue;
         }
-        let want_display = if status.has_problem() { Display::Flex } else { Display::None };
         if node.display != want_display {
             node.display = want_display;
         }
@@ -131,16 +148,20 @@ fn paint_notices(
         commands.entity(e).despawn();
     }
     for (entity, log) in &logs {
-        if log.0 != tab {
-            continue;
-        }
+        // **A log that is not the live tab's is hidden, not skipped** — the banner's rule above, for
+        // the same reason and with the same cost. The despawn just above takes every log line in the
+        // editor, so a log left `Display::Flex` by an earlier tab is an empty bordered box where the
+        // problem list used to be. Skipping made that unreachable only while each log sat in a panel
+        // of its own.
+        let mine = log.0.contains(&tab);
         if let Ok(mut node) = nodes.get_mut(entity) {
-            let display = if want.is_empty() { Display::None } else { Display::Flex };
+            let display =
+                if mine && !want.is_empty() { Display::Flex } else { Display::None };
             if node.display != display {
                 node.display = display;
             }
         }
-        if want.is_empty() {
+        if !mine || want.is_empty() {
             continue;
         }
         commands.entity(entity).with_children(|p| {
@@ -197,7 +218,7 @@ fn harvest(
         ));
     }
     for (entity, pane) in panes {
-        if pane.0 == tab {
+        if pane.0.contains(&tab) {
             collect_text(entity, children, texts, &mut lines);
         }
     }
@@ -236,12 +257,12 @@ fn dismiss(
     mut bench: ResMut<crate::anim_tab::BenchState>,
     mut compose: ResMut<crate::compose::ComposeState>,
 ) {
-    if !keys::just_pressed(&keyboard, live.0, Action::Cancel) {
+    if !keys::just_pressed(&keyboard, *live, Action::Cancel) {
         return;
     }
     match *mode {
         Mode::Map => {}
-        Mode::Tiles => import.status.dismiss(),
+        Mode::Meshes | Mode::Tiles => import.status.dismiss(),
         Mode::Anim => bench.status.dismiss(),
         Mode::Compose => compose.status.dismiss(),
     }
@@ -272,7 +293,7 @@ fn copy_out(
     children: Query<&Children>,
     texts: Query<&Text>,
 ) {
-    if !keys::just_pressed(&keyboard, live.0, Action::CopyInfo) {
+    if !keys::just_pressed(&keyboard, *live, Action::CopyInfo) {
         return;
     }
     let tab = *mode;
@@ -281,7 +302,7 @@ fn copy_out(
     // to one function and returned from it without borrowing all four for the rest of the system.
     let status: &mut crate::chrome::Status = match tab {
         Mode::Map => &mut editor.status,
-        Mode::Tiles => &mut import.status,
+        Mode::Meshes | Mode::Tiles => &mut import.status,
         Mode::Anim => &mut bench.status,
         Mode::Compose => &mut compose.status,
     };

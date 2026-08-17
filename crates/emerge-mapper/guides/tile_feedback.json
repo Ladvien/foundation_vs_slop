@@ -1,0 +1,137 @@
+{
+  "steps": [
+    {
+      "label": "open the Tiles tab",
+      "goal": "tile authoring lives there, and the key list changes with the tab. The tab opens a blank tile for you, already named after the kit",
+      "do": [
+        "press 3"
+      ],
+      "checkpoint": "the Tiles tab is open",
+      "recovery": "if a text field has the keyboard the number types into it: press Escape first"
+    },
+    {
+      "label": "bring a floor in",
+      "goal": "a tile with nothing in it has no size and no edges, so the floor comes first. It fills the tile, so the arrows have nowhere to take it -- movement starts with the wall",
+      "do": [
+        "walk the library with up and down -- Shift strides five",
+        "press Enter on site/floor"
+      ],
+      "checkpoint": "the tile has a piece in it",
+      "recovery": "if the list is empty a filter is hiding it: press Backspace until the filter clears"
+    },
+    {
+      "label": "the piece should be in hand",
+      "goal": "Enter both drops the piece and hands it to the arrows, no Space needed -- and the held piece is slightly brighter than a set one, resolving to its true colours when you press Escape",
+      "do": [
+        "nothing to press",
+        "look: the held piece carries a subtle brightness lift"
+      ],
+      "checkpoint": "a piece is in hand",
+      "recovery": "press Escape and then Enter again; if the arrows still walk the list, that is the bug back"
+    },
+    {
+      "label": "bring a wall in as well",
+      "goal": "two pieces is where a tile stops being a mesh with extra steps -- and the arrows will not walk the library while a piece is in hand",
+      "do": [
+        "press Escape to put the floor down",
+        "walk to site/wall -- the plain wall",
+        "press Enter"
+      ],
+      "checkpoint": "the tile has two pieces",
+      "recovery": "if the arrows move the piece instead of the list, Escape did not land: the panel says which of the two states the tab is in"
+    },
+    {
+      "label": "walk the wall with the arrows and J",
+      "goal": "new: the arrows walk stops on the wall's own span, so centre and flush are always reachable. At the top of the ladder one press from centre lands flush; J divides the span in thirds, then ninths, then wraps back",
+      "do": [
+        "press each of the four arrows and watch where it lands",
+        "press Q or E to turn the view, then an arrow again",
+        "press J and nudge, then J again, then once more to wrap"
+      ],
+      "checkpoint": null,
+      "recovery": "if the arrows walk the list instead, the piece is not in hand: press Space to take it"
+    },
+    {
+      "label": "put the wall against one side",
+      "goal": "Shift+arrow is still the flush verb, and it lands on the same outermost stop the plain arrows end at -- one coordinate system, not two",
+      "do": [
+        "hold Shift and press an arrow",
+        "the wall goes hard against that side"
+      ],
+      "checkpoint": null,
+      "recovery": "if the panel says nothing moved, the piece already fills that axis and it names the axis that would"
+    },
+    {
+      "label": "walk it back to the centre",
+      "goal": "the return trip that used to be impossible: flush is a stop on the ladder now, so plain presses walk it back and the centre is exactly one ladder away",
+      "do": [
+        "press the plain arrow that points back toward the middle",
+        "at the top of the ladder one press lands dead centre",
+        "press J first to come back in thirds instead"
+      ],
+      "checkpoint": null,
+      "recovery": "if it overshoots or lands beside a drawn line, say so -- the drawn stops ARE the reachable positions, and a mismatch is the finding"
+    },
+    {
+      "label": "is the tile still one cell",
+      "goal": "only a one-cell tile can be a solver prototype, and the size is read off the contents: a piece off centre costs DOUBLE its offset, because the tile is centred on its anchor and has to reach that far both ways",
+      "do": [
+        "read the size line at the top of the panel",
+        "if it is bigger than 1 x 1, the line under it names the piece"
+      ],
+      "checkpoint": "the tile is one cell",
+      "recovery": "focus that piece with , and . then walk it back toward the middle with the plain arrows"
+    },
+    {
+      "label": "save it",
+      "goal": "so the kit gains it and the Map palette can place it",
+      "do": [
+        "press Cmd+S"
+      ],
+      "checkpoint": "the tile is saved",
+      "recovery": "an empty tile is refused by name; so is an id the vocabulary does not accept"
+    },
+    {
+      "label": "reopen tile_4 from the kit",
+      "goal": "the kit is a tab on the list and reopening lands you editing -- and tile_4 ships wrong: its low wall sits dead centre, so all four edges derive open and the solver treats it as a second floor tile",
+      "do": [
+        "press Escape to put the piece down",
+        "press right to show the KIT tab",
+        "walk down to site/tile_4",
+        "press right again to open it"
+      ],
+      "checkpoint": "the tile contains",
+      "with": { "ids": ["site/wall_low"], "n": 1 },
+      "recovery": "Escape backs out of the kit list; if right does nothing, you are still holding a piece"
+    },
+    {
+      "label": "flush the low wall against a side",
+      "goal": "this is the real repair: once the wall touches the boundary, that face derives closed and tile_4 stops reading as a second floor tile",
+      "do": [
+        "press , or . until the low wall is the focused piece",
+        "hold Shift and press an arrow -- or use the plain arrow, flush is the last stop"
+      ],
+      "checkpoint": "the open tile is unsaved",
+      "recovery": "if nothing moved, it is already flush on that axis: pick another side"
+    },
+    {
+      "label": "save the repair",
+      "goal": "Cmd+S writes over the committed tile_4, and the kit leaves this exercise one tile better than it shipped",
+      "do": [
+        "press Cmd+S"
+      ],
+      "checkpoint": "the tile is saved",
+      "recovery": "if the save is refused the panel names why -- the id is already good, so it will be the members"
+    },
+    {
+      "label": "does it read as a tile",
+      "goal": "the last question no checkpoint can answer, and the reason this exercise has a person in it",
+      "do": [
+        "look at tile_4 in the 3d view",
+        "then say what you want changed about tile creation -- keys, panels, flow, anything"
+      ],
+      "checkpoint": null,
+      "recovery": "there is nothing to recover here: an answer of no is the finding"
+    }
+  ]
+}

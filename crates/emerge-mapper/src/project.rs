@@ -156,6 +156,15 @@ impl Project {
             .resolve(&vocab)
             .map_err(|e| format!("{}: {e}", library_path.display()))?;
 
+        // **And the holes, in the same breath.** A slot's `accepts` token is checked here rather than
+        // in `composition::validate` because that runs inside the project loader, which reads the
+        // library and the policy and never opens the vocabulary — so this is the first place both
+        // halves exist at once. Same rule as every other token: an invented one is refused at open,
+        // naming the composition, the member and the axis.
+        vocab
+            .check_slots(&compositions.compositions)
+            .map_err(|e| format!("{}: {e}", emerge_dir.join("compositions.ron").display()))?;
+
         let map_path = emerge_dir.join(naming::map_file_name(&name));
         // A map that does not exist yet is a new map, not an error: this is how an author starts one.
         // A map that exists and does not parse IS an error — silently replacing it with an empty one
@@ -291,6 +300,51 @@ impl Project {
                     .map_or(0, |g| emerge_core::import::triangles(&g))
             })
             .collect();
+    }
+
+    /// **The one door to `compositions.ron`.** Insert or replace by id, sort, validate the whole set,
+    /// write atomically, and adopt only on success.
+    ///
+    /// # Why it lives here and not on a tab
+    ///
+    /// The invariant FVS-R-15 bought is **one writer** — it was spent making the Compose tab read-only
+    /// while the Map authored, and `tests/compose_is_read_only.rs` held the line by naming the tabs.
+    /// Naming tabs was always a proxy: what mattered is that one function opens the file. Now that
+    /// tiles are assembled on the Tiles tab *and* captured from a box on the Map, two tabs legitimately
+    /// author compositions, and a per-tab rule would either forbid the feature or be quietly widened
+    /// until it forbade nothing.
+    ///
+    /// So the rule moves to where it was always aimed: **`project.rs` is the only module that names
+    /// the file**, and every author-facing verb comes through here. That is the same shape
+    /// `tiles::commit_measured` has for `library.ron`, and the ratchet now asserts it directly.
+    ///
+    /// # Validated as a set, before anything is written
+    ///
+    /// `composition::validate` is whole-set because containment is a set property — a nested group
+    /// that stops existing breaks its parent, not itself. Validating the *proposal* rather than the
+    /// live set is what makes a refusal leave the project exactly as it was.
+    pub fn commit_composition(
+        &mut self,
+        comp: emerge_core::composition::Composition,
+    ) -> Result<(), String> {
+        let mut proposed = self.compositions.clone();
+        match proposed.compositions.iter().position(|c| c.id == comp.id) {
+            Some(i) => proposed.compositions[i] = comp,
+            None => proposed.compositions.push(comp),
+        }
+        // Canonical order, so one set has one encoding and a diff shows what changed rather than
+        // where it was inserted.
+        proposed.compositions.sort_by(|a, b| a.id.cmp(&b.id));
+        emerge_core::composition::validate(&proposed.compositions, &self.library)?;
+
+        let path = self
+            .emerge_dir
+            .join(emerge_core::composition::Compositions::FILE);
+        let text = proposed.to_ron()?;
+        emerge_core::ron_surgery::save_atomic(&path, &text)
+            .map_err(|e| format!("NOT WRITTEN: {e}"))?;
+        self.compositions = proposed;
+        Ok(())
     }
 }
 

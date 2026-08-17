@@ -502,6 +502,7 @@ mod tests {
             },
             offers: Offers {
                 surfaces: vec!["worktop".into()],
+                faces: Vec::new(),
                 sockets: (0..n)
                     .map(|i| Socket {
                         id: format!("seat_{i}"),

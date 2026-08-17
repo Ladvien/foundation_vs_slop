@@ -45,17 +45,35 @@ pub fn needs_surface(d: &Descriptor) -> Option<&str> {
     }
 }
 
-/// Whether `host` offers the surface `guest` asks for.
+/// The face class a descriptor needs to be fixed to, and how far up it, if it needs one.
+///
+/// Its own function rather than a second return from [`needs_surface`]: the two answer different
+/// questions and exactly one of them can be true of a piece, so a caller that wants "does this need a
+/// host at all" asks both and reads better for it.
+pub fn needs_face(d: &Descriptor) -> Option<(&str, f32)> {
+    match &d.mount {
+        Some(Mount::OnFace { class, height }) => Some((class.as_str(), *height)),
+        _ => None,
+    }
+}
+
+/// Whether `host` offers the surface **or the face** `guest` asks for.
 ///
 /// String comparison here rather than the resolved masks because the editor works with a candidate
 /// that has not been through `Vocabularies::masks` yet. The vocabulary check still happens — at
 /// library load, where a misspelled class is refused for everyone at once rather than by failing to
 /// stack.
+///
+/// The two lists are checked separately rather than merged: a class is a class, but reading a top as
+/// a face would put a sconce on a wall's roof.
 pub fn offers_for(host: &Descriptor, guest: &Descriptor) -> bool {
-    match needs_surface(guest) {
-        Some(class) => host.offers.surfaces.iter().any(|s| s == class),
-        None => false,
+    if let Some(class) = needs_surface(guest) {
+        return host.offers.surfaces.iter().any(|s| s == class);
     }
+    if let Some((class, _)) = needs_face(guest) {
+        return host.offers.faces.iter().any(|s| s == class);
+    }
+    false
 }
 
 /// Whether a point in map space falls inside a placed piece's footprint.
@@ -161,16 +179,30 @@ fn resolve_one(
         )
     })?;
 
-    // The surface underneath, resolved first — the only part of the datum that depends on another
-    // placement, and so the only part that can recurse.
+    // The host, resolved first — the only part of the datum that depends on another placement, and so
+    // the only part that can recurse. **Two mounts arrive here and they differ only in how far above
+    // the host they land**: a top answers with the host's own height, a face with a distance measured
+    // up it. Sharing the lookup is what makes "the host is gone" one error rather than two.
     let host_top = match &d.mount {
-        Some(Mount::OnSurface { class }) => {
+        Some(Mount::OnSurface { class }) | Some(Mount::OnFace { class, .. }) => {
+            let (what, fix) = if needs_face(d).is_some() {
+                (
+                    "is fixed to a",
+                    "put it on a piece that offers the `{class}` face, or change the descriptor's \
+                     layer",
+                )
+            } else {
+                (
+                    "mounts on a",
+                    "Placing it at floor level is how a lamp ends up inside the floor — put it on a \
+                     piece that offers `{class}`, or change the descriptor's layer",
+                )
+            };
             let host_id = p.on.as_ref().ok_or_else(|| {
                 format!(
-                    "map: placement `{}` mounts on a `{class}` surface but records nothing under it. \
-                     Placing it at floor level is how a lamp ends up inside the floor — put it on a \
-                     piece that offers `{class}`, or change the descriptor's layer.",
-                    p.id
+                    "map: placement `{}` {what} `{class}` and records nothing under it. {}",
+                    p.id,
+                    fix.replace("{class}", class)
                 )
             })?;
             let hi = map
@@ -190,7 +222,18 @@ fn resolve_one(
                     host.id, host.descriptor
                 )
             })?;
-            let lift = surface_of(host_d, d, &host.id, &p.id)?;
+            // A top lifts by the host's whole height; a face by however far up it the fixture is
+            // fixed. Both are measured from the host's own resolved Y, which is what makes either
+            // one follow the host when it moves.
+            let lift = match needs_face(d) {
+                Some((_, height)) => {
+                    if !offers_for(host_d, d) {
+                        return Err(face_refusal(host_d, d, &host.id, &p.id));
+                    }
+                    height
+                }
+                None => surface_of(host_d, d, &host.id, &p.id)?,
+            };
             path.push(i);
             let host_y = resolve_one(map, library, hi, out, done, path)?;
             path.pop();
@@ -205,6 +248,24 @@ fn resolve_one(
     out[i] = datum(map, d, host_top, &p.id)? + p.lift;
     done[i] = true;
     Ok(out[i])
+}
+
+/// Why a host cannot carry this fixture, naming what it does offer.
+///
+/// Its own function so the message reads the same shape as [`surface_of`]'s, which is the one an
+/// author has already met — the difference between "cannot hold it up" and "has no such face" is the
+/// only part that should differ.
+fn face_refusal(host_d: &Descriptor, guest: &Descriptor, host_id: &str, guest_id: &str) -> String {
+    let class = needs_face(guest).map(|(c, _)| c).unwrap_or("");
+    format!(
+        "map: `{guest_id}` is fixed to a `{class}` face and rests on `{host_id}`, which presents {}. \
+         A piece that does not present the face cannot carry it.",
+        if host_d.offers.faces.is_empty() {
+            "none".to_owned()
+        } else {
+            host_d.offers.faces.join(", ")
+        }
+    )
 }
 
 /// How far above its own origin a host presents its surface — after checking it is entitled to.
@@ -256,6 +317,11 @@ pub fn datum(
         Some(Mount::OnCeiling) => map.origin.1 + map.bounds.1,
         Some(Mount::OnSurface { class }) => host_top.ok_or_else(|| {
             format!("`{who}` needs a `{class}` surface and there is none under it")
+        })?,
+        // Already the host's base plus the height up its face — `resolve_one` did the addition,
+        // because only it can resolve another placement.
+        Some(Mount::OnFace { class, .. }) => host_top.ok_or_else(|| {
+            format!("`{who}` is fixed to a `{class}` face and there is nothing presenting one")
         })?,
         // A decal lies on the plane it names. The floor and the ceiling are the map's to state; a
         // wall's height is nobody's, so `DecalHost::Wall` carries it — this used to be the one arm
@@ -357,6 +423,14 @@ fn same_layer(a: &Descriptor, a_on: Option<&str>, b: &Descriptor, b_on: Option<&
             (Some(x), Some(y)) => x == y,
             _ => false,
         },
+        // **Two fixtures contest a face only if it is the same face of the same host, at the same
+        // height.** Host alone is too coarse — a corridor wall carries a sconce on each side and they
+        // never meet — and the class is what tells the two sides apart. Height too, because a sconce
+        // and a socket on one wall are the ordinary case, not a collision.
+        (
+            Some(OnFace { class: c1, height: h1 }),
+            Some(OnFace { class: c2, height: h2 }),
+        ) => c1 == c2 && (h1 - h2).abs() < 1e-3 && matches!((a_on, b_on), (Some(x), Some(y)) if x == y),
         _ => false,
     }
 }
@@ -585,6 +659,7 @@ mod tests {
             Mount::OnSurface { class: "worktop".to_owned() },
             Mount::Decal { on: DecalHost::Floor },
             Mount::Tiled,
+            Mount::OnFace { class: "wall-inner".to_owned(), height: 1.8 },
         ];
 
         for mount in every {
@@ -599,6 +674,7 @@ mod tests {
                 | Mount::OnCeiling
                 | Mount::InOpening { .. }
                 | Mount::OnSurface { .. }
+                | Mount::OnFace { .. }
                 | Mount::Tiled => (false, ""),
             };
 
@@ -608,8 +684,9 @@ mod tests {
                 mount: Some(mount.clone()),
                 ..Descriptor::default()
             };
-            // `OnSurface` contests only pieces on the SAME host, so the probe names one.
-            let host = matches!(mount, Mount::OnSurface { .. }).then_some("table@1");
+            // `OnSurface` and `OnFace` contest only pieces on the SAME host, so the probe names one.
+            let host = matches!(mount, Mount::OnSurface { .. } | Mount::OnFace { .. })
+                .then_some("table@1");
             let contests = same_layer(&d, host, &d, host);
 
             if exempt {
@@ -642,6 +719,7 @@ mod tests {
             },
             offers: Offers {
                 surfaces: vec!["worktop".into()],
+                faces: Vec::new(),
                 sockets: Vec::new(),
             },
             mount: Some(Mount::OnFloor),
@@ -829,6 +907,81 @@ mod tests {
         let y = resolve_y(&m, &lib(vec![table(), lamp()])).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(y[0], 0.0);
         assert_eq!(y[1], 0.8);
+    }
+
+    /// A wall that presents an inner face, and a sconce fixed 1.8 m up it.
+    fn wall() -> Descriptor {
+        Descriptor {
+            id: "wall".into(),
+            extent: Extent { footprint: Some((0.1, 1.0)), height: Some(2.4) },
+            offers: Offers {
+                surfaces: Vec::new(),
+                faces: vec!["wall-inner".into()],
+                sockets: Vec::new(),
+            },
+            mount: Some(Mount::OnFloor),
+            ..Descriptor::default()
+        }
+    }
+
+    fn sconce() -> Descriptor {
+        Descriptor {
+            id: "sconce".into(),
+            extent: Extent { footprint: Some((0.2, 0.2)), height: Some(0.3) },
+            mount: Some(Mount::OnFace { class: "wall-inner".into(), height: 1.8 }),
+            ..Descriptor::default()
+        }
+    }
+
+    /// **A fixture is fixed to a wall, not to a number.**
+    ///
+    /// `Mount::OnWall { height }` answers `map.origin.1 + height` — a constant on the descriptor,
+    /// shared by every wall light in the project, answering to no wall in particular. So the sconce
+    /// sat at 1.8 m whether its wall was 2.4 m or absent, and
+    /// `docs/2026-08-09-unified-composition.md` §1 records the consequence: *"Delete the wall and the
+    /// sconce hangs there, and nothing reports it."*
+    ///
+    /// `OnFace` resolves the host first, so the height is measured up **that** wall.
+    #[test]
+    fn a_fixture_rides_the_face_it_is_fixed_to() {
+        let l = lib(vec![wall(), sconce()]);
+        let m = map(vec![at("w1", "wall", None), at("s1", "sconce", Some("w1"))]);
+        let y = resolve_y(&m, &l).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(y[0], 0.0, "the wall stands on the floor");
+        assert_eq!(y[1], 1.8, "the sconce is 1.8 m up the wall");
+
+        // **Raise the wall and the sconce comes with it** — the property a bare height cannot have.
+        // `Placed::lift` lands in the host's resolved Y, so the guest inherits it for free.
+        let mut raised = m.clone();
+        raised.placements[0].lift = 0.5;
+        let y = resolve_y(&raised, &l).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!((y[0], y[1]), (0.5, 2.3));
+    }
+
+    /// **Delete the wall and it says so**, instead of leaving a sconce in mid-air. This is the whole
+    /// point of the relationship existing.
+    #[test]
+    fn a_fixture_whose_host_is_gone_is_an_error_naming_both() {
+        let l = lib(vec![wall(), sconce()]);
+        // The wall is gone; the sconce still names it.
+        let m = map(vec![at("s1", "sconce", Some("w1"))]);
+        let e = resolve_y(&m, &l).expect_err("a missing host must be reported, not floored");
+        assert!(e.contains("s1") && e.contains("w1"), "{e}");
+
+        // And a host that exists but presents no such face is refused naming what it does present.
+        let m = map(vec![at("t1", "table", None), at("s1", "sconce", Some("t1"))]);
+        let e = resolve_y(&m, &lib(vec![table(), sconce()]))
+            .expect_err("a table presents no wall face");
+        assert!(e.contains("wall-inner"), "{e}");
+        assert!(e.contains("presents none"), "it must say what the host does present: {e}");
+    }
+
+    /// A fixture that names no host at all is refused at the door, the same way a surface piece is.
+    #[test]
+    fn a_fixture_with_no_host_recorded_is_refused() {
+        let m = map(vec![at("s1", "sconce", None)]);
+        let e = resolve_y(&m, &lib(vec![wall(), sconce()])).expect_err("no host, no height");
+        assert!(e.contains("wall-inner"), "{e}");
     }
 
     /// The host may be authored below its guest — file order is not the author's problem.

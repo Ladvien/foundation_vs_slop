@@ -1,13 +1,36 @@
 (
     version: 1,
-    note: Some("The Site kit's TILES — the first four groups authored as modules rather than as furniture, and the evidence for whether composition-as-tile works. THIS FILE CARRIES NO `//` COMMENTS ON PURPOSE: the Compose tab's record verb reserializes it, which deletes them. Every explanation lives in a `note`. Read them in order; each one is a measurement. The short version: a 1x1 group of floor-plus-wall IS a tile the grammar accepts, where the 0.1 x 1.0 wall alone is refused as the wrong size for a 1 m cell — which is the whole argument for this file existing. See docs/2026-08-09-compose-authoring-plan.md step 4."),
+    note: None,
     compositions: [
         (
-            id: "site/tile_corner_nw",
+            id: "site/tile_1",
             envelope: Bounded(
-                size: (1.0, 2.4, 1.0),
+                size: (1.0, 4.0, 1.0),
             ),
-            note: Some("An inside corner: wall on the north face and on the west. Both are the same `site/wall` piece, turned differently and flushed to different faces, which is the point Karth & Smith make about multi-tile modules via edge constraints — the cross product of wall positions does not have to be authored as separate meshes, only as separate seatings of one. Presents `wall` on N and W, nothing on E and S, so it can only abut something that presents nothing there."),
+            members: [
+                (
+                    id: "floor",
+                    body: Descriptor(
+                        id: "site/floor",
+                        tip: (0, 0),
+                        on: None,
+                        patch: None,
+                    ),
+                    at: (0.0, 0.0),
+                    yaw: 0.0,
+                    lift: 0.0,
+                    of_fingerprint: None,
+                    note: None,
+                ),
+            ],
+            locations: [],
+            note: None,
+        ),
+        (
+            id: "site/tile_2",
+            envelope: Bounded(
+                size: (1.0, 4.0, 1.0),
+            ),
             members: [
                 (
                     id: "floor",
@@ -24,121 +47,59 @@
                     note: None,
                 ),
                 (
-                    id: "wall_north",
+                    id: "wall",
                     body: Descriptor(
                         id: "site/wall",
                         tip: (0, 0),
                         on: None,
                         patch: None,
                     ),
-                    at: (0.0, -0.45),
-                    yaw: 90.0,
+                    at: (-0.45, -0.0),
+                    yaw: 0.0,
+                    lift: 0.0,
+                    of_fingerprint: None,
+                    note: None,
+                ),
+            ],
+            locations: [],
+            note: None,
+        ),
+        (
+            id: "site/tile_3",
+            envelope: Bounded(
+                size: (1.0, 4.0, 1.0),
+            ),
+            members: [
+                (
+                    id: "floor",
+                    body: Descriptor(
+                        id: "site/floor",
+                        tip: (0, 0),
+                        on: None,
+                        patch: None,
+                    ),
+                    at: (0.0, 0.0),
+                    yaw: 0.0,
                     lift: 0.0,
                     of_fingerprint: None,
                     note: None,
                 ),
                 (
-                    id: "wall_west",
+                    id: "wall",
                     body: Descriptor(
                         id: "site/wall",
                         tip: (0, 0),
                         on: None,
                         patch: None,
                     ),
-                    at: (-0.45, 0.0),
-                    yaw: 0.0,
-                    lift: 0.0,
-                    of_fingerprint: None,
-                    note: Some("Unturned, because `site/wall` is authored 0.1 wide and 1.0 deep — it already runs along Z. A wall has to be turned BEFORE it is flushed, and this is the one of the two that needs no turn."),
-                ),
-            ],
-            locations: [],
-        ),
-        (
-            id: "site/tile_doorway_n",
-            envelope: Bounded(
-                size: (1.0, 2.4, 1.0),
-            ),
-            note: Some("A doorway: the opening is what is NOT here. `site/wall_doorway` could not be used — it measures 2.06 m long, so it fits neither a 1 m cell nor a 2 m one, and `grammar::learn` refuses a piece that is not the cell's size because a solver would lay it at a spacing unrelated to its extent. So the doorway is built instead: `site/wall_header` is 0.1 x 1.0 x 0.4 and lifts, giving a lintel with the opening beneath it. This is the tile that first produces a VERTICALLY banded face — `wall` across the top 0.4 m and nothing below — which is exactly the case step 2's band form was built to represent and which no shipped descriptor had ever exercised."),
-            members: [
-                (
-                    id: "floor",
-                    body: Descriptor(
-                        id: "site/floor",
-                        tip: (0, 0),
-                        on: None,
-                        patch: None,
-                    ),
-                    at: (0.0, 0.0),
+                    at: (-0.45, -0.0),
                     yaw: 0.0,
                     lift: 0.0,
                     of_fingerprint: None,
                     note: None,
                 ),
                 (
-                    id: "header_north",
-                    body: Descriptor(
-                        id: "site/wall_header",
-                        tip: (0, 0),
-                        on: None,
-                        patch: None,
-                    ),
-                    at: (0.0, -0.45),
-                    yaw: 90.0,
-                    lift: 2.0,
-                    of_fingerprint: None,
-                    note: Some("Lifted 2.0 m so its 0.4 m height reaches exactly the 2.4 m the envelope and `site/wall` both stand at. Four presses of the raise key at this project's `divisions: 1`, since the lift step is SNAP / divisions = 0.5 m."),
-                ),
-            ],
-            locations: [],
-        ),
-        (
-            id: "site/tile_floor",
-            envelope: Bounded(
-                size: (1.0, 2.4, 1.0),
-            ),
-            note: Some("Open floor, and the simplest thing this file can say. It presents NOTHING on all four faces — and nothing is a token in its own right rather than a wildcard, so this tile can only sit beside another that also presents nothing there. That is why it is authored rather than assumed: the empty tile is the one every other tile is checked against. Its envelope is 2.4 m tall despite the floor being 0.06 m, because an envelope declares the tile a group CLAIMS, not the box its members fill; a 0.06 m envelope would make this the only tile in the kit no wall tile could ever meet."),
-            members: [
-                (
-                    id: "floor",
-                    body: Descriptor(
-                        id: "site/floor",
-                        tip: (0, 0),
-                        on: None,
-                        patch: None,
-                    ),
-                    at: (0.0, 0.0),
-                    yaw: 0.0,
-                    lift: 0.0,
-                    of_fingerprint: None,
-                    note: None,
-                ),
-            ],
-            locations: [],
-        ),
-        (
-            id: "site/tile_wall_n",
-            envelope: Bounded(
-                size: (1.0, 2.4, 1.0),
-            ),
-            note: Some("Floor with a wall along its north face. The wall is turned a quarter so it runs along X, then flushed north: its own thickness puts it at -0.45, which is NOT a multiple of the 0.5 m seating lattice and so is unreachable by the seat keys — the measurement that produced the flush verb. Compare the shipped `site_67` map, which places bare walls CENTRED on the tile seam at x = 0.0, half in each neighbour: read as a composition that wall would sit on no face at all and the group would present nothing."),
-            members: [
-                (
-                    id: "floor",
-                    body: Descriptor(
-                        id: "site/floor",
-                        tip: (0, 0),
-                        on: None,
-                        patch: None,
-                    ),
-                    at: (0.0, 0.0),
-                    yaw: 0.0,
-                    lift: 0.0,
-                    of_fingerprint: None,
-                    note: None,
-                ),
-                (
-                    id: "wall_north",
+                    id: "wall_2",
                     body: Descriptor(
                         id: "site/wall",
                         tip: (0, 0),
@@ -153,6 +114,45 @@
                 ),
             ],
             locations: [],
+            note: None,
+        ),
+        (
+            id: "site/tile_4",
+            envelope: Bounded(
+                size: (1.0, 4.0, 1.0),
+            ),
+            members: [
+                (
+                    id: "floor",
+                    body: Descriptor(
+                        id: "site/floor",
+                        tip: (0, 0),
+                        on: None,
+                        patch: None,
+                    ),
+                    at: (0.0, 0.0),
+                    yaw: 0.0,
+                    lift: 0.0,
+                    of_fingerprint: None,
+                    note: None,
+                ),
+                (
+                    id: "wall_low",
+                    body: Descriptor(
+                        id: "site/wall_low",
+                        tip: (0, 0),
+                        on: None,
+                        patch: None,
+                    ),
+                    at: (-0.4, 0.0),
+                    yaw: 0.0,
+                    lift: 0.0,
+                    of_fingerprint: None,
+                    note: None,
+                ),
+            ],
+            locations: [],
+            note: None,
         ),
     ],
 )

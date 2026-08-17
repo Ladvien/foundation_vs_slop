@@ -1,0 +1,54 @@
+{
+  "steps": [
+    {
+      "label": "open the Tiles tab",
+      "goal": "the kit lives on the tile tab's list, and the key list changes with the tab",
+      "do": [
+        "press 3"
+      ],
+      "checkpoint": "the Tiles tab is open",
+      "recovery": "if a text field has the keyboard the number types into it: press Escape first"
+    },
+    {
+      "label": "reopen tile_4 from the kit",
+      "goal": "tile_4 ships wrong: its low wall sits dead centre, so all four edges derive open and the solver treats it as a second floor tile",
+      "do": [
+        "press right to show the KIT tab -- Escape first if a piece is in hand",
+        "walk down to site/tile_4",
+        "press right again to open it"
+      ],
+      "checkpoint": "the tile contains",
+      "with": { "ids": ["site/wall_low"], "n": 1 },
+      "recovery": "Escape backs out of the kit list; if right does nothing, you are still holding a piece"
+    },
+    {
+      "label": "flush the low wall against a side",
+      "goal": "once the wall touches the boundary that face derives closed -- and flush is the last stop on the arrow ladder, so one plain press from centre lands it",
+      "do": [
+        "press , or . until the low wall is the focused piece",
+        "press the plain arrow toward a side -- or hold Shift for the flush verb"
+      ],
+      "checkpoint": "the open tile is unsaved",
+      "recovery": "if nothing moved, it is already flush on that axis: pick another side"
+    },
+    {
+      "label": "save the repair",
+      "goal": "Cmd+S writes over the committed tile_4, and the kit is one tile better than it shipped",
+      "do": [
+        "press Cmd+S"
+      ],
+      "checkpoint": "the tile is saved",
+      "recovery": "if the save is refused the panel names why -- the id is already good, so it will be the members"
+    },
+    {
+      "label": "does tile_4 read as a tile now",
+      "goal": "the question the whole repair serves, and the one no checkpoint can answer",
+      "do": [
+        "look at it in the 3d view",
+        "say what still bothers you about the kit flow -- reopening, walking, anything"
+      ],
+      "checkpoint": null,
+      "recovery": "there is nothing to recover here: an answer of no is the finding"
+    }
+  ]
+}

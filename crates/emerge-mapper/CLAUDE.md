@@ -46,6 +46,16 @@ would be checking that the fixture is what the fixture is. Anything else belongs
 
 **The mirror cannot see the panels.** Bevy draws a UI tree to one camera, so the offscreen image is the map and nothing else. A question about a panel, a banner or the error log is a `bevy_devshot` question — whole frame, UI included — which is the other reason that path stays.
 
+**And an agent can now guide the author instead of guessing.** That gap is what the mirror's blindness costs in practice: an agent that cannot see a panel has to ask the person what it says, and on 2026-08-12 that loop produced five bug reports in one afternoon of which three were not reproduced first time. `bevy_debugger/guide` posts a script; the editor renders one step over the map; `bevy_debugger/guide+watch` waits on a named condition and records `k/n` per step.
+
+`src/guided.rs` is the editor's half — its checkpoint vocabulary, registered by the names an author would use (*"the tile has two pieces"*, *"the tile is saved"*), each a one-shot system answering `bool`. A checkpoint asks **"has the state the step wanted arrived?"**, never "did they press the right key": a script that watched keystrokes would be testing the author, and the exercise exists to test the editor.
+
+`GuidePlugin` is in the **shared** plugin list while `add_debugger_plugins` is not, and the difference is that it binds nothing. The harness is where it is most wanted: `every_checkpoint_a_shipped_guide_names_is_registered_and_runs` boots this editor headless and asserts that every condition named by a file under `guides/` exists **and runs** — a one-shot system is in no schedule, so nothing else in the suite would ever discover that one of them takes a `Res<T>` that does not exist, which in Bevy 0.19 is a panic. A stranded exercise is caught in CI instead of at step four with the author at the keyboard.
+
+Scripts live in `guides/` as JSON, not as constants in the source: an agent posts them over BRP, and an editor that also shipped a "start the tour" key would be a second way to load one.
+
+**To look at a card, use `scripts/guide_devshot.sh`** — the overlay is a UI panel, so the mirror camera will never see it. That script builds the editor, posts a guide, and captures whole frames per requested step. It **waits for you to click the window and will not raise it**: on macOS 26.5 the documented `osascript ... set frontmost of (first process whose unix id is $PID)` is accepted and does nothing, and a freshly launched window does not come up in front either. A black frame here is exactly 55,654 bytes, which the script checks for rather than handing you the file.
+
 **One plugin list, two entry points.** `main.rs` and `harness::build_headless` share it — "not a second code path", the same argument the parent repo's `sim_harness.rs` makes.
 
 **Borrowed, not copied.** The editor spawns through `emerge_bevy::spawn_descriptor`, previews rigs through the real `emerge-anim` blender, and captures through `bevy_devshot` — never a local copy of any of them. A map that looked one way here and another in the game would be the whole failure this design exists to prevent.

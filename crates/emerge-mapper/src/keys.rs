@@ -37,12 +37,20 @@ pub enum Context {
     Global,
     /// The map tab.
     Map,
-    /// The tile-configuration tab.
-    Tiles,
+    /// The mesh tab — bring art in, measure it, say what it is.
+    Meshes,
     /// The animation bench.
     Anim,
     /// The composition tab — reusable groups, their derived interface, and what is stale.
     Compose,
+    /// **The Tiles tab** — assembling a cell-sized tile out of meshes.
+    ///
+    /// This was `Build`, a second context on the mesh tab reached by a mode key. It is a tab of its
+    /// own now (FVS-R-21): every other level of the kit hierarchy had one, and the twelve-row cap
+    /// each context gets is what made two of them affordable in the first place —
+    /// `no_context_carries_more_than_a_learnable_vocabulary` is not a limit to route around, since
+    /// Liapis names *"too many options"* as a cause of the user fatigue this is all shaped to avoid.
+    Tiles,
     /// A text field is taking raw keys. Overlaps everything, and suppresses everything.
     Typing,
 }
@@ -55,13 +63,87 @@ impl Context {
             // Typing shadows every other context by construction — that is what makes it the guard.
             (Typing, _) | (_, Typing) => true,
             (Global, _) | (_, Global) => true,
-            (Map, Map) | (Tiles, Tiles) | (Anim, Anim) | (Compose, Compose) => true,
-            // The three tabs are never live together — which is what lets them reuse each other's
-            // letters freely. `the_key_space_has_no_collisions` polices that they only do so here.
-            (Map, Tiles) | (Tiles, Map) => false,
-            (Map, Anim) | (Anim, Map) | (Tiles, Anim) | (Anim, Tiles) => false,
-            (Compose, _) | (_, Compose) => false,
+            // **A tab overlaps only itself.** Five arms rather than a `self == other` catch-all,
+            // because the catch-all would also make a *new* context overlap only itself by default —
+            // and the whole point of this table is that adding one costs a decision here.
+            (Map, Map) | (Meshes, Meshes) | (Tiles, Tiles) | (Anim, Anim) | (Compose, Compose) => {
+                true
+            }
+            // **The tabs are never live together**, which is what lets them reuse each other's
+            // letters freely: the Tiles tab walks a lattice with `T`/`F`/`G`/`H` and so does Meshes,
+            // one tab over. `the_key_space_has_no_collisions` polices that they only do so here.
+            _ => false,
         }
+    }
+}
+
+/// **What the author has in hand** — the second axis of who owns the keyboard.
+///
+/// # Why this is in the census rather than in a handler's `if`
+///
+/// [`Context::Typing`] was already a *phase* wearing a context's clothes: it is not a tab, it is a
+/// state the editor passes through, and modelling it here is what gave the focus guard one home. The
+/// second phase is holding something, and it was never modelled — so it went where an unmodelled
+/// phase always goes, into a handler's own state. `build.rs` said so plainly: *"the census forbids two
+/// actions on one key in one context, so the key is single and the **state** decides which job it
+/// does."*
+///
+/// That is the second census §3.5 exists to prevent, and it cost exactly what a second census costs:
+/// the arrows walk a list in three tabs and **move geometry** in a fourth, and the held-`K` overlay
+/// cannot say which — it renders one row, `"list / nudge the mesh / Shift: flush it"`, whatever is
+/// actually live. An author reading the key list gets no answer to the only question a modal grammar
+/// raises, *what do the arrows do right now*.
+///
+/// With the phase in the table, one key carries two actions the way [`Binding::needs_shift`] already
+/// lets it carry two: they are exclusive by construction, the collision test knows it, and [`rows`]
+/// shows the one that is live.
+///
+/// **This does not make the mode safe on its own, and the corpus cannot settle whether it is.**
+/// `docs/research/2026-08-10-snapping-corpus-vetting.md` records the gap — Raskin has never been
+/// ingested, so there is no mode-error literature here to appeal to. The standing argument is
+/// `build.rs`'s: the mode is acceptable *because it is drawn*, a ghost standing on the grid. This adds
+/// a second place it is stated, which strictly improves on that; it does not replace it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stance {
+    /// Nothing in hand. The arrows walk a list.
+    Idle,
+    /// A piece is held — taken with `Space` in the tile assembler, picked up with `B` on the map. The
+    /// arrows move *it*.
+    Holding,
+    /// **A generated layout is waiting to be accepted or thrown away.**
+    ///
+    /// The third phase, and the one that pays for itself. Alvarez et al. 2018 (FDG,
+    /// `10.1145/3235765.3235815`) added a two-step commit to the Evolutionary Dungeon Designer
+    /// *because* apply-on-click was **"occasionally causing work loss due to accidental
+    /// replacements"** — and `G` here rewrote the map on the keypress.
+    ///
+    /// Modelling it as a stance rather than as a flag is what made the door affordable: the four
+    /// region-fills are `Idle`, so their row leaves the list while a proposal is up and the door's row
+    /// takes its place. The Map context stays at twelve either way, and an author cannot start a
+    /// second generate on top of an answer they have not looked at yet.
+    Proposed,
+    /// **The kit list is live** — the arrows walk the tiles already authored, not the meshes.
+    ///
+    /// The fourth phase, and it exists because the Tiles tab could make tiles and never show them.
+    /// An author finished four and could not see the kit, could not reopen one to correct it, and had
+    /// no way to notice they had built the same thing twice. The one that was wrong — a low wall
+    /// sitting in the middle of its tile instead of flush — was only fixable by editing
+    /// `compositions.ron` by hand.
+    ///
+    /// It is a stance rather than a flag for the same reason `Proposed` is: the arrows and `Enter`
+    /// mean something different while it is on, and a key list that did not say so would be lying.
+    /// **It costs no new key.** `left`/`right` were unbound on this tab at `Idle`, and
+    /// `docs/tiles_tab_contract.md` recorded exactly why — *"There is one list on this tab, so there
+    /// is nothing to switch between."* There are two now, so the reservation is spent.
+    Browsing,
+}
+
+impl Stance {
+    /// Can these two be live at the same moment? A stance is exactly one thing at a time, so this is
+    /// equality — stated as a method anyway, so the collision test reads the same for both axes and a
+    /// future third stance costs a decision here rather than a silent `==`.
+    pub fn overlaps(self, other: Stance) -> bool {
+        self == other
     }
 }
 
@@ -71,6 +153,7 @@ pub enum Action {
     // ── Global ───────────────────────────────────────────────────────────────
     NextTab,
     MapTab,
+    MeshesTab,
     TilesTab,
     AnimTab,
     ComposeTab,
@@ -94,15 +177,28 @@ pub enum Action {
     /// Open the Tiles tab on the descriptor of the piece under the cursor.
     EditTile,
     // ── Map ──────────────────────────────────────────────────────────────────
-    AimLeft,
-    AimRight,
-    /// Turn the placement under the cursor, as opposed to the brush.
+    /// **Turn the thing being steered** — the ghost while a brush or a composition is armed, the
+    /// placement under the cursor when the cursor is clear.
+    ///
+    /// One cluster, not two. `Z`/`C` used to aim the brush while these turned what was underneath,
+    /// and the split was reported from the keyboard 2026-08-14: *"it felt weird to have a mesh
+    /// selected and use R and T to rotate not my ghosted selection, but the mesh underneath it."*
+    /// The subject now follows what is armed, the same rule `editor::cursor_is_clear` gives the
+    /// click.
     TurnPieceLeft,
     TurnPieceRight,
     /// Cycle which piece of the stack under the cursor the piece-verbs act on — coincident
     /// pieces made "the placement under the cursor" ambiguous, and a nudge aimed at a header
     /// moved the wall under it. Each press names the next piece, bottom to top; Esc releases.
     CycleTarget,
+    /// **Walk the palette — choose what to place, from the keyboard.**
+    ///
+    /// This did not exist. `EditorState::brush` had exactly one writer, the `on_row_click` mouse
+    /// observer, so on the tab the code itself calls *"the job"* the most frequent act in the editor
+    /// could only be done with the pointer. The author's brief was the opposite: *"this should be
+    /// done by the keyboard, as key strokes are faster."*
+    PalettePrev,
+    PaletteNext,
     /// A quarter turn tipping the piece under the cursor about the map's X axis — set dressing;
     /// see `Placed::tip` for why quarter turns and why a hosting piece refuses.
     TipX,
@@ -118,8 +214,9 @@ pub enum Action {
     /// Arm the move tool: click a piece to pick it up, click again to put it down.
     MoveMode,
     RenameMap,
-    /// Put the brush back to the rotation it was authored at.
-    AimReset,
+    /// Put the steered thing back to the rotation and tip it was authored at — same subject as
+    /// [`Action::TurnPieceLeft`].
+    Straighten,
     /// Leave the removal mode without removing anything.
     Cancel,
     OwnToggle,
@@ -128,10 +225,25 @@ pub enum Action {
     GenerateDeclared,
     /// Fill from the kit's COMPOSITIONS — whole tiles, laid as stamps rather than as placements.
     GenerateComposed,
-    /// Step the drawn grid's spacing. A view setting, not an edit — see `editor::GridSpacing`.
+    /// **Step the rung the map places on** — and therefore the grid it draws, because they are the
+    /// same number. See `editor::Rung`, whose note records the two-mechanism arrangement this
+    /// replaced.
     CycleGrid,
+    /// **Keep the edge tokens read off the mesh.** The other half of the door is `Cancel`.
+    /// See `tiles::DerivedEdges` and `emerge_core::adjacency::derive_edges`.
+    AcceptEdges,
+    /// **Keep the generated layout.** The other half of the door is `Cancel`, which throws it away.
+    /// See `editor::Proposal`.
+    AcceptProposal,
     /// Keep the set in hand as a reusable group — see `editor::composition_from_set`.
     GroupFromSet,
+    /// **Show the kit** — the tiles already authored — and let the arrows walk it.
+    KitEnter,
+    KitPrev,
+    KitNext,
+    /// **Reopen the selected tile for editing.** The verb the tab never had: every tile was a new
+    /// blank one, so a tile saved wrong stayed wrong.
+    KitOpen,
     PanForward,
     PanBack,
     PanLeft,
@@ -167,8 +279,58 @@ pub enum Action {
     LayerDown,
     LayerUp,
     CellSolid,
+    // ── Build (the Tiles tab's other half) ───────────────────────────────────
+    /// **Walk the library list on the Tiles tab, with nothing in hand.**
+    ///
+    /// Two actions rather than reusing [`Action::BuildForward`] for both jobs, which is what this tab
+    /// did until the census learned about [`Stance`]. The old arrangement could not be written down:
+    /// one binding, two behaviours, and a key list that had to describe both at once — it read
+    /// *"list / nudge the mesh / Shift: flush it"* whatever was actually happening.
+    TileListPrev,
+    TileListNext,
+    BuildForward,
+    /// The other two of the four. Added when the author said the arrows were not intuitive: two of
+    /// four directions moved the piece and the other two walked the member list, so an isometric view
+    /// offered NE/SW and nothing else. All four move it now, and `,`/`.` walk the members.
+    BuildLeft,
+    BuildRight,
+    BuildBack,
+    /// **Step to the previous / next member of the tile.**
+    ///
+    /// The missing primitive, reported 2026-08-12: *"once I place mesh down, and I place the second
+    /// mesh down, how do I switch between two meshes to edit its placement?"* You could not.
+    /// `Build::focus` is what `R`, `Delete`, the arrows and the flush all act on, and it is drawn in
+    /// amber — and nothing an author could press moved it. A drop set it, removal and undo clamped
+    /// it, and that was every writer there was.
+    ///
+    /// Left/right because **Compose already binds exactly this verb to them**, one level up: walking
+    /// the members of the group in hand. Same key, same job, one level down — and it fills the arrow
+    /// pair that did nothing on this tab.
+    MemberPrev,
+    MemberNext,
+    BuildDown,
+    BuildUp,
+    BuildDrop,
+    BuildSlot,
+    /// **Take the piece in hand**, so the arrows steer the tile instead of the library list.
+    /// `Esc` puts it back. See [`crate::build::Build::placing`].
+    BuildArm,
+    /// Step the tile assembler's own history back, and forward. See [`crate::build::TileHistory`].
+    UndoBuild,
+    RedoBuild,
+    /// Put the focused mesh flush against that side of the tile. See [`crate::build::aligned`].
+    AlignForward,
+    AlignBack,
+    AlignLeft,
+    AlignRight,
+    BuildNew,
+    BuildDropMember,
+    /// **Empty the tile** — the shifted form of removing one member, on the `RemoveTile`/`DemoteTile`
+    /// precedent. One undo step, so it is recoverable.
+    ClearTile,
+    BuildTurn,
+    BuildRung,
     CellEdge,
-    CellAnchor,
     CellClear,
     /// Mark every cell the mesh's geometry reaches. See `tiles::scan_mesh`.
     ScanMesh,
@@ -230,6 +392,16 @@ pub struct Binding {
     /// twice: undo declares `Some(false)`, redo `Some(true)`, and the collision test below knows they
     /// can never both be satisfied.
     pub needs_shift: Option<bool>,
+    /// **Which [`Stance`] this binding wants**, on exactly the rule [`Binding::needs_shift`] follows.
+    ///
+    /// `None` — the phase is not part of this binding, and it fires whether or not something is in
+    /// hand. That is what almost every row wants, and it is the default so that adding the axis
+    /// changed no existing row's behaviour.
+    ///
+    /// `Some(s)` — fires only in stance `s`. Two rows on one key asking for different stances can
+    /// never both be satisfied, which is what lets the arrows walk a list *and* move a piece without
+    /// the handler deciding.
+    pub needs_stance: Option<Stance>,
     pub context: Context,
     /// How the BARE key reads in the panel — `S`, `Z`, `up`. The modifier is **not** written here:
     /// [`rows`] prepends [`MOD_NAME`] when `needs_mod`, so the one panel that shows this list says
@@ -249,6 +421,14 @@ pub const MOD_KEYS: [KeyCode; 2] = [KeyCode::ControlLeft, KeyCode::ControlRight]
 
 /// Shift, either side. Not platform-dependent — unlike [`MOD_KEYS`], Shift is Shift everywhere.
 pub const SHIFT_KEYS: [KeyCode; 2] = [KeyCode::ShiftLeft, KeyCode::ShiftRight];
+
+/// Alt/Option, either side — **free placement while placing**, and nothing else.
+///
+/// It has its own modifier so that [`shift_held`] can mean exactly one thing. Free placement used to
+/// live on [`MOD_KEYS`], which made Shift read as "one rung finer" from bare and "back onto a
+/// lattice" from the modifier — a modifier whose meaning inverts depending on another modifier does
+/// not get learned.
+pub const ALT_KEYS: [KeyCode; 2] = [KeyCode::AltLeft, KeyCode::AltRight];
 
 /// What [`MOD_KEYS`] is called in writing. The panel and every status line take the name from here so
 /// no string in this crate can claim a modifier the build does not read.
@@ -280,14 +460,20 @@ pub const REMOVE_NAME: &str = "Del";
 /// name a `KeyCode` for an action.
 pub const BINDINGS: &[Binding] = &[
     b(Action::NextTab, KeyCode::Tab, false, Context::Global, "Tab", "next tab"),
-    b(Action::MapTab, KeyCode::Digit1, false, Context::Global, "1", "map tab"),
-    b(Action::TilesTab, KeyCode::Digit2, false, Context::Global, "2", "tiles tab"),
+    // **One row for five keys**, because jumping to a tab is one idea — the same collapse `T F G H`
+    // gets. Five separate rows put `Context::Global` at thirteen and tripped
+    // `no_context_carries_more_than_a_learnable_vocabulary`, which was right to: a list past about a
+    // dozen stops being learnable and starts being a reference card.
+    //
     // **The digits follow the strip, and the strip is `Mode::ALL`.** A number key that jumped to
-    // the third tab while the third tab on screen was a different one would be the census
-    // disagreeing with the thing it describes — which is the whole failure this file exists to
-    // prevent, one layer up from key allocation.
-    b(Action::ComposeTab, KeyCode::Digit3, false, Context::Global, "3", "compose tab"),
-    b(Action::AnimTab, KeyCode::Digit4, false, Context::Global, "4", "animation tab"),
+    // the third tab while the third tab on screen was a different one would be the census disagreeing
+    // with the thing it describes — which is the whole failure this file exists to prevent, one layer
+    // up from key allocation. `the_number_keys_follow_the_strip` holds them together.
+    b(Action::MapTab, KeyCode::Digit1, false, Context::Global, "1", "tab: map / meshes / tiles / compose / anim"),
+    b(Action::MeshesTab, KeyCode::Digit2, false, Context::Global, "2", "tab: map / meshes / tiles / compose / anim"),
+    b(Action::TilesTab, KeyCode::Digit3, false, Context::Global, "3", "tab: map / meshes / tiles / compose / anim"),
+    b(Action::ComposeTab, KeyCode::Digit4, false, Context::Global, "4", "tab: map / meshes / tiles / compose / anim"),
+    b(Action::AnimTab, KeyCode::Digit5, false, Context::Global, "5", "tab: map / meshes / tiles / compose / anim"),
     // **The modified tab key: go there, and take this with you.**
     //
     // Beside `2` because it is the same destination with a subject — `Cmd+2` reads as "the Tiles tab,
@@ -323,7 +509,7 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::Save, KeyCode::KeyS, true, Context::Global, "S", "save"),
     // **The agent's read-out, and it is Global because a problem is.**
     //
-    // It was `Context::Tiles`, copying that tab's detail pane. Every tab can now refuse, and a refusal
+    // It was `Context::Meshes`, copying that tab's detail pane. Every tab can now refuse, and a refusal
     // an agent cannot get out of the window is one that has to be retyped from a screenshot — bevy_ui
     // has no selectable text. So the verb follows the thing it is for: on any tab this copies what
     // that tab is showing, with the problem first. Leaving Tiles also gives that context back the row
@@ -361,16 +547,17 @@ pub const BINDINGS: &[Binding] = &[
     // One ROW, deliberately: a shared `does` collapses the pair the way `W, A, S, D` collapses, and
     // the Map context is at its twelve-row ceiling (see the vocabulary test) with the removal mode's
     // `Esc` now in it. The label carries the direction so nothing is lost by sharing the line.
-    // One row for all three aim keys — the shared `does` collapse that bought the target row
-    // below inside the twelve-row ceiling.
-    b(Action::AimLeft, KeyCode::KeyZ, false, Context::Map, "Z", "aim / straight again"),
-    b(Action::AimRight, KeyCode::KeyC, false, Context::Map, "C", "aim / straight again"),
-    b(Action::AimReset, KeyCode::KeyV, false, Context::Map, "V", "aim / straight again"),
     // **`H` picks WHICH piece of a stack the piece-verbs mean.** A floor tile, a wall and its
     // header legally share a cell (different layers), and "the placement under the cursor" cannot
     // name one of three. Each press steps up the stack, the status names the target, and the
     // verbs above act on it until the cursor leaves the cell or Esc releases.
     b(Action::CycleTarget, KeyCode::KeyH, false, Context::Map, "H", "target the stack"),
+    // **The arrows, on the tab that had none.** `Stance::Idle` because a piece already in hand is
+    // being placed, not chosen — and the same two keys are then free to mean something else, which is
+    // what the axis is for. Indifferent to Shift on purpose: `Shift` is the five-row stride here, the
+    // same as every other list in the editor.
+    bp(Action::PalettePrev, KeyCode::ArrowUp, false, Stance::Idle, Context::Map, "up", "walk the palette / Shift: x5"),
+    bp(Action::PaletteNext, KeyCode::ArrowDown, false, Stance::Idle, Context::Map, "down", "walk the palette / Shift: x5"),
     // **A separate cluster from the aim keys, on purpose.** `Z`/`C` turn the BRUSH and must keep
     // doing only that: binding them to the selection is what made rotation feel broken before,
     // because placing selects, so the next press turned the piece just put down while the ghost —
@@ -381,23 +568,28 @@ pub const BINDINGS: &[Binding] = &[
     // they always did, `Y U` tip it over — a quarter turn about X and about Z per press
     // (`Placed::tip`). Sharing a `does` collapses them the way `W, A, S, D` collapses, which is what
     // buys the lift row below inside the twelve-row ceiling.
-    b(Action::TurnPieceLeft, KeyCode::KeyR, false, Context::Map, "R", "turn / tip this"),
-    b(Action::TurnPieceRight, KeyCode::KeyT, false, Context::Map, "T", "turn / tip this"),
-    b(Action::TipX, KeyCode::KeyY, false, Context::Map, "Y", "turn / tip this"),
-    b(Action::TipZ, KeyCode::KeyU, false, Context::Map, "U", "turn / tip this"),
+    b(Action::TurnPieceLeft, KeyCode::KeyR, false, Context::Map, "R", "turn left / turn right / tip x / tip z / straight again"),
+    b(Action::TurnPieceRight, KeyCode::KeyT, false, Context::Map, "T", "turn left / turn right / tip x / tip z / straight again"),
+    b(Action::TipX, KeyCode::KeyY, false, Context::Map, "Y", "turn left / turn right / tip x / tip z / straight again"),
+    b(Action::TipZ, KeyCode::KeyU, false, Context::Map, "U", "turn left / turn right / tip x / tip z / straight again"),
+    b(Action::Straighten, KeyCode::KeyV, false, Context::Map, "V", "turn left / turn right / tip x / tip z / straight again"),
     // **The brackets lift.** Free in this context (the Tiles tab's layer pair is never live with
     // the Map), and vertically suggestive in a way no letter is. One subgrid unit per press, held
     // repeat for a long ride up; the authored offset is `Placed::lift`, the one amendment to
     // "height is never the author's".
-    // **`J` steps the grid.** A setting rather than a verb, and the only free letter under the right
-    // hand — it sits beside `H`, which is the other key about how you are reading the map rather
-    // than about changing it. The kit's module is what an author counts in, and that is not the same
-    // number as the snap: the site kit builds on 1 m while `grid::SNAP` is 0.5, so a grid fixed to
-    // either one is wrong for somebody. This makes it theirs.
-    b(Action::CycleGrid, KeyCode::KeyJ, false, Context::Map, "J", "grid: 0.5 / 1 / 2 / 4 m"),
+    // **`J` steps the rung — the same job it does on the Tiles tab.** The only free letter under the
+    // right hand, beside `H`, which is the other key about how you are reading the map.
+    //
+    // It used to step a *drawn* grid through `[0.5, 1, 2, 4]` m while the lattice a piece landed on
+    // was a held modifier — one key, two tabs, two meanings, and the Map's meaning was the one that
+    // decided nothing. Two of its four steps were lines no piece could ever sit on. FVS-R-19.
+    //
+    // The description names metres rather than rung names because the pitch is what an author is
+    // deciding between, and it depends on the project's `snap_divisor` — so the row says the shape
+    // and the status line, written by `cycle_grid`, says the number.
+    b(Action::CycleGrid, KeyCode::KeyJ, false, Context::Map, "J", "grid rung: tile / fine / finer"),
     b(Action::LiftDown, KeyCode::BracketLeft, false, Context::Map, "[", "lift / lower this"),
     b(Action::LiftUp, KeyCode::BracketRight, false, Context::Map, "]", "lift / lower this"),
-    b(Action::Fill, KeyCode::KeyF, false, Context::Map, "F", "flood fill"),
     // **The delete key arms a tool; it does not delete.** Removing on the keypress meant the only
     // preview of what was about to go was the author's memory of where the cursor was.
     b(Action::Remove, KeyCode::KeyX, false, Context::Map, "X", "removal mode"),
@@ -420,16 +612,32 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::GroupFromSet, KeyCode::KeyM, false, Context::Map, "M", "move / Shift: clone a set / M: keep as a composition"),
     b(Action::RenameMap, KeyCode::KeyN, false, Context::Map, "N", "rename map"),
     b(Action::OwnToggle, KeyCode::KeyO, false, Context::Map, "O", "pin / unpin"),
-    // **Two sources, one row.** `rows()` collapses adjacent bindings sharing a `does` string, so the
-    // Map context stays at its twelve-row ceiling while gaining a verb. The two are not a fallback
-    // pair — each either produces a grammar or refuses by name.
-    // Three sources, one displayed row. `rows` collapses consecutive bindings that share a `does`
-    // and renders each chord with its modifier, so this reads "G, Shift+G, {MOD}+G" against one
-    // description and costs the Map context nothing against its twelve-row ceiling. They must stay
-    // adjacent and keep the same string, or the third one buys a row this context has not got.
-    bs(Action::Generate, KeyCode::KeyG, false, false, Context::Map, "G", "continue the layout: from the map, the kit's tokens, or its compositions"),
-    bs(Action::GenerateDeclared, KeyCode::KeyG, false, true, Context::Map, "G", "continue the layout: from the map, the kit's tokens, or its compositions"),
-    bs(Action::GenerateComposed, KeyCode::KeyG, true, false, Context::Map, "G", "continue the layout: from the map, the kit's tokens, or its compositions"),
+    // **Four ways to cover a region, on one row, each named by its own chord.**
+    //
+    // `F` was a row of its own reading "flood fill" and the three `G`s shared a row reading
+    // *"continue the layout: from the map, the kit's tokens, or its compositions"* — three chords,
+    // three sources, and **no way to tell which chord took which source**. That is the collapse rule
+    // being used to buy row count with vagueness rather than to state one idea, and it is exactly
+    // what `no_context_carries_more_than_a_learnable_vocabulary` was measuring instead of key count.
+    //
+    // These four *are* one idea at the altitude that matters — take a region, fill it — and they
+    // differ only in where the content comes from: the armed brush, or a grammar learned from the
+    // map, declared by the kit's tokens, or composed from its tiles. Stated in chord order so a
+    // reader can pair them off, which the old row could not support at any length.
+    //
+    // They must stay adjacent and keep the same string: `rows()` collapses by `does`, and splitting
+    // them buys rows the Map context has not got.
+    // **All four are `Stance::Idle`**, so the row leaves the list while a proposal is waiting — see
+    // [`Stance::Proposed`]. That is not decoration: it is what stops a second generate landing on top
+    // of an answer nobody has looked at, and it is what buys the door's row inside the twelve.
+    bp(Action::Fill, KeyCode::KeyF, false, Stance::Idle, Context::Map, "F", "fill the region: brush / learned / declared / composed"),
+    bsp(Action::Generate, KeyCode::KeyG, false, false, Stance::Idle, Context::Map, "G", "fill the region: brush / learned / declared / composed"),
+    bsp(Action::GenerateDeclared, KeyCode::KeyG, false, true, Stance::Idle, Context::Map, "G", "fill the region: brush / learned / declared / composed"),
+    bsp(Action::GenerateComposed, KeyCode::KeyG, true, false, Stance::Idle, Context::Map, "G", "fill the region: brush / learned / declared / composed"),
+    // **The commit door.** `Enter` is free on this tab and taken on every other one, which is the
+    // case `Context` exists for. `Esc` is the Global cancel and discards it — stated in the row,
+    // because a door with only one visible half reads as a trap.
+    bp(Action::AcceptProposal, KeyCode::Enter, false, Stance::Proposed, Context::Map, "Enter", "keep this layout / Esc throws it away"),
 
     // **The camera is Global — pan included.** This briefly moved to `Context::Map` to free
     // `W, A, S, D` for the Tiles lattice cursor, on the argument that panning off a staged tile has
@@ -450,29 +658,34 @@ pub const BINDINGS: &[Binding] = &[
     // holding Shift jumps five at a time. Four bindings sharing one `does` collapse the way
     // `W, A, S, D` collapses, which is what bought the copy row below inside the twelve-row
     // ceiling.
-    b(Action::PrevCandidate, KeyCode::ArrowUp, false, Context::Tiles, "up", "walk the lists / Shift: x5"),
-    b(Action::NextCandidate, KeyCode::ArrowDown, false, Context::Tiles, "down", "walk the lists / Shift: x5"),
-    b(Action::FocusCandidates, KeyCode::ArrowLeft, false, Context::Tiles, "left", "walk the lists / Shift: x5"),
-    b(Action::FocusLibrary, KeyCode::ArrowRight, false, Context::Tiles, "right", "walk the lists / Shift: x5"),
-    b(Action::TypeId, KeyCode::KeyI, false, Context::Tiles, "I", "type an id"),
+    b(Action::PrevCandidate, KeyCode::ArrowUp, false, Context::Meshes, "up", "walk the lists / Shift: x5"),
+    b(Action::NextCandidate, KeyCode::ArrowDown, false, Context::Meshes, "down", "walk the lists / Shift: x5"),
+    b(Action::FocusCandidates, KeyCode::ArrowLeft, false, Context::Meshes, "left", "walk the lists / Shift: x5"),
+    b(Action::FocusLibrary, KeyCode::ArrowRight, false, Context::Meshes, "right", "walk the lists / Shift: x5"),
+    b(Action::TypeId, KeyCode::KeyI, false, Context::Meshes, "I", "type an id"),
     // **"mount", not "layer".** It cycles `Descriptor::mount` — what the piece stands on — and the
     // subgrid below has its own `layer y` picker for the lattice slice. One panel said "layer" twice
     // and meant two different things.
-    b(Action::CycleMount, KeyCode::KeyM, false, Context::Tiles, "M", "mount"),
+    b(Action::CycleMount, KeyCode::KeyM, false, Context::Meshes, "M", "mount"),
     // **One verb, two states of a tile.** It read "add to library", which named half of what it
     // does and made the other half look like a refusal: Enter on a piece already in the library
     // answered "already in the library", to an author who had just edited it.
-    b(Action::Accept, KeyCode::Enter, false, Context::Tiles, "Enter", "add / update this tile"),
-    b(Action::Rescan, KeyCode::KeyR, false, Context::Tiles, "R", "rescan"),
+    // **`Stance::Idle`, so `Enter` can be the derivation's door while one is staged.** Adding a tile
+    // and answering a proposal about the tile you are looking at are two answers to one key, and the
+    // proposal is the one that has to be resolved first — it describes the very lattice an Accept
+    // would write.
+    bp(Action::Accept, KeyCode::Enter, false, Stance::Idle, Context::Meshes, "Enter", "add / update this tile"),
+    bp(Action::AcceptEdges, KeyCode::Enter, false, Stance::Proposed, Context::Meshes, "Enter", "keep the derived edges / Esc throws them away"),
+    b(Action::Rescan, KeyCode::KeyR, false, Context::Meshes, "R", "rescan"),
     // The Cmd+Z shape again: one key, the shifted form for the reversible-but-destructive sibling.
     // Shift+Delete DEMOTES — back to the candidates, stripped — where bare Delete removes outright.
-    bs(Action::RemoveTile, REMOVE_KEY, false, false, Context::Tiles, REMOVE_NAME, "remove / Shift: back to candidates"),
-    bs(Action::DemoteTile, REMOVE_KEY, false, true, Context::Tiles, REMOVE_NAME, "remove / Shift: back to candidates"),
+    bs(Action::RemoveTile, REMOVE_KEY, false, false, Context::Meshes, REMOVE_NAME, "remove / Shift: back to candidates"),
+    bs(Action::DemoteTile, REMOVE_KEY, false, true, Context::Meshes, REMOVE_NAME, "remove / Shift: back to candidates"),
     // **This tab's own history**, on the same chords and for the reason `keys.rs`'s undo comment
     // records: an undo you cannot see the effect of is not an undo, so the map's stack is not reachable
     // from here and this one is not reachable from there. Neither is cleared by changing tabs.
-    bs(Action::UndoTile, KeyCode::KeyZ, true, false, Context::Tiles, "Z", "undo / redo"),
-    bs(Action::RedoTile, KeyCode::KeyZ, true, true, Context::Tiles, "Z", "undo / redo"),
+    bs(Action::UndoTile, KeyCode::KeyZ, true, false, Context::Meshes, "Z", "undo / redo"),
+    bs(Action::RedoTile, KeyCode::KeyZ, true, true, Context::Meshes, "Z", "undo / redo"),
 
     // **The lattice, by keyboard.** Two rows, which is what the twelve-row ceiling leaves once the
     // seven above and the labels row are counted — the cursor and the layer share one row (they are
@@ -484,31 +697,123 @@ pub const BINDINGS: &[Binding] = &[
     // T above, F left, G below, H right — and shape is what the hand remembers.
     // `Z, X, C, V` is the run under the left hand, free here because they are Map bindings and the
     // two tabs are never live together, which is the case `Context` exists to model.
-    b(Action::CellForward, KeyCode::KeyT, false, Context::Tiles, "T", "cell cursor / layer"),
-    b(Action::CellLeft, KeyCode::KeyF, false, Context::Tiles, "F", "cell cursor / layer"),
-    b(Action::CellBack, KeyCode::KeyG, false, Context::Tiles, "G", "cell cursor / layer"),
-    b(Action::CellRight, KeyCode::KeyH, false, Context::Tiles, "H", "cell cursor / layer"),
-    b(Action::LayerDown, KeyCode::BracketLeft, false, Context::Tiles, "[", "cell cursor / layer"),
-    b(Action::LayerUp, KeyCode::BracketRight, false, Context::Tiles, "]", "cell cursor / layer"),
-    b(Action::CellSolid, KeyCode::KeyZ, false, Context::Tiles, "Z", "solid / edge / anchor / clear"),
-    b(Action::CellEdge, KeyCode::KeyX, false, Context::Tiles, "X", "solid / edge / anchor / clear"),
-    b(Action::CellAnchor, KeyCode::KeyC, false, Context::Tiles, "C", "solid / edge / anchor / clear"),
-    b(Action::CellClear, KeyCode::KeyV, false, Context::Tiles, "V", "solid / edge / anchor / clear"),
-    b(Action::ScanMesh, KeyCode::KeyB, false, Context::Tiles, "B", "from the mesh: rescan solid / turn x y z"),
-    b(Action::RotateMeshX, KeyCode::KeyN, false, Context::Tiles, "N", "from the mesh: rescan solid / turn x y z"),
-    b(Action::RotateMeshY, KeyCode::KeyO, false, Context::Tiles, "O", "from the mesh: rescan solid / turn x y z"),
-    b(Action::RotateMeshZ, KeyCode::KeyP, false, Context::Tiles, "P", "from the mesh: rescan solid / turn x y z"),
+    b(Action::CellForward, KeyCode::KeyT, false, Context::Meshes, "T", "cell fwd / left / back / right / layer down / up"),
+    b(Action::CellLeft, KeyCode::KeyF, false, Context::Meshes, "F", "cell fwd / left / back / right / layer down / up"),
+    b(Action::CellBack, KeyCode::KeyG, false, Context::Meshes, "G", "cell fwd / left / back / right / layer down / up"),
+    b(Action::CellRight, KeyCode::KeyH, false, Context::Meshes, "H", "cell fwd / left / back / right / layer down / up"),
+    b(Action::LayerDown, KeyCode::BracketLeft, false, Context::Meshes, "[", "cell fwd / left / back / right / layer down / up"),
+    b(Action::LayerUp, KeyCode::BracketRight, false, Context::Meshes, "]", "cell fwd / left / back / right / layer down / up"),
+    b(Action::CellSolid, KeyCode::KeyZ, false, Context::Meshes, "Z", "solid / edge / clear"),
+    b(Action::CellEdge, KeyCode::KeyX, false, Context::Meshes, "X", "solid / edge / clear"),
+    b(Action::CellClear, KeyCode::KeyV, false, Context::Meshes, "V", "solid / edge / clear"),
+
+    // ── BUILD: assembling a tile ─────────────────────────────────────────────────────────────
+    //
+    // The cursor keeps `T F G H` and `[ ]` — the same inverted T walking the same kind of lattice one
+    // tab over, so the hand does not relearn a shape it already has. It is legal because two tabs
+    // are never live together, which is the case `Context` exists to model.
+    //
+    // **There is no door key.** It was `C`, flipping a mode on the mesh tab; the tab strip is the
+    // door now, and a strip is a mode nobody can forget — Raskin's condition, met by construction
+    // rather than by an indicator (FVS-R-21).
+    // **The arrows, and they do two jobs — which is now stated here rather than inside a handler.**
+    //
+    // `T F G H` held these before and the author's verdict on them was "gross". The replacement put
+    // both jobs on one key and let `Build::placing` pick between them, because the census had no way
+    // to say "these two can never both fire". It has one now — [`Stance`] — so the split is written
+    // down: with nothing in hand the arrows walk the library, with a piece in hand they move *it*.
+    // `Space` is the door, the ghost shows which side you are on, and the key list now shows it too.
+    //
+    // **What that bought, concretely.** One row saying `"list / nudge the mesh / Shift: flush it"` —
+    // eight bindings, three ideas, and no way for a reader to tell which was live — becomes three
+    // rows of which at most two are ever shown at once. Each is true when it is on screen.
+    //
+    // **The list walk is `bp`, not `bsp`.** It is *indifferent* to Shift on purpose: `Shift`+arrow is
+    // the five-row stride the Meshes tab already uses, and the same shared system serves both tabs.
+    // The tile-moving pair is `bsp` because bare and shifted are genuinely different verbs there.
+    // **The kit, and it costs no new key.** `left`/`right` were the tab's one unbound pair at
+    // `Idle`, reserved by the contract against there being a second list; this is that list.
+    bp(Action::KitEnter, KeyCode::ArrowRight, false, Stance::Idle, Context::Tiles, "right", "show the kit / Esc goes back"),
+    bp(Action::KitPrev, KeyCode::ArrowUp, false, Stance::Browsing, Context::Tiles, "up", "walk the kit"),
+    bp(Action::KitNext, KeyCode::ArrowDown, false, Stance::Browsing, Context::Tiles, "down", "walk the kit"),
+    // **`right` descends**: into the kit from the mesh list, then into the tile from the kit. `Esc`
+    // backs out of either. A column browser's idiom, and it is what keeps `Enter` meaning one thing:
+    // `BuildDrop` is bound across every stance, so an `Enter` here would be one key with two
+    // meanings — the collision the census forbids, and the reason the stance axis exists at all.
+    bp(Action::KitOpen, KeyCode::ArrowRight, false, Stance::Browsing, Context::Tiles, "right", "reopen this tile"),
+    bp(Action::TileListPrev, KeyCode::ArrowUp, false, Stance::Idle, Context::Tiles, "up", "walk the library / Shift: x5"),
+    bp(Action::TileListNext, KeyCode::ArrowDown, false, Stance::Idle, Context::Tiles, "down", "walk the library / Shift: x5"),
+    bsp(Action::BuildForward, KeyCode::ArrowUp, false, false, Stance::Holding, Context::Tiles, "up", "move the piece"),
+    bsp(Action::BuildBack, KeyCode::ArrowDown, false, false, Stance::Holding, Context::Tiles, "down", "move the piece"),
+    // **Left/right walk the members, and that is a trade made deliberately.** They used to nudge on
+    // the X axis; the cost of taking them is that sideways is reached by turning the view (`Q`/`E`
+    // step quarter detents and `step_in_view` maps the arrows through the yaw) or by `Shift`+arrow
+    // to the edge. The gain is that the focus can be moved at all — see [`Action::MemberPrev`].
+    // **All four arrows move the piece**, mapped through the camera yaw by `step_in_view` -- so on
+    // this isometric view `up` is north-east and `left` is north-west, which is what the screen
+    // shows. Two of them used to walk the member list instead, which meant the arrows offered half
+    // the directions and the missing half did something unrelated.
+    bsp(Action::BuildLeft, KeyCode::ArrowLeft, false, false, Stance::Holding, Context::Tiles, "left", "move the piece"),
+    bsp(Action::BuildRight, KeyCode::ArrowRight, false, false, Stance::Holding, Context::Tiles, "right", "move the piece"),
+    // The member walk moved here to free them. A prev/next pair, no modifier, under the fingers.
+    bsp(Action::MemberPrev, KeyCode::Comma, false, false, Stance::Holding, Context::Tiles, ",", "step to the previous / next member"),
+    bsp(Action::MemberNext, KeyCode::Period, false, false, Stance::Holding, Context::Tiles, ".", "step to the previous / next member"),
+    // **Flush is its own verb, not a finer rung.** The author's word for it was *"left aligned"*,
+    // and it is what a wall needs: a 0.1 m panel sits flush at -0.45 in a 1 m tile, and no rung of
+    // any divisor lands on -0.45 — the position is a function of the piece's own width.
+    bsp(Action::AlignForward, KeyCode::ArrowUp, false, true, Stance::Holding, Context::Tiles, "up", "flush it to that side"),
+    bsp(Action::AlignBack, KeyCode::ArrowDown, false, true, Stance::Holding, Context::Tiles, "down", "flush it to that side"),
+    bsp(Action::AlignLeft, KeyCode::ArrowLeft, false, true, Stance::Holding, Context::Tiles, "left", "flush it to that side"),
+    bsp(Action::AlignRight, KeyCode::ArrowRight, false, true, Stance::Holding, Context::Tiles, "right", "flush it to that side"),
+    b(Action::BuildArm, KeyCode::Space, false, Context::Tiles, "Space", "take the piece / Esc puts it back"),
+    b(Action::BuildDown, KeyCode::BracketLeft, false, Context::Tiles, "[", "layer"),
+    b(Action::BuildUp, KeyCode::BracketRight, false, Context::Tiles, "]", "layer"),
+
+    // **`J` cycles the rung, latched.** The same key the Map cycles its drawn grid with, and the same
+    // argument: Bier's snap-dragging latches every one of its modal commands, and StickyLines'
+    // designers avoid held modifiers because menus and modifiers *"make them lose focus"*. Safe to
+    // latch because the drawn grid shows which rung is live.
+    b(Action::BuildRung, KeyCode::KeyJ, false, Context::Tiles, "J", "grid deeper by thirds, wrapping"),
+
+    // **Both stated with `bs`.** A bare `b` is *indifferent* to Shift by design, so it would swallow
+    // the shifted chord rather than sit beside it — the same pair `RemoveTile`/`DemoteTile` makes.
+    // A hole rather than a piece is the rarer of the two, so it takes the modifier.
+    bs(Action::BuildDrop, KeyCode::Enter, false, false, Context::Tiles, "Enter", "drop the piece / Shift: a slot"),
+    bs(Action::BuildSlot, KeyCode::Enter, false, true, Context::Tiles, "Enter", "drop the piece / Shift: a slot"),
+    b(Action::BuildTurn, KeyCode::KeyR, false, Context::Tiles, "R", "turn / remove this / Shift: empty the tile"),
+    // **`bs`, both of them.** A bare binding is indifferent to Shift and would swallow the shifted
+    // chord — the collision the census exists to catch, and the precedent `RemoveTile`/`DemoteTile`
+    // set on the Meshes tab.
+    bs(Action::BuildDropMember, REMOVE_KEY, false, false, Context::Tiles, REMOVE_NAME, "turn / remove this / Shift: empty the tile"),
+    bs(Action::ClearTile, REMOVE_KEY, false, true, Context::Tiles, REMOVE_NAME, "turn / remove this / Shift: empty the tile"),
+    // **No save key here, on purpose.** `Cmd+S` is Global and already means *save what is open*; a
+    // second one in this context would collide with it, and the collision is the census pointing out
+    // that they are the same verb. The handler asks which mode is live.
+    b(Action::BuildNew, KeyCode::KeyN, false, Context::Tiles, "N", "new tile"),
+
+    // **Its own stack, like every other tab's.** `UndoTile` is the *mesh* tab's, over library edits;
+    // this one is over the tile in hand. Two tabs editing different files through one stack would
+    // make "undo" mean whichever thing was touched last, which is the shape `Action::UndoTile`'s own
+    // note already argues against.
+    bs(Action::UndoBuild, KeyCode::KeyZ, true, false, Context::Tiles, "Z", "undo / redo"),
+    bs(Action::RedoBuild, KeyCode::KeyZ, true, true, Context::Tiles, "Z", "undo / redo"),
+
+
+    b(Action::ScanMesh, KeyCode::KeyB, false, Context::Meshes, "B", "rescan solid / turn mesh x / y / z"),
+    b(Action::RotateMeshX, KeyCode::KeyN, false, Context::Meshes, "N", "rescan solid / turn mesh x / y / z"),
+    b(Action::RotateMeshY, KeyCode::KeyO, false, Context::Meshes, "O", "rescan solid / turn mesh x / y / z"),
+    b(Action::RotateMeshZ, KeyCode::KeyP, false, Context::Meshes, "P", "rescan solid / turn mesh x / y / z"),
 
     // **The VLM labeler's cluster** — one row, four verbs. `L` photographs the focused piece and
     // asks the model; `Shift+L` walks everything missing judgement fields (and cancels a running
     // walk); `U` applies the proposed labels through the ordinary edit path; `Y` discards them.
     // `L`/`U`/`Y` are unbound in Tiles and Global; the L pair is the Cmd+Z shape — one key, the
     // shifted form for the bigger sweep.
-    bs(Action::SuggestLabels, KeyCode::KeyL, false, false, Context::Tiles, "L", "labels: suggest / all / apply / discard / clear all"),
-    bs(Action::SuggestAll, KeyCode::KeyL, false, true, Context::Tiles, "L", "labels: suggest / all / apply / discard / clear all"),
-    b(Action::ApplySuggestion, KeyCode::KeyU, false, Context::Tiles, "U", "labels: suggest / all / apply / discard / clear all"),
-    bs(Action::DiscardSuggestion, KeyCode::KeyY, false, false, Context::Tiles, "Y", "labels: suggest / all / apply / discard / clear all"),
-    bs(Action::DiscardAllSuggestions, KeyCode::KeyY, false, true, Context::Tiles, "Y", "labels: suggest / all / apply / discard / clear all"),
+    bs(Action::SuggestLabels, KeyCode::KeyL, false, false, Context::Meshes, "L", "labels: suggest / all / apply / discard / clear all"),
+    bs(Action::SuggestAll, KeyCode::KeyL, false, true, Context::Meshes, "L", "labels: suggest / all / apply / discard / clear all"),
+    b(Action::ApplySuggestion, KeyCode::KeyU, false, Context::Meshes, "U", "labels: suggest / all / apply / discard / clear all"),
+    bs(Action::DiscardSuggestion, KeyCode::KeyY, false, false, Context::Meshes, "Y", "labels: suggest / all / apply / discard / clear all"),
+    bs(Action::DiscardAllSuggestions, KeyCode::KeyY, false, true, Context::Meshes, "Y", "labels: suggest / all / apply / discard / clear all"),
 
     // The arrows are the Tiles tab's too. Legal, and the reason the census models context at all:
     // the two tabs are never live together, so the same key means one thing in each.
@@ -553,7 +858,7 @@ pub const BINDINGS: &[Binding] = &[
     //
     // `Y`/`U` rather than the Map's `R`/`T`, which are both spoken for here — `R` records and `T`
     // seats. They keep the whole surface under one hand (`T F G H` seat, `Y U` turn, `[ ]` raise), and
-    // the Map's own row for `Y`/`U` is "turn / tip this", so the family is the same one.
+    // the Map's own row for `Y`/`U` is "turn left / turn right / tip x / tip z", so the family is the same one.
     //
     // **Not `,` and `.`, and the test is why.** `rows()` joins a collapsed row's chords with `", "`,
     // so a chord that *is* a comma comes out as `, , .` and cannot be read back —
@@ -592,10 +897,36 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::PlayPause, KeyCode::Space, false, Context::Anim, "Space", "play / scrub"),
     b(Action::CheckAllRigs, KeyCode::KeyC, false, Context::Anim, "C", "check all rigs"),
     // G is the Map tab's Generate and a Tiles cell-cursor key — the same legal cross-context
-    // share as the arrows above. V is the Map tab's AimReset and a Tiles lattice key.
+    // share as the arrows above. V is the Map tab's Straighten and a Tiles lattice key.
     b(Action::ToggleGhost, KeyCode::KeyG, false, Context::Anim, "G", "ghost: measured over declared"),
     b(Action::CycleCamPreset, KeyCode::KeyV, false, Context::Anim, "V", "view: figure / feet / side / ground"),
 ];
+
+/// **Every field stated.** The three constructors below are all this one with defaults filled in, so a
+/// new axis is added here once rather than in each of them — which is what let `needs_stance` arrive
+/// without touching a single existing row.
+#[allow(clippy::too_many_arguments)]
+const fn full(
+    action: Action,
+    key: KeyCode,
+    needs_mod: bool,
+    needs_shift: Option<bool>,
+    needs_stance: Option<Stance>,
+    context: Context,
+    chord: &'static str,
+    does: &'static str,
+) -> Binding {
+    Binding {
+        action,
+        key,
+        needs_mod,
+        needs_shift,
+        needs_stance,
+        context,
+        chord,
+        does,
+    }
+}
 
 const fn b(
     action: Action,
@@ -605,16 +936,9 @@ const fn b(
     chord: &'static str,
     does: &'static str,
 ) -> Binding {
-    Binding {
-        action,
-        key,
-        needs_mod,
-        // Indifferent to Shift — see [`Binding::needs_shift`] for why that is the default.
-        needs_shift: None,
-        context,
-        chord,
-        does,
-    }
+    // Indifferent to Shift and to what is in hand — see [`Binding::needs_shift`] and
+    // [`Binding::needs_stance`] for why those are the defaults.
+    full(action, key, needs_mod, None, None, context, chord, does)
 }
 
 /// A row that cares about Shift. `shift` is `true` for "must be held", `false` for "must be up".
@@ -627,15 +951,62 @@ const fn bs(
     chord: &'static str,
     does: &'static str,
 ) -> Binding {
-    Binding {
+    full(
         action,
         key,
         needs_mod,
-        needs_shift: Some(shift),
+        Some(shift),
+        None,
         context,
         chord,
         does,
-    }
+    )
+}
+
+/// A row that cares what is in hand, and not about Shift.
+const fn bp(
+    action: Action,
+    key: KeyCode,
+    needs_mod: bool,
+    stance: Stance,
+    context: Context,
+    chord: &'static str,
+    does: &'static str,
+) -> Binding {
+    full(
+        action,
+        key,
+        needs_mod,
+        None,
+        Some(stance),
+        context,
+        chord,
+        does,
+    )
+}
+
+/// A row that cares about both — `Shift`+arrow while holding a piece is the case that needs it.
+#[allow(clippy::too_many_arguments)]
+const fn bsp(
+    action: Action,
+    key: KeyCode,
+    needs_mod: bool,
+    shift: bool,
+    stance: Stance,
+    context: Context,
+    chord: &'static str,
+    does: &'static str,
+) -> Binding {
+    full(
+        action,
+        key,
+        needs_mod,
+        Some(shift),
+        Some(stance),
+        context,
+        chord,
+        does,
+    )
 }
 
 /// The binding for an action.
@@ -676,8 +1047,15 @@ pub fn chord(action: Action) -> String {
 /// Samp 2011, via `docs/ui.md` §3.5: a menu's cost is paid at first sight, so **fix item positions
 /// permanently and never reorder by recency**. A key list that rearranges itself is one nobody can
 /// build a memory of.
-pub fn in_context(context: Context) -> impl Iterator<Item = &'static Binding> {
-    BINDINGS.iter().filter(move |b| b.context == context)
+/// **What is live in one context, in one [`Stance`]** — declaration order, never sorted.
+///
+/// A row that declares no stance is live in both, so an `Idle` list and a `Holding` list share
+/// everything except the handful of keys the phase actually changes. That is the property that makes
+/// the two lists readable as one vocabulary with a variant, rather than two vocabularies.
+pub fn in_context(context: Context, stance: Stance) -> impl Iterator<Item = &'static Binding> {
+    BINDINGS
+        .iter()
+        .filter(move |b| b.context == context && stance_ok(b, stance))
 }
 
 /// How a binding READS: the bare key, or the platform modifier joined to it.
@@ -701,6 +1079,10 @@ pub fn chord_text(b: &Binding) -> String {
 }
 
 /// Is Shift down?
+pub fn alt_held(keys: &ButtonInput<KeyCode>) -> bool {
+    ALT_KEYS.iter().any(|k| keys.pressed(*k))
+}
+
 pub fn shift_held(keys: &ButtonInput<KeyCode>) -> bool {
     SHIFT_KEYS.iter().any(|k| keys.pressed(*k))
 }
@@ -713,10 +1095,14 @@ fn shift_ok(b: &Binding, keys: &ButtonInput<KeyCode>) -> bool {
     }
 }
 
-/// One displayed row: the chords, and what they do.
+/// One displayed row: the chords, what they do, and which actions they are.
+#[derive(Debug)]
 pub struct Row {
     pub chord: String,
     pub does: &'static str,
+    /// **Every action collapsed into this row**, so the thing that draws it can ask whether one of
+    /// them is firing right now. See `chrome::flash_live_rows` for what that is for.
+    pub actions: Vec<Action>,
 }
 
 /// The key list as it should be READ, which is not one row per binding.
@@ -729,9 +1115,9 @@ pub struct Row {
 /// **Adjacent**, not grouped-by-label: order is declaration order and stays that way. Samp 2011, via
 /// §3.5 — fix item positions permanently and never reorder, because a list that rearranges itself is
 /// one nobody can build a memory of.
-pub fn rows(context: Context) -> Vec<Row> {
+pub fn rows(context: Context, stance: Stance) -> Vec<Row> {
     let mut out: Vec<Row> = Vec::new();
-    for b in in_context(context) {
+    for b in in_context(context, stance) {
         match out.last_mut() {
             Some(last) if last.does == b.does => {
                 // Comma-separated: `W, A, S, D` reads as a set of keys, `W A S D` reads as a sequence
@@ -744,10 +1130,12 @@ pub fn rows(context: Context) -> Vec<Row> {
                 // text, and this was the one place that went around it.
                 last.chord.push_str(", ");
                 last.chord.push_str(&chord_text(b));
+                last.actions.push(b.action);
             }
             _ => out.push(Row {
                 chord: chord_text(b),
                 does: b.does,
+                actions: vec![b.action],
             }),
         }
     }
@@ -800,24 +1188,33 @@ impl Plugin for KeysPlugin {
     }
 }
 
-/// Who owns the keyboard this frame. Written once, in [`Phase::Sense`], and read everywhere else.
+/// Who owns the keyboard this frame, and what is in hand. Written once, in [`Phase::Sense`], and read
+/// everywhere else.
+///
+/// **A tuple struct with the context still at `.0`** so the six places that compare it to a `Context`
+/// directly (`live.0 == Context::Tiles`) read the way they always did. The dispatch functions take the
+/// whole thing, because a binding that declares a [`Stance`] cannot be judged from the context alone.
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Live(pub Context);
+pub struct Live(pub Context, pub Stance);
 
 impl Default for Live {
     fn default() -> Self {
         // The tab the editor opens on — `tiles::Mode::default()` is `Map`. Stated rather than
         // derived, because `Context`'s own first variant is `Global`, which is not a tab.
-        Live(Context::Map)
+        Live(Context::Map, Stance::Idle)
     }
 }
 
-/// Which context owns the keyboard: the live tab, unless a field is taking raw keys.
-pub fn live(tab: Context, typing: bool) -> Context {
+/// Who owns the keyboard: the live tab, unless a field is taking raw keys — and what is in hand.
+///
+/// **Typing clears the stance to [`Stance::Idle`].** Not because the piece is put down — it is not —
+/// but because `Typing` suppresses every action anyway ([`fires_in`]), and leaving a live `Holding`
+/// beside it would be a second state that decides nothing while looking like it decides something.
+pub fn live(tab: Context, typing: bool, stance: Stance) -> Live {
     if typing {
-        Context::Typing
+        Live(Context::Typing, Stance::Idle)
     } else {
-        tab
+        Live(tab, stance)
     }
 }
 
@@ -830,6 +1227,26 @@ pub fn live(tab: Context, typing: bool) -> Context {
 /// doing only the tab-exclusion half it was written for.
 pub fn fires_in(want: Context, live: Context) -> bool {
     live != Context::Typing && want.overlaps(live)
+}
+
+/// Does this binding's [`Stance`] requirement hold right now? `None` is always satisfied — the same
+/// shape as [`shift_ok`], and for the same reason: an axis a row does not mention must not gate it.
+fn stance_ok(b: &Binding, live: Stance) -> bool {
+    match b.needs_stance {
+        None => true,
+        Some(want) => want.overlaps(live),
+    }
+}
+
+/// Every gate a binding must pass except the key itself, in one place so the three entry points below
+/// cannot drift from each other.
+fn allowed(b: &Binding, keys: &ButtonInput<KeyCode>, live: Live) -> bool {
+    fires_in(b.context, live.0)
+        && stance_ok(b, live.1)
+        // A bare binding must not fire while the modifier is held, or `Cmd+S` would also pan the
+        // camera back — and `Cmd+Z` would turn the brush as well as undo, now that `Z` aims.
+        && b.needs_mod == mod_held(keys)
+        && shift_ok(b, keys)
 }
 
 /// Is the command modifier down?
@@ -851,30 +1268,16 @@ pub fn mod_held(keys: &ButtonInput<KeyCode>) -> bool {
 /// **The context is a parameter rather than a run condition** so that there is exactly one gate. A
 /// system gated from outside still has to be gated correctly by every future caller; a function that
 /// cannot answer without being told who owns the keyboard cannot be called wrongly. The five
-/// `if *mode != Mode::Tiles` early returns this replaced were that second census.
-pub fn just_pressed(keys: &ButtonInput<KeyCode>, live: Context, action: Action) -> bool {
+/// `if *mode != Mode::Meshes` early returns this replaced were that second census.
+pub fn just_pressed(keys: &ButtonInput<KeyCode>, live: Live, action: Action) -> bool {
     let b = binding(action);
-    if !fires_in(b.context, live) {
-        return false;
-    }
-    // A bare binding must not fire while the modifier is held, or `Cmd+S` would also pan the camera
-    // back — and `Cmd+Z` would turn the brush as well as undo, now that `Z` aims.
-    if b.needs_mod != mod_held(keys) || !shift_ok(b, keys) {
-        return false;
-    }
-    keys.just_pressed(b.key)
+    allowed(b, keys, live) && keys.just_pressed(b.key)
 }
 
 /// Is this action's key held? For the continuous ones — panning.
-pub fn pressed(keys: &ButtonInput<KeyCode>, live: Context, action: Action) -> bool {
+pub fn pressed(keys: &ButtonInput<KeyCode>, live: Live, action: Action) -> bool {
     let b = binding(action);
-    if !fires_in(b.context, live) {
-        return false;
-    }
-    if b.needs_mod != mod_held(keys) || !shift_ok(b, keys) {
-        return false;
-    }
-    keys.pressed(b.key)
+    allowed(b, keys, live) && keys.pressed(b.key)
 }
 
 /// **How long a held key waits before firing again**, and then between repeats.
@@ -902,7 +1305,7 @@ pub struct Repeat(Vec<(Action, f32)>);
 /// context the author never pressed it in.
 pub fn repeating(
     keys: &ButtonInput<KeyCode>,
-    live: Context,
+    live: Live,
     action: Action,
     repeat: &mut Repeat,
     dt: f32,
@@ -938,12 +1341,12 @@ mod tests {
     #[test]
     fn every_action_has_exactly_one_binding() {
         let actions = [
-            Action::NextTab, Action::MapTab, Action::TilesTab, Action::AnimTab,
+            Action::NextTab, Action::MapTab, Action::MeshesTab, Action::TilesTab, Action::AnimTab,
             Action::ComposeTab, Action::ComposePrev, Action::ComposeNext, Action::ComposeArm,
             Action::ComposeMemberPrev, Action::ComposeMemberNext,
             Action::CarouselPrev, Action::CarouselNext,
             Action::Save, Action::Undo, Action::Redo, Action::Shortcuts, Action::EditTile,
-            Action::AimLeft, Action::AimRight, Action::AimReset, Action::Cancel,
+            Action::Straighten, Action::Cancel,
             Action::Fill, Action::Remove, Action::MoveMode, Action::CloneMode, Action::RenameMap,
             Action::OwnToggle, Action::Generate, Action::GenerateDeclared, Action::GenerateComposed,
             Action::CycleGrid,
@@ -951,11 +1354,11 @@ mod tests {
             Action::PanForward, Action::PanBack, Action::PanLeft, Action::PanRight,
             Action::TurnViewLeft, Action::TurnViewRight,
             Action::PrevCandidate, Action::NextCandidate, Action::TypeId, Action::CycleMount,
-            Action::Accept, Action::Rescan, Action::RemoveTile, Action::DemoteTile,
+            Action::Accept, Action::AcceptEdges, Action::Rescan, Action::RemoveTile, Action::DemoteTile,
             Action::UndoTile, Action::RedoTile,
             Action::CellLeft, Action::CellRight, Action::CellForward, Action::CellBack,
             Action::LayerDown, Action::LayerUp,
-            Action::CellSolid, Action::CellEdge, Action::CellAnchor, Action::CellClear,
+            Action::CellSolid, Action::CellEdge, Action::CellClear,
             Action::ScanMesh,
             Action::RotateMeshX, Action::RotateMeshY, Action::RotateMeshZ,
             Action::FocusCandidates, Action::FocusLibrary, Action::CopyInfo,
@@ -967,6 +1370,18 @@ mod tests {
             Action::ToggleGhost, Action::CycleCamPreset,
             Action::TurnPieceLeft, Action::TurnPieceRight,
             Action::TipX, Action::TipZ, Action::LiftUp, Action::LiftDown, Action::CycleTarget,
+            Action::PalettePrev, Action::PaletteNext, Action::AcceptProposal,
+            // The Tiles tab's verbs. `Build*` rather than `Tile*` because they name the act, not the
+            // tab — dropping and turning are building whatever the strip calls the place it happens.
+            Action::TileListPrev, Action::TileListNext,
+            Action::BuildForward, Action::BuildBack, Action::BuildLeft, Action::BuildRight,
+            Action::MemberPrev, Action::MemberNext,
+            Action::BuildDown, Action::BuildUp, Action::BuildRung,
+            Action::BuildDrop, Action::BuildSlot, Action::BuildArm,
+            Action::UndoBuild, Action::RedoBuild,
+            Action::AlignForward, Action::AlignBack, Action::AlignLeft, Action::AlignRight,
+            Action::BuildTurn, Action::BuildDropMember, Action::ClearTile, Action::BuildNew,
+            Action::KitEnter, Action::KitPrev, Action::KitNext, Action::KitOpen,
         ];
         assert_eq!(
             actions.len(),
@@ -1006,14 +1421,28 @@ mod tests {
                     (a.needs_shift, b.needs_shift),
                     (Some(x), Some(y)) if x != y
                 );
+                // **And the same for the stance**, on the identical rule: two rows asking for
+                // different things to be in hand can never both fire, which is what lets the arrows
+                // walk a list and move a piece on one key without a handler deciding between them.
+                let stance_exclusive = matches!(
+                    (a.needs_stance, b.needs_stance),
+                    (Some(x), Some(y)) if !x.overlaps(y)
+                );
                 if a.key == b.key
                     && a.needs_mod == b.needs_mod
                     && !shift_exclusive
+                    && !stance_exclusive
                     && a.context.overlaps(b.context)
                 {
                     clashes.push(format!(
-                        "{:?} ({:?}) and {:?} ({:?}) both take `{}`",
-                        a.action, a.context, b.action, b.context, a.chord
+                        "{:?} ({:?}, {:?}) and {:?} ({:?}, {:?}) both take `{}`",
+                        a.action,
+                        a.context,
+                        a.needs_stance,
+                        b.action,
+                        b.context,
+                        b.needs_stance,
+                        a.chord
                     ));
                 }
             }
@@ -1026,14 +1455,114 @@ mod tests {
         );
     }
 
+    /// **One key, two jobs, and only one of them fires** — the property the whole [`Stance`] axis
+    /// exists to give, asserted on the pair that motivated it.
+    ///
+    /// Before this, `ArrowUp` on the Tiles tab was a single action whose meaning `build::Build::placing`
+    /// decided inside a handler. A test could not reach that decision without building an `App`, so
+    /// the only thing standing between "walk the list" and "move the piece" was an `if` nobody could
+    /// see from the key table.
+    #[test]
+    fn the_arrows_walk_a_list_or_move_a_piece_but_never_both() {
+        let mut input = ButtonInput::<KeyCode>::default();
+        input.press(KeyCode::ArrowUp);
+
+        let idle = Live(Context::Tiles, Stance::Idle);
+        assert!(
+            just_pressed(&input, idle, Action::TileListPrev),
+            "with nothing in hand, up walks the library"
+        );
+        assert!(
+            !just_pressed(&input, idle, Action::BuildForward),
+            "with nothing in hand, up must not move a piece there is none of"
+        );
+
+        let holding = Live(Context::Tiles, Stance::Holding);
+        assert!(
+            just_pressed(&input, holding, Action::BuildForward),
+            "with a piece in hand, up moves it"
+        );
+        assert!(
+            !just_pressed(&input, holding, Action::TileListPrev),
+            "with a piece in hand, up must not also walk the library out from under it"
+        );
+    }
+
+    /// **The key list answers `what do the arrows do right now`**, which is the only question a modal
+    /// grammar raises and the one the old single row could not answer.
+    ///
+    /// Asserted on the rendered rows rather than the bindings, because the rows are what an author
+    /// reads — and the failure being fixed was a row that stayed true by being vague.
+    #[test]
+    fn the_tiles_key_list_changes_when_a_piece_is_picked_up() {
+        let idle = rows(Context::Tiles, Stance::Idle);
+        let holding = rows(Context::Tiles, Stance::Holding);
+
+        let says = |rs: &[Row], want: &str| rs.iter().any(|r| r.does.contains(want));
+
+        assert!(says(&idle, "library"), "idle rows: {idle:?}");
+        assert!(
+            !says(&idle, "move the piece"),
+            "the idle list must not offer a verb that cannot fire: {idle:?}"
+        );
+
+        assert!(says(&holding, "move the piece"), "holding rows: {holding:?}");
+        assert!(says(&holding, "flush"), "holding rows: {holding:?}");
+        assert!(
+            !says(&holding, "library"),
+            "the holding list must not offer a verb that cannot fire: {holding:?}"
+        );
+
+        // **The whole arrow cluster moves the piece, and the member walk is elsewhere.**
+        //
+        // This asserted the opposite until 2026-08-13: up/down moved and left/right walked the
+        // members. The author's report was that the arrows were not intuitive, and they were right in
+        // a way the split made invisible — `step_in_view` maps a wish through the camera yaw, so on
+        // an isometric view the arrows point at the four diagonals the screen shows, and offering two
+        // of them while the other two did something unrelated is exactly what "not intuitive" means.
+        //
+        // The walk still has to exist: `Build::focus` is drawn and acted on by five verbs, and was
+        // unreachable before it (reported 2026-08-12: *"how do I switch between two meshes to edit
+        // its placement?"*). It is `,` and `.` now. Both halves are checked together, because an edit
+        // that quietly took the arrows back would either strand the focus again or halve the
+        // directions again, and the pair is what says which.
+        let moving = holding
+            .iter()
+            .find(|r| r.does == "move the piece")
+            .unwrap_or_else(|| panic!("no row for moving the piece: {holding:?}"));
+        assert_eq!(
+            moving.chord.split(", ").count(),
+            4,
+            "all four arrows move the piece, and it reads `{}`",
+            moving.chord
+        );
+        let walking = holding
+            .iter()
+            .find(|r| r.does.contains("member"))
+            .unwrap_or_else(|| panic!("no row walks the members: {holding:?}"));
+        assert_eq!(
+            walking.chord.split(", ").count(),
+            2,
+            "a prev/next pair walks the members, and it reads `{}`",
+            walking.chord
+        );
+        assert!(
+            !walking.chord.contains("left") && !walking.chord.contains("right"),
+            "the walk must not take an arrow back: `{}`",
+            walking.chord
+        );
+    }
+
     /// The legal collisions, asserted directly so nobody "fixes" them: `S` pans the map and the
-    /// modified `S` saves; `Z` aims the brush left and the modified `Z` undoes. Different chords
-    /// rather than clashes — and the second pair is the one that makes `Z` safe to bind at all.
+    /// modified `S` saves; `Z` marks a lattice cell solid on the Meshes tab and the modified `Z`
+    /// undoes. Different chords rather than clashes — and the second pair is what makes `Z` safe to
+    /// bind at all. (It read `AimLeft` until the aim keys retired into the turn cluster, 2026-08-14;
+    /// the rule it guards is the same.)
     #[test]
     fn a_bare_key_and_its_modified_chord_are_different_bindings() {
         for (bare, modified) in [
             (Action::PanBack, Action::Save),
-            (Action::AimLeft, Action::Undo),
+            (Action::CellSolid, Action::Undo),
         ] {
             let bare = binding(bare);
             let modified = binding(modified);
@@ -1045,12 +1574,12 @@ mod tests {
     /// Map and tile contexts can never be live together, which is what lets them share letters.
     #[test]
     fn the_two_tabs_do_not_overlap() {
-        assert!(!Context::Map.overlaps(Context::Tiles));
+        assert!(!Context::Map.overlaps(Context::Meshes));
         assert!(!Context::Anim.overlaps(Context::Map));
-        assert!(!Context::Anim.overlaps(Context::Tiles));
+        assert!(!Context::Anim.overlaps(Context::Meshes));
         assert!(Context::Global.overlaps(Context::Anim));
         assert!(Context::Global.overlaps(Context::Map));
-        assert!(Context::Global.overlaps(Context::Tiles));
+        assert!(Context::Global.overlaps(Context::Meshes));
         // Typing shadows everything — that is the focus guard.
         assert!(Context::Typing.overlaps(Context::Map));
         assert!(Context::Typing.overlaps(Context::Global));
@@ -1073,7 +1602,7 @@ mod tests {
     /// itself. What was actually wrong here is one unrelated key hiding in a family row.
     #[test]
     fn the_composition_verb_names_its_key_in_the_map_census() {
-        let row = rows(Context::Map)
+        let row = rows(Context::Map, Stance::Idle)
             .into_iter()
             .find(|r| r.does.contains("composition"))
             .unwrap_or_else(|| panic!("the Map census no longer offers a composition verb at all"));
@@ -1091,28 +1620,172 @@ mod tests {
         );
     }
 
+    /// **Every context, so a tab cannot escape the ceiling by not being listed.**
+    ///
+    /// `Context::Tiles` was absent, exactly as `Context::Compose` had been before it — and the note
+    /// below records that lesson being learned once already. A tab missing from the test that polices
+    /// the tabs is a tab the policing does not reach, and the Tiles tab is the one with an author's
+    /// "those keys are gross" against it.
+    ///
+    /// **Both stances, because both are things a reader looks at.** A list that fits only while
+    /// nothing is in hand is not a list that fits.
+    pub const POLICED: [Context; 6] = [
+        Context::Global,
+        Context::Map,
+        Context::Meshes,
+        Context::Tiles,
+        Context::Anim,
+        // **Compose was missing from both of these lists**, so the fourth tab's rows were
+        // neither counted against the ceiling nor checked for surviving the collapse. A tab
+        // absent from the test that polices the tabs is a tab the policing does not reach.
+        Context::Compose,
+    ];
+
     /// ~12 per context, counted as ROWS — what a reader actually sees. Zheng et al. 2018 found a
     /// vocabulary of about a dozen is learnable to recall in three ten-minute sessions; past that a
     /// list stops being memorised and starts being read.
     #[test]
     fn no_context_carries_more_than_a_learnable_vocabulary() {
-        for context in [
-            Context::Global,
-            Context::Map,
-            Context::Tiles,
-            Context::Anim,
-            // **Compose was missing from both of these lists**, so the fourth tab's rows were
-            // neither counted against the ceiling nor checked for surviving the collapse. A tab
-            // absent from the test that polices the tabs is a tab the policing does not reach.
-            Context::Compose,
-        ] {
-            let n = rows(context).len();
+        for (context, stance) in POLICED
+            .into_iter()
+            .flat_map(|c| [(c, Stance::Idle), (c, Stance::Holding)])
+        {
+            let n = rows(context, stance).len();
             assert!(
                 n <= 12,
-                "{context:?} shows {n} rows; past about a dozen a key list stops being learnable and \
-                 starts being a reference card (docs/ui.md §3.5, Zheng et al. 2018)"
+                "{context:?} in {stance:?} shows {n} rows; past about a dozen a key list stops being \
+                 learnable and starts being a reference card (docs/ui.md §3.5, Zheng et al. 2018)"
             );
         }
+    }
+
+    /// **A collapsed row must name what each of its chords does.**
+    ///
+    /// # The row cap was measuring the wrong thing, and this is the other half of it
+    ///
+    /// `rows()` collapses adjacent bindings that share a `does`, and the test above counts the
+    /// result. So the cheapest way to stay under the ceiling was never to remove a key — it was to
+    /// give more keys the *same, vaguer* description, and that is what happened. `T F G H [ ]` read
+    /// `"cell cursor / layer"`: six keys, two phrases, and nothing pairing them. `G / Shift+G /
+    /// Cmd+G` read `"continue the layout: from the map, the kit's tokens, or its compositions"` —
+    /// three chords, three sources, no mapping. Both rows were *true*. Neither could teach the tab.
+    ///
+    /// Goodhart, in a key table: the guard was satisfied while the thing it guarded got worse.
+    ///
+    /// # Why this rule and not the two that were tried
+    ///
+    /// `the_composition_verb_names_its_key_in_the_map_census` records two earlier attempts at a
+    /// general lint, both abandoned because they flagged prose that is fine. This one does not flag
+    /// any of the three cases named there — `Cmd+Z, Shift+Cmd+Z / undo / redo`, `[, ] / lift / lower`
+    /// and the `Z, X, C, V` keypad run all have as many phrases as chords already.
+    ///
+    /// The rule is only about **slash-separated** descriptions, because a slash is what this table
+    /// uses to mean "and these are the parts". A single phrase covering several chords is a family
+    /// row — `W, A, S, D / pan` — and is left alone.
+    ///
+    /// # Two things it deliberately does not catch, so nobody reads it as more than it is
+    ///
+    /// **The annotation form is exempt.** `"walk the lists / Shift: x5"` is four arrows and one idea
+    /// with a note about a modifier, not four ideas; `"move / Shift: clone a set / M: keep as a
+    /// composition"` names its chords outright. Both put a `chord:` prefix on the trailing phrase,
+    /// and that prefix *is* the pairing — so a phrase after the first containing a colon exempts the
+    /// row. Without this the rule flags exactly the prose the two abandoned attempts flagged.
+    ///
+    /// **A single phrase over many chords is not checked at all**, and one such row was genuinely
+    /// bad: `G / Shift+G / Cmd+G` reading *"continue the layout: from the map, the kit's tokens, or
+    /// its compositions"* is one phrase, so it would pass. It was fixed by hand rather than by rule,
+    /// because no mechanical test can tell `W, A, S, D / pan` from that — the difference is whether
+    /// the chords do the same thing, which only a reader knows. This catches the arithmetic case;
+    /// the judgement case stays a judgement.
+    #[test]
+    fn a_collapsed_row_names_each_of_its_chords() {
+        let mut vague = Vec::new();
+        for (context, stance) in POLICED
+            .into_iter()
+            .flat_map(|c| [(c, Stance::Idle), (c, Stance::Holding)])
+        {
+            for row in rows(context, stance) {
+                let chords = row.chord.split(", ").count();
+                let phrases: Vec<&str> = row.does.split(" / ").collect();
+                // The annotation form names its own chord; see the note above.
+                if phrases.iter().skip(1).any(|p| p.contains(':')) {
+                    continue;
+                }
+                let phrases = phrases.len();
+                if chords > 1 && phrases > 1 && chords != phrases {
+                    vague.push(format!(
+                        "{context:?}/{stance:?}: `{}` has {chords} chords but {phrases} phrases — \
+                         `{}`",
+                        row.chord, row.does
+                    ));
+                }
+            }
+        }
+        assert!(
+            vague.is_empty(),
+            "{} row(s) collapse more chords than they explain. Either name each chord, or give the \
+             row one phrase that honestly covers all of them:\n  {}",
+            vague.len(),
+            vague.join("\n  ")
+        );
+    }
+
+    /// **The live key vocabulary can shrink and cannot grow.**
+    ///
+    /// The ceiling above counts *rows*, which is what a reader sees — and that is the right thing to
+    /// measure for a cheat sheet. It is the wrong thing to measure for a **hand**: the fingers learn
+    /// keys, not rows, and four arrows on one row are still four keys.
+    ///
+    /// The gap between those numbers is where this editor grew. At the time this ratchet was written
+    /// the Meshes tab showed 10 rows and bound 30 keys, and its author had to hold `K` to use it.
+    ///
+    /// So this pins the count per context, going down only. It is deliberately **not** a cap with a
+    /// principled number attached — there isn't one to cite, and inventing one would be the same
+    /// mistake as measuring rows and calling it learnability. It is a ratchet: adding a key to a tab
+    /// costs a deliberate edit here, and removing one is free.
+    #[test]
+    fn no_context_gains_a_key() {
+        // (context, keys) — measured, not chosen. Lower these when a key goes; raising one is a
+        // decision, and it belongs in a commit message.
+        let pinned = [
+            (Context::Global, 17),
+            // 25 -> 26: `AcceptProposal`, the generate commit door. Bought deliberately, and it
+            // costs no *row* — the four region-fills are `Stance::Idle` and this is
+            // `Stance::Proposed`, so the two never share a list. See [`Stance::Proposed`].
+            (Context::Map, 26),
+            // 30 -> 31: `AcceptEdges`, the door on the geometric socket derivation (FVS-R-26).
+            // Costs no row — `Accept` is `Stance::Idle` and this is `Stance::Proposed`, so the
+            // two never share a list.
+            (Context::Meshes, 31),
+            // 21 -> 22: `ClearTile`. `MemberPrev`/`MemberNext` replace the X nudge rather than
+            // adding to it, so the walk costs nothing here.
+            // 22 -> 26: the KIT list (FVS: the tab could author tiles and never show them).
+            // `right` opens it, `up`/`down` walk it, `right` again reopens the selected tile -- four
+            // 26 -> 28: `,` and `.` for the member walk, freeing `left`/`right` so that all four
+            // arrows move the piece. The author's report was that two of four directions moved it
+            // and the other two did something unrelated, which on an isometric view is exactly what
+            // it looks like.
+            //
+            // bindings, and **no new key to learn**: every one is an arrow this tab already used,
+            // kept out of each other's lists by the stance. `Esc` backs out, which the tab already
+            // promised ("Esc always returns to Choosing").
+            (Context::Tiles, 28),
+            (Context::Anim, 11),
+            (Context::Compose, 7),
+        ];
+        let mut grown = Vec::new();
+        for (context, was) in pinned {
+            let now = BINDINGS.iter().filter(|b| b.context == context).count();
+            if now > was {
+                grown.push(format!("{context:?}: {was} -> {now}"));
+            }
+        }
+        assert!(
+            grown.is_empty(),
+            "a context gained keys. The row ceiling will not catch this — a row can hold six keys \
+             — so state the new number here on purpose:\n  {}",
+            grown.join("\n  ")
+        );
     }
 
     /// **A rendered chord carries its modifier**, or a message names a key that does something else.
@@ -1137,8 +1810,8 @@ mod tests {
     /// The camera's two collapsed rows are Global, so they read the same on every tab.
     #[test]
     fn keys_that_do_one_thing_share_a_row() {
-        let map = rows(Context::Map);
-        let global = rows(Context::Global);
+        let map = rows(Context::Map, Stance::Idle);
+        let global = rows(Context::Global, Stance::Idle);
         let pan = global
             .iter()
             .find(|r| r.does == "pan")
@@ -1146,30 +1819,38 @@ mod tests {
         assert_eq!(pan.chord, "W, A, S, D");
         assert_eq!(global.iter().filter(|r| r.does == "pan").count(), 1);
 
-        let turn = rows(Context::Global)
+        let turn = rows(Context::Global, Stance::Idle)
             .into_iter()
             .find(|r| r.does == "turn view")
             .unwrap_or_else(|| panic!("no turn row"));
         assert_eq!(turn.chord, "Q, E");
 
-        // All three aim keys on one row — the merge that bought the target-lock row its slot.
-        let aim = map
+        // **The whole rotate cluster on one row.** It was two rows and two subjects — `Z, C, V`
+        // aimed the brush while `R, T, Y, U` turned what was under the cursor — until the split was
+        // reported from the keyboard (2026-08-14). One row now, because it is one idea: turn the
+        // thing you are steering. Five chords, five phrases, which
+        // `a_collapsed_row_names_each_of_its_chords` is what enforces.
+        let turn_piece = map
             .iter()
-            .find(|r| r.does == "aim / straight again")
-            .unwrap_or_else(|| panic!("no aim row"));
-        assert_eq!(aim.chord, "Z, C, V");
+            .find(|r| r.does == "turn left / turn right / tip x / tip z / straight again")
+            .unwrap_or_else(|| panic!("no turn row"));
+        assert_eq!(turn_piece.chord, "R, T, Y, U, V");
+        assert!(
+            !map.iter().any(|r| r.does.starts_with("aim ")),
+            "the aim row retired into the turn cluster; two rows would be two subjects again"
+        );
 
         // The lattice cursor is its own cluster, and must not be the camera's — an author reaches
         // for `W A S D` to move the view on every tab. The layer keys share its row: one idea,
         // "where in the lattice", merged when the labels row needed the twelfth slot.
-        let cursor = rows(Context::Tiles)
+        let cursor = rows(Context::Meshes, Stance::Idle)
             .into_iter()
-            .find(|r| r.does == "cell cursor / layer")
+            .find(|r| r.does == "cell fwd / left / back / right / layer down / up")
             .unwrap_or_else(|| panic!("no cursor row"));
         assert_eq!(cursor.chord, "T, F, G, H, [, ]");
 
         // The labeler's five verbs read as one row, the shifted forms rendered as such.
-        let labels = rows(Context::Tiles)
+        let labels = rows(Context::Meshes, Stance::Idle)
             .into_iter()
             .find(|r| r.does == "labels: suggest / all / apply / discard / clear all")
             .unwrap_or_else(|| panic!("no labels row"));
@@ -1182,14 +1863,14 @@ mod tests {
     fn the_shortcuts_key_reads_as_held() {
         let mut input = ButtonInput::<KeyCode>::default();
         input.press(binding(Action::Shortcuts).key);
-        for tab in [Context::Map, Context::Tiles, Context::Anim] {
+        for tab in [Context::Map, Context::Meshes, Context::Anim] {
             assert!(
-                pressed(&input, tab, Action::Shortcuts),
+                pressed(&input, Live(tab, Stance::Idle), Action::Shortcuts),
                 "the shortcuts overlay must be reachable from {tab:?}"
             );
         }
         assert!(
-            !pressed(&input, Context::Typing, Action::Shortcuts),
+            !pressed(&input, Live(Context::Typing, Stance::Idle), Action::Shortcuts),
             "and must not open while a field is taking keys"
         );
     }
@@ -1200,19 +1881,19 @@ mod tests {
         for context in [
             Context::Global,
             Context::Map,
-            Context::Tiles,
+            Context::Meshes,
             Context::Anim,
             // **Compose was missing from both of these lists**, so the fourth tab's rows were
             // neither counted against the ceiling nor checked for surviving the collapse. A tab
             // absent from the test that polices the tabs is a tab the policing does not reach.
             Context::Compose,
         ] {
-            let chords: String = rows(context)
+            let chords: String = rows(context, Stance::Idle)
                 .iter()
                 .map(|r| r.chord.clone())
                 .collect::<Vec<_>>()
                 .join(" ");
-            for b in in_context(context) {
+            for b in in_context(context, Stance::Idle) {
                 // Against the RENDERED chord, not the bare field: a modified binding reads as one
                 // token (`Cmd+S`), and splitting it back apart would be this test inventing a second
                 // rendering rule to disagree with `chord_text`.
@@ -1233,20 +1914,23 @@ mod tests {
         let mut input = ButtonInput::<KeyCode>::default();
         input.press(KeyCode::Tab);
         assert!(
-            just_pressed(&input, Context::Map, Action::NextTab),
+            just_pressed(&input, Live(Context::Map, Stance::Idle), Action::NextTab),
             "Tab did not fire NextTab"
         );
         assert!(
-            !just_pressed(&input, Context::Map, Action::MapTab),
+            !just_pressed(&input, Live(Context::Map, Stance::Idle), Action::MapTab),
             "Tab fired an unrelated action"
         );
 
+        // **The digits follow the strip**, so this asserts the pairing rather than a key. `1` is the
+        // first tab in `Mode::ALL` and `2` the second — Map, then the kit levels in hierarchy order.
+        // The pairing itself is held by `the_number_keys_follow_the_strip`.
+        let mut input = ButtonInput::<KeyCode>::default();
+        input.press(KeyCode::Digit1);
+        assert!(just_pressed(&input, Live(Context::Map, Stance::Idle), Action::MapTab), "1 did not fire MapTab");
         let mut input = ButtonInput::<KeyCode>::default();
         input.press(KeyCode::Digit2);
-        assert!(
-            just_pressed(&input, Context::Map, Action::TilesTab),
-            "2 did not fire TilesTab"
-        );
+        assert!(just_pressed(&input, Live(Context::Map, Stance::Idle), Action::MeshesTab), "2 did not fire MeshesTab");
     }
 
     /// **The bug that put six descriptors in `library.ron`.** While a field owns the keyboard, no
@@ -1264,12 +1948,12 @@ mod tests {
         }
         for b in BINDINGS {
             assert!(
-                !just_pressed(&input, Context::Typing, b.action),
+                !just_pressed(&input, Live(Context::Typing, Stance::Idle), b.action),
                 "{:?} fired while a text field owned the keyboard",
                 b.action
             );
             assert!(
-                !pressed(&input, Context::Typing, b.action),
+                !pressed(&input, Live(Context::Typing, Stance::Idle), b.action),
                 "{:?} read as held while a text field owned the keyboard",
                 b.action
             );
@@ -1277,26 +1961,26 @@ mod tests {
     }
 
     /// A tab's letters mean nothing in another tab — which is the whole reason `Context` exists, and
-    /// what previously took five hand-written `if *mode != Mode::Tiles` early returns to enforce.
+    /// what previously took five hand-written `if *mode != Mode::Meshes` early returns to enforce.
     #[test]
     fn a_tabs_binding_does_not_fire_from_another_tab() {
         let mut input = ButtonInput::<KeyCode>::default();
         input.press(KeyCode::KeyF);
         assert!(
-            just_pressed(&input, Context::Map, Action::Fill),
+            just_pressed(&input, Live(Context::Map, Stance::Idle), Action::Fill),
             "F must flood fill on the map tab"
         );
         assert!(
-            !just_pressed(&input, Context::Tiles, Action::Fill),
+            !just_pressed(&input, Live(Context::Meshes, Stance::Idle), Action::Fill),
             "F must do nothing on the tiles tab"
         );
 
         // And a Global binding fires from every tab, which is what `Global` means.
         let mut input = ButtonInput::<KeyCode>::default();
         input.press(KeyCode::Tab);
-        for tab in [Context::Map, Context::Tiles, Context::Anim] {
+        for tab in [Context::Map, Context::Meshes, Context::Anim] {
             assert!(
-                just_pressed(&input, tab, Action::NextTab),
+                just_pressed(&input, Live(tab, Stance::Idle), Action::NextTab),
                 "Tab must cycle tabs from {tab:?}"
             );
         }
@@ -1309,9 +1993,9 @@ mod tests {
     fn modified_chords_and_bare_keys_do_not_shadow_each_other() {
         let mut input = ButtonInput::<KeyCode>::default();
         input.press(KeyCode::KeyS);
-        assert!(just_pressed(&input, Context::Map, Action::PanBack));
+        assert!(just_pressed(&input, Live(Context::Map, Stance::Idle), Action::PanBack));
         assert!(
-            !just_pressed(&input, Context::Map, Action::Save),
+            !just_pressed(&input, Live(Context::Map, Stance::Idle), Action::Save),
             "bare S must not save"
         );
 
@@ -1322,41 +2006,45 @@ mod tests {
         input.press(MOD_KEYS[0]);
         input.press(KeyCode::KeyS);
         assert!(
-            just_pressed(&input, Context::Map, Action::Save),
+            just_pressed(&input, Live(Context::Map, Stance::Idle), Action::Save),
             "{MOD_NAME}+S must save"
         );
         assert!(
-            !just_pressed(&input, Context::Map, Action::PanBack),
+            !just_pressed(&input, Live(Context::Map, Stance::Idle), Action::PanBack),
             "{MOD_NAME}+S must not also pan"
         );
     }
 
     /// **The chord that made undo look broken.** `Cmd+Z` on a Mac had been checked against Ctrl, so
     /// it did nothing at all — a flood fill could not be taken back and the undo stack looked empty.
-    /// Both halves of the `Z` pair are asserted because binding the bare letter to aim is what makes
-    /// getting this wrong silent rather than loud.
+    ///
+    /// Both halves of the `Z` pair are still asserted, on the Meshes tab, which is where the bare
+    /// letter now lives: `Z` marks a lattice cell solid and `Cmd+Z` steps that tab's history. On the
+    /// Map the bare letter is free — it aimed the brush until the aim keys retired into the turn
+    /// cluster (2026-08-14) — and a modifier check that is wrong there is exactly as silent as it
+    /// ever was, which is why the Map half is asserted too.
     #[test]
-    fn the_platform_modifier_undoes_and_the_bare_key_aims() {
+    fn the_platform_modifier_undoes_and_the_bare_key_does_not() {
         let mut input = ButtonInput::<KeyCode>::default();
         input.press(MOD_KEYS[0]);
         input.press(KeyCode::KeyZ);
         assert!(
-            just_pressed(&input, Context::Map, Action::Undo),
+            just_pressed(&input, Live(Context::Map, Stance::Idle), Action::Undo),
             "{MOD_NAME}+Z must undo"
         );
         assert!(
-            !just_pressed(&input, Context::Map, Action::AimLeft),
-            "{MOD_NAME}+Z must not also turn the brush"
+            !just_pressed(&input, Live(Context::Meshes, Stance::Idle), Action::CellSolid),
+            "{MOD_NAME}+Z must not also mark a cell solid"
         );
 
         let mut input = ButtonInput::<KeyCode>::default();
         input.press(KeyCode::KeyZ);
         assert!(
-            just_pressed(&input, Context::Map, Action::AimLeft),
-            "bare Z must aim left"
+            just_pressed(&input, Live(Context::Meshes, Stance::Idle), Action::CellSolid),
+            "bare Z must mark the lattice cell solid"
         );
         assert!(
-            !just_pressed(&input, Context::Map, Action::Undo),
+            !just_pressed(&input, Live(Context::Map, Stance::Idle), Action::Undo),
             "bare Z must not undo"
         );
     }
@@ -1384,7 +2072,7 @@ mod tests {
             }
             input.press(KeyCode::KeyG);
             for other in [Action::Generate, Action::GenerateDeclared, Action::GenerateComposed] {
-                let fired = just_pressed(&input, Context::Map, other);
+                let fired = just_pressed(&input, Live(Context::Map, Stance::Idle), other);
                 assert_eq!(
                     fired,
                     other == wanted,
@@ -1394,23 +2082,43 @@ mod tests {
         }
     }
 
-    /// The three share one displayed row, which is what keeps the Map context inside the ceiling
-    /// `no_context_carries_more_than_a_learnable_vocabulary` enforces. They collapse only while they
+    /// **The four region-fills share one row, and the row pairs each chord with its source.**
+    ///
+    /// The collapse is what keeps the Map context inside the ceiling
+    /// `no_context_carries_more_than_a_learnable_vocabulary` enforces — they collapse only while they
     /// are adjacent and carry the same `does`, so this pins both.
+    ///
+    /// **The second assertion is the one that was missing.** The row used to read *"continue the
+    /// layout: from the map, the kit's tokens, or its compositions"* against three chords, and this
+    /// test was satisfied: three chords, one row, all present. What it could not see is that a reader
+    /// had no way to tell which chord took which source — the count was right and the row taught
+    /// nothing. Counting the slash-separated phrases against the chords is what makes that a failure.
     #[test]
-    fn the_three_generate_sources_collapse_into_one_row() {
-        let rows = rows(Context::Map);
-        let generate: Vec<&str> = rows
+    fn the_region_fills_collapse_into_one_row_that_names_each_source() {
+        let rows = rows(Context::Map, Stance::Idle);
+        let fills: Vec<&Row> = rows
             .iter()
             .filter(|r| r.chord.split(", ").any(|c| c.ends_with('G')))
-            .map(|r| r.chord.as_str())
             .collect();
-        assert_eq!(generate.len(), 1, "three bindings, one row: {generate:?}");
-        let chords: Vec<&str> = generate[0].split(", ").collect();
-        assert_eq!(chords.len(), 3, "all three chords are on it: {:?}", generate[0]);
+        assert_eq!(fills.len(), 1, "four bindings, one row: {fills:?}");
+        let chords: Vec<&str> = fills[0].chord.split(", ").collect();
+        assert_eq!(chords.len(), 4, "all four chords are on it: {:?}", fills[0]);
+        assert!(chords.iter().any(|c| *c == "F"), "{chords:?}");
         assert!(chords.iter().any(|c| *c == "G"), "{chords:?}");
         assert!(chords.iter().any(|c| c.starts_with("Shift")), "{chords:?}");
         assert!(chords.iter().any(|c| c.starts_with(MOD_NAME)), "{chords:?}");
+
+        // One phrase per chord, so the pairing is readable off the row.
+        let phrases = fills[0].does.split(" / ").count();
+        assert_eq!(
+            phrases,
+            chords.len(),
+            "a collapsed row must name what each of its chords does — `{}` has {} chords and {} \
+             phrases",
+            fills[0].does,
+            chords.len(),
+            phrases
+        );
     }
 
     /// Every binding can be rendered next to the thing it does, which is the whole point of carrying
@@ -1435,30 +2143,30 @@ mod tests {
     fn a_press_fires_at_once_and_then_waits() {
         let mut input = ButtonInput::<KeyCode>::default();
         let mut repeat = Repeat::default();
-        input.press(binding(Action::AimRight).key);
+        input.press(binding(Action::TurnPieceRight).key);
 
         assert!(
-            repeating(&input, Context::Map, Action::AimRight, &mut repeat, 0.0),
+            repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceRight, &mut repeat, 0.0),
             "the press itself must fire without waiting on a timer"
         );
 
         // Held, but `just_pressed` no longer reports it — this is what a second frame looks like.
         input.clear();
-        input.press(binding(Action::AimRight).key);
-        input.clear_just_pressed(binding(Action::AimRight).key);
+        input.press(binding(Action::TurnPieceRight).key);
+        input.clear_just_pressed(binding(Action::TurnPieceRight).key);
         // Just under the interval, in ten equal steps: nothing more may fire.
         let step = REPEAT_SECS / 10.0;
         let mut fired = 0;
         for _ in 0..9 {
-            if repeating(&input, Context::Map, Action::AimRight, &mut repeat, step) {
+            if repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceRight, &mut repeat, step) {
                 fired += 1;
             }
         }
         assert_eq!(fired, 0, "9/10 of the {REPEAT_SECS} s interval must not fire");
 
         // Crossing it fires exactly once.
-        assert!(repeating(&input, Context::Map, Action::AimRight, &mut repeat, step * 2.0));
-        assert!(!repeating(&input, Context::Map, Action::AimRight, &mut repeat, 0.0));
+        assert!(repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceRight, &mut repeat, step * 2.0));
+        assert!(!repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceRight, &mut repeat, 0.0));
     }
 
     /// Holding for a second yields the presses the interval promises, rather than one per frame.
@@ -1466,13 +2174,13 @@ mod tests {
     fn holding_repeats_at_the_stated_cadence() {
         let mut input = ButtonInput::<KeyCode>::default();
         let mut repeat = Repeat::default();
-        input.press(binding(Action::AimLeft).key);
-        let mut fired = usize::from(repeating(&input, Context::Map, Action::AimLeft, &mut repeat, 0.0));
+        input.press(binding(Action::TurnPieceLeft).key);
+        let mut fired = usize::from(repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceLeft, &mut repeat, 0.0));
 
-        input.clear_just_pressed(binding(Action::AimLeft).key);
+        input.clear_just_pressed(binding(Action::TurnPieceLeft).key);
         // One second at 60 fps.
         for _ in 0..60 {
-            if repeating(&input, Context::Map, Action::AimLeft, &mut repeat, 1.0 / 60.0) {
+            if repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceLeft, &mut repeat, 1.0 / 60.0) {
                 fired += 1;
             }
         }
@@ -1490,20 +2198,20 @@ mod tests {
     fn releasing_resets_the_countdown() {
         let mut input = ButtonInput::<KeyCode>::default();
         let mut repeat = Repeat::default();
-        let key = binding(Action::AimRight).key;
+        let key = binding(Action::TurnPieceRight).key;
 
         input.press(key);
-        assert!(repeating(&input, Context::Map, Action::AimRight, &mut repeat, 0.0));
+        assert!(repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceRight, &mut repeat, 0.0));
         input.clear_just_pressed(key);
         // Part of the way to the next repeat, then let go.
-        repeating(&input, Context::Map, Action::AimRight, &mut repeat, REPEAT_SECS * 0.8);
+        repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceRight, &mut repeat, REPEAT_SECS * 0.8);
         input.release(key);
-        assert!(!repeating(&input, Context::Map, Action::AimRight, &mut repeat, 0.0));
+        assert!(!repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceRight, &mut repeat, 0.0));
 
         input.clear();
         input.press(key);
         assert!(
-            repeating(&input, Context::Map, Action::AimRight, &mut repeat, 0.0),
+            repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceRight, &mut repeat, 0.0),
             "a fresh press fires at once, not after the remainder of an interval"
         );
     }
@@ -1515,16 +2223,16 @@ mod tests {
     fn a_key_held_into_a_new_context_waits_for_a_fresh_press() {
         let mut input = ButtonInput::<KeyCode>::default();
         let mut repeat = Repeat::default();
-        let key = binding(Action::AimRight).key;
+        let key = binding(Action::TurnPieceRight).key;
 
         // Held down while the Tiles tab owns the keyboard: nothing accrues.
         input.press(key);
         input.clear_just_pressed(key);
-        assert!(!repeating(&input, Context::Tiles, Action::AimRight, &mut repeat, 5.0));
+        assert!(!repeating(&input, Live(Context::Meshes, Stance::Idle), Action::TurnPieceRight, &mut repeat, 5.0));
 
         // Now the Map tab is live and the key is still down, but was never pressed here.
         assert!(
-            !repeating(&input, Context::Map, Action::AimRight, &mut repeat, 5.0),
+            !repeating(&input, Live(Context::Map, Stance::Idle), Action::TurnPieceRight, &mut repeat, 5.0),
             "a key that was already down must not start repeating on a context change"
         );
     }

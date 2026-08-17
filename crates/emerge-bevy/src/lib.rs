@@ -695,6 +695,7 @@ mod tests {
         let mut table = descriptor("table");
         table.offers = Offers {
             surfaces: vec![],
+            faces: vec![],
             sockets: (0..seats)
                 .map(|i| Socket {
                     id: format!("seat_{i}"),

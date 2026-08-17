@@ -1,0 +1,47 @@
+# CI for the standalone `deterministic_solver` mirror.
+#
+# **This path is inert upstream and live here.** GitHub only reads workflows from `.github/` at a
+# repository root, so in the monorepo this file is an ordinary text file that nothing runs. The
+# `git subtree split` that produces the mirror lifts `crates/deterministic_solver/` to the root — and
+# this file with it — so it becomes the mirror's CI without the monorepo gaining a second workflow.
+#
+# This crate is one of the few that genuinely builds outside the workspace: its only dependency is
+# `batsat`, by version rather than by path. A mirror that cannot build standalone gets no workflow,
+# because a red badge nobody can fix is worse than no badge.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (standalone) + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release
+
+      # **`the_same_problem_gives_the_same_model_every_time` is the one that matters.** This crate's
+      # contract is that the answer is a function of the clauses and nothing else; consumers generate
+      # worlds from exactly these bits. A red there is a breaking change, not a flaky test.
+      #
+      # It also runs on a second architecture here, which the local suite cannot do — the determinism
+      # argument is reasoning from "no clock, no threads, no entropy" plus one platform's measurement,
+      # and an x86_64 Linux runner is the cheapest way to make it an observation.
+      - name: Test
+        run: cargo test
+
+      - name: Run the examples
+        run: |
+          cargo run --release --example n_queens
+          cargo run --release --example graph_colouring
+          cargo run --release --example soft_constraints
