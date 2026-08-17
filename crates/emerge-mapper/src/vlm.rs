@@ -44,6 +44,21 @@ pub struct VlmConfig {
     pub model: String,
     key: String,
     pub timeout_secs: u64,
+    /// **The generation budget, and it belongs beside the model rather than in the request.**
+    ///
+    /// It was a literal `800` at the POST. That number was chosen against `qwen3-vl-30b`, which
+    /// answers directly — the whole budget was the JSON. `qwen3.8-27b` is a **reasoning** model
+    /// (`--reasoning-format deepseek` on bmb), and the budget covers everything it generates, so
+    /// the thinking is spent out of the same 800 the answer needs. Measured 2026-08-17: a
+    /// one-word colour question at `max_tokens: 20` came back with **empty content and a full
+    /// paragraph of `reasoning_content`** — the exact shape a truncated label would take, except
+    /// across a 700-mesh batch it would look like an intermittent parse failure rather than a
+    /// budget.
+    ///
+    /// Config rather than a constant because that is the fault this whole incident was: the model
+    /// changed under a number compiled into the binary. Swapping the model again is a `.env` edit,
+    /// and the budget it needs travels with it.
+    pub max_tokens: u32,
 }
 
 impl std::fmt::Debug for VlmConfig {
@@ -54,6 +69,7 @@ impl std::fmt::Debug for VlmConfig {
             .field("model", &self.model)
             .field("key", &"<redacted>")
             .field("timeout_secs", &self.timeout_secs)
+            .field("max_tokens", &self.max_tokens)
             .finish()
     }
 }
@@ -124,17 +140,29 @@ impl VlmConfig {
         let url = get("EMERGE_VLM_URL")
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| "http://127.0.0.1:9292/v1/chat/completions".to_owned());
+        // **The model bmb serves, as of 2026-08-17.** This said `qwen3-vl-30b` until that day, when
+        // the endpoint stopped carrying it — `could not find suitable inference handler` — and the
+        // batch failed with a message about the SSH forward, which was down too and hid it. A
+        // default naming a model nothing serves is a second thing to keep in step with bmb; this
+        // one is at least the same name the `.env` beside it uses.
         let model = get("EMERGE_VLM_MODEL")
             .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| "qwen3-vl-30b".to_owned());
+            .unwrap_or_else(|| "qwen3.8-27b".to_owned());
         let timeout_secs = get("EMERGE_VLM_TIMEOUT_SECS")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(120);
+        // 2000 rather than the old 800: see [`VlmConfig::max_tokens`]. A direct-answering model
+        // spends a few hundred of these and stops, so the higher ceiling costs it nothing — the
+        // endpoint streams until the JSON closes, not until the budget is used.
+        let max_tokens = get("EMERGE_VLM_MAX_TOKENS")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(2000);
         Ok(VlmConfig {
             url,
             model,
             key,
             timeout_secs,
+            max_tokens,
         })
     }
 
@@ -146,6 +174,7 @@ impl VlmConfig {
             model: "stub-model".to_owned(),
             key: "stub-key".to_owned(),
             timeout_secs,
+            max_tokens: 2000,
         }
     }
 }
@@ -908,7 +937,7 @@ pub fn request_labels(
     let body = serde_json::json!({
         "model": cfg.model,
         "temperature": 0.1,
-        "max_tokens": 800,
+        "max_tokens": cfg.max_tokens,
         "messages": messages,
     });
 
@@ -1575,7 +1604,25 @@ mod tests {
         })
         .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(cfg.url, "http://127.0.0.1:9292/v1/chat/completions");
-        assert_eq!(cfg.model, "qwen3-vl-30b");
+        // **The name bmb answers to**, and it moved once already — `qwen3-vl-30b` until
+        // 2026-08-17, when the endpoint stopped carrying it and the batch failed with a message
+        // about the SSH forward. Pinned here so the default cannot drift from bmb silently: if
+        // this fails, `llama-swap.yaml` moved and the `.env` beside it needs the same edit.
+        assert_eq!(cfg.model, "qwen3.8-27b");
+        // Big enough for a reasoning model, because that is what the default now names — the
+        // budget covers the thinking as well as the JSON. See [`VlmConfig::max_tokens`].
+        assert_eq!(cfg.max_tokens, 2000);
+        assert_eq!(
+            VlmConfig::from_lookup(|name| match name {
+                "EMERGE_VLM_KEY" => Some("k".to_owned()),
+                "EMERGE_VLM_MAX_TOKENS" => Some("512".to_owned()),
+                _ => None,
+            })
+            .unwrap_or_else(|e| panic!("{e}"))
+            .max_tokens,
+            512,
+            "the budget has to be overridable, or swapping the model needs a recompile"
+        );
         // The redaction: the key never appears in Debug output.
         assert!(!format!("{cfg:?}").contains('k') || !format!("{cfg:?}").contains("\"k\""));
         assert!(format!("{cfg:?}").contains("<redacted>"));
