@@ -49,16 +49,20 @@ CRATES=(
     # same as every other crate but the direction of the FIRST move was inward. Its nested
     # `crates/bevy_debugger_bevy` travels with it — one mirror, both halves.
     bevy_debugger_mcp
-    # Runtime mesh fracture. Extracted from `src/autogib.rs`; the game keeps the rifle tagger, the run
-    # gate and the avian spawning, and this keeps the slicer.
-    bevy_autogib
+    # **`bevy_autogib` is deliberately absent, and it is the only crate that ever left this list.**
+    # It was a mirror of `crates/bevy_autogib` until 2026-08-16, when the arrow was reversed:
+    # `Ladvien/bevy_autogib` became the source of truth and this repo an ordinary consumer of it,
+    # pinned by rev in the root manifest. A `subtree split` carries only commits, so the crate's own
+    # audit harness could never reach the published repository from here — which is the whole reason
+    # the direction changed. Mirroring it now would push this monorepo's history OVER the repository
+    # that is upstream of it. Its work arrives by moving the pin; see the dependency's comment in
+    # `Cargo.toml`.
 )
 
 # Mirrors that are created PUBLIC. Everything absent from this list is created private — see the
 # `gh repo create` call below for why the default sits here rather than in a flag.
 #
-# `bevy_autogib` is public because nothing in the Bevy ecosystem ships runtime plane-cut prefracture
-# with watertight caps; `bevy_light_grid` because "illuminance the AI can read" is a question a renderer
+# `bevy_light_grid` is here because "illuminance the AI can read" is a question a renderer
 # does not answer; `bevy_speech_bubbles` because a world-space balloon is not something Bevy's text
 # stack does; `bevy_orca` because reciprocal avoidance is a solved algorithm most engines still make
 # you write yourself; `bevy_stigmergy` because coordination-through-the-environment is a whole class
@@ -75,7 +79,6 @@ CRATES=(
 # NB this list only drives repo CREATION. A repo that already exists is not touched here — flipping an
 # existing mirror's visibility is `gh repo edit <name> --visibility public`, deliberately a hand action.
 PUBLIC_CRATES=(
-    bevy_autogib
     deterministic_solver
     bevy_light_grid
     bevy_speech_bubbles

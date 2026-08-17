@@ -18,7 +18,9 @@
 
 ## Workspace & crates
 
-Root package is the game (`foundation_vs_slop`, `src/`). Fifteen members live under `crates/`; thirteen mirror to `Ladvien/*` repos. **Seven are public** — `bevy_autogib`, `bevy_light_grid`, `bevy_speech_bubbles`, `bevy_orca`, `bevy_stigmergy`, `det_rng` and `map_elites` — each carrying a runnable example and, where the behaviour is only legible in motion, a gif. The rest stay private. The exception is `crates/fvs`, the zero-dependency `cargo fvs` dispatcher — its own crate so `--help` doesn't rebuild the game (see its manifest header). The fourteenth is `crates/bevy_debugger_mcp/crates/bevy_debugger_bevy`, nested inside the debugger's own tree and mirrored as part of it rather than on its own.
+Root package is the game (`foundation_vs_slop`, `src/`). Fourteen members live under `crates/`; twelve mirror to `Ladvien/*` repos. **Six are public** — `bevy_light_grid`, `bevy_speech_bubbles`, `bevy_orca`, `bevy_stigmergy`, `det_rng` and `map_elites` — each carrying a runnable example and, where the behaviour is only legible in motion, a gif. The rest stay private.
+
+**`bevy_autogib` is the one that is no longer here, and the direction of that arrow is the point.** It was a member with a mirror until 2026-08-16; now [`Ladvien/bevy_autogib`](https://github.com/Ladvien/bevy_autogib) is the source of truth and this repo is an ordinary consumer, pinned by rev. A `subtree split` carries only commits, so the crate's own audit harness could never reach the published repository from here — which is what made the old arrangement backwards. It is absent from `CRATES` in `scripts/mirror_crates.sh` on purpose: mirroring it would push this history over the repository upstream of it. Its work arrives by moving the pin in the root `Cargo.toml`, and it is the only crate here that is not covered by `cargo test --workspace`. The exception is `crates/fvs`, the zero-dependency `cargo fvs` dispatcher — its own crate so `--help` doesn't rebuild the game (see its manifest header). The fourteenth is `crates/bevy_debugger_mcp/crates/bevy_debugger_bevy`, nested inside the debugger's own tree and mirrored as part of it rather than on its own.
 
 Each crate is still reached by the path the game always used. **The facade is the API: changing a call site means editing `src/`, not `crates/`.**
 
@@ -31,7 +33,7 @@ Each crate is still reached by the path the game always used. **The facade is th
 | `bevy_stigmergy` | N influence channels + vectorial rally pheromone | `Stig(StigGrid<CHANNEL_COUNT>)` in `ai::field` (`src/ai/field.rs:134`) |
 | `bevy_light_grid` | CPU illuminance grid creatures read | `LightField { core, dirty }` (`src/light.rs:341`) |
 | `bevy_speech_bubbles` | World-space speech/thought balloons | `dialogue::{bubble, model}` re-exports (`src/dialogue/bubble.rs:15`) |
-| `bevy_autogib` | Runtime mesh fracture: slicer, watertight caps, bake-once cache | `crate::autogib` facade + `squad::{FigurineSource, GunModel}` aliases (`src/autogib.rs`) |
+| `bevy_autogib` | Runtime mesh fracture: slicer, watertight caps, bake-once cache. **Not under `crates/` — a git dependency pinned by rev** | `crate::autogib` facade + `squad::{FigurineSource, GunModel}` aliases (`src/autogib.rs`) |
 | `emerge-core` | Engine-free world building: schemas, IR, solvers, WFC (re-exports `det_rng` as `rng`) | `crate::{geom, rng, wfc}` (`src/lib.rs:169`), `placement::{ir, …}` (`src/placement/mod.rs:26`) |
 | `emerge-anim` | Pose blender | `crate::anim` (`src/lib.rs:23`) |
 | `emerge-bevy` | Library + map → entities | `src/emerge_map.rs` |
