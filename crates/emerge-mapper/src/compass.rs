@@ -149,7 +149,7 @@ fn spawn(mut commands: Commands) {
                         // `PANEL_BG` would be the wrong contrast here.
                         // CHROME-OK: read against the axis dot, not against a panel.
                         TextColor(Color::srgb(0.10, 0.10, 0.10)),
-                        TextFont::from_font_size(9.0),
+                        TextFont::from_font_size(crate::chrome::text::HINT),
                         Pickable::IGNORE,
                     ));
                 });

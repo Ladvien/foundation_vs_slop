@@ -179,7 +179,7 @@ fn paint_notices(
                     crate::keys::chord(crate::keys::Action::Cancel)
                 )),
                 bevy::prelude::TextColor(crate::chrome::DIM),
-                bevy::prelude::TextFont::from_font_size(10.0),
+                bevy::prelude::TextFont::from_font_size(crate::chrome::text::LABEL),
                 crate::chrome::ProblemLogLine,
             ));
             for (i, line) in want.iter().enumerate() {

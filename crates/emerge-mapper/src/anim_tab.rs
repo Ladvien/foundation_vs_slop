@@ -318,7 +318,7 @@ fn spawn_panels(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
         p.spawn((
             Text::new(""),
             TextColor(DIM),
-            TextFont::from_font_size(10.0),
+            TextFont::from_font_size(crate::chrome::text::LABEL),
             Node {
                 margin: UiRect::top(Val::Px(6.0)),
                 ..default()
@@ -777,7 +777,7 @@ fn rebuild_list(
                     row.spawn((
                         Text::new((*name).to_owned()),
                         TextColor(TEXT),
-                        TextFont::from_font_size(10.0),
+                        TextFont::from_font_size(crate::chrome::text::LABEL),
                     ));
                 });
             }
@@ -865,7 +865,7 @@ fn rebuild_slots(
                         }
                     )),
                     TextColor(if bad > 0 { DANGER } else { TEXT }),
-                    TextFont::from_font_size(11.0),
+                    TextFont::from_font_size(crate::chrome::text::BODY),
                 ));
                 for (ix, n) in names.iter().enumerate() {
                     let Some(report) = reports.as_ref().and_then(|r| r.by_rig.get(*n)) else {
@@ -904,18 +904,18 @@ fn rebuild_slots(
                             head.spawn((
                                 Text::new((*n).to_owned()),
                                 TextColor(TEXT),
-                                TextFont::from_font_size(11.0),
+                                TextFont::from_font_size(crate::chrome::text::BODY),
                             ));
                             head.spawn((
                                 Text::new(word),
                                 TextColor(tint),
-                                TextFont::from_font_size(9.0),
+                                TextFont::from_font_size(crate::chrome::text::HINT),
                             ));
                         });
                         row.spawn((
                             Text::new(first),
                             TextColor(LABEL),
-                            TextFont::from_font_size(9.0),
+                            TextFont::from_font_size(crate::chrome::text::HINT),
                         ));
                     });
                 }
@@ -926,14 +926,14 @@ fn rebuild_slots(
                 p.spawn((
                     Text::new("no rig selected"),
                     TextColor(DIM),
-                    TextFont::from_font_size(11.0),
+                    TextFont::from_font_size(crate::chrome::text::BODY),
                 ));
                 return;
             };
             p.spawn((
                 Text::new(rig.mesh.clone()),
                 TextColor(ACCENT),
-                TextFont::from_font_size(11.0),
+                TextFont::from_font_size(crate::chrome::text::BODY),
             ));
             // **The staged figure's controls, directly under the rig they belong to.**
             //
@@ -951,7 +951,7 @@ fn rebuild_slots(
                     p.spawn((
                         Text::new("measuring..."),
                         TextColor(DIM),
-                        TextFont::from_font_size(9.0),
+                        TextFont::from_font_size(crate::chrome::text::HINT),
                     ));
                 }
                 Some(report) => {
@@ -967,13 +967,13 @@ fn rebuild_slots(
                         p.spawn((
                             Text::new(line),
                             TextColor(colour),
-                            TextFont::from_font_size(9.0),
+                            TextFont::from_font_size(crate::chrome::text::HINT),
                         ));
                         for d in &report.diff {
                             p.spawn((
                                 Text::new(d.clone()),
                                 TextColor(DANGER),
-                                TextFont::from_font_size(9.0),
+                                TextFont::from_font_size(crate::chrome::text::HINT),
                                 Node {
                                     // One panel inset of indent — `PAD`, not a bare 12, so the
                                     // provenance block steps in by the same unit the panel does.
@@ -1024,7 +1024,7 @@ fn rebuild_slots(
                         },
                         Text::new(format!("{i} - clip {}", slot.clip)),
                         TextColor(LABEL),
-                        TextFont::from_font_size(10.0),
+                        TextFont::from_font_size(crate::chrome::text::LABEL),
                         TextLayout::new(Justify::Left, LineBreak::NoWrap),
                     ));
                     row.spawn((
@@ -1037,12 +1037,15 @@ fn rebuild_slots(
                         // A gait is the only kind carrying measured numbers, so it is the only one
                         // worth picking out of the column.
                         TextColor(if kind == "gait" { ACCENT } else { DIM }),
-                        TextFont::from_font_size(10.0),
+                        TextFont::from_font_size(crate::chrome::text::LABEL),
                     ));
                     row.spawn((
                         Text::new(detail),
                         TextColor(TEXT),
-                        TextFont::from_font_size(10.0),
+                        // **The value, not the label** — this is the measured number the author came
+                        // to the bench to check. The audit found this pairing rendered inverted,
+                        // the declared half larger than the measured one.
+                        TextFont::from_font_size(crate::chrome::text::BODY),
                     ));
                     // The transient adopt-exclude chip — gaits only, since adopt writes nothing
                     // else. The durable form is `keep:` in the manifest; this is "not this once".
@@ -1082,7 +1085,7 @@ fn rebuild_slots(
                     p.spawn((
                         Text::new(sub.join(" | ")),
                         TextColor(DIM),
-                        TextFont::from_font_size(9.0),
+                        TextFont::from_font_size(crate::chrome::text::HINT),
                         Node {
                             margin: UiRect::left(Val::Px(84.0)),
                             ..default()
@@ -1102,7 +1105,7 @@ fn rebuild_slots(
                             p.spawn((
                                 Text::new(line),
                                 TextColor(DIM),
-                                TextFont::from_font_size(9.0),
+                                TextFont::from_font_size(crate::chrome::text::HINT),
                                 Node {
                                     margin: UiRect::left(Val::Px(84.0)),
                                     ..default()
@@ -1127,7 +1130,7 @@ fn rebuild_slots(
                     p.spawn((
                         Text::new(format!("{ok} measurement(s) agree with the manifest")),
                         TextColor(DIM),
-                        TextFont::from_font_size(9.0),
+                        TextFont::from_font_size(crate::chrome::text::HINT),
                     ));
                 }
                 for f in findings.iter().filter(|f| f.level != Level::Ok) {
@@ -1137,7 +1140,7 @@ fn rebuild_slots(
                             Level::Note => LABEL,
                             _ => DANGER,
                         }),
-                        TextFont::from_font_size(9.0),
+                        TextFont::from_font_size(crate::chrome::text::HINT),
                     ));
                 }
             }
@@ -1177,7 +1180,7 @@ fn rebuild_slots(
                         legend.spawn((
                             Text::new(label),
                             TextColor(crate::anim_plots::slot_ui_color(rank)),
-                            TextFont::from_font_size(9.0),
+                            TextFont::from_font_size(crate::chrome::text::HINT),
                         ));
                         rank += 1;
                     }
@@ -1191,7 +1194,7 @@ fn rebuild_slots(
                     p.spawn((
                         Text::new(caption),
                         TextColor(LABEL),
-                        TextFont::from_font_size(9.0),
+                        TextFont::from_font_size(crate::chrome::text::HINT),
                         Node {
                             margin: UiRect::top(Val::Px(4.0)),
                             ..default()
@@ -1237,13 +1240,13 @@ fn rebuild_slots(
                 p.spawn((
                     Text::new(String::new()),
                     TextColor(DIM),
-                    TextFont::from_font_size(9.0),
+                    TextFont::from_font_size(crate::chrome::text::HINT),
                     crate::anim_plots::PlotReadout,
                 ));
                 p.spawn((
                     Text::new("top-down trace (fwd = up; arrow = declared cycle along measured travel; dim arrow = measured, G)"),
                     TextColor(LABEL),
-                    TextFont::from_font_size(9.0),
+                    TextFont::from_font_size(crate::chrome::text::HINT),
                     Node {
                         margin: UiRect::top(Val::Px(4.0)),
                         ..default()

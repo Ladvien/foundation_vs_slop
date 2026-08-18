@@ -1034,7 +1034,7 @@ const LABEL_DROP: f32 = 4.0;
 /// did not set the size of — deriving the advance from the same pair keeps the two systems from
 /// disagreeing about how wide a label is. `TextFont::font_size` is a `FontSize` in Bevy 0.19 and does
 /// not divide, so reading it back is not the shortcut it looks like.
-const LABEL_PX: (f32, f32) = (12.0, 9.0);
+const LABEL_PX: (f32, f32) = (crate::chrome::text::BODY, crate::chrome::text::HINT);
 
 /// Advance of one glyph at `LABEL_PX.0`, in logical pixels.
 ///
@@ -1701,7 +1701,7 @@ fn on_member_row_click(
 }
 
 /// The body's one font size. Named because [`spawn_line`] derives an advance from it.
-const ROW_PX: f32 = 11.0;
+const ROW_PX: f32 = crate::chrome::text::BODY;
 
 /// A row's leading indent, in spaces, and what is left. The pane states its structure as leading
 /// spaces (`"    "` under OFFERS, `" ".repeat(7)` in the face table, the hex STALE lines); this is

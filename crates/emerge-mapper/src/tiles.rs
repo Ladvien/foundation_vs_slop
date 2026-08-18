@@ -1234,7 +1234,7 @@ fn header_button(row: &mut ChildSpawnerCommands, header: FillHeader, glyph: &str
         b.spawn((
             Text::new(glyph.to_owned()),
             TextColor(LABEL),
-            TextFont::from_font_size(9.0),
+            TextFont::from_font_size(crate::chrome::text::HINT),
         ));
     });
 }
@@ -3304,7 +3304,7 @@ fn spawn_tab_strip(
                         tab.spawn((
                             Text::new(chord),
                             TextColor(LABEL),
-                            TextFont::from_font_size(10.0),
+                            TextFont::from_font_size(crate::chrome::text::LABEL),
                             Node {
                                 margin: UiRect::right(Val::Px(7.0)),
                                 ..default()
@@ -3315,7 +3315,7 @@ fn spawn_tab_strip(
                     tab.spawn((
                         Text::new(mode.label()),
                         TextColor(LABEL),
-                        TextFont::from_font_size(13.0),
+                        TextFont::from_font_size(crate::chrome::text::TAB),
                         TextLayout::new(Justify::Left, LineBreak::NoWrap),
                         TabLabel,
                     ));
@@ -3323,7 +3323,7 @@ fn spawn_tab_strip(
                     tab.spawn((
                         Text::new(String::new()),
                         TextColor(DANGER),
-                        TextFont::from_font_size(10.0),
+                        TextFont::from_font_size(crate::chrome::text::LABEL),
                         TextLayout::new(Justify::Left, LineBreak::NoWrap),
                         Node {
                             margin: UiRect::left(Val::Px(7.0)),
@@ -3454,7 +3454,7 @@ fn spawn_tiles_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
         p.spawn((
             Text::new(""),
             TextColor(DIM),
-            TextFont::from_font_size(10.0),
+            TextFont::from_font_size(crate::chrome::text::LABEL),
             Node {
                 margin: UiRect::top(Val::Px(6.0)),
                 ..default()
@@ -3479,7 +3479,7 @@ fn spawn_tiles_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
         p.spawn((
             Text::new(""),
             TextColor(ACCENT),
-            TextFont::from_font_size(10.0),
+            TextFont::from_font_size(crate::chrome::text::LABEL),
             Node {
                 margin: UiRect::top(Val::Px(8.0)),
                 ..default()
@@ -3523,7 +3523,7 @@ fn spawn_tiles_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
             b.spawn((
                 Text::new(""),
                 TextColor(ACCENT),
-                TextFont::from_font_size(10.0),
+                TextFont::from_font_size(crate::chrome::text::LABEL),
                 LabelProgressText,
             ));
             // The bar: a dim trough with a bright fill whose WIDTH is the fraction. Two nodes,
@@ -3551,7 +3551,7 @@ fn spawn_tiles_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
             b.spawn((
                 Text::new(""),
                 TextColor(DIM),
-                TextFont::from_font_size(9.0),
+                TextFont::from_font_size(crate::chrome::text::HINT),
                 LabelProgressNow,
             ));
         });
@@ -6284,7 +6284,7 @@ fn tab_strip(p: &mut ChildSpawnerCommands, on_kit: bool, kit: usize) {
             row.spawn((
                 Text::new(label),
                 TextColor(if active { ACCENT } else { DIM }),
-                TextFont::from_font_size(10.0),
+                TextFont::from_font_size(crate::chrome::text::LABEL),
             ));
         }
         row.spawn((
@@ -6299,7 +6299,7 @@ fn tab_strip(p: &mut ChildSpawnerCommands, on_kit: bool, kit: usize) {
                 "  right for the kit"
             }),
             TextColor(DIM),
-            TextFont::from_font_size(9.0),
+            TextFont::from_font_size(crate::chrome::text::HINT),
         ));
     });
 }
@@ -6313,7 +6313,7 @@ fn kit_rows(p: &mut ChildSpawnerCommands, project: &Project, cursor: usize) {
         p.spawn((
             Text::new("nothing authored yet — build a tile and press Cmd+S"),
             TextColor(DIM),
-            TextFont::from_font_size(10.0),
+            TextFont::from_font_size(crate::chrome::text::LABEL),
         ));
         return;
     }
@@ -6330,7 +6330,7 @@ fn kit_rows(p: &mut ChildSpawnerCommands, project: &Project, cursor: usize) {
                 c.members.len()
             )),
             TextColor(if here { ACCENT } else { TEXT }),
-            TextFont::from_font_size(11.0),
+            TextFont::from_font_size(crate::chrome::text::BODY),
         ));
     }
 }
@@ -6501,7 +6501,7 @@ fn rebuild_candidates(
                         row.spawn((
                             Text::new(d.id.clone()),
                             TextColor(if judged { crate::chrome::LABELED } else { TEXT }),
-                            TextFont::from_font_size(10.0),
+                            TextFont::from_font_size(crate::chrome::text::LABEL),
                         ));
                     },
                 );
@@ -6516,7 +6516,7 @@ fn rebuild_candidates(
                         "press Tab to scan"
                     }),
                     TextColor(DIM),
-                    TextFont::from_font_size(11.0),
+                    TextFont::from_font_size(crate::chrome::text::BODY),
                 ));
                 return;
             }
@@ -6569,13 +6569,13 @@ fn rebuild_candidates(
                         Node { width: Val::Px(10.0), flex_shrink: 0.0, ..default() },
                         Text::new(if state.excluded_open { "v" } else { ">" }),
                         TextColor(MUTED),
-                        TextFont::from_font_size(10.0),
+                        TextFont::from_font_size(crate::chrome::text::LABEL),
                     ));
                     row.spawn((
                         Node { flex_grow: 1.0, ..default() },
                         Text::new("EXCLUDED"),
                         TextColor(MUTED),
-                        TextFont::from_font_size(10.0),
+                        TextFont::from_font_size(crate::chrome::text::LABEL),
                     ));
                     // Names the state and the way out of it, per `docs/ui.md` §1.4.
                     row.spawn((
@@ -6584,7 +6584,7 @@ fn rebuild_candidates(
                             keys::chord(Action::ExcludePack)
                         )),
                         TextColor(MUTED),
-                        TextFont::from_font_size(10.0),
+                        TextFont::from_font_size(crate::chrome::text::LABEL),
                     ));
                 });
                 if state.excluded_open {
@@ -6672,7 +6672,7 @@ fn draw_pack(
                     },
                     Text::new(if folded { ">" } else { "v" }),
                     TextColor(LABEL),
-                    TextFont::from_font_size(10.0),
+                    TextFont::from_font_size(crate::chrome::text::LABEL),
                 ));
                 row.spawn((
                     Node {
@@ -6681,7 +6681,7 @@ fn draw_pack(
                     },
                     Text::new(pack.clone()),
                     TextColor(if excluded { MUTED } else { LABEL }),
-                    TextFont::from_font_size(10.0),
+                    TextFont::from_font_size(crate::chrome::text::LABEL),
                 ));
                 // A folded pack says what it is hiding. A bare count on a thin row reads as
                 // absence when 145 rows just left the screen — the word is what makes "folded"
@@ -6700,7 +6700,7 @@ fn draw_pack(
                         format!("{}", members.len())
                     }),
                     TextColor(if excluded { MUTED } else { LABEL }),
-                    TextFont::from_font_size(10.0),
+                    TextFont::from_font_size(crate::chrome::text::LABEL),
                 ));
             });
             if folded {
@@ -6730,7 +6730,7 @@ fn draw_pack(
                             Some(s) => crate::chrome::severity_style(s).0,
                             None => LABEL,
                         }),
-                        TextFont::from_font_size(11.0),
+                        TextFont::from_font_size(crate::chrome::text::BODY),
                     ));
                     row.spawn((
                         Node {
@@ -6741,7 +6741,7 @@ fn draw_pack(
                         // where it came from, and repeating it on 145 rows is the same word 145 times.
                         Text::new(leaf(&c.mesh)),
                         TextColor(TEXT),
-                        TextFont::from_font_size(10.0),
+                        TextFont::from_font_size(crate::chrome::text::LABEL),
                     ));
                 });
             }
@@ -6963,7 +6963,7 @@ fn rebuild_detail(
             p.spawn((
                 Text::new(id_text),
                 TextColor(id_tint),
-                TextFont::from_font_size(13.0),
+                TextFont::from_font_size(crate::chrome::text::TAB),
                 Node {
                     margin: UiRect::bottom(Val::Px(crate::chrome::GAP_ROW)),
                     ..default()
@@ -7009,14 +7009,14 @@ fn rebuild_detail(
                         p_.model, p_.date, s.confidence
                     )),
                     TextColor(crate::chrome::SUGGEST),
-                    TextFont::from_font_size(10.0),
+                    TextFont::from_font_size(crate::chrome::text::LABEL),
                 ));
                 // The model's identification — the reasoning its answers hang off, and the line a
                 // reviewer sanity-checks first.
                 p.spawn((
                     Text::new(s.what.clone()),
                     TextColor(TEXT),
-                    TextFont::from_font_size(10.0),
+                    TextFont::from_font_size(crate::chrome::text::LABEL),
                 ));
                 // The proposed note as a ghost line — never in the editable buffer.
                 if let Some(note) = &s.note {
@@ -7024,7 +7024,7 @@ fn rebuild_detail(
                         p.spawn((
                             Text::new(format!("proposed: {note}")),
                             TextColor(crate::chrome::SUGGEST),
-                            TextFont::from_font_size(9.0),
+                            TextFont::from_font_size(crate::chrome::text::HINT),
                         ));
                     }
                 }
@@ -7040,7 +7040,7 @@ fn rebuild_detail(
                                 }
                             )),
                             TextColor(crate::chrome::SUGGEST),
-                            TextFont::from_font_size(9.0),
+                            TextFont::from_font_size(crate::chrome::text::HINT),
                         ));
                     }
                 }
@@ -7057,7 +7057,7 @@ fn rebuild_detail(
                             turn.why
                         )),
                         TextColor(crate::chrome::SUGGEST),
-                        TextFont::from_font_size(9.0),
+                        TextFont::from_font_size(crate::chrome::text::HINT),
                     ));
                 }
                 // Vocabulary the model wanted and could not have — a human's decision, elsewhere.
@@ -7072,7 +7072,7 @@ fn rebuild_detail(
                             t.token, t.axis, t.why
                         )),
                         TextColor(crate::chrome::SUGGEST),
-                        TextFont::from_font_size(9.0),
+                        TextFont::from_font_size(crate::chrome::text::HINT),
                     ));
                 }
             }
@@ -7180,7 +7180,7 @@ fn rebuild_detail(
                 row.spawn((
                     Text::new(width_note),
                     TextColor(LABEL),
-                    TextFont::from_font_size(10.0),
+                    TextFont::from_font_size(crate::chrome::text::LABEL),
                 ));
             });
 
@@ -7209,7 +7209,7 @@ fn rebuild_detail(
                         row.spawn((
                             Text::new(format!("  -> proposed: {}", mount_label(Some(m)))),
                             TextColor(crate::chrome::SUGGEST),
-                            TextFont::from_font_size(10.0),
+                            TextFont::from_font_size(crate::chrome::text::LABEL),
                         ));
                     }
                 }
@@ -7244,7 +7244,7 @@ fn rebuild_detail(
                     row.spawn((
                         Text::new("  m up the wall, from the map floor"),
                         TextColor(LABEL),
-                        TextFont::from_font_size(10.0),
+                        TextFont::from_font_size(crate::chrome::text::LABEL),
                     ));
                 });
             }
@@ -7258,7 +7258,7 @@ fn rebuild_detail(
                     p.spawn((
                         Text::new(why),
                         TextColor(ACCENT),
-                        TextFont::from_font_size(9.0),
+                        TextFont::from_font_size(crate::chrome::text::HINT),
                     ));
                     return;
                 }
@@ -7278,7 +7278,7 @@ fn rebuild_detail(
             p.spawn((
                 Text::new(format!("{dx} x {dy} x {dz} cells of {subunit_mm:.0} mm")),
                 TextColor(TEXT),
-                TextFont::from_font_size(11.0),
+                TextFont::from_font_size(crate::chrome::text::BODY),
                 DivReadout,
             ));
             p.spawn((
@@ -7292,7 +7292,7 @@ fn rebuild_detail(
                     emerge_core::grid::SNAP,
                 )),
                 TextColor(DIM),
-                TextFont::from_font_size(9.0),
+                TextFont::from_font_size(crate::chrome::text::HINT),
                 Node {
                     margin: UiRect::top(Val::Px(crate::chrome::GAP_TIGHT)),
                     ..default()
@@ -7330,7 +7330,7 @@ fn rebuild_detail(
                             col.spawn((
                                 Text::new(layer_label(y, dy)),
                                 TextColor(LABEL),
-                                TextFont::from_font_size(9.0),
+                                TextFont::from_font_size(crate::chrome::text::HINT),
                             ));
 
                             // The column headers, with the layer header in the corner above the row
@@ -7410,7 +7410,7 @@ fn rebuild_detail(
                                                     } else {
                                                         LABEL
                                                     }),
-                                                    TextFont::from_font_size(11.0),
+                                                    TextFont::from_font_size(crate::chrome::text::BODY),
                                                     CellGlyph(x, z),
                                                     CellLayer(y),
                                                 ));
@@ -7447,7 +7447,7 @@ fn rebuild_detail(
                 } else {
                     DIM
                 }),
-                TextFont::from_font_size(9.0),
+                TextFont::from_font_size(crate::chrome::text::HINT),
                 SelectedCellLine,
                 Node {
                     margin: UiRect::top(Val::Px(crate::chrome::GAP_ROW)),
@@ -7595,7 +7595,7 @@ fn rebuild_detail(
                             row.spawn((
                                 Text::new(format!("  -> proposed: {prop}")),
                                 TextColor(crate::chrome::SUGGEST),
-                                TextFont::from_font_size(10.0),
+                                TextFont::from_font_size(crate::chrome::text::LABEL),
                             ));
                         }
                     });
@@ -7632,7 +7632,7 @@ fn rebuild_detail(
                 p.spawn((
                     Text::new("what the importer noticed about this mesh"),
                     TextColor(DIM),
-                    TextFont::from_font_size(9.0),
+                    TextFont::from_font_size(crate::chrome::text::HINT),
                     Node {
                         margin: UiRect::bottom(Val::Px(crate::chrome::GAP_ROW)),
                         ..default()
@@ -7644,12 +7644,12 @@ fn rebuild_detail(
                         block.spawn((
                             Text::new(word),
                             TextColor(tint),
-                            TextFont::from_font_size(9.0),
+                            TextFont::from_font_size(crate::chrome::text::HINT),
                         ));
                         block.spawn((
                             Text::new(f.message.clone()),
                             TextColor(TEXT),
-                            TextFont::from_font_size(10.0),
+                            TextFont::from_font_size(crate::chrome::text::LABEL),
                             // Wrapped prose at 10 px needs the leading; the 1.2 default packs these
                             // into the block of text the screenshot showed.
                             bevy::text::LineHeight::RelativeToFont(1.35),
@@ -7660,7 +7660,7 @@ fn rebuild_detail(
                             block.spawn((
                                 Text::new(fix.clone()),
                                 TextColor(LABEL),
-                                TextFont::from_font_size(10.0),
+                                TextFont::from_font_size(crate::chrome::text::LABEL),
                                 bevy::text::LineHeight::RelativeToFont(1.35),
                                 Node {
                                     margin: UiRect::top(Val::Px(3.0)),

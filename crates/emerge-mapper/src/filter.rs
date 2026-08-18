@@ -141,7 +141,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands, pane: Pane) {
             b.spawn((
                 Text::new("filter"),
                 TextColor(DIM),
-                TextFont::from_font_size(11.0),
+                TextFont::from_font_size(crate::chrome::text::BODY),
                 FilterText(pane),
             ));
         });

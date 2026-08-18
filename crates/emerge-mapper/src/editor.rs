@@ -1034,7 +1034,7 @@ fn spawn_cost_readout(mut commands: Commands, frame: Res<crate::chrome::Frame>) 
             p.spawn((
                 Text::new(""),
                 TextColor(DIM),
-                TextFont::from_font_size(11.0),
+                TextFont::from_font_size(crate::chrome::text::BODY),
                 TriangleTotal,
             ));
         });
@@ -1394,7 +1394,7 @@ fn rebuild_palette(
                         },
                         Text::new(if folded { ">" } else { "v" }),
                         TextColor(LABEL),
-                        TextFont::from_font_size(10.0),
+                        TextFont::from_font_size(crate::chrome::text::LABEL),
                     ));
                     row.spawn((
                         Node {
@@ -1403,12 +1403,12 @@ fn rebuild_palette(
                         },
                         Text::new(category.to_uppercase()),
                         TextColor(LABEL),
-                        TextFont::from_font_size(10.0),
+                        TextFont::from_font_size(crate::chrome::text::LABEL),
                     ));
                     row.spawn((
                         Text::new(format!("{}", members.len())),
                         TextColor(LABEL),
-                        TextFont::from_font_size(10.0),
+                        TextFont::from_font_size(crate::chrome::text::LABEL),
                     ));
                 });
 
@@ -1459,13 +1459,13 @@ fn rebuild_palette(
                             },
                             Text::new(d.id.clone()),
                             TextColor(TEXT),
-                            TextFont::from_font_size(11.0),
+                            TextFont::from_font_size(crate::chrome::text::BODY),
                         ));
                         let tris = project.triangles.get(ix).copied().unwrap_or(0);
                         row.spawn((
                             Text::new(brief_count(tris)),
                             TextColor(cost_tint(tris)),
-                            TextFont::from_font_size(10.0),
+                            TextFont::from_font_size(crate::chrome::text::LABEL),
                             TextLayout::new(Justify::Right, LineBreak::NoWrap),
                         ));
                     });

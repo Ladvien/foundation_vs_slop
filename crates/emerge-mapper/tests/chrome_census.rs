@@ -15,20 +15,16 @@
 //!   ink — gizmo palettes, tool tints, a stage floor — and the marker is the decision on the
 //!   record, the determinism lint's `SORT-OK` precedent. Variable-argument constructors
 //!   (`srgb_u8(r, g, b)`) are not literals and pass.
-//! - **A literal `from_font_size` stays on the type scale** — 9 / 10 / 11 / 13 / 15 / 18. The
-//!   scale is pinned as data rather than each use marked, because a size on the scale is not a
-//!   decision, while a new 12 or 14 is one — and it fails here until it is either put on the scale
-//!   deliberately or taken back off the screen.
+//! - **A font size outside `chrome.rs` is a `chrome::text::` ROLE, never a number.** The old form
+//!   of this rule accepted any literal on a pinned scale, which stopped a stray 12 arriving and did
+//!   nothing about a hundred sites choosing among six numbers with no rule between them — the exact
+//!   drift the 2026-08-17 audit measured. Naming the role puts "what does a heading measure" in one
+//!   place, the way the palette already works.
 //!
 //! Test modules are exempt: a fixture painting a throwaway colour asserts nothing about the
 //! shipped panels.
 
 use std::path::{Path, PathBuf};
-
-/// The sizes the editor's text is allowed to be, per the 2026-08-17 type-role decision:
-/// 9 `section`/fine print, 10 labels and list rows, 11 body and values, 13 the tab strip's word,
-/// 15 the panel title, 18 the name-box value.
-const TYPE_SCALE: &[f32] = &[9.0, 10.0, 11.0, 13.0, 15.0, 18.0];
 
 fn src_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
@@ -129,12 +125,22 @@ fn panel_ink_comes_from_the_palette() {
     );
 }
 
-/// **Text stays on the scale.** A size on the scale is a role; a size off it is a new decision,
-/// and it fails here until it is made deliberately (added to [`TYPE_SCALE`] with its role) rather
-/// than slipped in.
+/// **Text is named, not numbered.**
+///
+/// This test used to accept any literal on the 9/10/11/13/15/18 scale, and that was the weaker half
+/// of the rule: it stopped a stray 12 or 14 arriving, and did nothing at all about a hundred call
+/// sites choosing among six numbers with no rule between them. The 2026-08-17 audit measured the
+/// result — section headings at 9, 10 **and** 11 in one editor, two "COMPOSITIONS" headings in one
+/// pane at different sizes, label/value pairs at 10/11, 10/10 and flat 11 depending on the tab, and
+/// the anim bench rendering declared over measured **inverted**. The palette had `chrome::token`
+/// discipline and the spacing had a scale; *size never got a name*.
+///
+/// So the rule is now the one the palette already has: **a size outside `chrome.rs` is a
+/// `chrome::text::` role**, and a bare number fails here. Which value a role carries is `text`'s
+/// decision to change in one place — two roles may share a value, and `HEADING` and `LABEL` both do.
 #[test]
-fn text_sizes_stay_on_the_scale() {
-    let mut off_scale = Vec::new();
+fn text_is_named_not_numbered() {
+    let mut numbered = Vec::new();
     for (file, line_no, line) in panel_source() {
         let mut from = 0;
         while let Some(at) = line[from..].find("from_font_size(") {
@@ -144,17 +150,57 @@ fn text_sizes_stay_on_the_scale() {
                 .take_while(|c| c.is_ascii_digit() || *c == '.')
                 .collect();
             if let Ok(px) = literal.parse::<f32>() {
-                if !TYPE_SCALE.contains(&px) {
-                    off_scale.push(format!("{file}:{line_no}: {px} — {}", line.trim()));
-                }
+                numbered.push(format!("{file}:{line_no}: {px} — {}", line.trim()));
             }
             from += at + "from_font_size(".len();
         }
     }
     assert!(
-        off_scale.is_empty(),
-        "font sizes off the 9/10/11/13/15/18 scale — a new size is a type-role decision, not a \
-         tweak:\n{}",
-        off_scale.join("\n")
+        numbered.is_empty(),
+        "font sizes written as numbers outside chrome.rs. Name the ROLE — \
+         `crate::chrome::text::{{TITLE, TAB, BODY, HEADING, LABEL, HINT}}` — so that changing what a \
+         role measures is one edit rather than a hunt:\n{}",
+        numbered.join("\n")
+    );
+}
+
+/// **The roles are the whole scale, and the scale is short.**
+///
+/// The companion to the rule above: naming a size is worth nothing if `text` grows a role per call
+/// site. Six roles over five values is the shape the audit's findings ask for, and a seventh is a
+/// decision somebody should have to make on purpose.
+#[test]
+fn the_type_scale_stays_short() {
+    let src = std::fs::read_to_string(src_dir().join("chrome.rs"))
+        .unwrap_or_else(|e| panic!("chrome.rs: {e}"));
+    let module = src
+        .split_once("pub mod text {")
+        .map(|(_, rest)| rest.split_once("\n}").map(|(m, _)| m).unwrap_or(rest))
+        .unwrap_or_else(|| panic!("`chrome::text` is where the type scale lives"));
+
+    let roles: Vec<&str> = module
+        .lines()
+        .filter(|l| l.trim_start().starts_with("pub const "))
+        .collect();
+    assert!(
+        roles.len() <= 6,
+        "the type scale has grown to {} roles. A role per call site is the drift the audit \
+         measured, one indirection later:\n{}",
+        roles.len(),
+        roles.join("\n")
+    );
+
+    let mut values: Vec<String> = roles
+        .iter()
+        .filter_map(|l| l.rsplit_once("= ").map(|(_, v)| v.trim_end_matches(';').to_owned()))
+        .collect();
+    values.sort();
+    values.dedup();
+    assert!(
+        values.len() <= 5,
+        "the type scale carries {} distinct sizes. The audit's finding was six with no rule; \
+         more than five is not a fix:\n{:?}",
+        values.len(),
+        values
     );
 }

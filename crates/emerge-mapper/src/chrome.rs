@@ -170,6 +170,47 @@ pub const TILES_CONTROLS_W: f32 = 380.0;
 /// map at `UiScale(1.2)`, which is the thing the right edge was chosen to protect.
 pub const LIST_W: f32 = 264.0;
 
+// ── type ─────────────────────────────────────────────────────────────────────────────────────────
+
+/// **The type scale, as roles rather than numbers.**
+///
+/// The palette got named constants and the spacing got a scale; **size never got a name**, and the
+/// 2026-08-17 audit measured what that cost: six sizes across a hundred call sites with no rule
+/// between them. Section headings were 9 (`chrome::section`), 10 (the editor's and anim's
+/// hand-rolled ones) or 11 (Compose's three) — *three dialects for one role in one editor*. Compose
+/// showed two "COMPOSITIONS" headings, the real `section` plus an 11 px twin. Label/value pairs were
+/// 10/11, 10/10 or flat 11 depending on the tab. And the anim bench rendered its central pairing
+/// **inverted** — declared at 10 over measured at 9 — so the number the author is checking was the
+/// smaller of the two.
+///
+/// A role is not the same thing as a distinct size, and two roles sharing a value is not a defect:
+/// [`HEADING`] and [`LABEL`] are both 10 because both are quiet supporting text, and what separates
+/// a heading from a label is that it is uppercase, in a different ink, and preceded by
+/// [`GAP_GROUP`]. `section`'s own doc says so — *"quiet, and separated from what came before it…
+/// the separation is the work"* — which is why the fix for three heading dialects is the smallest
+/// of them and not the largest. A scale where headings out-shouted values would be a different
+/// editor, and nobody asked for that one.
+///
+/// **What actually moved**, so a capture diff can be read rather than guessed at: `section` 9 → 10,
+/// Compose's three hand-made headings 11 → 10, the anim pair un-inverted, and the name box's 18 →
+/// [`TITLE`]. Everything else keeps the size it had and gains a name.
+pub mod text {
+    /// The panel's own name — `EMERGE MAPPER`, `MESHES AND TILES`. One per panel.
+    pub const TITLE: f32 = 15.0;
+    /// A tab's word in the strip, and the chooser's column headers.
+    pub const TAB: f32 = 13.0;
+    /// **The readable default.** A row's value, a field's contents, the problem banner, a census
+    /// row — anything the author is reading rather than orienting by.
+    pub const BODY: f32 = 11.0;
+    /// A block or list heading. Quiet: uppercase, dim ink, and [`super::GAP_GROUP`] above it.
+    pub const HEADING: f32 = 10.0;
+    /// The dim half of a label/value pair, and a log line.
+    pub const LABEL: f32 = 10.0;
+    /// Chords, badges, footnotes, and the always-on hint — the smallest thing on screen, and never
+    /// the thing being read.
+    pub const HINT: f32 = 9.0;
+}
+
 // ── spacing ──────────────────────────────────────────────────────────────────────────────────────
 //
 // **A scale, used as a set.** van den Berg, Cornelissen & Roerdink 2009 (`10.1167/9.4.24`) find that
@@ -211,7 +252,7 @@ pub fn section<'a>(parent: &'a mut ChildSpawnerCommands, label: &str) -> EntityC
     parent.spawn((
         Text::new(label.to_owned()),
         TextColor(LABEL),
-        TextFont::from_font_size(9.0),
+        TextFont::from_font_size(text::HEADING),
         Node {
             margin: UiRect::top(Val::Px(GAP_GROUP)).with_bottom(Val::Px(GAP_TIGHT)),
             ..default()
@@ -492,7 +533,7 @@ pub fn title(parent: &mut ChildSpawnerCommands, text: &str) {
     parent.spawn((
         Text::new(text.to_owned()),
         TextColor(ACCENT),
-        TextFont::from_font_size(15.0),
+        TextFont::from_font_size(text::TITLE),
     ));
 }
 
@@ -715,7 +756,7 @@ pub fn problem_banner(parent: &mut ChildSpawnerCommands, tabs: &'static [crate::
         BackgroundColor(PROBLEM_BG),
         Text::new(String::new()),
         TextColor(PROBLEM_TEXT),
-        TextFont::from_font_size(11.0),
+        TextFont::from_font_size(text::BODY),
         // **Stated, not inherited.** This carries the newest refusal in full, and those name
         // descriptors and compositions — the longest text this editor renders. `max_width` is what
         // stops a long word pushing the node wider than the panel it sits in.
@@ -787,7 +828,7 @@ pub fn problem_log_line(parent: &mut ChildSpawnerCommands, text: &str, colour: C
             row.spawn((
                 Text::new("•"),
                 TextColor(colour),
-                TextFont::from_font_size(10.0),
+                TextFont::from_font_size(text::LABEL),
                 TextLayout::new(Justify::Left, LineBreak::NoWrap),
             ));
             row.spawn((
@@ -802,7 +843,7 @@ pub fn problem_log_line(parent: &mut ChildSpawnerCommands, text: &str, colour: C
                 },
                 Text::new(text.to_owned()),
                 TextColor(colour),
-                TextFont::from_font_size(10.0),
+                TextFont::from_font_size(text::LABEL),
             ));
         });
 }
@@ -852,7 +893,7 @@ pub fn key_census(parent: &mut ChildSpawnerCommands, contexts: &[Context], stanc
                         },
                         Text::new(row_def.chord.clone()),
                         TextColor(KEY),
-                        TextFont::from_font_size(11.0),
+                        TextFont::from_font_size(text::BODY),
                         // No wrap: a chord with a space in it is one token to a reader and two to a
                         // line-breaker.
                         TextLayout::new(Justify::Left, LineBreak::NoWrap),
@@ -860,7 +901,7 @@ pub fn key_census(parent: &mut ChildSpawnerCommands, contexts: &[Context], stanc
                     row.spawn((
                         Text::new(row_def.does),
                         TextColor(DIM),
-                        TextFont::from_font_size(11.0),
+                        TextFont::from_font_size(text::BODY),
                     ));
                 });
             }
@@ -991,7 +1032,7 @@ pub fn list_heading(parent: &mut ChildSpawnerCommands, text: &str) {
     parent.spawn((
         Text::new(text.to_owned()),
         TextColor(LABEL),
-        TextFont::from_font_size(10.0),
+        TextFont::from_font_size(text::HEADING),
     ));
 }
 
@@ -1007,7 +1048,7 @@ pub fn row_label(row: &mut ChildSpawnerCommands, width: f32, label: &str) {
         },
         Text::new(label.to_owned()),
         TextColor(LABEL),
-        TextFont::from_font_size(10.0),
+        TextFont::from_font_size(text::LABEL),
         TextLayout::new(Justify::Left, LineBreak::NoWrap),
     ));
 }
@@ -1018,7 +1059,7 @@ pub fn row_value(row: &mut ChildSpawnerCommands, text: impl Into<String>, colour
     row.spawn((
         Text::new(text.into()),
         TextColor(colour),
-        TextFont::from_font_size(11.0),
+        TextFont::from_font_size(text::BODY),
         marker,
     ));
 }
@@ -1255,19 +1296,19 @@ fn spawn_name_box(mut commands: Commands) {
             .with_children(|b| {
                 b.spawn((
                     Text::new(String::new()),
-                    TextFont::from_font_size(11.0),
+                    TextFont::from_font_size(text::BODY),
                     TextColor(LABEL),
                     NameBoxTitle,
                 ));
                 b.spawn((
                     Text::new(String::new()),
-                    TextFont::from_font_size(18.0),
+                    TextFont::from_font_size(text::TITLE),
                     TextColor(ACCENT),
                     NameBoxValue,
                 ));
                 b.spawn((
                     Text::new(String::new()),
-                    TextFont::from_font_size(11.0),
+                    TextFont::from_font_size(text::BODY),
                     TextColor(DIM),
                     NameBoxHint,
                 ));
@@ -1587,7 +1628,7 @@ fn drive_shortcuts_overlay(
                 p.spawn((
                     Text::new("holding a piece — Esc puts it back".to_owned()),
                     TextColor(ACCENT),
-                    TextFont::from_font_size(10.0),
+                    TextFont::from_font_size(text::LABEL),
                     Node {
                         margin: UiRect::bottom(Val::Px(GAP_ROW)),
                         ..default()
@@ -1916,13 +1957,13 @@ pub fn spawn_chrome_bar(
             b.spawn((
                 Text::new("\u{2039} kits & maps".to_owned()),
                 TextColor(KEY),
-                TextFont::from_font_size(11.0),
+                TextFont::from_font_size(text::BODY),
                 bevy::picking::Pickable::IGNORE,
             ));
             b.spawn((
                 Text::new(keys::chord(keys::Action::MainMenu)),
                 TextColor(LABEL),
-                TextFont::from_font_size(11.0),
+                TextFont::from_font_size(text::BODY),
                 bevy::picking::Pickable::IGNORE,
             ));
         });
@@ -1942,7 +1983,7 @@ pub fn spawn_chrome_bar(
                 WhereYouAre,
                 Text::new(here),
                 TextColor(DIM),
-                TextFont::from_font_size(11.0),
+                TextFont::from_font_size(text::BODY),
                 bevy::picking::Pickable::IGNORE,
             ));
         }
@@ -2023,6 +2064,6 @@ pub fn shortcut_hint(parent: &mut ChildSpawnerCommands) {
             keys::chord(keys::Action::MainMenu),
         )),
         TextColor(LABEL),
-        TextFont::from_font_size(10.0),
+        TextFont::from_font_size(text::LABEL),
     ));
 }

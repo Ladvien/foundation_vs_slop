@@ -4212,7 +4212,7 @@ fn panel(width: f32, height: f32, kind: PanelKind) -> impl Bundle {
 fn header(text: &str) -> impl Bundle {
     (
         Text::new(text.to_owned()),
-        TextFont::from_font_size(11.0),
+        TextFont::from_font_size(crate::chrome::text::BODY),
         TextColor(crate::chrome::KEY),
     )
 }
@@ -4250,7 +4250,7 @@ fn spawn_screen(
         .with_children(|root| {
             root.spawn((
                 Text::new("emerge-mapper"),
-                TextFont::from_font_size(13.0),
+                TextFont::from_font_size(crate::chrome::text::TAB),
                 TextColor(crate::chrome::LABEL),
             ));
             // **Three columns, left to right, each one the contents of the selection beside it.**
@@ -4321,13 +4321,13 @@ fn spawn_screen(
             // role a thing has, and these two bottom lines have the same one.
             root.spawn((
                 Text::new(String::new()),
-                TextFont::from_font_size(11.0),
+                TextFont::from_font_size(crate::chrome::text::BODY),
                 TextColor(crate::chrome::DANGER),
                 ProblemLine,
             ));
             root.spawn((
                 Text::new(String::new()),
-                TextFont::from_font_size(11.0),
+                TextFont::from_font_size(crate::chrome::text::BODY),
                 TextColor(crate::chrome::LABEL),
                 HintLine,
             ));
@@ -4442,13 +4442,13 @@ fn fill(commands: &mut Commands, at: Entity, rows: &[Row], kind: PanelKind) {
             .with_children(|line| {
                 line.spawn((
                     Text::new(left.clone()),
-                    TextFont::from_font_size(13.0),
+                    TextFont::from_font_size(crate::chrome::text::TAB),
                     TextColor(c),
                 ));
                 if !right.is_empty() {
                     line.spawn((
                         Text::new(right.clone()),
-                        TextFont::from_font_size(13.0),
+                        TextFont::from_font_size(crate::chrome::text::TAB),
                         TextColor(c),
                     ));
                 }
