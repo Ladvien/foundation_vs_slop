@@ -3368,3 +3368,92 @@ Measured after: **2,550 passed, 57 failed, and every one of the 57 names the mis
 - **FVS-R-18 — An empty histogram wants to be its own outcome** · S · ✅ **LANDED 2026-08-17**
   §4.6 of `docs/research/2026-08-09-composition-grammar-decisions.md`, pre-registered before any second judged run, and encoded in `examples/expressive_range.rs` in the same change so rerunning the old harness cannot re-make the mistake. **No committed threshold moved** — the amendment defines *evaluability*, which §4 never addressed because every rule silently assumed a populated histogram. Rule 1: a block certifies stability only at or above `N_min = K = 36` in-histogram solves (the uniform one-per-bin expectation, derived from the fixed grid alone — the same committable-without-output property every §4.5 number was chosen for); TV against an under-populated block is not computed, and a sweep that caps out makes no stability claim. Rule 2: an empty final histogram is the terminal outcome **`empty histogram`** — never "converged" — and rows 4a/4b are conditional on the floor, which retires their vacuous-fire/vacuous-pass disagreement instead of adjudicating it.
   **The amended harness was run to verify the amendment and earned its keep immediately:** every block size correctly refused to certify (`0/0 … 3/3 in-histogram, need 36 each`), the cap reported as a budget — and at 2048 solves, **6 reached the histogram**. The grammar samples an enclosed region at roughly 0.3%, which FVS-R-9's 128 solves could never have seen: consistent with FVS-R-17's mechanism (the room is legal and vanishingly rare, not impossible), and the first non-empty data point for whenever that item's re-measure runs. *Verified:* 100 workspace suites green; the item's visual artifact is the terminal report, inspected — floor lines, budget line, and conditional rows all render as §4.6 states.
+
+---
+
+## `emerge-mapper` UI — the editor overhaul (FVS-S-*), 2026-08-18
+
+Its own heading, because `EDITOR_BACKLOG.md` is its own file: `emerge-mapper` is not a game
+dependency, so nothing here moved a determinism golden. The plan is
+`/Users/ladvien/.claude/plans/please-make-a-plan-inherited-newt.md`; the design it builds on is
+`docs/research/2026-08-18-reusable-scroll-and-tab-widgets.md` and
+`docs/2026-08-17-one-application.md`.
+
+**The report was "it's bad, rethink it from the ground up."** What that turned out to mean, measured
+rather than assumed: two unrelated fixed-pixel layout models, neither of which filled the window;
+nothing at window level that was navigation; no scrollbar anywhere; six font sizes with no rule; and
+an agent that could not see a panel without taking the author's screen.
+
+### Shipped
+
+- **FVS-S-38 — Measure the gate before touching anything.** `cargo test --workspace` is **red for a
+  reason nothing to do with the editor**: 31 `site::*` failures in the game and 5 in the editor, all
+  from the kit deleted 2026-08-16 (FVS-R-39). That floor is what every claim below is measured
+  against. One of the five stopped depending on the deleted kit during this work, so the editor's
+  own suite is 4.
+- **FVS-S-50 (new) — The agent's capture can see the panels** · `185cb8b`. Bevy draws a UI tree to
+  one camera, so the offscreen mirror never received the interface — measured the same day, same
+  screen: the BRP capture returned one chair on black while the whole-frame capture returned the
+  panel, the strip and the list. The whole application now draws into one image and the window shows
+  it. Three things bit, all silent: `bevy_state` runs its transition schedule **before** `Startup`
+  (`app.rs:336`), the "every root a screen owns" rule was written **twice** and the second copy swept
+  the rig away with nothing in the log, and `bevy_ui`'s picking backend matches a camera's target
+  against the *pointer's* — so this would have killed every panel's `Hovered`. It also buys something
+  the window path never could: an **injected** cursor now reaches `Hovered`.
+- **FVS-S-39/40 — The window has a frame** · `c2bc8e3`. `chrome::Frame` is the window: chrome bar,
+  door strip, left dock / viewport / right dock, status band. Flex rather than `Val::Percent`,
+  because `UiScale` multiplies `Px` and ignores `Percent` and a layout mixing them scales two ways on
+  a 2x display. The viewport is a real region — the map camera gets the frame's hole as
+  `Camera::viewport`. `chrome::PANEL_Z` is deleted: nothing stacks by z-index any more.
+- **FVS-S-41/42 — The way out is chrome, and the status has a band** · `6ad9db6`. The way out had
+  been reported missing **twice**; `docs/2026-08-17-one-application.md` §3 found that the encoding
+  was wrong rather than weak. Four `back_button` call sites became one, and
+  `every_panel_offers_the_way_back` **inverted** — it demanded four, and four copies was the defect.
+  The banner and hint line moved to a full-width band, which is what stopped the hint wrapping.
+- **FVS-S-35 — Size gets a name** · `ba6013d`. Section headings were 9, 10 **and** 11 in one editor;
+  the anim bench rendered declared-over-measured inverted. `chrome::text` is the role table, and the
+  fix for three heading dialects is the *smallest* of them because `section`'s own doc says a heading
+  here is deliberately quiet. The ratchet inverted with it: a bare number now fails.
+- **FVS-S-44/37 — The menu fills the window** · `f39dd75`. Fourteen constants and five functions of
+  layout arithmetic deleted. One cause produced three symptoms — the frame's viewport carries
+  `flex_grow: 1` and on the menu it competed for the same slack, taking a third of the window.
+- **FVS-S-48 — The strip answers a press** · `347da7c`. The note said it needed "a focus decision,
+  not just an observer"; it needed the chip to stop being a `Button`. And the click had to be
+  reachable to be believed: `bevy_picking` reads `WindowEvent` and takes a press's position from the
+  *real* cursor, so `surface::inject_clicks` closes that for an agent.
+- **FVS-S-43 — Every resource says what a door change does to it** · `afeffca`. `screen.rs` claims a
+  full teardown; four resources are named and **fifty-six are not touched**. All sixty classified,
+  with a ratchet that boots the editor and asks the World. No behaviour change.
+- **FVS-S-31/7/8/9 — The widget layer's foundation** · `a034f95`. The Tab-key collision was real and
+  maximally quiet: with nothing focused, `dispatch_focused_input` sends to the **primary window**,
+  which is where Feathers' handler lives. Resolved by retiring `NextTab` — it only ever worked on the
+  Kit door, where `1`/`2`/`3` already do the job. Leaving the plugin out was worse than it reads:
+  `acquire_focus` is `pub(crate)` and `click_to_focus` is private. The theme is **machinery, not
+  greys** — every entry references a `chrome` const, and `docs/ui.md` §5's rule is kept.
+- **FVS-S-10/11 — A list that scrolls says so** · `55ee9bd`. Every list scrolled by wheel and showed
+  no bar at all. Built into `chrome::scroll_list` rather than as a BSN widget — **a deliberate
+  deviation from the design**, recorded in the commit: that builder is already the single path, and
+  the editor rebuilds lists imperatively, which the design's own §8.1 says BSN does not help with.
+  It found something immediately: the Compose pane is **2417 px of content in an 833 px viewport**.
+- **FVS-S-29 — The no-writing-every-frame rule becomes a test** · `f856ce1`. Found
+  `compass::follow_the_camera` writing six layout values a frame. The scan needed two corrections of
+  its own, both about not crying wolf.
+- **FVS-S-18 (part) — The strip says what it is** · `a56cb2f`. The editor had **zero** accessibility;
+  the strip is now a `TabList` of labelled `Tab`s.
+
+### Closed by measurement, not by building
+
+The repo's own precedent for this is FVS-N-23, demoted when FVS-N-25 measured the premise away.
+
+- **FVS-S-24/25/26/27 — `VirtualList`.** Not warranted. The mesh lists **fold into collapsed packs**,
+  so only an open pack spawns rows, and the largest pack the shipped project has is **145** — under
+  the design's own ~200-row threshold. The 778 figure the design cites is a *labelling queue*, not a
+  list. Measured: 242 UI nodes for a 20-row pack. Re-open it if a pack over ~200 ever ships.
+- **FVS-S-36 — Compose as rows.** Substantially already true, verified in code and in a capture:
+  selection is a filled row, and `split_indent`/`spawn_line` convert leading spaces into a real
+  gutter so wrapped lines keep their column. What remains is `{:>5}` column alignment *within* one
+  line of a generated monospace report, which is legitimate. The pane's real problem is its height,
+  now visible for the first time because it has a scrollbar.
+- **FVS-S-3/49 — `Door` in `TabView` / doors switch directly.** Skipped at the keyboard. Entering the
+  MAP door needs a map name and from inside another door there is none — which
+  `docs/2026-08-17-one-application.md` §7 lists as undecided. The menu stays the way between doors.
