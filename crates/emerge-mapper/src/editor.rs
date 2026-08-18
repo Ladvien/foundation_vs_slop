@@ -23,7 +23,7 @@ use emerge_core::map::Placed;
 
 use crate::chrome::{
     ACCENT, BOUNDS_LINE, CHIP_PAD, DANGER, DIM, FOCUS_BG, GRID_LINE, HEADER_BG, LABEL, LIST_W,
-    PANEL_BG, PANEL_Z, ROW_BG, ROW_HOVER, ROW_SELECTED, SLOT_BG, TEXT,
+    ROW_BG, ROW_HOVER, ROW_SELECTED, SLOT_BG, TEXT,
 };
 use crate::keys::{self, Action};
 use crate::project::{OpenMap, Project};
@@ -1005,33 +1005,29 @@ impl Plugin for EditorPlugin {
 
 // ── chrome ───────────────────────────────────────────────────────────────────────────────────────
 
-/// The cost readout, in its own root — top right, in the tab strip's band.
+/// **The triangle count, in the chrome bar with everything else that belongs to the window.**
 ///
-/// Separate from the panel rather than a row in it: it is about the *scene*, not about the tool.
+/// It was a second absolute root at `right: MARGIN, top: MARGIN` on `PANEL_Z`, and it collided
+/// twice. First it was painted over on Anim and painted over the Tiles candidate list's bottom row
+/// (captured, 2026-08-17 audit), because z-order between two roots on one layer is spawn order.
+/// Dodging left of the list collided with the 380 px controls panel the moment the window narrowed —
+/// measured, not guessed. It was then moved to a top band no panel claimed, which held until the
+/// frame gave that band a job: it landed on top of the chrome bar's `MAP · test`.
 ///
-/// **The strip band is the one horizontal run no tab claims.** This root is unmarked on purpose
-/// (`apply_mode` skips it — the scene's cost does not stop being true on another tab), so it needs
-/// a spot that is free in every mode. Bottom-right was not one: every tab's list panel is `LIST_W`
-/// at `right: MARGIN`, z-order between two roots on the same `PANEL_Z` layer is spawn order, and the
-/// readout was painted over on Anim and painted over the candidate list's bottom row on Tiles
-/// (captured, 2026-08-17 audit). Dodging left of the list collided with the 380px controls panel
-/// instead the moment the window was narrow — measured, not guessed. Every panel starts below
-/// `TAB_STRIP_BOTTOM` and the strip itself is pinned left, so the band's right end is claimed by
-/// nothing at any window width.
-fn spawn_cost_readout(mut commands: Commands) {
-    commands
-        .spawn((
+/// The frame is the answer to all three: it is a child in a row now, so nothing can overlap it and
+/// nothing has to reason about what claims which strip of window. It carries `MapRoot` so
+/// `tiles::apply_mode` hides it with the rest of the Map tab — a triangle count is a fact about the
+/// map, not about the application.
+fn spawn_cost_readout(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
+    commands.entity(frame.chrome_bar).with_children(|bar| {
+        bar.spawn((
+            crate::tiles::MapRoot,
             Node {
-                position_type: PositionType::Absolute,
-                right: Val::Px(crate::chrome::MARGIN),
-                top: Val::Px(crate::chrome::MARGIN),
                 padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
                 ..default()
             },
-            BackgroundColor(PANEL_BG),
-            GlobalZIndex(PANEL_Z),
-            // Nothing here is clickable, and a readout that eats clicks is a readout that steals the
-            // corner of the map underneath it.
+            // Nothing here is clickable, and a readout that eats clicks is a readout that steals
+            // whatever is underneath it.
             Pickable::IGNORE,
         ))
         .with_children(|p| {
@@ -1042,6 +1038,7 @@ fn spawn_cost_readout(mut commands: Commands) {
                 TriangleTotal,
             ));
         });
+    });
 }
 
 /// **Leave for the chooser — the whole decision, in one place.**
@@ -1235,9 +1232,6 @@ fn spawn_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
 
     commands.entity(root).with_children(|p| {
         crate::chrome::title(p, "EMERGE MAPPER");
-        crate::chrome::back_button(p);
-        crate::chrome::problem_banner(p, &[crate::tiles::Mode::Map]);
-        crate::chrome::shortcut_hint(p);
 
         // The readout, in the same two columns as the keys so the whole panel shares one left edge.
         p.spawn((

@@ -656,37 +656,72 @@ mod stepped {
         assert_eq!(project.lattice.face_bands, 1);
     }
 
-    /// **Every tab offers the way out, and the pointer can take it.**
+    /// **The way out is chrome, and there is exactly one of it.**
     ///
-    /// Asked for at the keyboard: *"when we go into the map editor, we actually need a button to go
-    /// back to the main UI."* There was only `Cmd+O` — a key nothing on screen mentioned, in the
-    /// one place where not finding it means closing the window.
+    /// Asked for at the keyboard twice. First: *"when we go into the map editor, we actually need a
+    /// button to go back to the main UI."* There was only `Cmd+O`, and a key nothing on screen
+    /// mentions is a key nobody finds. A button was added to each tab's panel — and it was reported
+    /// missing **again**: *"When I enter kit editing, there's no clear way to get back to the main
+    /// menu."*
     ///
-    /// Four tabs build their own furniture, so the failure this guards is a fifth arriving without
-    /// one, or a panel losing it in a rewrite. It also asserts the entity is **pickable**: the panel
-    /// root is `Pickable::IGNORE` so the world stays reachable through it, and a button inheriting
-    /// that would look exactly like a working one and answer no clicks at all.
+    /// `docs/2026-08-17-one-application.md` §3 found the reason, and it was not contrast: drawn
+    /// inside a panel on inspector ground it read as that panel's content, and nothing at window
+    /// level was navigation at all. So this test **inverted**. It used to demand one back button per
+    /// tab, `found.len() >= 4`, and four copies was the defect rather than the feature: a way out
+    /// each panel places is a way out each panel can forget, and the Rigs door drew it somewhere
+    /// else from the Map door.
+    ///
+    /// Two things are asserted. **Exactly one**, so a panel that grows its own again fails here. And
+    /// that it is **pickable**: the frame is `Pickable::IGNORE` so the world stays reachable through
+    /// it, and a button inheriting that would look exactly like a working one and answer no clicks.
     #[test]
-    fn every_panel_offers_the_way_back() {
-        let mut app = harness::build_headless_at(&root(), "untitled_map", Some("site"), emerge_mapper::tiles::Mode::Meshes)
-            .unwrap_or_else(|e| panic!("{e}"));
-        for _ in 0..10 {
+    fn the_way_out_is_chrome_and_there_is_one_of_it() {
+        let root = Fixture::new("one-way-out")
+            .descriptor("wall", "alpha")
+            .place("wall", (0.0, 0.0))
+            .build("test_map");
+        let mut app = harness::build_headless(&root, "test_map", None)
+            .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+        for _ in 0..4 {
             app.update();
         }
-        let mut q = app
-            .world_mut()
-            .query::<(&emerge_mapper::chrome::BackButton, &bevy::picking::Pickable)>();
-        let found: Vec<_> = q.iter(app.world()).collect();
-        assert!(
-            found.len() >= 4,
-            "each tab's panel needs its own way back; found {}",
+
+        let chrome_bar = app
+            .world()
+            .get_resource::<emerge_mapper::chrome::Frame>()
+            .map(|f| f.chrome_bar)
+            .expect("the frame owns the chrome bar the way out lives on");
+
+        let mut q = app.world_mut().query::<(
+            bevy::ecs::entity::Entity,
+            &emerge_mapper::chrome::BackButton,
+            &bevy::picking::Pickable,
+        )>();
+        let found: Vec<_> = q
+            .iter(app.world())
+            .map(|(e, _, p)| (e, p.should_block_lower || p.is_hoverable))
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "the way out is chrome, not panel furniture — found {} of them, which is the shape that \
+             got it reported missing twice",
             found.len()
         );
         assert!(
-            found
-                .iter()
-                .all(|(_, p)| p.should_block_lower || p.is_hoverable),
-            "a back button inheriting the panel root's `Pickable::IGNORE` answers no clicks"
+            found[0].1,
+            "a back button inheriting the frame's `Pickable::IGNORE` answers no clicks"
+        );
+
+        let parent = app
+            .world()
+            .get::<bevy::ecs::hierarchy::ChildOf>(found[0].0)
+            .map(|c| c.parent());
+        assert_eq!(
+            parent,
+            Some(chrome_bar),
+            "it belongs to the chrome bar. Inside a panel it reads as that panel's content, which \
+             is exactly why nobody found it."
         );
     }
 

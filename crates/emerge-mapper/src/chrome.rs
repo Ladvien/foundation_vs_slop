@@ -203,11 +203,6 @@ pub const FIELD_PAD: UiRect = UiRect::axes(Val::Px(4.0), Val::Px(2.0));
 /// A text field's floor. An unstated height lays out at 7 px while empty — this fact was restated
 /// at five sites as a bare `18.0` before it had a name.
 pub const MIN_FIELD_H: f32 = 18.0;
-/// The panel layer. [`panel_root`] uses it, and so must any other absolute root that has to share
-/// the panels' plane — between equal indices the UI stack breaks the tie by spawn order, which is
-/// how the cost readout vanished behind two tabs' panels (2026-08-17 audit).
-pub const PANEL_Z: i32 = 100;
-
 /// A block heading: quiet, and separated from what came before it.
 ///
 /// The separation is the work — a heading with the same gap above it as below is a label that could
@@ -698,10 +693,13 @@ impl Status {
 #[derive(Component, Clone, Copy)]
 pub struct ProblemBanner(pub &'static [crate::tiles::Mode]);
 
-/// **The problem block: filled, not tinted, and directly under the title.**
+/// **The problem block: filled, not tinted, and the loudest thing in the status band.**
 ///
-/// Spawned once per panel and hidden until there is something to say — `Display::None` rather than a
-/// zero-height node, so a quiet panel has no gap where the banner would be.
+/// Spawned **once**, by [`spawn_status_band`], and hidden until there is something to say —
+/// `Display::None` rather than a zero-height node, so a quiet band has no gap where the banner
+/// would be. It used to be spawned per panel, which put the longest text this editor renders in the
+/// narrowest place on screen; the vertical margins that separated it from a panel's title went with
+/// that move, because a band centres it instead.
 ///
 /// The glyph is `▲` and not `⚠`: the shipped face is `FiraMono-Regular.ttf`, which **has no U+26A0**
 /// (measured), and a missing codepoint draws as a tofu box — the same class of trap `CLAUDE.md`
@@ -710,8 +708,7 @@ pub fn problem_banner(parent: &mut ChildSpawnerCommands, tabs: &'static [crate::
     parent.spawn((
         Node {
             display: Display::None,
-            padding: UiRect::axes(Val::Px(GAP_ROW + 1.0), Val::Px(GAP_ROW)),
-            margin: UiRect::top(Val::Px(GAP_ROW)).with_bottom(Val::Px(GAP_TIGHT)),
+            padding: UiRect::axes(Val::Px(GAP_ROW + 1.0), Val::Px(GAP_TIGHT)),
             max_width: Val::Percent(100.0),
             ..default()
         },
@@ -1476,7 +1473,13 @@ impl Plugin for ChromePlugin {
             )
             .add_systems(
                 OnEnter(crate::screen::Screen::Editor),
-                (spawn_shortcuts_overlay, spawn_name_box).after(FrameSet),
+                (
+                    spawn_shortcuts_overlay,
+                    spawn_name_box,
+                    spawn_chrome_bar,
+                    spawn_status_band,
+                )
+                    .after(FrameSet),
             )
             // Every list row's hover, in one place — the rows themselves are spawned by
             // change-gated rebuilds that never see mouse motion.
@@ -1838,33 +1841,74 @@ mod status_tests {
 }
 
 /// **One line where eighteen rows used to be.** See [`ChromePlugin`] for why it is not optional.
-/// **The way back to the chooser, as something you can see and click.**
+/// **What this door is open on** — the map's name, or the kit's if no map is open.
+///
+/// One function because two things say it: the window's title (`main::name_the_window`) and the
+/// chrome bar. Which *name* is the right one is a decision, and a decision made twice is a decision
+/// that drifts — the window would go on saying `furniture` while the bar said the map, and nobody
+/// would notice for a week.
+pub fn subject(
+    open_map: Option<&crate::project::OpenMap>,
+    project: Option<&crate::project::Project>,
+) -> Option<String> {
+    match (open_map, project) {
+        (Some(m), _) => Some(m.map.name.clone()),
+        (None, Some(p)) => Some(p.namespace.clone()),
+        _ => None,
+    }
+}
+
+/// **The way back to the chooser, and the one piece of the window that belongs to no door.**
+///
+/// # It failed twice as a row in a panel
 ///
 /// Asked for at the keyboard: *"when we go into the map editor, we actually need a button to go back
 /// to the main UI."* There was only `Cmd+O`, and a key nothing on screen mentions is a key nobody
-/// finds — the same defect the always-on shortcut hint below this exists to fix, in the one place
-/// where being stuck is worst: an author who cannot get back out of a map has to close the window.
+/// finds. So a button was added — **inside the left panel**, under that panel's own heading, on
+/// `SLOT_BG`, the ground this editor uses for an inspector slot. It was reported missing again:
+/// *"When I enter kit editing, there's no clear way to get back to the main menu."*
 ///
-/// It names its chord as well as being clickable, which is `ExposeHK`'s rehearsal argument: the
-/// pointer is the way in, and the label beside it is what turns a pointing habit into a typing one.
-/// The click and the key both go through `editor::leave_for_menu`, so the unsaved-work refusal
-/// cannot differ between them.
-pub fn back_button(parent: &mut ChildSpawnerCommands) {
-    parent
-        .spawn((
+/// `docs/2026-08-17-one-application.md` §3 diagnosed why, and it was not the contrast: the encoding
+/// said *"a field of the thing you are looking at"* rather than *"a way out of it"*, because it read
+/// as a row in a list of rows, and **nothing at window level was navigation at all**. This repo
+/// already settled what to do when a signal fails twice — *"the encoding was not weak, it was
+/// wrong"*.
+///
+/// So it is chrome now, above the door's own strip, the same on every door. **Four call sites
+/// became one**, which is the other half of the point: a way out that each panel places is a way out
+/// each panel can forget, and the Rigs door drew it in a different place from the Map door.
+///
+/// It still names its chord beside itself, which is `ExposeHK`'s rehearsal argument — the pointer is
+/// the way in, and the label beside it is what turns a pointing habit into a typing one. The click
+/// and the key both go through `editor::leave_for_menu`, so the unsaved-work refusal cannot differ
+/// between them.
+pub fn spawn_chrome_bar(
+    mut commands: Commands,
+    frame: Res<Frame>,
+    door: Option<Res<crate::tiles::Door>>,
+    open_map: Option<Res<crate::project::OpenMap>>,
+    project: Option<Res<crate::project::Project>>,
+) {
+    let here = door.as_deref().map(|d| {
+        match subject(open_map.as_deref(), project.as_deref()) {
+            Some(name) => format!("{} · {name}", d.label()),
+            None => d.label().to_owned(),
+        }
+    });
+
+    commands.entity(frame.chrome_bar).with_children(|bar| {
+        bar.spawn((
             BackButton,
             Node {
                 flex_direction: FlexDirection::Row,
-                justify_content: JustifyContent::SpaceBetween,
                 align_items: AlignItems::Center,
-                padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
-                margin: UiRect::bottom(Val::Px(4.0)),
+                column_gap: Val::Px(GAP_ROW),
+                padding: CHIP_PAD,
                 ..default()
             },
             BackgroundColor(SLOT_BG),
-            // The panel root is `Pickable::IGNORE` so the world stays reachable through it; this
-            // narrows that for one node rather than undoing it — the same move `spawn_name_box`
-            // makes, and for the same reason.
+            // The bar is `Pickable::IGNORE` so the frame answers no clicks; this narrows that for
+            // the one node on it that is a button — the same move `spawn_name_box` makes.
             bevy::picking::Pickable::default(),
             Hovered::default(),
         ))
@@ -1882,6 +1926,73 @@ pub fn back_button(parent: &mut ChildSpawnerCommands) {
                 bevy::picking::Pickable::IGNORE,
             ));
         });
+
+        // Pushes the subject to the far end. A spacer rather than `SpaceBetween` on the bar, so a
+        // third thing added later lands where it is put rather than being redistributed.
+        bar.spawn((
+            Node {
+                flex_grow: 1.0,
+                ..default()
+            },
+            bevy::picking::Pickable::IGNORE,
+        ));
+
+        if let Some(here) = here {
+            bar.spawn((
+                WhereYouAre,
+                Text::new(here),
+                TextColor(DIM),
+                TextFont::from_font_size(11.0),
+                bevy::picking::Pickable::IGNORE,
+            ));
+        }
+    });
+}
+
+/// The bar's right-hand end: which door, on what. Marked so a test can find it.
+#[derive(Component)]
+pub struct WhereYouAre;
+
+/// **Every panel this editor has.** The status band speaks for whichever one is live, so it names
+/// them all and `notice::paint_notices` picks — rather than five bands each hidden by its own tab.
+pub const ALL_TABS: &[crate::tiles::Mode] = &[
+    crate::tiles::Mode::Map,
+    crate::tiles::Mode::Meshes,
+    crate::tiles::Mode::Tiles,
+    crate::tiles::Mode::Anim,
+    crate::tiles::Mode::Compose,
+];
+
+/// **One band at the foot of the window: what went wrong, and what the keys are.**
+///
+/// Both of these were spawned *inside* each panel, once per tab, which had two costs. The banner
+/// carries the longest text this editor renders — refusals naming descriptors and compositions —
+/// and a 300 px controls panel is the narrowest place on screen to put it. And the hint line, at
+/// `CONTROLS_W`, wrapped: *"Hold K for shortcuts · Cmd+O back to kits & maps"* broke across two
+/// lines on the Map door, which is visible in the capture that started this work.
+///
+/// Full window width fixes both by construction, and it deletes four copies of the same two calls.
+///
+/// **The hint goes at the far end behind a spacer, not in a `SpaceBetween` row**, so it does not
+/// move when the banner appears — a hint that shifts sideways the moment something goes wrong is a
+/// hint you have to re-find exactly when you are least able to.
+///
+/// The problem **log** deliberately stays in the panels. The banner answers *"what just happened"*
+/// and belongs to the window; the log answers *"what has gone wrong here"*, is a stack of lines
+/// rather than one, and a band that grew to hold it would move the viewport every time a refusal
+/// landed.
+pub fn spawn_status_band(mut commands: Commands, frame: Res<Frame>) {
+    commands.entity(frame.status).with_children(|band| {
+        problem_banner(band, ALL_TABS);
+        band.spawn((
+            Node {
+                flex_grow: 1.0,
+                ..default()
+            },
+            bevy::picking::Pickable::IGNORE,
+        ));
+        shortcut_hint(band);
+    });
 }
 
 /// The clickable way back. Marked so `editor` can hang one observer on it wherever a panel put it.
@@ -1913,9 +2024,5 @@ pub fn shortcut_hint(parent: &mut ChildSpawnerCommands) {
         )),
         TextColor(LABEL),
         TextFont::from_font_size(10.0),
-        Node {
-            margin: UiRect::top(Val::Px(2.0)),
-            ..default()
-        },
     ));
 }

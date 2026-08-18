@@ -131,10 +131,13 @@ fn name_the_window(
         (Screen::Menu, _) => "emerge-mapper — choose a kit or a map".to_owned(),
         (Screen::Editor, Some(d)) => {
             let door = d.label().to_lowercase();
-            match (open_map.as_deref(), project.as_deref()) {
-                (Some(m), _) => format!("emerge-mapper — {door} — {}", m.map.name),
-                (None, Some(p)) => format!("emerge-mapper — {door} — {}", p.namespace),
-                _ => format!("emerge-mapper — {door}"),
+            // **Which name to show is `chrome::subject`'s decision, not a second copy of it.** The
+            // chrome bar states the same fact where the eye actually goes, and a title that went on
+            // saying the kit while the bar said the map is the drift this shares one function to
+            // avoid.
+            match emerge_mapper::chrome::subject(open_map.as_deref(), project.as_deref()) {
+                Some(name) => format!("emerge-mapper — {door} — {name}"),
+                None => format!("emerge-mapper — {door}"),
             }
         }
         (Screen::Editor, None) => "emerge-mapper".to_owned(),

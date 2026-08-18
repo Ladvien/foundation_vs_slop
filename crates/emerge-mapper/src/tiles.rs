@@ -3444,16 +3444,12 @@ fn spawn_tiles_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
     .insert(TilesRoot)
     .with_children(|p| {
         crate::chrome::title(p, "MESHES AND TILES");
-        crate::chrome::back_button(p);
         // **One banner per tab, both in the shared panel.** `ProblemBanner` carries the tabs it
         // speaks for and `notice.rs` shows only a matching one, so a panel serving two tabs needs
         // two — without the second, every refusal the Tiles tab's verbs write would be invisible on
         // it. The detail pane and the problem log below take the other shape, `TILES_PANEL_TABS`:
         // they are single nodes whose *contents* the live tab decides, so duplicating them would be
         // two copies to keep in step rather than one node that says which tabs it is for.
-        crate::chrome::problem_banner(p, &[Mode::Meshes]);
-        crate::chrome::problem_banner(p, &[Mode::Tiles]);
-        crate::chrome::shortcut_hint(p);
 
         p.spawn((
             Text::new(""),
