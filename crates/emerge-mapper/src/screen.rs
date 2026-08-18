@@ -144,3 +144,125 @@ pub(crate) fn scene_roots(world: &mut World) -> Vec<Entity> {
         .iter(world)
         .collect()
 }
+
+/// **What a door change does to a resource** — the answer, for every one of them, in one place.
+///
+/// # Why this exists
+///
+/// `screen.rs` used to claim, a few lines up, that *"leaving a door despawns everything it made and
+/// drops the project"*, and defend it: *"A reload cannot be wrong; a partial teardown can be,
+/// silently, and the bug lands weeks later looking like something else."*
+///
+/// **That is not what the code does**, measured on 2026-08-17 and unchanged since: entities are
+/// swept by reachability and four resources are named, and the other **fifty-six are not touched at
+/// all**. Nothing resets them on entry either — every `OnEnter(Editor)` system is a spawn. So the
+/// door change is *already* the partial teardown the comment is spent avoiding, unnamed and
+/// unchecked, and the bug class it warns about is already open: edit a tile in kit A, leave, open
+/// kit B, and A's undo stack is there to be replayed into B.
+///
+/// So the list is the deliverable. **This changes no behaviour** — it is `docs/2026-08-17-one-application.md`
+/// §6 step 1, the step that makes the rest safe and that stands alone if the rest is dropped. What
+/// it buys today is that a new resource is a deliberate answer to "what happens to this when the
+/// door changes", asked when it is added rather than three weeks later when its stale value
+/// surfaces as something else.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ownership {
+    /// Derived from files on disk. Kept while the kit is unchanged, reloaded when it is not.
+    Project,
+    /// This door's own working state — selections, drags, edit buffers, undo stacks. **Reset.**
+    Door,
+    /// True for as long as the application runs: caches, generations, input, the surface. Kept.
+    Session,
+}
+
+/// **Every resource the editor's own plugins register, and what a door does to it.**
+///
+/// Keyed by the full type path, because two crates may name a type alike and the ratchet compares
+/// against what the world reports. Unsure cases are classified [`Ownership::Door`] on purpose: it is
+/// the class that matches what a full teardown would do, so a wrong guess here is conservative
+/// rather than a stale value nobody looks for.
+pub const OWNERSHIP: &[(&str, Ownership)] = &[
+    // ── What was opened, and what was read off disk for it ──────────────────────────────────────
+    ("emerge_mapper::project::Project", Ownership::Project),
+    ("emerge_mapper::project::OpenMap", Ownership::Project),
+    ("emerge_mapper::tiles::Door", Ownership::Project),
+    ("emerge_mapper::tiles::Mode", Ownership::Project),
+    // Derived from the kit's meshes: a different kit means different thumbnails.
+    ("emerge_mapper::thumbs::Thumbnails", Ownership::Project),
+    ("emerge_mapper::thumbs::ThumbGeneration", Ownership::Project),
+    ("emerge_mapper::labels::Suggestions", Ownership::Project),
+    ("emerge_mapper::anim_watch::BenchReports", Ownership::Project),
+    ("emerge_mapper::anim_watch::RigWatch", Ownership::Project),
+
+    // ── The door's own working state ────────────────────────────────────────────────────────────
+    // The undo stack is the one this list was written for: `docs/2026-08-17-one-application.md` §1
+    // names it as the value that survives into the next kit today.
+    ("emerge_mapper::build::TileHistory", Ownership::Door),
+    ("emerge_mapper::build::Build", Ownership::Door),
+    ("emerge_mapper::editor::EditorState", Ownership::Door),
+    ("emerge_mapper::editor::CloneDrag", Ownership::Door),
+    ("emerge_mapper::editor::MoveDrag", Ownership::Door),
+    ("emerge_mapper::editor::PlaceDrag", Ownership::Door),
+    ("emerge_mapper::editor::RemovalDrag", Ownership::Door),
+    ("emerge_mapper::editor::FineAnchor", Ownership::Door),
+    ("emerge_mapper::editor::Proposal", Ownership::Door),
+    ("emerge_mapper::editor::Rung", Ownership::Door),
+    ("emerge_mapper::editor::SizeEdit", Ownership::Door),
+    ("emerge_mapper::editor::StampPicture", Ownership::Door),
+    ("emerge_mapper::editor::TargetLock", Ownership::Door),
+    ("emerge_mapper::editor::UnderCursor", Ownership::Door),
+    ("emerge_mapper::editor::EdgeFaults", Ownership::Door),
+    ("emerge_mapper::tiles::ImportState", Ownership::Door),
+    ("emerge_mapper::tiles::CellEdit", Ownership::Door),
+    ("emerge_mapper::tiles::DemoteArm", Ownership::Door),
+    ("emerge_mapper::tiles::DerivedEdges", Ownership::Door),
+    ("emerge_mapper::tiles::HeightEdit", Ownership::Door),
+    ("emerge_mapper::tiles::LatticePick", Ownership::Door),
+    ("emerge_mapper::tiles::MapView", Ownership::Door),
+    ("emerge_mapper::tiles::NoteEdit", Ownership::Door),
+    ("emerge_mapper::tiles::ScaleEdit", Ownership::Door),
+    ("emerge_mapper::tiles::StagedLift", Ownership::Door),
+    ("emerge_mapper::compose::ComposeState", Ownership::Door),
+    ("emerge_mapper::compose::Budget", Ownership::Door),
+    ("emerge_mapper::compose::StagedCarousel", Ownership::Door),
+    ("emerge_mapper::anim_tab::BenchState", Ownership::Door),
+    ("emerge_mapper::anim_tab::AdoptExclude", Ownership::Door),
+    ("emerge_mapper::anim_stage::BenchAb", Ownership::Door),
+    ("emerge_mapper::anim_stage::BenchCamera", Ownership::Door),
+    ("emerge_mapper::anim_stage::BenchScrub", Ownership::Door),
+    ("emerge_mapper::anim_watch::MeasureQueue", Ownership::Door),
+    ("emerge_mapper::labels::LabelQueue", Ownership::Door),
+    ("emerge_mapper::filter::Filters", Ownership::Door),
+    ("emerge_mapper::notice::Showing", Ownership::Door),
+    // Holds entity ids from the frame this screen spawned, so it is meaningless the moment those
+    // are despawned — and `chrome::spawn_frame` replaces it on every entry.
+    ("emerge_mapper::chrome::Frame", Ownership::Door),
+    ("emerge_mapper::chrome::ShowingFor", Ownership::Door),
+    ("emerge_mapper::view::Rig", Ownership::Door),
+
+    // ── True for as long as the application runs ────────────────────────────────────────────────
+    // The surface is how this application DRAWS — see `crate::surface`, and `scene_roots`, which
+    // excludes its entities for the same reason.
+    ("emerge_mapper::surface::Surface", Ownership::Session),
+    ("emerge_mapper::keys::Live", Ownership::Session),
+    ("emerge_mapper::keys::Repeat", Ownership::Session),
+    ("emerge_mapper::view::Pointer", Ownership::Session),
+    // Persisted to disk under `target/`, so that STALE is truthful at startup rather than after the
+    // bench's first audit.
+    ("emerge_mapper::anim_cache::BenchCache", Ownership::Session),
+    ("emerge_mapper::anim_watch::BenchGeneration", Ownership::Session),
+    ("emerge_mapper::anim_plots::BenchPlots", Ownership::Session),
+    ("emerge_mapper::anim_stage::GhostMaterial", Ownership::Session),
+    ("emerge_mapper::label_booth::ShotRig", Ownership::Session),
+    ("emerge_mapper::labels::LabelGeneration", Ownership::Session),
+    // In-flight vision-model work. Dropping it mid-request would strand the task, not cancel it.
+    ("emerge_mapper::labels::LabelTasks", Ownership::Session),
+];
+
+/// What a door change does to this resource, or `None` if nobody has said.
+pub fn ownership(type_path: &str) -> Option<Ownership> {
+    OWNERSHIP
+        .iter()
+        .find(|(name, _)| *name == type_path)
+        .map(|(_, class)| *class)
+}
