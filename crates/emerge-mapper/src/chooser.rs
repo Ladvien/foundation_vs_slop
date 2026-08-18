@@ -4004,10 +4004,14 @@ fn header(text: &str) -> impl Bundle {
         Text::new(text.to_owned()),
         // **`HEADING`, not `BODY`.** `MAPS`, `KIT INFO` and the rest are headings, and they were
         // rendered at the body role — the same class of misuse the 2026-08-18 type pass found in the
-        // four tabs (a section heading at three different sizes, and the anim bench's declared/
-        // measured pair inverted). The role table exists so that "what does a heading measure" is
-        // answered in one place; a heading opting out of it is that answer going stale here first.
+        // four tabs. The role table exists so "what does a heading measure" is answered once.
         TextFont::from_font_size(crate::chrome::text::HEADING),
+        // **`KEY`, where `chrome::list_heading` uses `LABEL`**, and this is the one deliberate
+        // departure from that builder rather than an oversight. These words carry the *relationship*
+        // — `MAPS IN emerge`, `SETTINGS FOR untitled_map` are the only text on the screen stating
+        // what belongs to what — and they were `LABEL`, the dimmest ink in the palette, so an author
+        // asked to read the hierarchy had to hunt for the sentence explaining it. `docs/ui.md` §1.3:
+        // the encoding is the message.
         TextColor(crate::chrome::KEY),
     )
 }
@@ -4228,75 +4232,146 @@ enum PanelKind {
     Inspector,
 }
 
-fn fill(commands: &mut Commands, at: Entity, rows: &[Row], kind: PanelKind) {
+/// **Which list a row belongs to**, so a click can move the cursor there.
+///
+/// The chooser was keyboard-only — no `Hovered`, no `Pointer<..>`, no button anywhere in 5,616
+/// lines — which was survivable while its rows were plain text. Adopting [`crate::chrome::list_row`]
+/// makes them light under the pointer, and a row that lights and answers nothing is the
+/// dead-affordance defect the tab strip carried for months (`docs/ui.md` §4.2: everything reachable
+/// by mouse is reachable by keyboard **and the reverse**). So the marker comes with the shape.
+#[derive(Component, Clone, Copy)]
+struct ChooserRow {
+    pane: RowPane,
+    /// **The index IS the cursor value.** `Chooser::kit` counts the `+ new kit` row as 0 and the
+    /// catalogue's kit `i` as `i + 1` — which is exactly the order `screen()` builds the rows in, so
+    /// a click needs no translation and cannot drift from what the arrows do.
+    index: usize,
+}
+
+/// The three lists a cursor can be in. `KIT INFO` is facts about the selection, not a list you stand
+/// in — it has no [`Focus`], so its rows carry no marker and stay unclickable rather than lighting
+/// under the pointer and doing nothing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowPane {
+    Kits,
+    Maps,
+    Settings,
+}
+
+/// The label column of an inspector row. One number, so `MAP INFO` and `KIT INFO` cannot disagree
+/// about where their values start.
+const INFO_LABEL_W: f32 = 76.0;
+
+/// **Rebuild one list, in the editor's own row vocabulary.**
+///
+/// The 2026-08-18 audit's finding about this file: thirty `chrome::` references and **not one row
+/// builder** — no `list_row`, `chip`, `text_field`, `list_heading`, `row_label` or `row_value`. It
+/// was the fifth dialect `docs/2026-08-17-mapper-ui-audit.md` warned about, with the front door as
+/// the dialect, and the one screen an author sees before anything else.
+///
+/// A list row is now [`crate::chrome::list_row`] — the same fill, the same hover, repainted by the
+/// same `style_list_rows` as every list in the editor. An inspector row is
+/// [`crate::chrome::row_label`] beside [`crate::chrome::row_value`], the label/value shape the audit
+/// counted hand-rolled eight times.
+///
+/// **The chevron stays.** `docs/ui.md` §1.3 requires a second, non-colour channel on every status,
+/// and with the fill doing the shouting the mark is what still reads in a capture, in a screenshot
+/// somebody pastes into a message, and to anyone who cannot tell two dark warm greys apart.
+fn fill(commands: &mut Commands, at: Entity, rows: &[Row], kind: PanelKind, pane: Option<RowPane>) {
     commands.entity(at).despawn_related::<Children>();
     commands.entity(at).insert(Node {
         flex_direction: FlexDirection::Column,
-        row_gap: Val::Px(crate::chrome::GAP_ROW * 0.6),
+        row_gap: Val::Px(crate::chrome::GAP_TIGHT),
         // **Full width, or the rows inside do not line up with the panel they sit in.**
         //
         // This was unset, so the container shrank to its own content and each row's
-        // `width: Percent(100)` resolved against *that* — which left `JustifyContent::SpaceBetween`
-        // with no space to distribute. Every right-hand value landed wherever its own left text
-        // happened to end, so the right column was ragged and neither column agreed with the header
-        // above it. Reported at the keyboard, 2026-08-16: *"the alignment of the columns of these
-        // list boxes with the content of the actual scroll box contained in it don't align."*
+        // `width: Percent(100)` resolved against *that* — which left the right column ragged and
+        // disagreeing with the header above it. Reported at the keyboard, 2026-08-16.
         width: Val::Percent(100.0),
         ..default()
     });
-    for r in rows {
+    for (i, r) in rows.iter().enumerate() {
         let c = colour(r.tone);
+        let selected = r.tone == Tone::Selected;
         // **The chevron points into the column this row opens.** Only a list has one; a settings row
         // opens nothing, and giving it the same mark would restate the confusion this is fixing.
-        let mark = match (kind, r.tone == Tone::Selected) {
+        let mark = match (kind, selected) {
             (PanelKind::List, true) => "\u{203a}",
             (PanelKind::Inspector, true) => "\u{2022}",
             _ => " ",
         };
         let left = format!("{mark} {}", r.left);
         let right = r.right.clone();
-        commands.entity(at).with_children(|p| {
-            p.spawn(Node {
-                flex_direction: FlexDirection::Row,
-                column_gap: Val::Px(crate::chrome::PAD),
-                justify_content: JustifyContent::SpaceBetween,
-                width: Val::Percent(100.0),
-                ..default()
-            })
-            .with_children(|line| {
-                // **The label takes the slack and the value never wraps.**
-                //
-                // Both halves were plain text in a `SpaceBetween` row with nothing saying which one
-                // yields, so in a 300 px column they both wrapped and a kit read as
-                // `> [=] 82 pieces · only one` / `furniture   on` — the value broken across two
-                // lines and interleaved with its own label. A row is a label column and a value
-                // column; this is what says so.
-                line.spawn((
-                    Text::new(left.clone()),
-                    TextFont::from_font_size(crate::chrome::text::TAB),
-                    TextColor(c),
-                    Node {
-                        flex_grow: 1.0,
-                        // Without this a flex item's automatic minimum size is its content, so the
-                        // label refuses to shrink and pushes the value out of the row instead.
-                        min_width: Val::Px(0.0),
-                        ..default()
-                    },
-                ));
-                if !right.is_empty() {
+        commands.entity(at).with_children(|p| match kind {
+            PanelKind::List => {
+                // **Not `list_row`** — see `chrome::quiet_row`. The menu brings its own click handler
+                // and must stay off the editor's `Activate` bus, whose observers take Map-door
+                // resources that do not exist on this screen.
+                let mut row = crate::chrome::quiet_row(p, selected, ());
+                if let Some(pane) = pane {
+                    row.insert(ChooserRow { pane, index: i });
+                    row.observe(on_row_click);
+                }
+                row.with_children(|line| {
                     line.spawn((
-                        Text::new(right.clone()),
-                        TextFont::from_font_size(crate::chrome::text::TAB),
+                        Text::new(left.clone()),
+                        TextFont::from_font_size(crate::chrome::text::BODY),
                         TextColor(c),
-                        TextLayout::new(Justify::Right, LineBreak::NoWrap),
                         Node {
-                            flex_shrink: 0.0,
+                            flex_grow: 1.0,
+                            // A flex item's automatic minimum size is its content, so without this
+                            // the label refuses to shrink and pushes the value out of the row.
+                            min_width: Val::Px(0.0),
                             ..default()
                         },
                     ));
-                }
-            });
+                    if !right.is_empty() {
+                        line.spawn((
+                            Text::new(right.clone()),
+                            TextFont::from_font_size(crate::chrome::text::BODY),
+                            TextColor(c),
+                            TextLayout::new(Justify::Right, LineBreak::NoWrap),
+                            Node { flex_shrink: 0.0, ..default() },
+                        ));
+                    }
+                });
+            }
+            PanelKind::Inspector => {
+                p.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(crate::chrome::GAP_ROW),
+                    width: Val::Percent(100.0),
+                    ..default()
+                })
+                .with_children(|line| {
+                    crate::chrome::row_label(line, INFO_LABEL_W, &left);
+                    crate::chrome::row_value(line, right.clone(), c, ());
+                });
+            }
         });
+    }
+}
+
+/// **A click puts the cursor where the arrows would have put it**, through the same two fields —
+/// so the pointer and the keyboard cannot come to disagree about what is selected.
+fn on_row_click(
+    click: On<Pointer<Click>>,
+    rows: Query<&ChooserRow>,
+    mut chooser: Option<ResMut<Chooser>>,
+) {
+    let (Ok(row), Some(chooser)) = (rows.get(click.entity), chooser.as_mut()) else {
+        return;
+    };
+    match row.pane {
+        RowPane::Kits => {
+            chooser.focus = Focus::Kits;
+            chooser.kit = row.index;
+        }
+        RowPane::Maps => {
+            chooser.focus = Focus::Maps;
+            chooser.map = row.index;
+        }
+        RowPane::Settings => chooser.focus = Focus::Settings,
     }
 }
 
@@ -4326,13 +4401,13 @@ fn paint_chooser(
     let s = chooser.screen();
     for (e, kit, map, set, info) in &lists {
         if kit.is_some() {
-            fill(&mut commands, e, &s.kits, PanelKind::List);
+            fill(&mut commands, e, &s.kits, PanelKind::List, Some(RowPane::Kits));
         } else if map.is_some() {
-            fill(&mut commands, e, &s.maps, PanelKind::List);
+            fill(&mut commands, e, &s.maps, PanelKind::List, Some(RowPane::Maps));
         } else if set.is_some() {
-            fill(&mut commands, e, &s.settings, PanelKind::Inspector);
+            fill(&mut commands, e, &s.settings, PanelKind::Inspector, Some(RowPane::Settings));
         } else if info.is_some() {
-            fill(&mut commands, e, &s.kit_info, PanelKind::Inspector);
+            fill(&mut commands, e, &s.kit_info, PanelKind::Inspector, None);
         }
     }
     for (mut text, maps, settings, problem, hint, kit_info) in &mut texts {

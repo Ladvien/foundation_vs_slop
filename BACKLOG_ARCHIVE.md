@@ -3481,3 +3481,15 @@ The repo's own precedent for this is FVS-N-23, demoted when FVS-N-25 measured th
   of the row builders**, which is the fifth dialect the audit warned about with the front door as the
   dialect. `header()` rendering headings at `text::BODY` was fixed in the pass as a role error; the
   port and the missing scrolling are minted as FVS-S-34a and FVS-S-34b.
+
+- **FVS-S-34a — The chooser ported onto the row vocabulary.** Its rows are `chrome::quiet_row` with
+  `row_label`/`row_value` in the inspectors and headings at `text::HEADING`, so the front door looks
+  like the rest of the editor and is repainted by the same `style_list_rows`. Rows answer a click,
+  through the same two fields the arrows write. Two departures are documented rather than silent: the
+  headings keep `KEY` ink because they carry the *relationship* (`MAPS IN emerge`) and were the
+  dimmest thing on screen, and the chevron survives the fill because `docs/ui.md` §1.3 wants a
+  second, non-colour channel.
+  **It found a crash on the way**, which is what adopting a shared builder is for — see FVS-S-34c.
+  It also found that `view::sense_pointer` was gated to the editor screen, so the menu had no pointer
+  at all: harmless while `Pointer` only served the map's spatial verbs, and load-bearing the moment
+  it started feeding `surface::inject_clicks`.

@@ -81,22 +81,18 @@ Unchanged, and every item below is judged against them.
 Five items closed on 2026-08-18 alongside the overhaul — see the archive. What is left is below, and
 **two of the four are content of the chooser audit rather than the audit itself**, which is done.
 
-**FVS-S-34a · The chooser uses none of the shared row vocabulary** · M
-The audit ran. `chooser.rs` is clean where it was easy to be — **zero raw colour literals**, and its
-type is on the role table — and it uses **none of the row builders**: not `list_row`, `chip`,
-`text_field`, `list_heading`, `row_label`, `row_value`, `section`, `title`, `panel_root` or
-`scroll_list`. Thirty `chrome::` references and every one of them a constant. Spacing is `PAD` (5)
-and `GAP_ROW` (4), with `GAP_TIGHT`, `GAP_GROUP` and `CHIP_PAD` unused.
-It is **the fifth dialect the audit warned about, and it is the front door.** One thing was fixed in
-the audit pass because it was a role error rather than a style choice: `header()` rendered headings
-at `text::BODY`. The rest is a port, and it is worth doing as one change rather than opportunistically
-— the same argument the sweep makes. · *Touches:* `chooser.rs`
-
-**FVS-S-34b · The chooser's lists cannot scroll** · S
-No `scroll_list` anywhere in it, and the panels are flex now — so a catalogue longer than the window
-overflows its panel with nothing to say so. It never mattered while the screen sized itself to its
-content; it does now. Needs a `Follow<K>` per list, per
-`tests/every_list_follows_its_selection.rs`. · *Deps:* FVS-S-34a is the natural home for it
+**FVS-S-34c · Twenty-two global `Activate` observers still assume the Map door** · M
+Found by FVS-S-34a and it is a **crash**, not a tidiness item. This editor has twenty-four global
+`Activate` observers and most take a Map-door resource — `on_row_click` wants `Res<Project>`,
+`on_tag_chip` wants `ResMut<Project>`. A global observer fires for *any* `Activate` anywhere, and in
+Bevy 0.19 a missing `Res<T>` **panics**: the first click on a `bevy_ui_widgets::Button` outside the
+editor takes the whole application down. It was invisible only because `chrome::list_row` had never
+been called outside an editor panel.
+Two were fixed (`editor::on_row_click`, and the menu was kept off the bus with `chrome::quiet_row`).
+**The other twenty-two are the same landmine for the next caller** — including any Feathers widget,
+now that `FeathersPlugins` is in the graph. Each needs `Option<Res<..>>` and an early return, which
+is what `CLAUDE.md` has always said. · *Touches:* `tiles.rs`, `editor.rs`, `compose.rs`,
+`anim_stage.rs`, `build.rs`
 
 **FVS-S-33 · Focus-by-click, now that routing is settled** · S
 `keys.rs`'s header records the decision taken 2026-08-18: **routing is by `Context`, not by focus**,

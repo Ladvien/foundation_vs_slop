@@ -1657,14 +1657,29 @@ fn walk_palette(
 
 /// One observer for the whole palette. `Activate` carries the entity, so the index lives on the row
 /// as a component and there is no macro-unrolled observer per row.
+/// **Every resource here is an `Option`, and that is not defensive — it is required.**
+///
+/// This is a **global** observer: it fires for any `Activate` anywhere in the application, and it
+/// takes the Map door's resources. That was survivable while `chrome::list_row` was only ever called
+/// by editor panels. The moment the **menu** adopted the shared row vocabulary it spawned rows that
+/// carry `Button` too, and the first click on one panicked the whole application — `Res<Project>`
+/// does not exist on `Screen::Menu`, and in Bevy 0.19 a missing `Res<T>` panics rather than skipping
+/// (`CLAUDE.md`; `bevy_ecs/error/handler.rs:130`).
+///
+/// The row query already answers "is this mine" — a menu row has no `PaletteRow` — so the guard was
+/// there and simply ran too late, after parameter validation. Found by adopting the vocabulary,
+/// which is the sort of thing sharing a builder is supposed to surface.
 fn on_row_click(
     activate: On<Activate>,
     rows: Query<&PaletteRow>,
-    project: Res<Project>,
-    mut state: ResMut<EditorState>,
-    mut filters: ResMut<crate::filter::Filters>,
+    project: Option<Res<Project>>,
+    state: Option<ResMut<EditorState>>,
+    filters: Option<ResMut<crate::filter::Filters>>,
 ) {
     let Ok(row) = rows.get(activate.entity) else {
+        return;
+    };
+    let (Some(project), Some(mut state), Some(mut filters)) = (project, state, filters) else {
         return;
     };
     state.brush = Some(row.0);

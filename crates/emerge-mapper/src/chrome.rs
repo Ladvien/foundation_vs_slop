@@ -1342,11 +1342,44 @@ pub fn list_row<'a>(
     selected: bool,
     marker: impl Bundle,
 ) -> EntityCommands<'a> {
+    // `Button` is what puts a row on the editor's `Activate` bus — see [`quiet_row`] for who is
+    // deliberately not on it.
+    parent.spawn((bevy::ui_widgets::Button, row_shape(selected), marker))
+}
+
+/// **The same row, not on the `Activate` bus.**
+///
+/// # Why this exists, which is worth reading before merging the two back together
+///
+/// This editor has **twenty-four global `Activate` observers**, and most take a Map-door resource:
+/// `on_row_click` wants `Res<Project>`, `on_tag_chip` wants `ResMut<Project>`. A global observer
+/// fires for *any* `Activate` anywhere in the application, and in Bevy 0.19 a missing `Res<T>`
+/// **panics** rather than skipping — so the first click on a `Button` outside the editor takes the
+/// whole application down.
+///
+/// That was invisible while `list_row` was only ever called by editor panels. The moment the menu
+/// adopted the shared row vocabulary, its first click panicked: `Res<Project>` does not exist on
+/// `Screen::Menu`. Two observers were fixed to take `Option`; twenty-two were not, and each is the
+/// same landmine for the next caller.
+///
+/// So a row that brings its own click handling says so, and stays off the bus. It keeps everything
+/// that makes a row *look* like a row — [`RowRest`], `Hovered`, the fill, the padding — and
+/// `style_list_rows` repaints it exactly the same, because that system keys on `RowRest` and has
+/// never needed `Button`.
+pub fn quiet_row<'a>(
+    parent: &'a mut ChildSpawnerCommands,
+    selected: bool,
+    marker: impl Bundle,
+) -> EntityCommands<'a> {
+    parent.spawn((row_shape(selected), marker))
+}
+
+/// What a list row looks like, shared by [`list_row`] and [`quiet_row`] so the two cannot drift into
+/// two row shapes — which is the drift this whole module exists to stop.
+fn row_shape(selected: bool) -> impl Bundle {
     let rest = if selected { ROW_SELECTED } else { ROW_BG };
-    parent.spawn((
-        bevy::ui_widgets::Button,
+    (
         Hovered::default(),
-        marker,
         RowRest(rest),
         Node {
             width: Val::Percent(100.0),
@@ -1354,7 +1387,7 @@ pub fn list_row<'a>(
             ..default()
         },
         BackgroundColor(rest),
-    ))
+    )
 }
 
 /// Selection beats hover, hover beats rest — the same priority every hand-rolled repainter uses

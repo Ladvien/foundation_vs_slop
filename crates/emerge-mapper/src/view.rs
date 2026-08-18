@@ -131,10 +131,14 @@ impl Plugin for ViewPlugin {
             // **Before anything acts on it.** `Phase::Sense` is where this editor decides who owns an
             // input for the frame — the keyboard already does — so the pointer is read once, there,
             // and every spatial system downstream sees one answer.
-            .add_systems(Update,
-                (sense_pointer.in_set(keys::Phase::Sense))
-                    .run_if(in_state(crate::screen::Screen::Editor)),
-            )
+            //
+            // **Ungated by screen, and that is a correction.** It ran only in the editor, which was
+            // true while `Pointer` served the map's spatial verbs and nothing else. It now feeds
+            // `surface::retarget_pointer` and `surface::inject_clicks` — the bridge that carries a
+            // pointer to `bevy_picking` at all — so leaving it off on the menu meant the menu's rows
+            // could be given a click observer and never receive one. Where the pointer is is true on
+            // both screens; it was the *readers* that were editor-only.
+            .add_systems(Update, sense_pointer.in_set(keys::Phase::Sense))
             .add_systems(Update,
                 (drive.in_set(keys::Phase::Act))
                     .run_if(in_state(crate::screen::Screen::Editor)),
