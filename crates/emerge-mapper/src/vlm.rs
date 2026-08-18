@@ -59,6 +59,9 @@ pub struct VlmConfig {
     /// changed under a number compiled into the binary. Swapping the model again is a `.env` edit,
     /// and the budget it needs travels with it.
     pub max_tokens: u32,
+    /// **Whether to let a reasoning model deliberate.** Off by default — see the measurement at
+    /// the `chat_template_kwargs` site in [`request_labels`]. `EMERGE_VLM_THINK=1` turns it on.
+    pub think: bool,
 }
 
 impl std::fmt::Debug for VlmConfig {
@@ -70,6 +73,7 @@ impl std::fmt::Debug for VlmConfig {
             .field("key", &"<redacted>")
             .field("timeout_secs", &self.timeout_secs)
             .field("max_tokens", &self.max_tokens)
+            .field("think", &self.think)
             .finish()
     }
 }
@@ -148,9 +152,21 @@ impl VlmConfig {
         let model = get("EMERGE_VLM_MODEL")
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| "qwen3.8-27b".to_owned());
+        // **600, because the first request of a batch pays for loading the model.** 120 was chosen
+        // when the doc below said llama-swap warms "a cold model in tens of seconds". Qwen3.8-27B
+        // is 31 GB at Q8 plus a 927 MB projector: measured 2026-08-17, the batch died at mesh 1
+        // of 778 with `timeout: global` while `llama-server` sat at 0.1% CPU and 35 GB resident —
+        // not computing, still loading. Warm, the same endpoint answers in 3 s.
+        //
+        // It matches llama-swap's own `ttl: 600`, which is the other half of this: ten idle
+        // minutes unloads the model, so a batch that is paused long enough pays the load again
+        // mid-run, and a timeout shorter than the load turns that into a failure rather than a
+        // wait.
         let timeout_secs = get("EMERGE_VLM_TIMEOUT_SECS")
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(120);
+            .unwrap_or(600);
+        // Deliberation off by default; `EMERGE_VLM_THINK=1` restores it.
+        let think = get("EMERGE_VLM_THINK").is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
         // 2000 rather than the old 800: see [`VlmConfig::max_tokens`]. A direct-answering model
         // spends a few hundred of these and stops, so the higher ceiling costs it nothing — the
         // endpoint streams until the JSON closes, not until the budget is used.
@@ -163,6 +179,7 @@ impl VlmConfig {
             key,
             timeout_secs,
             max_tokens,
+            think,
         })
     }
 
@@ -175,6 +192,7 @@ impl VlmConfig {
             key: "stub-key".to_owned(),
             timeout_secs,
             max_tokens: 2000,
+            think: false,
         }
     }
 }
@@ -934,12 +952,33 @@ pub fn request_labels(
             )
         }));
     }
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": cfg.model,
         "temperature": 0.1,
         "max_tokens": cfg.max_tokens,
         "messages": messages,
     });
+    // **Ask the chat template to skip the thinking, and the batch stops being an overnight job.**
+    //
+    // Measured 2026-08-17 against bmb, same prompt and two images, model warm:
+    //
+    //   thinking on             88 s   826 completion tokens
+    //   `/no_think` in the text 63 s   650 tokens, 2,193 characters of reasoning — this template
+    //                                  does not honour the suffix, so it is not an option
+    //   enable_thinking: false   6 s    48 tokens, no reasoning at all
+    //
+    // Fifteen times, and over 778 meshes it is the difference between ~78 minutes and ~19 hours.
+    // A closed-set classification off two pictures is recall, not deduction, so the deliberation
+    // was buying very little of what it cost.
+    //
+    // Sent as `chat_template_kwargs`, which is a **hint to the Jinja template** rather than an API
+    // parameter: a template that does not read `enable_thinking` ignores it, so this stays inert
+    // against an endpoint that is not Qwen — which is why it can be on by default without making
+    // the Ollama Cloud path a second configuration. `EMERGE_VLM_THINK=1` turns deliberation back
+    // on for a run where the labels matter more than the wall clock.
+    if !cfg.think {
+        body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": false });
+    }
 
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(cfg.timeout_secs)))
@@ -952,7 +991,22 @@ pub fn request_labels(
         .post(&cfg.url)
         .header("Authorization", &format!("Bearer {}", cfg.key))
         .send_json(&body)
-        .map_err(|e| format!("the VLM endpoint is unreachable: {e}"))?;
+        // **A timeout is not an unreachable endpoint, and saying so sent us the wrong way.** Every
+        // transport error used to read "the VLM endpoint is unreachable", and `labels.rs` turns
+        // that into *"bring the forward up and press Shift+L again"*. On 2026-08-17 the batch
+        // stopped at 1/778 with `timeout: global` **while the forward was up** — the advice was
+        // confidently wrong, and the actual cause (a 31 GB model still loading) was not something
+        // the message let you reach.
+        .map_err(|e| match e {
+            ureq::Error::Timeout(_) => format!(
+                "the VLM endpoint did not answer within {}s. The forward may be fine: a cold model \
+                 load on bmb costs minutes and is spent before the first mesh. Check with \
+                 `curl -sS http://127.0.0.1:9292/health`, and if that answers OK, raise \
+                 EMERGE_VLM_TIMEOUT_SECS rather than restarting the tunnel.",
+                cfg.timeout_secs
+            ),
+            other => format!("the VLM endpoint is unreachable: {other}"),
+        })?;
     let status = response.status();
     let text = response
         .body_mut()
@@ -1612,6 +1666,22 @@ mod tests {
         // Big enough for a reasoning model, because that is what the default now names — the
         // budget covers the thinking as well as the JSON. See [`VlmConfig::max_tokens`].
         assert_eq!(cfg.max_tokens, 2000);
+        // Long enough to cover a cold 31 GB load, not just a warm answer — the failure this
+        // replaced looked like an unreachable endpoint and was a model still loading.
+        assert_eq!(cfg.timeout_secs, 600);
+        // **Deliberation off by default.** 88 s per mesh with it, 6 s without: over 778 meshes
+        // that is 19 hours against 78 minutes.
+        assert!(!cfg.think, "thinking must be opt-IN, or a batch is an overnight job");
+        assert!(
+            VlmConfig::from_lookup(|name| match name {
+                "EMERGE_VLM_KEY" => Some("k".to_owned()),
+                "EMERGE_VLM_THINK" => Some("1".to_owned()),
+                _ => None,
+            })
+            .unwrap_or_else(|e| panic!("{e}"))
+            .think,
+            "a run that wants the deliberation back must be able to ask for it"
+        );
         assert_eq!(
             VlmConfig::from_lookup(|name| match name {
                 "EMERGE_VLM_KEY" => Some("k".to_owned()),
