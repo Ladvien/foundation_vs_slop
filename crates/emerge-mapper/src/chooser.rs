@@ -3961,6 +3961,8 @@ impl Plugin for ChooserPlugin {
                 type_into_field,
                 drive_chooser,
                 paint_chooser,
+                // **After the paint**, because it measures rows the paint may have just respawned.
+                keep_the_chooser_selection_on_screen,
             )
                 .chain()
                 .run_if(in_state(crate::screen::Screen::Menu)),
@@ -4087,7 +4089,11 @@ fn spawn_screen(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
         row.spawn(column()).with_children(|col| {
             col.spawn((list_panel(), ListPanel)).with_children(|p| {
                 p.spawn((header("MAPS"), MapsHeader));
-                p.spawn((Node::default(), MapList));
+                // **A scroll container, because the panel is flex now.** It sized itself to the
+                // catalogue while the whole screen did; on the frame it takes the height that is
+                // left, so a project with more maps than fit simply overflowed with nothing on
+                // screen saying so.
+                crate::chrome::scroll_list(p, MapList);
             });
             col.spawn((info_panel(), InfoPanel)).with_children(|p| {
                 p.spawn((header("MAP INFO"), SettingsHeader));
@@ -4098,7 +4104,7 @@ fn spawn_screen(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
         row.spawn(column()).with_children(|col| {
             col.spawn((list_panel(), ListPanel)).with_children(|p| {
                 p.spawn(header("KITS"));
-                p.spawn((Node::default(), KitList));
+                crate::chrome::scroll_list(p, KitList);
             });
             col.spawn((info_panel(), InfoPanel)).with_children(|p| {
                 p.spawn((header("KIT INFO"), KitInfoHeader));
@@ -4279,17 +4285,25 @@ const INFO_LABEL_W: f32 = 76.0;
 /// somebody pastes into a message, and to anyone who cannot tell two dark warm greys apart.
 fn fill(commands: &mut Commands, at: Entity, rows: &[Row], kind: PanelKind, pane: Option<RowPane>) {
     commands.entity(at).despawn_related::<Children>();
-    commands.entity(at).insert(Node {
-        flex_direction: FlexDirection::Column,
-        row_gap: Val::Px(crate::chrome::GAP_TIGHT),
-        // **Full width, or the rows inside do not line up with the panel they sit in.**
-        //
-        // This was unset, so the container shrank to its own content and each row's
-        // `width: Percent(100)` resolved against *that* — which left the right column ragged and
-        // disagreeing with the header above it. Reported at the keyboard, 2026-08-16.
-        width: Val::Percent(100.0),
-        ..default()
-    });
+    // **A list's node is `chrome::scroll_list`'s; an inspector's is written here.**
+    //
+    // This used to `insert(Node { .. })` unconditionally, and over a `scroll_list` that would have
+    // silently replaced the three things making a list scrollable — the `overflow`, the `ScrollArea`
+    // and the `min_height: 0`. Dropping it wholesale was the first fix and it was wrong in the other
+    // direction: the inspector containers are plain nodes, so they fell back to `FlexDirection::Row`
+    // and `MAP INFO` drew its four rows side by side, wrapping mid-value. Caught in a capture, which
+    // is the half of this a green suite could not have told me.
+    if kind == PanelKind::Inspector {
+        commands.entity(at).insert(Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(crate::chrome::GAP_TIGHT),
+            // Full width, or the rows inside do not line up with the panel they sit in — the
+            // container shrinks to its own content and each row's `width: 100%` resolves against
+            // *that*, which is what left the right column ragged (reported 2026-08-16).
+            width: Val::Percent(100.0),
+            ..default()
+        });
+    }
     for (i, r) in rows.iter().enumerate() {
         let c = colour(r.tone);
         let selected = r.tone == Tone::Selected;
@@ -4349,6 +4363,70 @@ fn fill(commands: &mut Commands, at: Entity, rows: &[Row], kind: PanelKind, pane
                 });
             }
         });
+    }
+}
+
+/// **Keep the selected row on screen**, the way every other list in this editor does.
+///
+/// `tests/every_list_follows_its_selection.rs` requires one of these per `scroll_list` marker, and
+/// its header records why: the defect was reported twice and passed its tests both times, because
+/// the tests measured a world that only exists in tests.
+///
+/// **Keyed on the selection, never on `Res<Chooser>::is_changed`** — `chrome::Follow`'s founding
+/// observation. The resource is written on most frames (a keystroke, a rescan, a message), so
+/// watching it would re-arm this for ever and the scroll would never run. `Follow` also swallows the
+/// first frame after the selection moves, because `ComputedNode` still describes the previous
+/// layout then.
+fn keep_the_chooser_selection_on_screen(
+    chooser: Res<Chooser>,
+    rows: Query<(&ChooserRow, &ComputedNode, &UiGlobalTransform)>,
+    mut maps: Query<
+        (&ComputedNode, &UiGlobalTransform, &mut ScrollPosition),
+        (With<MapList>, Without<KitList>, Without<ChooserRow>),
+    >,
+    mut kits: Query<
+        (&ComputedNode, &UiGlobalTransform, &mut ScrollPosition),
+        (With<KitList>, Without<MapList>, Without<ChooserRow>),
+    >,
+    mut follow: Local<crate::chrome::Follow<(usize, usize)>>,
+) {
+    // The cursor as one value, so `Follow` re-arms when either half moves — walking from kit 2 to
+    // kit 3 and crossing from the maps column to the kits column are both "the selection moved".
+    let (pane, index) = match chooser.focus {
+        Focus::Maps => (0, chooser.map),
+        Focus::Kits => (1, chooser.kit),
+        // The settings panel is content-sized and never scrolls; there is nothing to reveal.
+        Focus::Settings => return,
+    };
+    if !follow.should_scroll(Some((pane, index))) {
+        return;
+    }
+    let want = if pane == 0 { RowPane::Maps } else { RowPane::Kits };
+    let Some((row_mid, row_half)) = rows
+        .iter()
+        .find(|(r, _, _)| r.pane == want && r.index == index)
+        .map(|(_, n, t)| (t.translation.y, n.size().y * 0.5))
+    else {
+        return;
+    };
+    let reveal = |list: &ComputedNode, tf: &UiGlobalTransform, scroll: &mut ScrollPosition| {
+        if let Some(y) = crate::chrome::scroll_to_reveal(
+            (row_mid, row_half),
+            (tf.translation.y, list.size().y * 0.5),
+            scroll.0.y,
+            list.inverse_scale_factor,
+        ) {
+            scroll.0.y = y;
+        }
+    };
+    if pane == 0 {
+        for (list, tf, mut scroll) in &mut maps {
+            reveal(list, tf, &mut scroll);
+        }
+    } else {
+        for (list, tf, mut scroll) in &mut kits {
+            reveal(list, tf, &mut scroll);
+        }
     }
 }
 

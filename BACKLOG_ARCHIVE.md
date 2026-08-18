@@ -3507,3 +3507,16 @@ The repo's own precedent for this is FVS-N-23, demoted when FVS-N-25 measured th
   code on purpose and watching the lint stay green, which is the only way that class of hole is ever
   found; it matches parentheses now. Verified both directions, and by four clicks across both menu
   columns with no panic.
+
+- **FVS-S-34b — The chooser's lists scroll, and follow their selection.** `chrome::scroll_list` for
+  `MapList` and `KitList`, plus `keep_the_chooser_selection_on_screen` keyed on `(pane, index)` —
+  never on `Res<Chooser>::is_changed`, which is written most frames and is the exact re-arming
+  `chrome::Follow` exists to prevent. `tests/every_list_follows_its_selection.rs` covers it (verified
+  by removing the follower and watching it name `MapList` by name).
+  **One bug in, one bug out.** `fill` used to `insert(Node { .. })` unconditionally, which over a
+  `scroll_list` would have silently replaced the `overflow`, the `ScrollArea` and the `min_height: 0`
+  that make a list scrollable. Dropping it wholesale was wrong the other way: the inspector
+  containers are plain nodes, so they fell back to `FlexDirection::Row` and `MAP INFO` drew its four
+  rows side by side, wrapping mid-value. It is now conditional on the panel kind. **The suite stayed
+  green through both states** — a capture is what caught it, which is the half of this a test could
+  not have told me.
