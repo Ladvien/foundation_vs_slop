@@ -1078,22 +1078,147 @@ pub fn scroll_to_reveal(
     ((scroll_y - want).abs() > 0.5).then_some(want)
 }
 
+/// The scrollbar's track. Marked so [`hide_idle_scrollbars`] can find it and its own width is
+/// stated once.
+#[derive(Component)]
+pub struct ScrollTrack;
+
+/// Width of the bar, and how far it is inset from the panel's inner edge.
+const BAR_W: f32 = 5.0;
+const BAR_INSET: f32 = 1.0;
+/// The thumb never shrinks below this, or a long list makes it a dot nobody can grab (Fitts, and
+/// upstream's own reason for the parameter).
+const MIN_THUMB: f32 = 18.0;
+
+/// **A list that scrolls, and now says so.**
+///
+/// # It scrolled and nothing on screen admitted it
+///
+/// This spawned one node with `overflow: scroll_y` and a `ScrollArea`, and **no bar of any kind** —
+/// so a list longer than its panel clipped, answered the wheel, and gave the author no indication
+/// that there was more. It is visible in the 2026-08-18 captures: the Kit door's candidate list
+/// opens part-way down, scrolled to the selection, with nothing saying what is above it.
+///
+/// # Shape, and why there is a wrapper
+///
+/// `bevy_ui_widgets::Scrollbar` goes on a **track** entity pointing at the scrolled one, and
+/// `ScrollbarThumb` is its child. The track has to be positioned against the list's own box, so the
+/// list gains a wrapper and the two are siblings inside it. The **marker stays on the scrolling
+/// node** and that is load-bearing: every caller's queries, `chrome::Follow`'s reveal arithmetic and
+/// `tests/every_list_follows_its_selection.rs` all key on it, and this returns the viewport rather
+/// than the wrapper so not one call site changes.
+///
+/// **The thumb deliberately has no `Node`.** Upstream lays it out itself in `PostUpdate` after
+/// `ui_layout_system`; giving it one looks like it works and then fights `update_scrollbar_thumb`.
+///
+/// **The bar overlays rather than reserving a gutter.** `Node.scrollbar_width` would reserve space,
+/// and it also turns on a shipped disagreement: `ScrollArea`'s wheel handler computes its maximum
+/// from `size()` while the scrollbar's own code subtracts `scrollbar_size`
+/// (`scrollarea.rs:27` vs `scrollbar.rs:173`), so the two disagree by exactly the gutter width.
+/// Overlaying sidesteps it.
 pub fn scroll_list<'a>(
     parent: &'a mut ChildSpawnerCommands,
     marker: impl Bundle,
 ) -> EntityCommands<'a> {
-    parent.spawn((
-        Node {
+    let viewport = parent
+        .commands_mut()
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(2.0),
+                flex_grow: 1.0,
+                min_height: Val::Px(0.0),
+                overflow: Overflow::scroll_y(),
+                ..default()
+            },
+            ScrollArea::default(),
+            marker,
+        ))
+        .id();
+
+    let thumb = parent
+        .commands_mut()
+        .spawn((
+            bevy::ui_widgets::ScrollbarThumb {
+                border_radius: BorderRadius::all(Val::Px(BAR_W / 2.0)),
+                border: UiRect::ZERO,
+            },
+            BackgroundColor(scaled(ROW_SELECTED, 0.9)),
+        ))
+        .id();
+
+    let track = parent
+        .commands_mut()
+        .spawn((
+            ScrollTrack,
+            bevy::ui_widgets::Scrollbar::new(
+                viewport,
+                bevy::ui_widgets::ControlOrientation::Vertical,
+                MIN_THUMB,
+            ),
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(BAR_INSET),
+                top: Val::Px(0.0),
+                bottom: Val::Px(0.0),
+                width: Val::Px(BAR_W),
+                // Hidden until there is somewhere to scroll — see [`hide_idle_scrollbars`].
+                display: Display::None,
+                ..default()
+            },
+            // The track is a drag target; the content under it is not. The panel root is
+            // `Pickable::IGNORE`, so this narrows that for the one node here that is grabbable.
+            bevy::picking::Pickable::default(),
+        ))
+        .id();
+    parent.commands_mut().entity(track).add_child(thumb);
+
+    let wrapper = parent
+        .spawn(Node {
             flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(2.0),
             flex_grow: 1.0,
             min_height: Val::Px(0.0),
-            overflow: Overflow::scroll_y(),
             ..default()
-        },
-        ScrollArea::default(),
-        marker,
-    ))
+        })
+        .id();
+    parent
+        .commands_mut()
+        .entity(wrapper)
+        .add_children(&[viewport, track]);
+
+    parent.commands_mut().entity(viewport)
+}
+
+/// **A bar only while there is somewhere to scroll** — the browser default, and the reason a panel
+/// that fits its content shows no furniture at all.
+///
+/// `Display::None` rather than alpha, so a bar nobody needs costs no draw and no hit test.
+///
+/// **Compares before writing**, per the standing rule this crate keeps: `chrome::Follow`'s doc
+/// records what unconditional per-frame writes cost, and `Node` is change-detected by the layout
+/// system. Reading the target's `ComputedNode` from the track side is deliberate — the link runs
+/// track → viewport and only that way, so a `Changed<ComputedNode>` filter here would be watching
+/// the wrong entity.
+pub fn hide_idle_scrollbars(
+    mut tracks: Query<(&mut Node, &bevy::ui_widgets::Scrollbar), With<ScrollTrack>>,
+    viewports: Query<&bevy::ui::ComputedNode>,
+) {
+    for (mut node, bar) in &mut tracks {
+        let Ok(view) = viewports.get(bar.target) else {
+            continue;
+        };
+        // The same clamp upstream uses, so the bar appears exactly when the wheel has somewhere to
+        // go rather than one pixel before or after.
+        let visible = view.size().y - view.scrollbar_size.y;
+        let want = if view.content_size().y > visible + 0.5 {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        if node.display != want {
+            node.display = want;
+        }
+    }
 }
 
 // ── the row vocabulary ───────────────────────────────────────────────────────────────────────────
@@ -1615,7 +1740,7 @@ impl Plugin for ChromePlugin {
             // **Ungated by screen**, unlike the systems below it: the menu draws rows too, and the
             // query simply matches nothing on a screen that has none. Gating it would be a second
             // place that has to know which screens have lists.
-            .add_systems(Update, style_list_rows)
+            .add_systems(Update, (style_list_rows, hide_idle_scrollbars))
             // `flash_live_rows` after the rebuild, so a row spawned this frame is lit this frame
             // rather than one frame late — which for a tap is the difference between a readout and
             // a flicker.

@@ -9385,3 +9385,81 @@ fn the_theme_is_seeded_from_the_palette() {
         );
     }
 }
+
+/// **A bar appears only when there is somewhere to scroll, and it appears when there is.**
+///
+/// Every list in this editor scrolled by wheel and showed **no bar of any kind** — so a pane longer
+/// than its panel clipped silently and the author had no way to know. Both halves of the fix are
+/// asserted here because each fails differently: a bar that never shows leaves the old defect in
+/// place, and a bar that never hides puts furniture on every panel that does not need it.
+///
+/// The numbers are measured rather than assumed, and the measurement found something. The Compose
+/// pane is **2417 px of content in an 833 px viewport** — nearly three screens, almost all of it
+/// blank, because that tab still spaces itself with empty `Text` rows (the 2026-08-17 audit's
+/// "Compose is a different program", still open as FVS-S-36). It looked like it fit. It does not,
+/// and now it says so.
+#[test]
+fn a_scrollbar_shows_exactly_when_there_is_somewhere_to_scroll() {
+    use bevy::ui::Display;
+
+    let measure = |mode: emerge_mapper::tiles::Mode, name: &str| -> Vec<(Display, f32, f32)> {
+        let root = Fixture::new(name)
+            .descriptor("wall", "alpha")
+            .place("wall", (0.0, 0.0))
+            .build("m");
+        let mut app = harness::build_headless_at(&root, "m", None, mode)
+            .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+        for _ in 0..5 {
+            app.update();
+        }
+        let mut q = app.world_mut().query_filtered::<
+            (&bevy::ui::Node, &bevy::ui_widgets::Scrollbar),
+            bevy::ecs::prelude::With<emerge_mapper::chrome::ScrollTrack>,
+        >();
+        let targets: Vec<(Display, bevy::ecs::entity::Entity)> =
+            q.iter(app.world()).map(|(n, b)| (n.display, b.target)).collect();
+        targets
+            .into_iter()
+            .filter_map(|(d, t)| {
+                let c = app.world().get::<bevy::ui::ComputedNode>(t)?;
+                Some((d, c.size().y - c.scrollbar_size.y, c.content_size().y))
+            })
+            // A hidden panel lays out at zero and answers nothing; the live one is the subject.
+            .filter(|(_, visible, _)| *visible > 1.0)
+            .collect()
+    };
+
+    let compose = measure(emerge_mapper::tiles::Mode::Compose, "bar-shows");
+    assert!(
+        !compose.is_empty(),
+        "expected the Compose pane's track; found none, which would make the assertion vacuous"
+    );
+    for (display, visible, content) in &compose {
+        assert!(
+            content > visible,
+            "the Compose pane was measured at {content} over {visible} — if it now fits, this test \
+             is asserting the wrong half and should move to a pane that does not"
+        );
+        assert_eq!(
+            *display,
+            Display::Flex,
+            "content past the fold with no bar is the defect this replaced: the pane clips, the \
+             wheel works, and nothing on screen admits either"
+        );
+    }
+
+    let map = measure(emerge_mapper::tiles::Mode::Map, "bar-hides");
+    let fitting: Vec<_> = map.iter().filter(|(_, v, c)| c <= v).collect();
+    assert!(
+        !fitting.is_empty(),
+        "expected at least one pane whose content fits, to prove the bar hides; found none"
+    );
+    for (display, visible, content) in fitting {
+        assert_eq!(
+            *display,
+            Display::None,
+            "a pane holding {content} in {visible} has nowhere to scroll, and a bar there is \
+             furniture on every panel that does not need one"
+        );
+    }
+}
