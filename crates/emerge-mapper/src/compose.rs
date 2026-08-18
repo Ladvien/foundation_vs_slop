@@ -169,7 +169,10 @@ impl Plugin for ComposePlugin {
                 (measure_budget.before(rebuild))
                     .run_if(in_state(crate::screen::Screen::Editor)),
             )
-            .add_systems(OnEnter(crate::screen::Screen::Editor), spawn_compose_panel)
+            .add_systems(
+                OnEnter(crate::screen::Screen::Editor),
+                spawn_compose_panel.after(crate::chrome::FrameSet),
+            )
             // **Before anything reads `selected`, and not gated on the mode.** The list can shrink
             // while another tab is live — capturing on the Map rewrites the whole set — and a reader
             // that clamped for itself is how three of them came to disagree. See `clamp_selection`.
@@ -319,9 +322,10 @@ fn in_compose_mode(mode: Option<Res<Mode>>) -> bool {
     mode.is_some_and(|m| *m == Mode::Compose)
 }
 
-fn spawn_compose_panel(mut commands: Commands) {
+fn spawn_compose_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
     crate::chrome::panel_root(
         &mut commands,
+        &frame,
         crate::chrome::Side::Left,
         // The wider of the two panel widths. Measured, not guessed: at `CONTROLS_W` a member line
         // (`chair_north: dining_chair (0.0, -1.0) yaw 180`) wrapped, and a wrapped continuation

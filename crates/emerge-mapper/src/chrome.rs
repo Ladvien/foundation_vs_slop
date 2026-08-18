@@ -231,51 +231,265 @@ pub enum Side {
     Right,
 }
 
-/// **A panel.** Absolutely positioned, below the tab strip, opaque, above the world.
+/// **A panel.** A child of one of the frame's docks, opaque, and as tall as the frame lets it be.
 ///
-/// `full_height` pins `bottom` as well as `top`, which is what gives a list inside it a real height to
-/// scroll within: a `max_height` inside an unpinned panel is never reached and does nothing — the map
-/// palette shipped that way and rendered two rows.
+/// It used to be `PositionType::Absolute` at `top: TAB_STRIP_BOTTOM`, pinned to a window edge and
+/// floating over the world — which is why nothing on screen filled the window and why a panel's
+/// height was a number rather than a consequence. [`Frame`] owns position now; this owns width,
+/// which side, and whether the panel wants the dock's whole height.
 ///
-/// **Every panel carries `Hovered`.** `view::drive` and `place_on_click` both ask "is the pointer over
-/// UI" by looking for any true `Hovered`, and when only the *rows* carried one the gaps between them
-/// counted as open map — a wheel turn over a list zoomed the world, and a click that missed a row by a
-/// pixel dropped a piece behind the panel. `Hovered` is true for an entity **or any descendant**
-/// (`bevy_picking-0.19.0/src/hover.rs:322`), so one on the root answers for the whole surface.
+/// `full_height` becomes `flex_grow` rather than a pinned `bottom`, and the reason to keep the
+/// distinction is unchanged: a list inside needs a real height to scroll within, and a `max_height`
+/// inside a content-sized panel is never reached and does nothing — the map palette shipped that way
+/// and rendered two rows. **`min_height: 0` comes with it**, because a flex item's automatic minimum
+/// size is its content, so without it the panel grows to fit every row and `overflow` has nothing
+/// left to clip.
+///
+/// **Every panel carries `Hovered`.** `view::drive` and `place_on_click` both ask "is the pointer
+/// over UI" by looking for any true `Hovered`, and when only the *rows* carried one the gaps between
+/// them counted as open map — a wheel turn over a list zoomed the world, and a click that missed a
+/// row by a pixel dropped a piece behind the panel. `Hovered` is true for an entity **or any
+/// descendant** (`bevy_picking-0.19.0/src/hover.rs:322`), so one on the root answers for the whole
+/// surface. The frame above it deliberately carries none — see [`Frame`].
 pub fn panel_root<'a>(
     commands: &'a mut Commands,
+    frame: &Frame,
     side: Side,
     width: f32,
     full_height: bool,
     hidden: bool,
 ) -> EntityCommands<'a> {
     let mut node = Node {
-        position_type: PositionType::Absolute,
-        top: Val::Px(TAB_STRIP_BOTTOM),
         width: Val::Px(width),
         flex_direction: FlexDirection::Column,
         row_gap: Val::Px(6.0),
         padding: UiRect::all(Val::Px(PAD)),
+        margin: UiRect::all(Val::Px(MARGIN)),
         ..default()
     };
-    match side {
-        Side::Left => node.left = Val::Px(MARGIN),
-        Side::Right => node.right = Val::Px(MARGIN),
-    }
     if full_height {
-        node.bottom = Val::Px(MARGIN);
+        node.flex_grow = 1.0;
+        node.min_height = Val::Px(0.0);
     }
     if hidden {
         // `Display::None`, never `Visibility`: a visibility-hidden UI node still occupies layout and
-        // still answers hover, which would leave a hidden tab's rows eating clicks aimed at the world.
+        // still answers hover, which would leave a hidden tab's rows eating clicks aimed at the
+        // world — and in a dock it would also hold the dock open at its width.
         node.display = Display::None;
     }
-    commands.spawn((
-        node,
-        BackgroundColor(PANEL_BG),
-        GlobalZIndex(PANEL_Z),
-        Hovered::default(),
-    ))
+    let dock = match side {
+        Side::Left => frame.left,
+        Side::Right => frame.right,
+    };
+    let panel = commands
+        .spawn((node, BackgroundColor(PANEL_BG), Hovered::default()))
+        .id();
+    commands.entity(dock).add_child(panel);
+    commands.entity(panel)
+}
+
+/// **The window's own layout, and the one thing on screen that belongs to no panel.**
+///
+/// # Why there is a frame at all
+///
+/// There were two layouts and neither filled the window. The editor drew `PositionType::Absolute`
+/// panels of fixed pixel width, anchored to the left and right edges and floating over a 3-D camera
+/// that owned the whole window; the menu was a fixed-pixel flex grid whose own code said it *"is
+/// fixed-size and simply sits in whatever window there is"*. On a 2560x1406 window that left about
+/// two fifths of the screen as ground nothing could use, panels sized for twenty rows holding two,
+/// and rows wrapping into their own value column — reported as *"it's bad"*, and visible in the
+/// capture that started this.
+///
+/// So position stops being something a panel decides. A panel says how wide it wants to be and which
+/// side it lives on; **where it goes is the frame's answer**, and the frame is the window.
+///
+/// ```text
+/// +--------------------------------------------------+
+/// |  < kits & maps                 KIT . furniture   |  chrome bar
+/// +--------------------------------------------------+
+/// |  KIT | MAP | RIGS      1 MESHES 2 TILES 3 COMPOSE |  door strip
+/// +----------+---------------------------+-----------+
+/// | left     |                           | right     |
+/// | dock     |        viewport           | dock      |  body: flex_grow 1
+/// |          |                           |           |
+/// +----------+---------------------------+-----------+
+/// |  stamped 4 pieces        Hold K . Cmd+O back      |  status band
+/// +--------------------------------------------------+
+/// ```
+///
+/// # Flex, deliberately, and not `Val::Percent`
+///
+/// [`EDITOR_UI_SCALE`] multiplies every `Val::Px` and every font size and leaves `Val::Percent`
+/// alone (`docs/ui.md` §5). A layout mixing percentage widths with pixel minimums would therefore
+/// scale two ways at once on a 2x display, which is a bug that only appears on somebody else's
+/// monitor. `flex_grow` on the centre and pixel widths on the docks is responsive *and*
+/// density-correct, because the centre is defined as whatever is left.
+///
+/// # What the frame must not carry
+///
+/// **No `Hovered`, and `Pickable::IGNORE` throughout.** `view::over_ui` and `view::drive` both ask
+/// "is the pointer on the interface" by looking for a true `Hovered`, and a frame node carrying one
+/// would answer yes for the entire window — the map would stop taking clicks and the wheel would
+/// stop zooming, everywhere, with nothing to point at. `Hovered` belongs on the panels, which is
+/// where [`panel_root`] puts it.
+#[derive(Resource)]
+pub struct Frame {
+    pub root: Entity,
+    /// Above everything, and the same on every door — see `docs/2026-08-17-one-application.md` §4.1.
+    pub chrome_bar: Entity,
+    /// The door's own strip of panels.
+    pub door_strip: Entity,
+    pub left: Entity,
+    /// The hole the world is drawn through. Carries [`ViewportSlot`].
+    pub viewport: Entity,
+    pub right: Entity,
+    /// One band at the foot of the window: what happened, what went wrong, what the keys are.
+    pub status: Entity,
+}
+
+/// **The node the world shows through, and the only one with no background.**
+///
+/// `crate::surface` reads its rect and gives it to the map camera as a viewport, which is what makes
+/// the viewport a region rather than the whole window with panels floating over it.
+#[derive(Component)]
+pub struct ViewportSlot;
+
+/// Everything that spawns into a dock runs after this.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FrameSet;
+
+/// Height of the two bars. Fixed, because a bar that changed height as its content changed would
+/// move the viewport under the author's hands.
+const BAR_H: f32 = 26.0;
+
+/// **Build the frame and remember its slots.**
+///
+/// The `Frame` resource is how [`panel_root`] finds the dock to put a panel in; BSN-style name
+/// lookup does not exist here and a marker query would need a flush between the frame and the first
+/// panel. Ordering is [`FrameSet`], which every panel spawner runs `after`.
+pub fn spawn_frame(mut commands: Commands) {
+    let bar = |extra: Node| -> Node {
+        Node {
+            width: Val::Percent(100.0),
+            height: Val::Px(BAR_H),
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(GAP_GROUP),
+            padding: UiRect::axes(Val::Px(MARGIN), Val::Px(0.0)),
+            flex_shrink: 0.0,
+            ..extra
+        }
+    };
+
+    let chrome_bar = commands
+        .spawn((
+            bar(Node::default()),
+            BackgroundColor(HEADER_BG),
+            bevy::picking::Pickable::IGNORE,
+        ))
+        .id();
+
+    // The strip sets its own padding — a tab is a box, not a word on a bar — so this one only says
+    // how tall the band is and where it starts.
+    let door_strip = commands
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Stretch,
+                column_gap: Val::Px(2.0),
+                padding: UiRect::left(Val::Px(MARGIN)),
+                flex_shrink: 0.0,
+                ..default()
+            },
+            bevy::picking::Pickable::IGNORE,
+        ))
+        .id();
+
+    // **A dock is a column with no width of its own.** Its width is its widest visible panel, which
+    // is what lets four tabs' panels share one dock and each keep the width it argued for
+    // (`CONTROLS_W` vs `TILES_CONTROLS_W`) without a dock-level table saying it twice.
+    let dock = || {
+        (
+            Node {
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexStart,
+                flex_shrink: 0.0,
+                ..default()
+            },
+            bevy::picking::Pickable::IGNORE,
+        )
+    };
+    let left = commands.spawn(dock()).id();
+    let right = commands.spawn(dock()).id();
+
+    let viewport = commands
+        .spawn((
+            ViewportSlot,
+            Node {
+                // **The centre is what is left**, which is the whole idea. `min_width: 0` because a
+                // flex item's automatic minimum size is its content, and without it a wide panel
+                // would push the viewport off the window instead of narrowing it.
+                flex_grow: 1.0,
+                min_width: Val::Px(0.0),
+                min_height: Val::Px(0.0),
+                ..default()
+            },
+            // No `BackgroundColor` at all: this is the hole the world shows through.
+            bevy::picking::Pickable::IGNORE,
+        ))
+        .id();
+
+    let body = commands
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Stretch,
+                flex_grow: 1.0,
+                min_height: Val::Px(0.0),
+                ..default()
+            },
+            bevy::picking::Pickable::IGNORE,
+        ))
+        .id();
+    commands
+        .entity(body)
+        .add_children(&[left, viewport, right]);
+
+    let status = commands
+        .spawn((
+            bar(Node::default()),
+            BackgroundColor(HEADER_BG),
+            bevy::picking::Pickable::IGNORE,
+        ))
+        .id();
+
+    let root = commands
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                ..default()
+            },
+            // See the type doc: no `Hovered`, and nothing here eats a click meant for the map.
+            bevy::picking::Pickable::IGNORE,
+        ))
+        .id();
+    commands
+        .entity(root)
+        .add_children(&[chrome_bar, door_strip, body, status]);
+
+    commands.insert_resource(Frame {
+        root,
+        chrome_bar,
+        door_strip,
+        left,
+        viewport,
+        right,
+        status,
+    });
 }
 
 /// A panel's heading.
@@ -1251,9 +1465,18 @@ pub struct ChromePlugin;
 impl Plugin for ChromePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShowingFor>()
+            // **The frame first, and everything that puts a panel in it after.** `Res<Frame>` is
+            // how `panel_root` finds its dock, and in Bevy 0.19 a missing `Res<T>` panics its
+            // system rather than skipping it — so this is an ordering the build must state, not one
+            // that happens to hold. Ordering across a set also gets a sync point inserted, which is
+            // what makes the deferred `insert_resource` visible to the spawners.
             .add_systems(
                 OnEnter(crate::screen::Screen::Editor),
-                (spawn_shortcuts_overlay, spawn_name_box),
+                spawn_frame.in_set(FrameSet),
+            )
+            .add_systems(
+                OnEnter(crate::screen::Screen::Editor),
+                (spawn_shortcuts_overlay, spawn_name_box).after(FrameSet),
             )
             // Every list row's hover, in one place — the rows themselves are spawned by
             // change-gated rebuilds that never see mouse motion.

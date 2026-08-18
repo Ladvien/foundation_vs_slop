@@ -3971,6 +3971,12 @@ impl Plugin for ChooserPlugin {
             root: self.root.clone(),
             preselect: self.preselect.clone(),
         })
+        // **`ExtraRoom` belongs to the menu, not to the capture rig it used to sit beside.** It was
+        // `init_resource`'d by `ChooserCapturePlugin`, and when that plugin's job moved to
+        // `crate::surface` the resource went with it — leaving `room_for_the_card` taking a
+        // `ResMut<ExtraRoom>` that no longer existed, which in Bevy 0.19 panics the system rather
+        // than skipping it. The menu screen came up as a crash with the guide card as the only clue.
+        .init_resource::<ExtraRoom>()
         // **`PostStartup`, not `Startup.after(..)`.** Ordering systems does not flush commands: a
         // camera spawned in `Startup` does not exist in the World until that schedule ends, so an
         // `.after()` here found no camera, returned early, and drew no interface at all — a black

@@ -892,7 +892,7 @@ impl Plugin for EditorPlugin {
                     spawn_clone_tile,
                     spawn_target_tile,
                     spawn_existing,
-                )
+                ).after(crate::chrome::FrameSet)
                     .chain()
                     // The Map door's own furniture: a palette bound to a map, the bounds floor, the
                     // rows already placed. `spawn_existing` takes `Res<OpenMap>`, which no other
@@ -1221,9 +1221,10 @@ fn back_button_clicked(
 
 /// Build the panel's fixed furniture. The palette itself is `rebuild_palette`'s, which is why neither
 /// the project nor the thumbnails are read here — they were parameters that had stopped being used.
-fn spawn_panel(mut commands: Commands) {
+fn spawn_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
     let root = crate::chrome::panel_root(
         &mut commands,
+        &frame,
         crate::chrome::Side::Left,
         crate::chrome::CONTROLS_W,
         false,
@@ -1329,9 +1330,10 @@ fn spawn_panel(mut commands: Commands) {
 ///
 /// Right edge rather than a second column beside the keys: the left panel keeps its width, and the map
 /// stays visible in the band between them, which is the thing being authored.
-fn spawn_palette_panel(mut commands: Commands) {
+fn spawn_palette_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
     crate::chrome::panel_root(
         &mut commands,
+        &frame,
         crate::chrome::Side::Right,
         LIST_W,
         // Pinned top AND bottom — the whole point of this panel.

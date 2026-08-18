@@ -133,6 +133,13 @@ impl Plugin for SurfacePlugin {
         // Doing it at build time is also simply true — the surface is not something a frame makes.
         spawn_surface(app.world_mut());
         app.add_systems(Update, fit_surface_to_window)
+            // **After layout, because it reads it.** `PostUpdate` is where `ComputedNode` becomes
+            // true for this frame; asking in `Update` would chase the previous one, which is the
+            // same one-frame lag `chrome::Follow` exists to name.
+            .add_systems(
+                PostUpdate,
+                fit_viewport_to_frame.after(bevy::ui::UiSystems::Layout),
+            )
             // **Between the two picking sets that matter**: `ProcessInput` writes `PointerLocation`
             // in `PreUpdate`, `Backend` reads it in the same schedule
             // (`bevy_picking-0.19.0/src/lib.rs:258`). Anywhere else and the retarget is either
@@ -336,6 +343,50 @@ fn fit_surface_to_window(
             height: ih,
             depth_or_array_layers: 1,
         });
+    }
+}
+
+/// **Give the map camera the frame's hole, so the viewport is a region rather than the window.**
+///
+/// Panels used to float over a camera that owned the whole window, which is why the world ran under
+/// them and why "is the pointer over UI" had to be asked at all before a click could mean anything
+/// in the world. With a docked frame the interface has its own ground and the world has its own
+/// rectangle, and this is the line between them: `chrome::ViewportSlot`'s computed rect, handed to
+/// the camera as `Camera::viewport` in physical pixels.
+///
+/// `ComputedNode` and `UiGlobalTransform` are already in the surface's space — the interface is laid
+/// out at `UiScale = EDITOR_UI_SCALE * scale_factor` into a physical-sized target — so no conversion
+/// happens here, which is the whole reason [`fit_surface_to_window`] carries the density in `UiScale`
+/// rather than in the target's own `scale_factor`.
+///
+/// `Changed<ComputedNode>`-gated and compares before writing, per the standing rule: `Camera` is
+/// change-detected and the render world reads it.
+fn fit_viewport_to_frame(
+    slot: Query<(&ComputedNode, &UiGlobalTransform), With<crate::chrome::ViewportSlot>>,
+    mut camera: Query<&mut Camera, With<crate::view::MainCamera>>,
+) {
+    let (Ok((node, tf)), Ok(mut camera)) = (slot.single(), camera.single_mut()) else {
+        return;
+    };
+    let size = node.size();
+    // A zero rect is the frame before its first layout, and a camera given a zero viewport renders
+    // nothing at all — which looks exactly like a broken scene and says nothing about why.
+    if size.x < 1.0 || size.y < 1.0 {
+        return;
+    }
+    let min = tf.translation - size / 2.0;
+    let want = bevy::camera::Viewport {
+        physical_position: min.max(Vec2::ZERO).as_uvec2(),
+        physical_size: size.as_uvec2(),
+        ..default()
+    };
+    // `Viewport` has no `PartialEq` in 0.19, so the two fields that matter are compared by hand
+    // rather than the whole struct — the point is only to not mark `Camera` changed every frame.
+    let same = camera.viewport.as_ref().is_some_and(|v| {
+        v.physical_position == want.physical_position && v.physical_size == want.physical_size
+    });
+    if !same {
+        camera.viewport = Some(want);
     }
 }
 

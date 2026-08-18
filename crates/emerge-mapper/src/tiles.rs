@@ -30,7 +30,7 @@ use emerge_core::descriptor::{Descriptor, mount_label, mount_options};
 use emerge_core::import::{self, Candidate, Severity};
 
 use crate::chrome::{
-    ACCENT, CHIP_PAD, DANGER, DIM, HEADER_BG, LABEL, MARGIN, MIN_FIELD_H, MUTED, PANEL_BG,
+    ACCENT, CHIP_PAD, DANGER, DIM, HEADER_BG, LABEL, MIN_FIELD_H, MUTED, PANEL_BG,
     ROW_BG, ROW_HOVER, ROW_SELECTED, TEXT,
 };
 use crate::keys::{self, Action};
@@ -3082,7 +3082,8 @@ impl Plugin for TilesPlugin {
             .init_resource::<crate::build::TileHistory>()
             .add_systems(
                 OnEnter(crate::screen::Screen::Editor),
-                (spawn_tab_strip, spawn_tiles_panel, scan_on_entering_the_kits_door),
+                (spawn_tab_strip, spawn_tiles_panel, scan_on_entering_the_kits_door)
+                    .after(crate::chrome::FrameSet),
             )
             .add_systems(
                 Update,
@@ -3246,20 +3247,27 @@ impl Plugin for TilesPlugin {
 /// `anim_cache::load_bench_cache`, `thumbs::setup`): the door is a door's resource, so a screen
 /// entered without one draws no strip rather than aborting the process. `screen::open_the_door`
 /// already says so on the log in the one case that reaches it.
-fn spawn_tab_strip(mut commands: Commands, door: Option<Res<Door>>) {
+fn spawn_tab_strip(
+    mut commands: Commands,
+    door: Option<Res<Door>>,
+    frame: Res<crate::chrome::Frame>,
+) {
     let Some(door) = door else { return };
+    // **Into the frame's own band, not floating over the window.** It was absolute at
+    // `left: MARGIN, top: MARGIN` with `GlobalZIndex(101)` to sit above the panels it overlapped —
+    // a strip that had to out-rank the thing beneath it because both were competing for the same
+    // ground. In the frame nothing overlaps, so neither number is needed.
+    let strip = commands
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            column_gap: Val::Px(2.0),
+            align_items: AlignItems::Stretch,
+            ..default()
+        })
+        .id();
+    commands.entity(frame.door_strip).add_child(strip);
     commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(MARGIN),
-                top: Val::Px(MARGIN),
-                flex_direction: FlexDirection::Row,
-                column_gap: Val::Px(2.0),
-                ..default()
-            },
-            GlobalZIndex(101),
-        ))
+        .entity(strip)
         .with_children(|p| {
             for (i, &mode) in door.tabs().iter().enumerate() {
                 // **The key this door gives that slot**, which is why it is read off the index and
@@ -3421,9 +3429,10 @@ const TILES_PANEL_TABS: &[Mode] = &[Mode::Meshes, Mode::Tiles];
 /// panel that is not pinned to the bottom of the viewport is never reached. 318 candidates scrolled
 /// in a 300 px window. Now it is `chrome::scroll_list` inside a `full_height` panel, which is bounded
 /// by construction.
-fn spawn_tiles_panel(mut commands: Commands) {
+fn spawn_tiles_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
     crate::chrome::panel_root(
         &mut commands,
+        &frame,
         crate::chrome::Side::Left,
         crate::chrome::TILES_CONTROLS_W,
         // Pinned to the bottom as well, so the detail block below has a bounded height to scroll
@@ -3492,6 +3501,7 @@ fn spawn_tiles_panel(mut commands: Commands) {
     // does not mean learning a second layout.
     crate::chrome::panel_root(
         &mut commands,
+        &frame,
         crate::chrome::Side::Right,
         crate::chrome::LIST_W,
         true,

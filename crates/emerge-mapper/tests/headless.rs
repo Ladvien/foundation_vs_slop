@@ -9188,3 +9188,75 @@ fn the_application_draws_into_one_surface_an_agent_can_read() {
         other => panic!("the map camera renders to {other:?}, not to the surface"),
     }
 }
+
+/// **The frame owns position, and no panel is absolutely positioned any more.**
+///
+/// Panels used to be `PositionType::Absolute` at fixed pixel widths, anchored to the window edges
+/// and floating over a camera that owned the whole window — so nothing on screen filled the window,
+/// a panel's height was a number rather than a consequence, and the strip needed `GlobalZIndex(101)`
+/// to out-rank the panels it overlapped. Two fifths of a 2560x1406 window was ground nothing used.
+///
+/// This pins the class rather than any one panel: **a panel that goes back to positioning itself
+/// fails here**, whichever tab it lands on. The `Hovered` clause is the second half, and it is not
+/// decoration — `view::over_ui` and `view::drive` ask "is the pointer on the interface" by looking
+/// for any true `Hovered`, so a frame node carrying one answers yes for the whole window and the map
+/// silently stops taking clicks.
+#[test]
+fn the_frame_owns_position_and_carries_no_hover() {
+    let root = Fixture::new("frame-owns-position")
+        .descriptor("wall", "alpha")
+        .place("wall", (0.0, 0.0))
+        .build("test_map");
+    let mut app = harness::build_headless(&root, "test_map", None)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    app.update();
+
+    let (left, right, slots) = {
+        let frame = app
+            .world()
+            .get_resource::<emerge_mapper::chrome::Frame>()
+            .expect("the frame is the layout — no resource means every panel has nowhere to go");
+        (
+            frame.left,
+            frame.right,
+            [
+                frame.root,
+                frame.chrome_bar,
+                frame.door_strip,
+                frame.viewport,
+                frame.status,
+            ],
+        )
+    };
+
+    // Every panel is a child of a dock, and none of them positions itself.
+    let mut panels = app
+        .world_mut()
+        .query_filtered::<(&bevy::ui::Node, &bevy::ecs::hierarchy::ChildOf), With<bevy::picking::hover::Hovered>>();
+    let mut docked = 0;
+    for (node, parent) in panels.iter(app.world()) {
+        if parent.parent() != left && parent.parent() != right {
+            continue;
+        }
+        docked += 1;
+        assert_eq!(
+            node.position_type,
+            bevy::ui::PositionType::Relative,
+            "a docked panel that positions itself is the floating-overlay layout coming back"
+        );
+    }
+    assert!(
+        docked >= 2,
+        "expected the door's panels in the docks, found {docked} — if this ever reads zero the \
+         query has stopped seeing panels and the assertion above is vacuous"
+    );
+
+    // The frame itself must be invisible to the "is the pointer over UI" question.
+    for slot in slots {
+        assert!(
+            app.world().get::<bevy::picking::hover::Hovered>(slot).is_none(),
+            "a frame node carrying `Hovered` answers 'the pointer is on the interface' for the \
+             entire window: the map stops taking clicks and the wheel stops zooming, everywhere"
+        );
+    }
+}

@@ -238,7 +238,7 @@ impl Plugin for AnimTabPlugin {
                     // The persisted cache warms the reports before the first frame, so the STALE
                     // badge is truthful at startup rather than after the tab's first audit.
                     crate::anim_cache::load_bench_cache,
-                ),
+                ).after(crate::chrome::FrameSet),
             )
             .add_systems(
                 Update,
@@ -303,9 +303,10 @@ impl Plugin for AnimTabPlugin {
     }
 }
 
-fn spawn_panels(mut commands: Commands) {
+fn spawn_panels(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
     crate::chrome::panel_root(
         &mut commands,
+        &frame,
         crate::chrome::Side::Left,
         crate::chrome::TILES_CONTROLS_W,
         true,
@@ -345,6 +346,7 @@ fn spawn_panels(mut commands: Commands) {
 
     crate::chrome::panel_root(
         &mut commands,
+        &frame,
         crate::chrome::Side::Right,
         crate::chrome::LIST_W,
         true,
