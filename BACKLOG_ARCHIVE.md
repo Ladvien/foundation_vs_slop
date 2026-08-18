@@ -3493,3 +3493,17 @@ The repo's own precedent for this is FVS-N-23, demoted when FVS-N-25 measured th
   It also found that `view::sense_pointer` was gated to the editor screen, so the menu had no pointer
   at all: harmless while `Pointer` only served the map's spatial verbs, and load-bearing the moment
   it started feeding `surface::inject_clicks`.
+
+- **FVS-S-34c — Global observers stop demanding a door's resource.** Five, not the twenty-two first
+  estimated: most of the twenty-four take `init_resource`'d state that exists app-wide, and only
+  `Project`/`OpenMap`/`Door`/`Mode` are inserted per-door and removed by `close_the_door`. All five
+  were in `tiles.rs` and all took `Project`. Each already had the real guard — a `Query` answering
+  "is this entity mine" — and could not reach it, because parameters are validated before a body
+  runs.
+  **The ratchet is the deliverable**, and it took two attempts to be worth having. The first parsed
+  signatures by looking for the literal `") {"` that ends one — and a function returning something
+  ends `") -> T {"`, so the scan ran on to the *next* signature and skipped every function between.
+  It saw eight observers in `tiles.rs` and missed the one the test exists for. Found by breaking the
+  code on purpose and watching the lint stay green, which is the only way that class of hole is ever
+  found; it matches parentheses now. Verified both directions, and by four clicks across both menu
+  columns with no panic.

@@ -155,3 +155,103 @@ fn nobody_places_their_own_panel() {
         rogue.join("\n")
     );
 }
+
+/// **A global observer must not demand a resource a door owns.**
+///
+/// This is a crash, not tidiness, and it hid for months. An observer registered with `add_observer`
+/// fires for **any** matching event anywhere in the application — and `Project`, `OpenMap`, `Door`
+/// and `Mode` are inserted when a door opens and **removed by `screen::close_the_door`**. On
+/// `Screen::Menu` they do not exist, and in Bevy 0.19 a missing `Res<T>` **panics its system** rather
+/// than skipping it.
+///
+/// Every one of these observers already had the real guard — a `Query` answering "is this entity
+/// mine", which a menu row fails. It just could not run: parameters are validated *before* the body.
+///
+/// It was invisible for exactly as long as `chrome::list_row` was only ever called inside an editor
+/// panel. The moment the menu adopted the shared row vocabulary (FVS-S-34a) its first click took the
+/// whole application down, and `FeathersPlugins` being in the graph now means any Feathers widget
+/// could have done the same.
+///
+/// The fix at each site is `Option<Res<..>>` and an early return after the entity check — which is
+/// what `CLAUDE.md` has said all along.
+/// **Every `fn` and its parameter list, by matching parentheses.**
+///
+/// The first cut looked for the literal `") {"` that ends a signature — and a function returning
+/// something ends `") -> T {"`, so the search ran on to the *next* signature's terminator and
+/// skipped every function in between. It found eight observers in `tiles.rs` and silently missed the
+/// one this whole test exists for. Caught by breaking the code on purpose and watching the lint stay
+/// green, which is the only way that class of hole is ever found.
+fn signatures(src: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let bytes = src.as_bytes();
+    let mut from = 0usize;
+    while let Some(at) = src[from..].find("\nfn ") {
+        let start = from + at + 1;
+        let Some(open_rel) = src[start..].find('(') else { break };
+        let open = start + open_rel;
+        let name = src[start + 3..open].trim().to_string();
+        let mut depth = 0usize;
+        let mut i = open;
+        let mut close = None;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let Some(close) = close else { break };
+        out.push((name, src[open..=close].to_string()));
+        from = close;
+    }
+    out
+}
+
+#[test]
+fn a_global_observer_never_demands_a_doors_resource() {
+    // Inserted by `open_the_door`, removed by `close_the_door` — see
+    // `screen::OWNERSHIP`, where these four are the `Project` class.
+    const DOOR_OWNED: &[&str] = &["Project", "OpenMap", "Door", "Mode"];
+
+    let mut rogue = Vec::new();
+    let mut seen = 0usize;
+    for (file, src) in panels() {
+        for (name, params) in signatures(&src) {
+            // Only observers — the ones that fire application-wide.
+            if !params.contains("On<") {
+                continue;
+            }
+            seen += 1;
+            for ty in DOOR_OWNED {
+                for kind in ["Res<", "ResMut<"] {
+                    let needle = format!("{kind}{ty}>");
+                    let optional = format!("Option<{kind}{ty}>>");
+                    if params.contains(&needle) && !params.contains(&optional) {
+                        rogue.push(format!("{file}::{name} takes {kind}{ty}>"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        seen >= 10,
+        "the scan found only {seen} observers — if the signature parser has stopped seeing them, \
+         the assertion below is vacuous"
+    );
+    assert!(
+        rogue.is_empty(),
+        "these global observers demand a resource that belongs to a DOOR. They fire for any matching \
+         event anywhere, including on `Screen::Menu` where `close_the_door` has removed it — and a \
+         missing `Res<T>` panics rather than skipping, so the first click outside the editor takes \
+         the application down. Take `Option<Res<..>>` and return early after the entity check, which \
+         is the guard these already have and cannot reach:\n{}",
+        rogue.join("\n")
+    );
+}

@@ -51,6 +51,7 @@ Six ratchets that did not exist before, each of which found something or would h
 | `the_frame_owns_position_and_carries_no_hover` | a panel positioning itself again, or a frame node claiming the pointer |
 | `a_tab_is_not_a_button` | the `Enter`-steals-the-panel bug returning |
 | `a_scrollbar_shows_exactly_when_there_is_somewhere_to_scroll` | a bar that never shows, or one that never hides |
+| `the_sweep_is_finished.rs` | a hand-rolled scroll container, strip or panel — and a global observer demanding a door's resource, which is a crash |
 
 ---
 
@@ -80,19 +81,6 @@ Unchanged, and every item below is judged against them.
 
 Five items closed on 2026-08-18 alongside the overhaul — see the archive. What is left is below, and
 **two of the four are content of the chooser audit rather than the audit itself**, which is done.
-
-**FVS-S-34c · Twenty-two global `Activate` observers still assume the Map door** · M
-Found by FVS-S-34a and it is a **crash**, not a tidiness item. This editor has twenty-four global
-`Activate` observers and most take a Map-door resource — `on_row_click` wants `Res<Project>`,
-`on_tag_chip` wants `ResMut<Project>`. A global observer fires for *any* `Activate` anywhere, and in
-Bevy 0.19 a missing `Res<T>` **panics**: the first click on a `bevy_ui_widgets::Button` outside the
-editor takes the whole application down. It was invisible only because `chrome::list_row` had never
-been called outside an editor panel.
-Two were fixed (`editor::on_row_click`, and the menu was kept off the bus with `chrome::quiet_row`).
-**The other twenty-two are the same landmine for the next caller** — including any Feathers widget,
-now that `FeathersPlugins` is in the graph. Each needs `Option<Res<..>>` and an early return, which
-is what `CLAUDE.md` has always said. · *Touches:* `tiles.rs`, `editor.rs`, `compose.rs`,
-`anim_stage.rs`, `build.rs`
 
 **FVS-S-33 · Focus-by-click, now that routing is settled** · S
 `keys.rs`'s header records the decision taken 2026-08-18: **routing is by `Context`, not by focus**,

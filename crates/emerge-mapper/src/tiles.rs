@@ -598,16 +598,22 @@ impl NoteEdit {
     }
 }
 
+/// **`Option<Res<Project>>`, because this is a GLOBAL observer.** See [`on_cell_verb`] for the whole
+/// argument; the short form is that it fires for any `Activate` anywhere in the application, and
+/// `Project` belongs to a door. The entity query below is the real "is this mine" guard — it just
+/// cannot run until the parameters have been validated, and in Bevy 0.19 a missing `Res<T>` panics
+/// at that point rather than skipping.
 fn on_note_click(
     activate: On<Activate>,
     fields: Query<&NoteField>,
-    project: Res<Project>,
+    project: Option<Res<Project>>,
     mut edit: ResMut<NoteEdit>,
     mut state: ResMut<ImportState>,
 ) {
     if fields.get(activate.entity).is_err() {
         return;
     }
+    let Some(project) = project else { return };
     // Seeded with what is there, unlike the id and the tokens: a description is *edited*, not
     // replaced, and retyping a sentence to change one word is not an interaction.
     // From `measured`, which is what a description is written back to — reading the layered library
@@ -1267,16 +1273,29 @@ fn cell_glyph(c: Option<&emerge_core::descriptor::SubCell>) -> &'static str {
     }
 }
 
+/// **`Option<ResMut<Project>>`, and every global observer here needs the same.**
+///
+/// This fires for *any* `Activate` in the application, not only ones inside this panel — and
+/// `Project` is a **door's** resource, removed by `screen::close_the_door`. On `Screen::Menu` it does
+/// not exist, and in Bevy 0.19 a missing `Res<T>` **panics its system** rather than skipping
+/// (`bevy_ecs/error/handler.rs:130`).
+///
+/// The `Query` below is the real guard — a menu row has no `CellVerb` — but parameters are validated
+/// *before* a body runs, so it never got the chance. This was invisible for as long as
+/// `chrome::list_row` was only ever called by editor panels; the moment the menu adopted the shared
+/// row vocabulary, the first click on it took the whole application down. Found 2026-08-18 by
+/// FVS-S-34a, and `tests/the_sweep_is_finished.rs` now fails on a sixth.
 fn on_cell_verb(
     activate: On<Activate>,
     verbs: Query<&CellVerb>,
     mut edit: ResMut<CellEdit>,
-    mut project: ResMut<Project>,
+    project: Option<ResMut<Project>>,
     mut state: ResMut<ImportState>,
 ) {
     let Ok(verb) = verbs.get(activate.entity) else {
         return;
     };
+    let Some(mut project) = project else { return };
     apply_verb(*verb, &mut edit, &mut project, &mut state);
 }
 
@@ -1442,16 +1461,22 @@ fn rotate_mesh(
 }
 
 /// The chip.
+/// **`Option<Res<Project>>`, because this is a GLOBAL observer.** See [`on_cell_verb`] for the whole
+/// argument; the short form is that it fires for any `Activate` anywhere in the application, and
+/// `Project` belongs to a door. The entity query below is the real "is this mine" guard — it just
+/// cannot run until the parameters have been validated, and in Bevy 0.19 a missing `Res<T>` panics
+/// at that point rather than skipping.
 fn on_rotate_click(
     activate: On<Activate>,
     axes: Query<&RotateAxis>,
     keyboard: Res<ButtonInput<KeyCode>>,
-    mut project: ResMut<Project>,
+    project: Option<ResMut<Project>>,
     mut state: ResMut<ImportState>,
 ) {
     let Ok(axis) = axes.get(activate.entity) else {
         return;
     };
+    let Some(mut project) = project else { return };
     rotate_mesh(*axis, 1, held_shift(&keyboard), &mut project, &mut state);
 }
 
@@ -1762,16 +1787,22 @@ fn autoscan_candidate(
 }
 
 /// The chip.
+/// **`Option<Res<Project>>`, because this is a GLOBAL observer.** See [`on_cell_verb`] for the whole
+/// argument; the short form is that it fires for any `Activate` anywhere in the application, and
+/// `Project` belongs to a door. The entity query below is the real "is this mine" guard — it just
+/// cannot run until the parameters have been validated, and in Bevy 0.19 a missing `Res<T>` panics
+/// at that point rather than skipping.
 fn on_scan_mesh(
     activate: On<Activate>,
     buttons: Query<&ScanMeshButton>,
-    mut project: ResMut<Project>,
+    project: Option<ResMut<Project>>,
     mut state: ResMut<ImportState>,
     mut derived: ResMut<DerivedEdges>,
 ) {
     if buttons.get(activate.entity).is_err() {
         return;
     }
+    let Some(mut project) = project else { return };
     // **Only the asked-for scan stages a proposal** — see `scan_mesh`'s note on why the automatic
     // one must not.
     if let Some(proposal) = scan_mesh(&mut project, &mut state) {
@@ -2285,16 +2316,22 @@ fn cell_keys(
 }
 
 /// Fill a row, a column or a whole layer with the verb the chips last used.
+/// **`Option<Res<Project>>`, because this is a GLOBAL observer.** See [`on_cell_verb`] for the whole
+/// argument; the short form is that it fires for any `Activate` anywhere in the application, and
+/// `Project` belongs to a door. The entity query below is the real "is this mine" guard — it just
+/// cannot run until the parameters have been validated, and in Bevy 0.19 a missing `Res<T>` panics
+/// at that point rather than skipping.
 fn on_fill_header(
     activate: On<Activate>,
     headers: Query<&FillHeader>,
     mut edit: ResMut<CellEdit>,
-    mut project: ResMut<Project>,
+    project: Option<ResMut<Project>>,
     mut state: ResMut<ImportState>,
 ) {
     let Ok(header) = headers.get(activate.entity) else {
         return;
     };
+    let Some(mut project) = project else { return };
     let Ok((dx, _, dz)) = focused_div(&state, &project) else {
         return;
     };
