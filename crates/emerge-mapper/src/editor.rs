@@ -1084,6 +1084,53 @@ pub fn leave_for_menu(dirty: bool, state: &mut EditorState) {
     }
 }
 
+/// **Write what is open, then go — the one way the deliberate exits leave.**
+///
+/// # This replaced a confirmation, on purpose
+///
+/// [`leave_for_menu`] used to catch `Cmd+O` and the back button too, and its own doc argued for it:
+/// *"Every entry point asks, including the deliberate chord. Confirming a `Cmd+O` costs one press;
+/// having the chord and the reflex key mean different things costs an author their model of the
+/// editor."* Reversed at the keyboard, 2026-08-18: *"make sure the Cmd+O button doesn't require a
+/// second key press, it just autosaves and takes you back."*
+///
+/// The argument it was making has been answered rather than overruled. The prompt existed to stop
+/// work being lost, and **saving loses nothing** — so there is no longer a question to ask. What is
+/// left of the old rule still holds where it was actually about reflexes: `Esc` keeps its prompt,
+/// because `Esc` is pressed by accident and a deliberate chord or a deliberate click is not. The
+/// two keys still mean the same thing about *your work*; they differ only in how sure the editor is
+/// that you meant to press them.
+///
+/// **A refused save keeps you here.** `Project::save` validates before it writes, so a map that
+/// cannot be written is one this must not walk away from — leaving would silently discard exactly
+/// the work the autosave was promising to keep. That is the one path out of this function that does
+/// not reach the menu, and it is loud.
+pub fn save_and_leave(
+    open: Option<&mut OpenMap>,
+    project: Option<&Project>,
+    state: &mut EditorState,
+    next: &mut NextState<crate::screen::Screen>,
+) {
+    // **Both `Option`, because two of the three doors have no map** — the Kit and Rigs doors carry
+    // no `OpenMap` at all (`args::Opened::insert_into` removes it). Nothing open is nothing to
+    // write, which is the same reason `leave_for_menu` takes a `dirty: bool` rather than a map.
+    if let (Some(open), Some(project)) = (open, project)
+        && open.dirty
+    {
+        match open.save(project) {
+            // Through `Project::save`, the same door `Cmd+S` uses: validate, then an atomic write.
+            Ok(()) => state.status.note("saved".to_owned()),
+            Err(e) => {
+                state
+                    .status
+                    .problem(format!("NOT SAVED: {e} — staying on this map"));
+                return;
+            }
+        }
+    }
+    next.set(crate::screen::Screen::Menu);
+}
+
 /// **`Cmd+O` leaves this door for the chooser**, from whichever door is open.
 ///
 /// Its own system rather than a branch in [`keys`], because `keys` is Maps-door furniture — it takes
@@ -1101,15 +1148,25 @@ pub fn leave_for_menu(dirty: bool, state: &mut EditorState) {
 fn back_to_the_menu(
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<keys::Live>,
-    open: Option<Res<OpenMap>>,
+    open: Option<ResMut<OpenMap>>,
+    project: Option<Res<Project>>,
     mut state: ResMut<EditorState>,
+    mut next: ResMut<NextState<crate::screen::Screen>>,
 ) {
-    // The prompt owns the keyboard while it is up; answering it is `answer_the_leaving_prompt`'s.
+    // **An `Esc` prompt still owns the keyboard while it is up.** Answering it is
+    // `answer_the_leaving_prompt`'s job, and a chord that reached past it would answer a question
+    // the author is still looking at.
     if state.leaving {
         return;
     }
     if keys::just_pressed(&keyboard, *live, Action::MainMenu) {
-        leave_for_menu(open.is_some_and(|o| o.dirty), &mut state);
+        let mut open = open;
+        save_and_leave(
+            open.as_deref_mut(),
+            project.as_deref(),
+            &mut state,
+            &mut next,
+        );
     }
 }
 
@@ -1210,10 +1267,20 @@ fn wire_back_buttons(
 /// so it costs nothing on the frames nobody clicks.
 fn back_button_clicked(
     _: On<bevy::picking::events::Pointer<bevy::picking::events::Click>>,
-    open: Option<Res<OpenMap>>,
+    open: Option<ResMut<OpenMap>>,
+    project: Option<Res<Project>>,
     mut state: ResMut<EditorState>,
+    mut next: ResMut<NextState<crate::screen::Screen>>,
 ) {
-    leave_for_menu(open.is_some_and(|o| o.dirty), &mut state);
+    // **The same door the chord uses.** A click on `‹ kits & maps` is as deliberate as `Cmd+O`, so
+    // it saves and goes rather than asking — see [`save_and_leave`] for why the question went away.
+    let mut open = open;
+    save_and_leave(
+        open.as_deref_mut(),
+        project.as_deref(),
+        &mut state,
+        &mut next,
+    );
 }
 
 /// Build the panel's fixed furniture. The palette itself is `rebuild_palette`'s, which is why neither

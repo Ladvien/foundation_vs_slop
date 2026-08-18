@@ -8899,17 +8899,25 @@ fn escape_peels_to_the_selection_then_asks_then_goes() {
     );
 }
 
-/// **`Cmd+O` goes back to the menu, and refuses to take unsaved work with it.**
+/// **`Cmd+O` saves what is open and goes, in one press.**
 ///
-/// The editor is a child process of the chooser, so "back to the menu" is an exit: the handler
-/// writes `AppExit` with `chooser::BACK_TO_MENU` and `main.rs`'s loop shows the chooser again. What
-/// matters here is the guard in front of it — leaving with unsaved edits would discard them with one
-/// keystroke and no way back, because the undo stack does not survive the process.
+/// # This test used to pin the opposite, and the reversal is the point
 ///
-/// A **refusal** rather than a confirmation, deliberately: it cannot lose anything, and an author
-/// who genuinely wants to discard closes the window, which nobody presses by accident.
+/// It was `the_menu_key_refuses_to_leave_unsaved_work`, and it asserted a three-way question — `S`
+/// save and go, `D` discard and go, `Esc` stay — raised by the chord as well as by `Esc`. Asked for
+/// at the keyboard 2026-08-18: *"make sure the Cmd+O button doesn't require a second key press, it
+/// just autosaves and takes you back."*
+///
+/// The question existed to stop work being lost. **Saving loses nothing**, so it has been answered
+/// rather than removed: there is no branch here that discards. What survives is the part that was
+/// really about reflexes — `Esc` still asks, because `Esc` gets pressed by accident and a chord does
+/// not, and `the_escape_peel_asks_before_it_leaves` above is what holds that half.
+///
+/// The one path out of `save_and_leave` that does not reach the menu is a **refused** save, which is
+/// why `dirty` is checked after the chord rather than just the transition: a test that only watched
+/// the screen change would go green on a save that silently did nothing.
 #[test]
-fn the_menu_key_refuses_to_leave_unsaved_work() {
+fn the_menu_key_saves_and_goes() {
     use emerge_mapper::keys::{Action, MOD_KEYS, binding};
     use emerge_mapper::project::OpenMap;
 
@@ -9007,7 +9015,7 @@ fn the_menu_key_refuses_to_leave_unsaved_work() {
             .leaving
     };
 
-    // **Dirty: it must not go.**
+    // **Dirty: it saves, and then it goes — one press, no question.**
     {
         let mut open = app.world_mut().resource_mut::<OpenMap>();
         open.map.placements.push(emerge_core::map::Placed {
@@ -9019,78 +9027,39 @@ fn the_menu_key_refuses_to_leave_unsaved_work() {
     }
     chord(&mut app);
     assert!(
-        !heading_back(&app),
-        "Cmd+O left with unsaved edits on the map — that discards work the undo stack cannot get \
-         back, because it does not survive the process"
+        !leaving(&app),
+        "Cmd+O must not raise the leaving question — that is the second press this was asked to \
+         remove, and `Esc` is the key that still asks"
     );
     assert!(
-        leaving(&app),
-        "it must ASK rather than merely refuse: a refusal cannot lose anything and is also a dead \
-         end, and the author still wants to leave"
+        !app.world().resource::<OpenMap>().dirty,
+        "the map had unsaved edits and the chord left anyway without writing them. `dirty` is \
+         `OpenMap::save`'s own receipt, so this is the assertion that a silent no-op cannot pass"
     );
-    let said = app
-        .world()
-        .resource::<emerge_mapper::editor::EditorState>()
-        .status
-        .problems()
-        .iter()
-        .map(|p| p.text.clone())
-        .collect::<Vec<_>>()
-        .join(" ");
-    assert!(
-        said.contains("unsaved")
-            && said.contains(" S ")
-            && said.contains('D')
-            && said.contains("Esc"),
-        "the question has to name every answer, per docs/ui.md §1.4; it said: {said}"
-    );
-
-    // **Esc stays, and changes nothing.** The first press of anything must never be the one that
-    // loses work.
-    tap(&mut app, KeyCode::Escape);
-    assert!(!leaving(&app), "Esc puts the question away");
-    assert!(
-        !heading_back(&app),
-        "and does not leave");
-    assert!(
-        app.world().resource::<OpenMap>().dirty,
-        "nor save behind your back"
-    );
-
-    // **`D` is the one answer that discards, and it takes a key that means nothing else here.**
-    chord(&mut app);
-    assert!(leaving(&app), "asking again");
-    tap(&mut app, KeyCode::KeyD);
     assert!(
         heading_back(&app),
-        "D discards and goes — the whole reason this asks instead of refusing"
+        "and having saved, it goes — in the same press"
+    );
+    // The write is real: the placement is on disk, not merely flagged clean.
+    let on_disk = root.join("assets/emerge/maps/m.map.ron");
+    let written = std::fs::read_to_string(&on_disk)
+        .unwrap_or_else(|e| panic!("the saved map must be on disk at {on_disk:?}: {e}"));
+    assert!(
+        written.contains("floor@1"),
+        "the autosave has to write the edit it was protecting, not just clear the flag"
     );
     stay(&mut app);
 
-    // **Saved: it still asks, and `Esc` is what answers yes.**
-    //
-    // It used to go straight out. Asked for at the keyboard on 2026-08-16 — leaving on a reflex key
-    // with no question is what made the first `Esc` fix feel like the editor had crashed. Every way
-    // out asks now, including the deliberate chord, because a chord and a reflex key meaning
-    // different things costs an author their model of the editor.
+    // **Clean: nothing to write, so it simply goes.**
     {
         let mut open = app.world_mut().resource_mut::<OpenMap>();
         open.dirty = false;
     }
     chord(&mut app);
-    assert!(
-        leaving(&app),
-        "a clean map asks once before it goes — `Esc` on a reflex must not leave silently"
-    );
-    assert!(
-        !heading_back(&app),
-        "asking is not going");
-    tap(&mut app, KeyCode::Escape);
+    assert!(!leaving(&app), "still no question on a clean map");
     assert!(
         heading_back(&app),
-        "and `Esc` at that question answers it yes — with nothing unsaved it cannot lose anything, \
-         which is the whole reason it is allowed to be the confirming key here and the cancelling \
-         one when the map is dirty"
+        "a clean map has nothing to save and nothing to ask about"
     );
 }
 

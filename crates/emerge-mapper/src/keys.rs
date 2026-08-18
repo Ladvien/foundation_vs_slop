@@ -2266,15 +2266,52 @@ pub fn pressed(keys: &ButtonInput<KeyCode>, live: Live, action: Action) -> bool 
 /// of their own: two cadences would be two answers to how fast a held key goes, and an author who
 /// learned the lists would have been wrong about the turn keys.
 ///
-/// At [`crate::editor::YAW_STEP`] this sweeps a full turn in about 1.75 s.
+/// **Walked back a third on 2026-08-18**, the same day it was halved: 0.150 → 0.075 → 0.100. The
+/// halving was right about the direction and overshot, which is what tuning a cadence by feel looks
+/// like — 75 ms is about seven rows a second and the selection outran the eye reading it. This is
+/// still a third faster than the original.
+///
+/// At [`crate::editor::YAW_STEP`] this sweeps a full turn in about 2.4 s.
 ///
 /// **The known cost, stated rather than discovered.** The first repeat lands one interval after the
-/// press, so at 75 ms a deliberate tap much over that fires *twice* — the hazard the old value was
-/// picked to avoid, since a tap is rarely under about 120 ms. If tapping starts double-stepping,
-/// the fix is not a slower number: it is the split every OS keyboard makes, a long delay before the
-/// first repeat and a short interval after it. That is one constant and one line in [`countdown`]
-/// away, and deliberately not taken yet — nobody has reported a double step.
-pub const REPEAT_SECS: f32 = 0.075;
+/// press, so a deliberate tap much over 100 ms fires *twice* — the hazard the original 0.150 was
+/// picked to avoid, since a tap is rarely under about 120 ms. The margin is thinner than it was and
+/// this is the value to suspect if tapping starts double-stepping. The fix then is not a slower
+/// number: it is the split every OS keyboard makes, a long delay before the first repeat and a
+/// short interval after it. That is one constant and one line in [`countdown`] away, and
+/// deliberately not taken yet — nobody has reported a double step.
+pub const REPEAT_SECS: f32 = 0.100;
+
+/// **The fastest a held key will ever go**, reached after [`REPEAT_RAMP_SECS`] of holding.
+///
+/// A single number could not serve both jobs a held arrow has. Stepping two rows to read them wants
+/// about 100 ms; crossing 300 candidates to reach the one you are thinking of wants a number that
+/// would be unreadable if you got it immediately — which is exactly what 0.075 felt like, and why
+/// it was walked back the same day it landed. An acceleration curve is not a compromise between
+/// the two, it is both: the key starts at [`REPEAT_SECS`] and only becomes a traversal tool once
+/// you have held it long enough to have meant it.
+///
+/// This is the shape every OS keyboard and every DCC scrubber uses, for the same reason.
+pub const REPEAT_FAST_SECS: f32 = 0.030;
+
+/// **How long a key must be held before it reaches [`REPEAT_FAST_SECS`].**
+///
+/// Long enough that a two-or-three-row nudge never sees any of the ramp — at 100 ms a step, three
+/// quarters of a second is seven rows, and by then an author walking a list rather than reading one
+/// has made that obvious. All three of these numbers are by feel and meant to be tuned; they are
+/// named and separate so that tuning one does not mean rediscovering what the others were for.
+pub const REPEAT_RAMP_SECS: f32 = 0.75;
+
+/// **The gap before the next repeat, given how long the key has already been down.**
+///
+/// Linear from [`REPEAT_SECS`] to [`REPEAT_FAST_SECS`] across [`REPEAT_RAMP_SECS`], then flat.
+/// Linear rather than eased on purpose: an author tuning this reads two endpoints and a duration
+/// and can predict the middle, which an easing curve takes away for a difference nobody has asked
+/// for.
+pub fn interval_after(held: f32) -> f32 {
+    let t = (held / REPEAT_RAMP_SECS).clamp(0.0, 1.0);
+    REPEAT_SECS + (REPEAT_FAST_SECS - REPEAT_SECS) * t
+}
 
 /// **What a countdown belongs to.**
 ///
@@ -2294,12 +2331,20 @@ pub enum RepeatId {
     Key(KeyCode),
 }
 
+/// One key that is currently down: what it is, how long until its next repeat, and how long it has
+/// been held — the last of which is what [`interval_after`] reads to accelerate.
+struct Countdown {
+    id: RepeatId,
+    left: f32,
+    held: f32,
+}
+
 /// Per-key countdown to the next repeat, for [`repeating`] and [`repeating_key`].
 ///
 /// A `Vec` rather than a map because [`Action`] is `Eq` but not `Hash`, and because the list only
 /// ever holds the keys actually down — at most a couple.
 #[derive(Resource, Default)]
-pub struct Repeat(Vec<(RepeatId, f32)>);
+pub struct Repeat(Vec<Countdown>);
 
 /// **Fires on the press, then every [`REPEAT_SECS`] for as long as the key is held.**
 ///
@@ -2351,24 +2396,32 @@ pub fn repeating_key(
 ///
 /// `held` and `fresh` are the caller's answer to "is this down" and "did it arrive this frame",
 /// because that is the only part the editor and the menu disagree about.
-fn countdown(repeat: &mut Repeat, id: RepeatId, held: bool, fresh: bool, dt: f32) -> bool {
-    if !held {
-        repeat.0.retain(|(a, _)| *a != id);
+fn countdown(repeat: &mut Repeat, id: RepeatId, down: bool, fresh: bool, dt: f32) -> bool {
+    if !down {
+        // **Releasing forgets the ramp**, which is what makes acceleration safe to have at all: a
+        // key let go and pressed again starts slow, so tapping never inherits the speed of the
+        // hold before it.
+        repeat.0.retain(|c| c.id != id);
         return false;
     }
     if fresh {
-        repeat.0.retain(|(a, _)| *a != id);
-        repeat.0.push((id, REPEAT_SECS));
+        repeat.0.retain(|c| c.id != id);
+        repeat.0.push(Countdown {
+            id,
+            left: REPEAT_SECS,
+            held: 0.0,
+        });
         return true;
     }
-    let Some((_, left)) = repeat.0.iter_mut().find(|(a, _)| *a == id) else {
+    let Some(c) = repeat.0.iter_mut().find(|c| c.id == id) else {
         return false;
     };
-    *left -= dt;
-    if *left <= 0.0 {
+    c.held += dt;
+    c.left -= dt;
+    if c.left <= 0.0 {
         // Add rather than reset, so a long frame does not silently swallow the overshoot and drift
         // the cadence slower than it says it is.
-        *left += REPEAT_SECS;
+        c.left += interval_after(c.held);
         return true;
     }
     false
@@ -3339,38 +3392,110 @@ mod tests {
         ));
     }
 
-    /// Holding for a second yields the presses the interval promises, rather than one per frame.
+    /// **The ramp runs from [`REPEAT_SECS`] to [`REPEAT_FAST_SECS`] and never turns back.**
+    ///
+    /// The behavioural test below can only ever measure the curve through sixty frames of
+    /// integration; this reads it directly, so "acceleration is switched on" is pinned exactly
+    /// rather than statistically.
     #[test]
-    fn holding_repeats_at_the_stated_cadence() {
+    fn the_ramp_only_ever_speeds_up() {
+        assert!(
+            REPEAT_FAST_SECS < REPEAT_SECS,
+            "the floor must be faster than the opening interval, or there is no ramp"
+        );
+        // Approximate, because the lerp lands a float ULP off its endpoint (0.030000001 vs 0.03)
+        // and pinning that would be pinning f32 rounding rather than the curve.
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        assert!(
+            near(interval_after(0.0), REPEAT_SECS),
+            "a fresh hold starts at the slow end, not {}",
+            interval_after(0.0)
+        );
+        assert!(
+            near(interval_after(REPEAT_RAMP_SECS), REPEAT_FAST_SECS),
+            "the ramp must actually reach the floor, not {}",
+            interval_after(REPEAT_RAMP_SECS)
+        );
+        assert!(
+            near(interval_after(REPEAT_RAMP_SECS * 10.0), REPEAT_FAST_SECS),
+            "past the ramp it is flat, never faster, not {}",
+            interval_after(REPEAT_RAMP_SECS * 10.0)
+        );
+        // Monotone, and strictly so inside the ramp.
+        let mut prev = interval_after(0.0);
+        for i in 1..=100 {
+            let now = interval_after(REPEAT_RAMP_SECS * i as f32 / 100.0);
+            assert!(now <= prev, "the interval grew at step {i}: {prev} -> {now}");
+            prev = now;
+        }
+    }
+
+    /// **A held key speeds up, and a released one forgets it had.**
+    ///
+    /// Two properties rather than a rate, because the rate is now a function of time and pinning a
+    /// count would pin the tuning — the three constants are explicitly by-feel. What must not
+    /// change without somebody meaning it is that holding accelerates, and that letting go resets,
+    /// which is the whole reason acceleration is safe to have on keys that also nudge one step.
+    #[test]
+    fn holding_accelerates_and_releasing_forgets() {
+        let key = binding(Action::TurnPieceLeft).key;
+        let live = Live(Context::Map, Stance::Idle);
         let mut input = ButtonInput::<KeyCode>::default();
         let mut repeat = Repeat::default();
-        input.press(binding(Action::TurnPieceLeft).key);
-        let mut fired = usize::from(repeating(
-            &input,
-            Live(Context::Map, Stance::Idle),
-            Action::TurnPieceLeft,
-            &mut repeat,
-            0.0,
-        ));
 
-        input.clear_just_pressed(binding(Action::TurnPieceLeft).key);
-        // One second at 60 fps.
-        for _ in 0..60 {
-            if repeating(
-                &input,
-                Live(Context::Map, Stance::Idle),
-                Action::TurnPieceLeft,
-                &mut repeat,
-                1.0 / 60.0,
-            ) {
-                fired += 1;
+        // Count fires over one second of holding, split into two half-seconds.
+        input.press(key);
+        assert!(
+            repeating(&input, live, Action::TurnPieceLeft, &mut repeat, 0.0),
+            "the press itself always fires"
+        );
+        input.clear_just_pressed(key);
+        let mut half = [0usize; 2];
+        for frame in 0..60 {
+            if repeating(&input, live, Action::TurnPieceLeft, &mut repeat, 1.0 / 60.0) {
+                half[usize::from(frame >= 30)] += 1;
             }
         }
-        // The press, plus 1 / REPEAT_SECS more per second.
-        let want = 1 + (1.0 / REPEAT_SECS) as usize;
+        // **Twice, not merely more.** `half[1] > half[0]` was the first version of this line and it
+        // was vacuous: with acceleration switched off entirely the halves come out 4 and 5, because
+        // the first interval is spent before any repeat lands. Measured with the ramp on it is 6 and
+        // 14, so the doubling is what actually distinguishes the two — found by turning
+        // REPEAT_FAST_SECS up to REPEAT_SECS and watching the test stay green.
         assert!(
-            fired == want || fired == want + 1,
-            "a second of holding fired {fired} times, wanted about {want}"
+            half[1] >= half[0] * 2,
+            "holding must accelerate: {} fires in the first half-second, {} in the second — a flat \
+             cadence gives roughly equal halves",
+            half[0],
+            half[1]
+        );
+
+        // The floor is a floor — a second half-second cannot exceed what REPEAT_FAST_SECS allows.
+        let ceiling = (0.5 / REPEAT_FAST_SECS).ceil() as usize + 1;
+        assert!(
+            half[1] <= ceiling,
+            "{} fires in half a second is past the {REPEAT_FAST_SECS}s floor (max {ceiling})",
+            half[1]
+        );
+
+        // **Release, press again: back to the slow end.** Without this, a fast hold would leave the
+        // next tap running at traversal speed.
+        input.release(key);
+        repeating(&input, live, Action::TurnPieceLeft, &mut repeat, 1.0 / 60.0);
+        input.clear_just_released(key);
+        input.press(key);
+        assert!(repeating(&input, live, Action::TurnPieceLeft, &mut repeat, 0.0));
+        input.clear_just_pressed(key);
+        let mut after = 0usize;
+        for _ in 0..30 {
+            if repeating(&input, live, Action::TurnPieceLeft, &mut repeat, 1.0 / 60.0) {
+                after += 1;
+            }
+        }
+        assert!(
+            after <= half[0] + 1,
+            "a fresh press fired {after} times in half a second — it inherited the previous \
+             hold's ramp instead of starting at REPEAT_SECS ({} from cold)",
+            half[0]
         );
     }
 
