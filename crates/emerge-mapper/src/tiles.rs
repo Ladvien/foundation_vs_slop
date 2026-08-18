@@ -3094,7 +3094,6 @@ impl Plugin for TilesPlugin {
                     // `not_typing` conditions that used to say the same thing are gone rather than
                     // duplicated. `Phase::Act` puts them all ahead of the text fields below.
                     (
-                        cycle_tab.in_set(crate::keys::Phase::Act),
                         tab_shortcuts.in_set(crate::keys::Phase::Act),
                         rescan_key.in_set(crate::keys::Phase::Act),
                     ),
@@ -3569,32 +3568,6 @@ fn spawn_tiles_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
         ));
         crate::chrome::scroll_list(p, CandidateList);
     });
-}
-
-/// **`Tab` walks the panels this door holds**, and `R` rescans.
-///
-/// Scoped to [`Door::tabs`] rather than to every `Mode`, so the Kit door cycles Meshes → Tiles →
-/// Compose and the Map door cycles nothing — there is one panel behind it and nowhere to go.
-fn cycle_tab(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    live: Res<crate::keys::Live>,
-    project: Res<Project>,
-    door: Res<Door>,
-    mut mode: ResMut<Mode>,
-    mut state: ResMut<ImportState>,
-) {
-    if !keys::just_pressed(&keyboard, *live, Action::NextTab) {
-        return;
-    }
-    let tabs = door.tabs();
-    if tabs.len() < 2 {
-        return;
-    }
-    let at = tabs.iter().position(|m| m == &*mode).unwrap_or(0);
-    *mode = tabs[(at + 1) % tabs.len()];
-    if *mode == Mode::Meshes && !state.scanned {
-        scan(&project, &mut state);
-    }
 }
 
 /// **The number keys jump straight to a panel of this door**, in strip order.

@@ -47,6 +47,26 @@ pub fn add_editor_plugins(app: &mut App) -> &mut App {
         // **First, because it is how this application draws.** Every camera below targets
         // the surface it owns, and `view::setup` reads `Res<Surface>` on `OnEnter(Editor)`.
         crate::surface::SurfacePlugin,
+        // **The widget layer's machinery, and the one key it costs.**
+        //
+        // `FeathersPlugins` brings `TabNavigationPlugin`, whose handler claims `Tab` for focus
+        // traversal — and `keys.rs` bound `Tab` to "next panel". Both would have fired: with nothing
+        // focused, `dispatch_focused_input` sends to the PRIMARY WINDOW
+        // (`bevy_input_focus-0.19.0/src/lib.rs:372`), which is where that observer lives, so it is
+        // not gated on the editor having a focus model. The collision test reads `BINDINGS` and
+        // cannot see an upstream observer, and the handler is window-scoped so every headless test
+        // stays green — it would have surfaced as an author's `Tab` key doing two things at once.
+        //
+        // Resolved at the keyboard by **retiring `NextTab`**: it only ever did anything on the Kit
+        // door, where `1`/`2`/`3` already jump to those same three panels, so what was given up is a
+        // duplicate and the census is one row shorter rather than one key more overloaded. `Tab`
+        // now means what it means everywhere else.
+        //
+        // Leaving the plugin out was the alternative and it is worse than it reads: `acquire_focus`
+        // is `pub(crate)` and `click_to_focus` is private, so they cannot be registered by hand —
+        // dropping the plugin drops all three permanently, and clicking a widget would never move
+        // focus.
+        crate::chrome::WidgetsPlugin,
         crate::keys::KeysPlugin,
         crate::chrome::ChromePlugin,
         crate::view::ViewPlugin,
@@ -59,9 +79,15 @@ pub fn add_editor_plugins(app: &mut App) -> &mut App {
         crate::label_booth::LabelBoothPlugin,
         crate::labels::LabelsPlugin,
         crate::notice::NoticePlugin,
-        // Two plugins, two jobs: the capture rig is the shared crate, the verbs are ours.
-        bevy_devshot::DevShotPlugin,
-        crate::devshot::DrivePlugin,
+        // **Nested, because `add_plugins` tuples cap at 15** (`bevy_app-0.19.0/src/plugin.rs:186`,
+        // `all_tuples!(impl_plugins_tuples, 0, 15, P, S)`) and `WidgetsPlugin` was the sixteenth.
+        // The error names a `Plugins<_>` bound rather than the cap, so this is worth the comment.
+        // Still one list, in one order — the nesting is punctuation, not a second code path.
+        (
+            // Two plugins, two jobs: the capture rig is the shared crate, the verbs are ours.
+            bevy_devshot::DevShotPlugin,
+            crate::devshot::DrivePlugin,
+        ),
     ));
     // **The guide vocabulary belongs in the shared list; the transport does not.**
     //

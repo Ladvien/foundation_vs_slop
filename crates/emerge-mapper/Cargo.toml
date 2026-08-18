@@ -66,7 +66,19 @@ emerge-anim = { path = "../emerge-anim" }
 # while `emerge_core::grid::SNAP` is 0.5, and drew forever, so the ground outside `Map::bounds` looked
 # as buildable as the ground inside. `editor::draw_map_grid` is bounded by the map and spaced by the
 # constant that defines a cell.
-bevy = { workspace = true, features = ["jpeg"] }
+# **`bevy_feathers` is on for its MACHINERY, not for its greys.** `docs/ui.md` §5 says of it "its
+# visuals are Bevy's editor skin — do not adopt them", and that rule is kept: `chrome::theme()` seeds
+# Feathers' `UiTheme` from this editor's own palette, so a token miss renders fuchsia and shouts
+# rather than quietly drawing somebody else's grey. What is adopted is the theme mechanism, the focus
+# outlines, and the themed scrollbar — the parts that would otherwise be hand-written badly.
+#
+# The crate is marked experimental and its own docs suggest copying it. Depended on, pinned by the
+# workspace: this editor ships to nobody, so an API break costs an afternoon rather than a release.
+bevy = { workspace = true, features = ["jpeg", "bevy_feathers"] }
+# **Not re-exported by `bevy_a11y`**, so it is a direct dependency — and 0.24 is what `bevy_feathers`
+# itself depends on (`bevy_feathers-0.19.0/Cargo.toml:47`), so the two agree by construction rather
+# than by a version somebody kept in step.
+accesskit = "0.24"
 # The screenshot rig, shared with the game so there is one capture path rather than two copies of it.
 bevy_devshot = { path = "../bevy_devshot" }
 ron.workspace = true

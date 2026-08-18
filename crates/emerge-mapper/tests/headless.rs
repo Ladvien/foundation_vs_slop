@@ -9342,3 +9342,46 @@ fn a_tab_is_not_a_button() {
          to change panel out from under a guide step. It is a `Pointer<Click>` observer instead."
     );
 }
+
+/// **The theme is seeded from the palette, and an empty one would be a fuchsia editor.**
+///
+/// `UiTheme::default()` is empty; every token miss renders **fuchsia** and warns once. Nothing else
+/// in this suite reads a colour back, so a `WidgetsPlugin` that forgot to insert the theme would
+/// pass every test and be obvious only on screen — which is the failure mode this whole widget layer
+/// is meant to avoid, not demonstrate.
+///
+/// It also asserts the seeding is *this editor's*, not Feathers'. `docs/ui.md` §5 says of the crate
+/// "its visuals are Bevy's editor skin — do not adopt them"; the machinery is adopted and the greys
+/// are not, and `PANE_BODY_BG` reading `chrome::PANEL_BG` is what that reconciliation looks like
+/// from the outside.
+#[test]
+fn the_theme_is_seeded_from_the_palette() {
+    let root = Fixture::new("theme-seeded")
+        .descriptor("wall", "alpha")
+        .place("wall", (0.0, 0.0))
+        .build("test_map");
+    let mut app = harness::build_headless(&root, "test_map", None)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    app.update();
+
+    let theme = app
+        .world()
+        .get_resource::<bevy::feathers::theme::UiTheme>()
+        .expect("no `UiTheme` means every token misses and the editor draws fuchsia");
+    assert!(
+        !theme.0.color.is_empty(),
+        "an empty theme is the default, and the default is a fuchsia editor"
+    );
+    for (token, want, what) in [
+        (bevy::feathers::tokens::PANE_BODY_BG, emerge_mapper::chrome::PANEL_BG, "a panel's ground"),
+        (bevy::feathers::tokens::WINDOW_BG, emerge_mapper::chrome::VOID, "the window's ground"),
+        (bevy::feathers::tokens::TEXT_MAIN, emerge_mapper::chrome::TEXT, "body text"),
+        (bevy::feathers::tokens::LISTROW_BG_SELECTED, emerge_mapper::chrome::ROW_SELECTED, "a chosen row"),
+    ] {
+        assert_eq!(
+            theme.0.color.get(&token).copied(),
+            Some(want),
+            "{what} must come from `chrome`, not from Feathers' own skin"
+        );
+    }
+}

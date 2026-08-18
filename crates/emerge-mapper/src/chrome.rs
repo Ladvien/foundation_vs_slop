@@ -170,6 +170,80 @@ pub const TILES_CONTROLS_W: f32 = 380.0;
 /// map at `UiScale(1.2)`, which is the thing the right edge was chosen to protect.
 pub const LIST_W: f32 = 264.0;
 
+// ── the widget layer ─────────────────────────────────────────────────────────────────────────────
+
+/// **`bevy_feathers`' machinery, with this editor's palette in it.**
+///
+/// Separate from [`ChromePlugin`] because `add_plugins` tuples cap at **15**
+/// (`bevy_app-0.19.0/src/plugin.rs:186`) and `harness::add_editor_plugins` is near it — a plugin
+/// that nests its own group keeps the shared list one list.
+///
+/// **`UiTheme` is inserted, never defaulted.** `UiTheme::default()` is empty and every token miss
+/// renders fuchsia with a warning; a theme nobody seeded is a magenta editor, and no test would see
+/// it because nothing here reads a colour back. [`theme`] is the seed and
+/// `the_theme_is_seeded_from_the_palette` is what notices if it stops being.
+pub struct WidgetsPlugin;
+
+impl Plugin for WidgetsPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(bevy::feathers::FeathersPlugins)
+            .insert_resource(bevy::feathers::theme::UiTheme(theme()));
+    }
+}
+
+// ── theme ────────────────────────────────────────────────────────────────────────────────────────
+
+/// **This editor's palette, expressed as a `bevy_feathers` theme.**
+///
+/// # Machinery, not greys — and that reconciliation is written down here because nowhere else has it
+///
+/// `docs/ui.md` §5 says of `bevy_feathers`: *"its visuals are Bevy's editor skin — do not adopt
+/// them"*, and *"Do not add a UI framework crate"*. Both stand. What is adopted is the **mechanism**
+/// — a token table, a themed scrollbar, and focus outlines that would otherwise be hand-written
+/// badly — and every colour in it comes from the constants above. Feathers' own greys are
+/// overwritten wholesale; none reaches the screen.
+///
+/// The editor already deviates from that section once, deliberately and on the record (the full font
+/// face, where the game keeps Bevy's 95-codepoint default). This is the second, and the same shape:
+/// take the machinery, keep the house's own decisions.
+///
+/// # Why this is not a fifth dialect
+///
+/// The 2026-08-17 audit's verdict is that four tabs were drifting into four dialects, and its remedy
+/// is *one name per fact*. A token table that **restated** a colour — `srgb(0.098, 0.092, 0.082)`
+/// beside `ROW_BG` — would be exactly the leak it measured, one indirection later. So every entry
+/// below is a reference to a const, never a literal, and `tests/chrome_census.rs` fails on a literal
+/// in this file's theme.
+///
+/// A token this table misses renders **fuchsia** and warns once (`UiTheme::color`). That is already
+/// the house convention: [`scaled`] and [`ink`] both answer their own error case *"loudly in magenta
+/// rather than with a silent guess"*. Feathers picked the same one independently, which is why
+/// seeding is not optional and a miss is not quiet.
+pub fn theme() -> bevy::feathers::theme::ThemeProps {
+    use bevy::feathers::tokens;
+    let mut props = bevy::feathers::dark_theme::create_dark_theme();
+    props.color.extend([
+        (tokens::WINDOW_BG, VOID),
+        (tokens::PANE_BODY_BG, PANEL_BG),
+        (tokens::PANE_HEADER_BG, HEADER_BG),
+        (tokens::SUBPANE_BODY_BG, SLOT_BG),
+        (tokens::SUBPANE_HEADER_BG, HEADER_BG),
+        (tokens::TEXT_MAIN, TEXT),
+        (tokens::TEXT_DIM, DIM),
+        // The focus ring is the one thing Feathers gives that this editor has never had. `ACCENT` at
+        // half alpha, because a ring is a *state* and the audit's rule is that persistent signals sit
+        // at medium contrast with the loud end held in reserve.
+        (tokens::FOCUS_RING, ACCENT.with_alpha(0.5)),
+        (tokens::SCROLLBAR_BG, HEADER_BG),
+        (tokens::SCROLLBAR_THUMB, scaled(ROW_SELECTED, 0.8)),
+        (tokens::SCROLLBAR_THUMB_HOVER, ROW_SELECTED),
+        (tokens::LISTROW_BG, ROW_BG),
+        (tokens::LISTROW_BG_HOVER, ROW_HOVER),
+        (tokens::LISTROW_BG_SELECTED, ROW_SELECTED),
+    ]);
+    props
+}
+
 // ── type ─────────────────────────────────────────────────────────────────────────────────────────
 
 /// **The type scale, as roles rather than numbers.**

@@ -151,7 +151,6 @@ impl Stance {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     /// Cycle the panels this door holds.
-    NextTab,
     /// Jump to this door's first, second or third panel. **Three, because the widest door holds
     /// three** — Kit is Meshes/Tiles/Compose. A fourth would be a fourth row here and a fourth in
     /// every context's list, which is what the twelve-row cap is for.
@@ -492,14 +491,6 @@ pub const REMOVE_NAME: &str = "Del";
 /// **The census.** Adding a binding means adding a row here; nothing else in this crate is allowed to
 /// name a `KeyCode` for an action.
 pub const BINDINGS: &[Binding] = &[
-    b(
-        Action::NextTab,
-        KeyCode::Tab,
-        false,
-        Context::Global,
-        "Tab",
-        "next panel",
-    ),
     // **One row for three keys**, because jumping to a panel is one idea — the same collapse
     // `T F G H` gets. Three separate rows put `Context::Global` over the twelve-row ceiling
     // `no_context_carries_more_than_a_learnable_vocabulary` enforces, and a Global row costs every
@@ -2281,7 +2272,6 @@ mod tests {
     #[test]
     fn every_action_has_exactly_one_binding() {
         let actions = [
-            Action::NextTab,
             Action::TabSlot1,
             Action::TabSlot2,
             Action::TabSlot3,

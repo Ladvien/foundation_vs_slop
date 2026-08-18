@@ -39,6 +39,11 @@ const ALLOWED: &[(&str, &str)] = &[
     ("emerge-anim", "the game's real pose blender, so the bench previews what the game plays"),
     ("bevy_devshot", "the one capture rig"),
     ("bevy", "this is a Bevy application"),
+    (
+        "accesskit",
+        "roles and setters for the widget layer's a11y tree; `bevy_a11y` does not re-export it, and \
+         0.24 is what `bevy_feathers` itself depends on so the two cannot drift",
+    ),
     ("ron", "map and library serialization"),
     ("serde", "derives on every schema type this crate reads and writes"),
     ("serde_json", "the VLM chat request and reply bodies"),
