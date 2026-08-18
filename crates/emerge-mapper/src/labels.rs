@@ -189,7 +189,8 @@ impl Plugin for LabelsPlugin {
                     suggest_all
                         .in_set(crate::keys::Phase::Act)
                         .after(answer_overwrite),
-                    drive_batch,
+                    poll_warm,
+                    drive_batch.after(poll_warm),
                     spawn_request,
                     poll_tasks,
                     watch_sentinel,
@@ -245,6 +246,8 @@ pub(crate) fn clear_all_labels(
     queue.paused = false;
     queue.auto_apply = false;
     queue.current = None;
+    // Dropping the task cancels it, the same way the in-flight label requests below are cancelled.
+    queue.warming = None;
     tasks.0.clear();
     if proposals + queued + in_flight > 0 {
         generation.0 = generation.0.wrapping_add(1);
@@ -698,6 +701,42 @@ pub struct LabelQueue {
     /// undo what was already labeled."* Nothing already proposed is touched either way — pausing
     /// stops the pump, and that is all it does.
     paused: bool,
+    /// **The model being loaded, before the walk starts asking it anything.**
+    ///
+    /// `Some` from the moment a batch is armed until [`vlm::warm`] answers. [`drive_batch`] will
+    /// not pump while it is set, so the queue stands full and still — see [`poll_warm`].
+    warming: Option<Warm>,
+}
+
+/// A warm-up request in flight, and when it started — the elapsed seconds are the whole point of
+/// showing it, since the wait is minutes and a status line that does not count looks like a hang.
+struct Warm {
+    task: Task<Result<(), String>>,
+    since: f64,
+    /// The last whole second already reported, so the count is written once a second rather than
+    /// once a frame — `status.note` is read by a change-detected painter, and sixty identical
+    /// writes a second is the thing `chrome.rs`'s guards exist to stop.
+    said: u64,
+}
+
+/// **Arm a batch.** The one place a walk begins, because there are two ways in — `Shift+L` on a
+/// scope with nothing judged, and `Enter`/`Esc` answering the overwrite question — and they had
+/// the same four assignments written twice. The warm-up is why that mattered: added to one tail
+/// only, half the batches would still pay the model load inside mesh 1.
+fn arm_batch(queue: &mut LabelQueue, targets: Vec<EditTarget>, root: &std::path::Path, now: f64) {
+    queue.total = targets.len();
+    queue.queue = targets.into_iter().collect();
+    queue.paused = false;
+    queue.auto_apply = true;
+    let root = root.to_path_buf();
+    queue.warming = Some(Warm {
+        task: AsyncComputeTaskPool::get().spawn(async move {
+            let cfg = VlmConfig::load(&root)?;
+            vlm::warm(&cfg)
+        }),
+        since: now,
+        said: 0,
+    });
 }
 
 impl LabelQueue {
@@ -776,6 +815,8 @@ pub(crate) fn suggest_all(
     mut queue: ResMut<LabelQueue>,
     // **The walk takes what the list is showing.** See the note where the targets are gathered.
     filters: Res<crate::filter::Filters>,
+    // For `arm_batch`, which stamps the warm-up's start so the wait can count itself.
+    time: Res<Time>,
 ) {
     if !crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::SuggestAll) {
         return;
@@ -910,15 +951,15 @@ pub(crate) fn suggest_all(
         });
         return;
     }
-    queue.total = targets.len();
-    queue.queue = targets.into_iter().collect();
-    queue.paused = false;
-    queue.auto_apply = true;
+    arm_batch(&mut queue, targets, &project.root, time.elapsed_secs_f64());
     state.status.note(if scope.is_empty() {
-        format!("labeling {} piece(s)... Shift+L holds it", queue.total)
+        format!(
+            "labeling {} piece(s) — warming the model first... Shift+L holds it",
+            queue.total
+        )
     } else {
         format!(
-            "labeling {} piece(s) matching `{scope}`... Shift+L holds it",
+            "labeling {} piece(s) matching `{scope}` — warming the model first... Shift+L holds it",
             queue.total
         )
     });
@@ -935,7 +976,12 @@ pub(crate) fn answer_overwrite(
     live: Res<crate::keys::Live>,
     mut state: ResMut<crate::tiles::ImportState>,
     mut queue: ResMut<LabelQueue>,
+    // Both are for `arm_batch`: the root is where the endpoint config is read from, and the clock
+    // is what makes the warm-up able to say how long it has been waiting.
+    project: Option<Res<Project>>,
+    time: Res<Time>,
 ) {
+    let Some(project) = project else { return };
     let Some(ask) = queue.ask.clone() else { return };
     let yes = crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::Accept);
     let no = crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::Cancel);
@@ -950,14 +996,64 @@ pub(crate) fn answer_overwrite(
             .note("nothing to label — every piece in scope already has labels".to_owned());
         return;
     }
-    queue.total = targets.len();
-    queue.queue = targets.into_iter().collect();
-    queue.paused = false;
-    queue.auto_apply = true;
+    arm_batch(&mut queue, targets, &project.root, time.elapsed_secs_f64());
     state.status.note(format!(
-        "labeling {} piece(s)... Shift+L holds it",
+        "labeling {} piece(s) — warming the model first... Shift+L holds it",
         queue.total
     ));
+}
+
+/// **Hold the batch until the model is loaded, and say so while it loads.**
+///
+/// The wait is minutes on a cold 31 GB model, so a silent one is indistinguishable from a hang —
+/// which is exactly what it was mistaken for on 2026-08-17, when the load was being paid inside
+/// mesh 1 of 778 and surfaced as `timeout: global`. The elapsed count is the fix for that: the
+/// author can see it working rather than infer it.
+///
+/// **A warm-up that fails takes the batch with it.** Nothing is queued to the model yet, so this is
+/// the cheapest possible place to find out the endpoint is down — the whole reason `probe` exists,
+/// one layer further in. Burning 778 photo shoots to learn it a second time is the failure this
+/// file has already fixed once (`poll_tasks`' unreachable arm).
+pub(crate) fn poll_warm(
+    mut queue: ResMut<LabelQueue>,
+    mut state: ResMut<crate::tiles::ImportState>,
+    mut rig: ResMut<ShotRig>,
+    time: Res<Time>,
+) {
+    let Some(warm) = queue.warming.as_mut() else {
+        return;
+    };
+    let waited = (time.elapsed_secs_f64() - warm.since).max(0.0) as u64;
+    let Some(result) = bevy::tasks::futures::check_ready(&mut warm.task) else {
+        if waited > warm.said {
+            warm.said = waited;
+            let (_, total) = queue.progress();
+            state
+                .status
+                .note(format!("warming the model... {waited}s ({total} queued)"));
+        }
+        return;
+    };
+    queue.warming = None;
+    match result {
+        Ok(()) => {
+            let (_, total) = queue.progress();
+            state
+                .status
+                .note(format!("model warm in {waited}s — labeling {total} piece(s)"));
+        }
+        Err(e) => {
+            // Drop the walk rather than let `drive_batch` run it into an endpoint that just said no.
+            let total = queue.total;
+            queue.queue.clear();
+            queue.total = 0;
+            let dropped = rig.clear_queue();
+            state.status.problem(format!(
+                "batch not started — {e}. {total} piece(s) dropped ({dropped} unphotographed); \
+                 nothing was sent to the model"
+            ));
+        }
+    }
 }
 
 /// Feed the booth one subject at a time — fully serial, matching the one-subject booth and the
@@ -976,7 +1072,16 @@ pub(crate) fn drive_batch(
 ) {
     let Some(project) = project else { return };
     // A paused walk keeps its queue and its proposals; only the pump stops.
-    if queue.paused || queue.queue.is_empty() || !rig.is_idle() || tasks.in_flight() > 0 {
+    //
+    // **And a warming one has not started yet.** The queue is full and deliberately still until
+    // `poll_warm` clears it: the whole point of the warm-up is that the model load is paid once,
+    // visibly, instead of inside mesh 1 of 778 where it reads as a hang and then as a timeout.
+    if queue.warming.is_some()
+        || queue.paused
+        || queue.queue.is_empty()
+        || !rig.is_idle()
+        || tasks.in_flight() > 0
+    {
         return;
     }
     let Some(target) = queue.queue.pop_front() else {

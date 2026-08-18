@@ -112,9 +112,23 @@ impl VlmConfig {
     /// `EMERGE_VLM_MODEL=... cargo run` still overrides it. Says exactly how to configure it
     /// when it cannot.
     ///
-    /// The default URL is the SSH-tunnel form — the bmb service is bound to `127.0.0.1` on bmb,
-    /// and the human brings the tunnel up (never this program):
-    /// `ssh -fN -L 9292:127.0.0.1:9292 bmb`. Ollama Cloud is a pure config flip:
+    /// # Three setups, and only one of them needs a tunnel
+    ///
+    /// **The default URL is the SSH-tunnel form**, and it is a workaround rather than a design:
+    /// `llama-server` on bmb binds to `127.0.0.1:9292`, so nothing on the LAN can reach it and the
+    /// forward is what borrows it — `ssh -fN -L 9292:127.0.0.1:9292 bmb`, brought up by the human
+    /// and never by this program. It is also the least portable thing here. A new machine has to
+    /// have a key on bmb, and the forward cannot be raised at all while bmb is locked, because
+    /// macOS declines key auth until somebody unlocks it at its own keyboard.
+    ///
+    /// **The portable setup is a LAN bind, and this program already speaks it.** Bind the service
+    /// to the LAN on bmb, then every machine needs one line and no tunnel:
+    /// `EMERGE_VLM_URL=http://192.168.1.113:9292/v1/chat/completions`. The API key is already the
+    /// authentication, so this trades an SSH hop for a host firewall — worth stating out loud,
+    /// since it puts the endpoint in front of everything on the subnet. [`probe`] treats a LAN
+    /// address exactly like loopback, so the preflight survives the move.
+    ///
+    /// **Ollama Cloud is a pure config flip**, for a machine that is not on this network at all:
     /// `EMERGE_VLM_URL=https://ollama.com/v1/chat/completions EMERGE_VLM_MODEL=qwen3-vl:235b
     /// EMERGE_VLM_KEY=$OLLAMA_API_KEY`.
     pub fn load(root: &std::path::Path) -> Result<VlmConfig, String> {
@@ -1069,6 +1083,79 @@ pub fn request_labels(
     Ok(text)
 }
 
+/// **Is this address one a refused connection tells the truth about?**
+///
+/// Loopback and this LAN, yes: nothing in between can turn a running service into a refusal, so
+/// "refused" means "not serving" and the preflight is worth its 400 ms. Anything further away, no —
+/// a refusal out there folds DNS, TLS, proxies and the remote's own health into one verdict, and
+/// the real request's error says more than a guess would.
+fn is_near(ip: std::net::IpAddr) -> bool {
+    ip.is_loopback()
+        || match ip {
+            std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+            std::net::IpAddr::V6(v6) => v6.is_unique_local() || v6.is_unicast_link_local(),
+        }
+}
+
+/// **Load the model, so the batch does not pay for it inside its first real request.**
+///
+/// [`probe`] answers "is the socket open"; this answers "is the model resident". They are different
+/// questions with very different costs: a TCP connect is instant, and a cold `qwen3.8-27b` is 31 GB
+/// at Q8 plus a 927 MB projector, which is why [`VlmConfig::timeout_secs`] defaults to 600. Measured
+/// 2026-08-17, that load was being paid *inside* mesh 1 of 778 — `llama-server` at 0.1 % CPU and
+/// 35 GB resident, not computing, still loading — and it read as a hang and then as a timeout.
+///
+/// So the wait is spent here, once, where the caller can say what it is waiting for. The request is
+/// the smallest one the endpoint will accept: one token, no images, no deliberation. `llama-swap`
+/// hot-swaps on the model name, so naming [`VlmConfig::model`] is what makes the swap happen — the
+/// content is irrelevant and deliberately so.
+///
+/// **Text-only, and that is a judgement rather than an oversight.** `llama-server` loads the vision
+/// projector with the model it belongs to, so one text token brings both in. A warm-up carrying a
+/// 1×1 PNG would exercise the projector's own first call as well; if the first *real* mesh of a
+/// batch is ever measured to be much slower than the second, that is the thing to try next.
+pub fn warm(cfg: &VlmConfig) -> Result<(), String> {
+    let mut body = serde_json::json!({
+        "model": cfg.model,
+        "temperature": 0.0,
+        "max_tokens": 1,
+        "messages": [{ "role": "user", "content": "ready" }],
+    });
+    // Inert against a template that does not read it — see `request_labels` for the measurement.
+    if !cfg.think {
+        body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": false });
+    }
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(cfg.timeout_secs)))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut response = agent
+        .post(&cfg.url)
+        .header("Authorization", &format!("Bearer {}", cfg.key))
+        .send_json(&body)
+        .map_err(|e| match e {
+            ureq::Error::Timeout(_) => format!(
+                "the model did not finish loading within {}s. Raise EMERGE_VLM_TIMEOUT_SECS — a \
+                 cold 31 GB load can outlast it on a busy GPU.",
+                cfg.timeout_secs
+            ),
+            other => format!("the VLM endpoint is unreachable: {other}"),
+        })?;
+    let status = response.status();
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("reading the VLM response failed: {e}"))?;
+    if !status.is_success() {
+        // A model name the endpoint does not serve lands here, and it is worth the whole body:
+        // `could not find suitable inference handler` is what a stale EMERGE_VLM_MODEL looks like,
+        // and it cost a batch once already (see `VlmConfig::from_lookup`).
+        return Err(format!("the VLM endpoint answered {status}: {text}"));
+    }
+    Ok(())
+}
+
 /// **Is anybody home, and are they ready?**
 ///
 /// Three answers, because two of the failures want opposite responses from the caller and lumping
@@ -1124,12 +1211,41 @@ pub fn probe(cfg: &VlmConfig) -> Reach {
     let Some(addr) = addrs.next() else {
         return Reach::Unreachable(format!("`{host}` resolves to nothing"));
     };
+    // **A machine on this LAN is worth probing; a machine on the internet is not.** The old rule
+    // was "loopback only", which quietly deleted the preflight for the portable setup — point
+    // `EMERGE_VLM_URL` at `http://192.168.1.113:9292/...` and `probe` answered `Ready` without
+    // asking anything, so a batch went back to learning the endpoint was down one mesh at a time.
+    // Decided on the resolved address rather than the spelling of the host, so a name that maps to
+    // the LAN is treated the same as its literal.
+    let ip = addr.ip();
+    if !is_near(ip) {
+        return Reach::Ready;
+    }
     match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(400)) {
         Ok(_) => Reach::Ready,
-        // **Refused is the tunnel, and it is the one worth spelling out** — the local endpoint is an
-        // SSH forward to another machine, and the fix is a command rather than a setting.
+        // **Refused is the one worth spelling out**, and what to say depends on which setup this is.
+        //
+        // A loopback URL means the SSH forward: the service on bmb is bound to `127.0.0.1`, so
+        // nothing on the LAN can reach it and the tunnel is the workaround. That workaround is why
+        // this fails on a machine that has never been set up, and why the message names the other
+        // way out — a LAN bind on bmb plus `EMERGE_VLM_URL` is one line of config per machine and
+        // no tunnel at all.
+        //
+        // **And a refusal is not always the port.** macOS declines key auth entirely while the host
+        // is locked ("This system is locked. To unlock it, use a local account name and password"),
+        // so a forward can be impossible to raise for a reason that has nothing to do with 9292.
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused && ip.is_loopback() => {
+            Reach::Unreachable(format!(
+                "nothing is listening on {host}:{port} — this URL is the SSH-forward setup, so \
+                 bring it up with `ssh -fN -L {port}:127.0.0.1:{port} bmb` (if that is refused, \
+                 bmb is locked — unlock it at its own keyboard first). To stop needing a tunnel at \
+                 all, bind the model to the LAN on bmb and set EMERGE_VLM_URL to its address."
+            ))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => Reach::Unreachable(format!(
-            "nothing is listening on {host}:{port} — the model runs on `bmb` behind an SSH              forward. Bring it up with `ssh -fN -L {port}:127.0.0.1:{port} bmb`, then try again"
+            "{host} is up but nothing is serving {port} — the model host is reachable, so this is \
+             the service rather than the network. Start it on {host}, or check it is bound to the \
+             LAN and not to 127.0.0.1."
         )),
         // Reachable-but-not-answering. A host that is up with a model still loading times out here,
         // and that is a wait rather than a fault.
@@ -1268,6 +1384,35 @@ mod reach_tests {
 
 #[cfg(test)]
 mod tests {
+    /// **The preflight reaches the LAN, which is what makes the tunnel optional.**
+    ///
+    /// `probe` used to connect only for loopback and answer `Ready` for everything else, so the
+    /// portable setup — the model bound to the LAN on bmb, `EMERGE_VLM_URL` pointed at its address,
+    /// no SSH forward anywhere — silently lost its preflight and went back to discovering a dead
+    /// endpoint one mesh at a time. Pinned on the resolved address rather than the URL's spelling,
+    /// because a hostname that maps onto the LAN has to be treated as the LAN.
+    #[test]
+    fn the_preflight_covers_loopback_and_this_lan_but_not_the_internet() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        let v4 = |a, b, c, d| IpAddr::V4(Ipv4Addr::new(a, b, c, d));
+        for near in [
+            v4(127, 0, 0, 1),
+            v4(192, 168, 1, 113), // bmb
+            v4(10, 0, 0, 5),
+            v4(172, 16, 4, 1),
+            v4(169, 254, 3, 2), // link-local, which is what a .local name can land on
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ] {
+            assert!(super::is_near(near), "{near} is reachable without leaving the house");
+        }
+        for far in [v4(1, 1, 1, 1), v4(104, 18, 0, 1), v4(172, 32, 0, 1)] {
+            assert!(
+                !super::is_near(far),
+                "{far} is on the internet — its refusal means too many things to preflight on"
+            );
+        }
+    }
+
     use super::*;
 
     fn vocab() -> Vocabularies {
