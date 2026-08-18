@@ -8957,31 +8957,6 @@ fn the_menu_key_saves_and_goes() {
         );
         app.update();
     };
-    let tap = |app: &mut App, key: KeyCode| {
-        app.add_systems(
-            // **`PreUpdate`, after Bevy's own input pass — not `.before(Phase::Act)`.**
-            //
-            // The injector and `editor::answer_the_leaving_prompt` were both `.before(Phase::Act)`
-            // and unordered *relative to each other*, so which ran first was arbitrary — and they
-            // conflict on `ButtonInput`, so the executor picks. This test passed alone and failed in
-            // the full suite for exactly that reason. Pressing after `InputSystems` (which is what
-            // clears `just_pressed`) makes the press visible to **every** `Update` system, which is
-            // a superset of what `.before(Act)` bought and is not a coin toss.
-            PreUpdate,
-            IntoScheduleConfigs::after(
-                move |mut input: ResMut<bevy::input::ButtonInput<KeyCode>>,
-                      mut done: Local<bool>| {
-                    if !*done {
-                        input.release_all();
-                        input.press(key);
-                        *done = true;
-                    }
-                },
-                bevy::input::InputSystems,
-            ),
-        );
-        app.update();
-    };
     // **The way back is a state change, not an exit.** It was `AppExit` with a code the parent
     // process compared against; both screens are one application now (`screen.rs`), so leaving sets
     // `Screen::Menu`. Read as *pending*: `StateTransition` runs before `Update`, so the set made by
@@ -9563,5 +9538,95 @@ fn the_leaving_question_is_visible_on_a_door_that_is_not_the_map() {
         after[0].1.contains("Esc"),
         "the prompt must name the key that answers it; `Esc` is the whole point of asking. Got: {:?}",
         after[0].1
+    );
+}
+
+/// **A receipt does not follow you to the next tab, and a problem does.**
+///
+/// Reported at the keyboard 2026-08-18 as *"click on Tiles and it rotates our selected mesh"*. It
+/// does not: driven over BRP, the preview's rotation quaternion is identical on both tabs and
+/// `library.ron` is never written. What followed the author across was the **note** — one `String`
+/// on the `ImportState` that Meshes and Tiles share, only ever overwritten — still reading
+/// `lamp_tall 270,270,180 deg` from a turn made minutes earlier. A message announcing a rotation,
+/// on a tab just arrived at, beside a piece genuinely lying on its side, is a complete story.
+///
+/// Both halves are pinned, because clearing the wrong one would be the more expensive bug: a
+/// refusal that vanished on a tab switch is how an author never learns why a save did not happen.
+#[test]
+fn a_note_does_not_survive_a_tab_change_but_a_problem_does() {
+    let root = Fixture::new("sticky_note")
+        .pack("alpha/scan", &["spare"])
+        .descriptor("alpha/floor", "alpha")
+        .build("m");
+    let mut app =
+        harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Tiles)
+            .unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..3 {
+        app.update();
+    }
+
+    {
+        let mut state = app
+            .world_mut()
+            .resource_mut::<emerge_mapper::tiles::ImportState>();
+        state.status.note("alpha/floor 270,270,180 deg".to_owned());
+        state.status.problem("NOT SAVED: disk is full".to_owned());
+    }
+    // **Compose, and the choice of destination is what makes this test able to fail at all.**
+    //
+    // Arriving on Tiles writes its own line ("building `alpha/tile_1` — ...") and arriving on
+    // Meshes writes "loading spare.glb …", so with either as the destination the stale note is
+    // overwritten whether or not anything cleared it. Two earlier versions of this test did exactly
+    // that and passed with the fix commented out. Compose does not touch `ImportState::status`, so
+    // what is in the note after landing there is only ever what survived the switch.
+    //
+    // Verified both ways: with `clear_note` commented out this reads back
+    // "alpha/floor 270,270,180 deg"; with it in, the empty string.
+    let slot = emerge_mapper::keys::binding(
+        emerge_mapper::keys::Action::tab_slot(2).unwrap_or_else(|| panic!("no third slot")),
+    )
+    .key;
+    // **`PreUpdate`, after Bevy's own input pass.** `keyboard_input_system` clears `just_pressed`
+    // at the top of the frame, so a press written before `update()` is gone before any `Update`
+    // system sees it — the trap `docs/bevy_debugger_mcp.md` records and the shape every other
+    // key-driving test in this file uses.
+    app.add_systems(
+        PreUpdate,
+        IntoScheduleConfigs::after(
+            move |mut input: ResMut<bevy::input::ButtonInput<KeyCode>>, mut done: Local<bool>| {
+                if !*done {
+                    input.release_all();
+                    input.press(slot);
+                    *done = true;
+                }
+            },
+            bevy::input::InputSystems,
+        ),
+    );
+    app.update();
+    app.update();
+
+    let state = app
+        .world()
+        .resource::<emerge_mapper::tiles::ImportState>();
+    assert!(
+        *app.world().resource::<emerge_mapper::tiles::Mode>()
+            != emerge_mapper::tiles::Mode::Tiles,
+        "the slot key must actually have changed tab, or this test proves nothing"
+    );
+    // Asserted on the stale text rather than on emptiness, because the rule is "a receipt does not
+    // outlive the tab that earned it" — not "a tab arrives silent". `enter_tab` clears before the
+    // arriving tab gets to speak, so a tab with something to say still says it.
+    let note = state.status.note_text();
+    assert!(
+        !note.contains("270,270,180"),
+        "the rotate receipt followed the author to the next tab, which is the whole bug — it reads \
+         as something the tab switch just did. Note now: {note:?}"
+    );
+    assert_eq!(
+        state.status.problem_text(),
+        "NOT SAVED: disk is full",
+        "a problem is a state the editor is IN — clearing it on a tab change would lose the one \
+         message an author most needs to still be there"
     );
 }

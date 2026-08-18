@@ -780,6 +780,23 @@ impl Status {
         }
     }
 
+    /// **Drop the running commentary**, leaving the problems alone.
+    ///
+    /// A note is a receipt for something that just happened *here*; a problem is a state the editor
+    /// is in. So changing what "here" means ends a note's relevance and none of a problem's — which
+    /// is why this is not [`Self::dismiss`].
+    ///
+    /// Reported at the keyboard, 2026-08-18, and the report was of a different bug entirely: a
+    /// rotate receipt — `lamp_tall 270,270,180 deg` — sat on the panel across every tab switch,
+    /// because `note` is one `String` that is only ever overwritten and Meshes and Tiles share one
+    /// `ImportState`. The author read a message announcing a rotation, on a tab they had just
+    /// arrived at, beside a piece that was lying on its side, and concluded the tab switch had
+    /// turned it. Measured over BRP: the rotation quaternion is identical on both tabs and
+    /// `library.ron` is not written. **The stale receipt was the whole of the bug.**
+    pub fn clear_note(&mut self) {
+        self.note.clear();
+    }
+
     /// **Take the notices down** — the banner and the log together, because they are one list.
     ///
     /// `Esc`'s last layer, and the only thing that clears a problem without another replacing it.

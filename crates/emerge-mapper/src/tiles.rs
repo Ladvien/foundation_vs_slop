@@ -3676,6 +3676,17 @@ fn enter_tab(
         return;
     }
     **mode = want;
+    // **A receipt does not follow you to the next tab.**
+    //
+    // Meshes and Tiles share one `ImportState`, so its single `note` string — only ever overwritten,
+    // never cleared — outlived every switch between them. See `chrome::Status::clear_note` for the
+    // report that closes and the BRP measurement showing the rotation it seemed to announce was not
+    // happening. Cleared here rather than in a system watching `Mode`, because this is the one door
+    // both the slot key and the chip click come through, and because clearing *before* the scan
+    // below means a tab that has something to say still gets to say it.
+    //
+    // Only the note. A problem is a state the editor is in and outlives a tab on purpose.
+    state.status.clear_note();
     if want == Mode::Meshes && !state.scanned {
         scan(project, state);
     }
