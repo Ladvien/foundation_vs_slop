@@ -72,17 +72,25 @@ pub struct CompassPlugin;
 
 impl Plugin for CompassPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(crate::screen::Screen::Editor), spawn)
-            // `Update`, not `FixedUpdate`: this is chrome, and it follows a camera that eases.
-            .add_systems(Update,
-                ((follow_the_camera, place_by_tab))
-                    .run_if(in_state(crate::screen::Screen::Editor)),
-            );
+        app.add_systems(
+            OnEnter(crate::screen::Screen::Editor),
+            // **After the frame, because it parents into it.** `Res<Frame>` is how `spawn` finds
+            // the viewport, and in Bevy 0.19 a missing `Res<T>` panics its system rather than
+            // skipping it — so this is an ordering the build states rather than one that happens
+            // to hold. Ordering across the set also inserts the sync point that makes
+            // `spawn_frame`'s deferred `insert_resource` visible here.
+            spawn.after(crate::chrome::FrameSystems),
+        )
+        // `Update`, not `FixedUpdate`: this is chrome, and it follows a camera that eases.
+        .add_systems(
+            Update,
+            (follow_the_camera, show_by_tab).run_if(in_state(crate::screen::Screen::Editor)),
+        );
     }
 }
 
-fn spawn(mut commands: Commands) {
-    commands
+fn spawn(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
+    let gizmo = commands
         .spawn((
             Node {
                 // PLACES-ITSELF-OK: a gizmo's arms and dots are placed by projecting a world axis, not by
@@ -160,7 +168,16 @@ fn spawn(mut commands: Commands) {
                     ));
                 });
             }
-        });
+        })
+        .id();
+
+    // **Inside the hole the world is drawn through, not inside the window.** `bottom: MARGIN` on a
+    // root node measures from the window edge, so the gizmo sat on top of the status bar; and
+    // `left` was a second statement of where the viewport starts — `MARGIN + TILES_CONTROLS_W +
+    // MARGIN`, which is only right while that panel is the widest thing in the dock and reaches the
+    // bottom. `chrome::ViewportSlot` already answers both, and `surface.rs` hands the very same rect
+    // to the map camera, so this is the one measurement rather than a third copy of it.
+    commands.entity(frame.viewport).add_child(gizmo);
 }
 
 /// **Place every arm and dot from the camera's basis.**
@@ -245,46 +262,39 @@ fn follow_the_camera(
     }
 }
 
-/// **One gizmo, on every tab that has a camera to be lost in — moved clear of that tab's panel.**
+/// **One gizmo, shown on every tab that has a camera to be lost in.**
 ///
 /// It is not one gizmo per tab, and the difference matters: there is a single `MainCamera` and a
 /// single [`Rig`], `Q`/`E` turn it from anywhere, so a second compass would be a second answer to a
-/// question that has one. What changes per tab is only where it can be *seen*.
+/// question that has one. What changes per tab is only whether it can be *seen*.
 ///
-/// Tiles and Meshes share a full-height left panel ([`crate::chrome::TILES_CONTROLS_W`] wide), so
-/// the corner the Map leaves free is covered there — the gizmo steps right, to the inside edge of
-/// that panel, which is still the bottom-left of the *viewport*. The Map's own left panel stops
-/// short of the bottom, so it keeps the true corner.
+/// **It no longer decides where, only whether.** This used to step the gizmo right by
+/// `MARGIN + TILES_CONTROLS_W + MARGIN` on the tabs with a wide left panel, to land it at what that
+/// arithmetic believed was the bottom-left of the viewport. Two things were wrong with computing it
+/// here. The dock's width is *its widest visible panel*, so the constant is right only while that
+/// panel is the widest one in it; and the Map arm kept `MARGIN`, which is inside the dock's own
+/// column rather than the viewport — the map is not drawn there, so the corner it called "true" was
+/// black. Both are moot now: [`spawn`] parents the gizmo to `chrome::ViewportSlot`, so bottom-left
+/// of the viewport is expressed as bottom-left of the viewport.
 ///
 /// Compose and Anim are deliberately absent for now: Anim drives its own camera presets and has its
 /// own reading of "which way is the figure facing", and putting a second orientation cue beside that
 /// is a question rather than an answer. Both are one arm of this match away if they want it.
-fn place_by_tab(mode: Res<crate::tiles::Mode>, mut compass: Query<&mut Node, With<Compass>>) {
+fn show_by_tab(mode: Res<crate::tiles::Mode>, mut compass: Query<&mut Node, With<Compass>>) {
     if !mode.is_changed() {
         return;
     }
     use crate::tiles::Mode;
-    // `None` is "this tab does not show it"; `Some(left)` is where it sits when it does.
-    let want = match *mode {
-        Mode::Map => Some(MARGIN),
-        // Clear of the shared controls panel, with the same margin on the far side of it.
-        Mode::Tiles | Mode::Meshes => Some(MARGIN + crate::chrome::TILES_CONTROLS_W + MARGIN),
-        Mode::Compose | Mode::Anim => None,
+    let show = match *mode {
+        Mode::Map | Mode::Tiles | Mode::Meshes => true,
+        Mode::Compose | Mode::Anim => false,
     };
+    let display = if show { Display::Flex } else { Display::None };
     for mut node in &mut compass {
-        let display = if want.is_some() {
-            Display::Flex
-        } else {
-            Display::None
-        };
+        // Compare through `Deref`, write through `DerefMut`, and only then — `Mut::deref_mut` calls
+        // `set_changed()`, so `&mut node.display` would announce the write before this could refuse.
         if node.display != display {
             node.display = display;
-        }
-        if let Some(left) = want {
-            let left = Val::Px(left);
-            if node.left != left {
-                node.left = left;
-            }
         }
     }
 }

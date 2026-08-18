@@ -4779,7 +4779,13 @@ fn commit_candidate(
     mut state: ResMut<ImportState>,
     queue: Res<crate::labels::LabelQueue>,
 ) {
-    if !keys::just_pressed(&keyboard, *live, Action::Accept) {
+    let accept = keys::just_pressed(&keyboard, *live, Action::Accept);
+    // **Space is the heading key, and only the heading key.** It was unbound on this tab, so
+    // pressing it on a collapsed pack did nothing — reported at the keyboard 2026-08-18. It joins
+    // `Enter` on a heading and is deliberately inert everywhere else, which is why it is its own
+    // action: a second key on `Accept` would have made Space commit a tile.
+    let fold = keys::just_pressed(&keyboard, *live, Action::FoldPack);
+    if !accept && !fold {
         return;
     }
     // **`Enter` acts on the row the cursor is on.** On a pack heading that means opening or closing
@@ -4799,6 +4805,11 @@ fn commit_candidate(
             "`{pack}` {}",
             if opened { "opened" } else { "closed" }
         ));
+        return;
+    }
+    // **Off a heading, Space has nothing to say.** Everything below commits a tile, and that is
+    // `Enter`'s verb alone — see the binding's own note.
+    if !accept {
         return;
     }
     // **A question owns `Enter` while it is up.** `labels::answer_overwrite` reads the same key in
@@ -6970,9 +6981,13 @@ fn draw_pack(
                     TextColor(if excluded { MUTED } else { LABEL }),
                     TextFont::from_font_size(crate::chrome::text::LABEL),
                 ));
-                // A folded pack says what it is hiding. A bare count on a thin row reads as
-                // absence when 145 rows just left the screen — the word is what makes "folded"
-                // and "gone" impossible to confuse.
+                // **The count, and nothing else.** A folded pack used to say
+                // "{n} hidden — click to open", on the argument that a bare count reads as absence
+                // when 145 rows have just left the screen. Removed at the keyboard, 2026-08-18:
+                // that is a whole sentence on every folded row of a list an author is scrolling,
+                // and the chevron to the left of the name (`>` folded, `v` open) already carries
+                // both the state and the affordance. An excluded pack keeps its words because it
+                // names a state the chevron does NOT show, and the way out of it.
                 row.spawn((
                     Text::new(if excluded {
                         // Names the state and the way out of it, per `docs/ui.md` §1.4.
@@ -6981,8 +6996,6 @@ fn draw_pack(
                             members.len(),
                             keys::chord(Action::ExcludePack)
                         )
-                    } else if folded {
-                        format!("{} hidden — click to open", members.len())
                     } else {
                         format!("{}", members.len())
                     }),

@@ -4820,6 +4820,11 @@ fn drive_chooser(
     mut commands: Commands,
     mut next: ResMut<NextState<crate::screen::Screen>>,
     mut exit: MessageWriter<AppExit>,
+    // Held arrows walk the list at the one application-wide cadence — see `keys::REPEAT_SECS`.
+    // `KeysPlugin` owns `Repeat` and `screen.rs` marks it session-owned, so both outlive this
+    // screen and a key held across the door does not resume repeating on the far side of it.
+    time: Res<Time>,
+    mut repeat: ResMut<crate::keys::Repeat>,
 ) {
     // **A key the text handler already took is not read again.** One `Escape` is one press; see
     // `Chooser::swallowed` for the bug this closes.
@@ -4874,10 +4879,17 @@ fn drive_chooser(
     // **Arrows move inside a panel. `Tab` crosses between them.** One rule, no exceptions — the
     // correction asked for at the keyboard, replacing a `Tab` that meant "next field" in the
     // settings and "go to the settings" everywhere else.
-    if keyboard.just_pressed(KeyCode::ArrowUp) {
+    //
+    // **And they repeat when held**, at `keys::REPEAT_SECS`, like every list inside the editor.
+    // They read raw `KeyCode` rather than an `Action` because the door has no key census — that is
+    // deliberate — so they go through `keys::repeating_key`, which is the same countdown the
+    // census path uses and not a second one. A kit list long enough to scroll is long enough that
+    // tapping down it is not a job.
+    let dt = time.delta_secs();
+    if crate::keys::repeating_key(&keyboard, KeyCode::ArrowUp, &mut repeat, dt) {
         chooser.step(-1);
     }
-    if keyboard.just_pressed(KeyCode::ArrowDown) {
+    if crate::keys::repeating_key(&keyboard, KeyCode::ArrowDown, &mut repeat, dt) {
         chooser.step(1);
     }
     let shifted = keyboard.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);

@@ -295,6 +295,7 @@ pub enum Action {
     TypeId,
     CycleMount,
     Accept,
+    FoldPack,
     Rescan,
     RemoveTile,
     /// Send a library entry back to the candidate list, stripped — it re-enters as a freshly
@@ -1063,6 +1064,26 @@ pub const BINDINGS: &[Binding] = &[
         Context::Meshes,
         "Enter",
         "add / update this tile",
+    ),
+    // **Space opens and closes a heading, and does nothing anywhere else.**
+    //
+    // Asked for at the keyboard, 2026-08-18: Space on a collapsed pack did nothing, because it is
+    // bound in Tiles (take the piece) and Anim (play) but was never bound here. `Enter` already
+    // toggled a heading — the row the cursor is on decides what committing means — so this is a
+    // second key for that one meaning, not a second meaning.
+    //
+    // It is worth a row because a folded list is walked with the arrows and opened with the thumb,
+    // and reaching for `Enter` mid-scroll is the reach for the mouse that `commit_candidate`'s own
+    // note is about. Deliberately inert off a heading: Space must never commit a tile, which is why
+    // this is its own action rather than a second key on `Accept`.
+    bp(
+        Action::FoldPack,
+        KeyCode::Space,
+        false,
+        Stance::Idle,
+        Context::Meshes,
+        "Space",
+        "open / close the pack",
     ),
     bp(
         Action::AcceptEdges,
@@ -2239,17 +2260,46 @@ pub fn pressed(keys: &ButtonInput<KeyCode>, live: Live, action: Action) -> bool 
 
 /// **How long a held key waits before firing again**, and then between repeats.
 ///
-/// Between the two things a repeat can get wrong. Faster and a tap starts becoming two steps,
-/// because a deliberate tap is rarely under about 120 ms; slower and holding is not worth doing.
-/// At the aim keys' [`crate::editor::YAW_STEP`] this sweeps a full turn in about 3.5 seconds.
-pub const REPEAT_SECS: f32 = 0.150;
+/// **One number for the whole application**, chosen at the keyboard 2026-08-18 — walking a
+/// 300-candidate list was too slow at the old 0.150 s, and the answer to "which surface" was
+/// "all of them". So every repeating key moved together rather than the lists growing a constant
+/// of their own: two cadences would be two answers to how fast a held key goes, and an author who
+/// learned the lists would have been wrong about the turn keys.
+///
+/// At [`crate::editor::YAW_STEP`] this sweeps a full turn in about 1.75 s.
+///
+/// **The known cost, stated rather than discovered.** The first repeat lands one interval after the
+/// press, so at 75 ms a deliberate tap much over that fires *twice* — the hazard the old value was
+/// picked to avoid, since a tap is rarely under about 120 ms. If tapping starts double-stepping,
+/// the fix is not a slower number: it is the split every OS keyboard makes, a long delay before the
+/// first repeat and a short interval after it. That is one constant and one line in [`countdown`]
+/// away, and deliberately not taken yet — nobody has reported a double step.
+pub const REPEAT_SECS: f32 = 0.075;
 
-/// Per-action countdown to the next repeat, for [`repeating`].
+/// **What a countdown belongs to.**
+///
+/// Two, because the editor and the menu name a key differently and neither should be made to speak
+/// the other's vocabulary. Inside the editor a repeat belongs to an [`Action`], which is what
+/// carries the context and stance rules that decide whether the key is even live. The chooser runs
+/// before any of that exists — it reads raw [`KeyCode`], deliberately, being the screen you arrive
+/// at — so its repeats are keyed by the key.
+///
+/// One enum rather than two resources: the countdown arithmetic is written once, in [`countdown`],
+/// and a second store would be a second place for the cadence to drift.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RepeatId {
+    /// A binding in the editor's census.
+    Action(Action),
+    /// A raw key, for a screen that has no census — see [`repeating_key`].
+    Key(KeyCode),
+}
+
+/// Per-key countdown to the next repeat, for [`repeating`] and [`repeating_key`].
 ///
 /// A `Vec` rather than a map because [`Action`] is `Eq` but not `Hash`, and because the list only
 /// ever holds the keys actually down — at most a couple.
 #[derive(Resource, Default)]
-pub struct Repeat(Vec<(Action, f32)>);
+pub struct Repeat(Vec<(RepeatId, f32)>);
 
 /// **Fires on the press, then every [`REPEAT_SECS`] for as long as the key is held.**
 ///
@@ -2267,16 +2317,51 @@ pub fn repeating(
     repeat: &mut Repeat,
     dt: f32,
 ) -> bool {
-    if !pressed(keys, live, action) {
-        repeat.0.retain(|(a, _)| *a != action);
+    countdown(
+        repeat,
+        RepeatId::Action(action),
+        pressed(keys, live, action),
+        just_pressed(keys, live, action),
+        dt,
+    )
+}
+
+/// **The same cadence, for a screen with no key census.**
+///
+/// The chooser reads raw [`KeyCode`] on purpose — it is the door, and the editor's contexts and
+/// stances do not exist yet there. This gives its arrows the repeat every list inside the editor
+/// has, off the one [`REPEAT_SECS`], so "hold to walk a long list" means the same thing on both
+/// sides of the door.
+pub fn repeating_key(
+    keys: &ButtonInput<KeyCode>,
+    key: KeyCode,
+    repeat: &mut Repeat,
+    dt: f32,
+) -> bool {
+    countdown(
+        repeat,
+        RepeatId::Key(key),
+        keys.pressed(key),
+        keys.just_pressed(key),
+        dt,
+    )
+}
+
+/// **The countdown itself, written once.**
+///
+/// `held` and `fresh` are the caller's answer to "is this down" and "did it arrive this frame",
+/// because that is the only part the editor and the menu disagree about.
+fn countdown(repeat: &mut Repeat, id: RepeatId, held: bool, fresh: bool, dt: f32) -> bool {
+    if !held {
+        repeat.0.retain(|(a, _)| *a != id);
         return false;
     }
-    if just_pressed(keys, live, action) {
-        repeat.0.retain(|(a, _)| *a != action);
-        repeat.0.push((action, REPEAT_SECS));
+    if fresh {
+        repeat.0.retain(|(a, _)| *a != id);
+        repeat.0.push((id, REPEAT_SECS));
         return true;
     }
-    let Some((_, left)) = repeat.0.iter_mut().find(|(a, _)| *a == action) else {
+    let Some((_, left)) = repeat.0.iter_mut().find(|(a, _)| *a == id) else {
         return false;
     };
     *left -= dt;
@@ -2338,6 +2423,7 @@ mod tests {
             Action::TypeId,
             Action::CycleMount,
             Action::Accept,
+            Action::FoldPack,
             Action::AcceptEdges,
             Action::Rescan,
             Action::RemoveTile,
@@ -2798,7 +2884,14 @@ mod tests {
             // 30 -> 31: `AcceptEdges`, the door on the geometric socket derivation (FVS-R-26).
             // Costs no row — `Accept` is `Stance::Idle` and this is `Stance::Proposed`, so the
             // two never share a list.
-            (Context::Meshes, 32),
+            //
+            // 32 -> 33: `FoldPack`. Space on a collapsed pack heading did nothing on this tab —
+            // it is bound in Tiles and Anim and was never bound here — so a list walked with the
+            // arrows had to be opened with `Enter`, which is the reach this tab keeps trying to
+            // remove. **No new key to learn**: Space already means "the obvious thing to this row"
+            // on two other tabs, and it is inert off a heading by construction rather than by
+            // prose, since making it a second key on `Accept` would have let Space commit a tile.
+            (Context::Meshes, 33),
             // 21 -> 22: `ClearTile`. `MemberPrev`/`MemberNext` replace the X nudge rather than
             // adding to it, so the walk costs nothing here.
             // 22 -> 26: the KIT list (FVS: the tab could author tiles and never show them).

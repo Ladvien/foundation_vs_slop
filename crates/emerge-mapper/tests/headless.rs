@@ -997,11 +997,14 @@ mod stepped {
             "{} folded pack(s) but only {chevrons} `>` chevron(s) rendered",
             folded.len().min(dirs.len())
         );
-        // And a folded pack SAYS it is hiding rows — the word is what keeps "folded" from
-        // reading as "gone".
+        // **The chevron says it, and nothing else does.** A folded header used to add the
+        // sentence "{n} hidden — click to open"; removed at the keyboard 2026-08-18, because it
+        // is a whole sentence on every folded row of a list an author is scrolling. The `>`
+        // assertion above is what now carries "folded is distinguishable from gone" — this pins
+        // the sentence staying gone, so a future edit has to mean it.
         assert!(
-            texts.iter().any(|t| t.contains("hidden — click to open")),
-            "a folded header must say what it hides"
+            !texts.iter().any(|t| t.contains("hidden — click to open")),
+            "the folded-header sentence was removed on purpose — the chevron says it instead"
         );
 
         // The default selection is VISIBLE: its pack is open, even when every pack started
