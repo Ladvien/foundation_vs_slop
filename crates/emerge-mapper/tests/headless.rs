@@ -9463,3 +9463,52 @@ fn a_scrollbar_shows_exactly_when_there_is_somewhere_to_scroll() {
         );
     }
 }
+
+/// **The editor says what its panels are, to something that cannot see them.**
+///
+/// There was no accessibility at all: `AccessibilityNode` appeared **zero times** in `src/`, so a
+/// screen reader met this application as an unlabelled tree of boxes. The strip is the right place
+/// to start, because the one thing a reader most needs is which panel you are in and what the
+/// alternatives are — and AccessKit has exactly that shape, a `TabList` of `Tab`s.
+///
+/// The label is asserted against `Mode::label()` rather than a string, because a second copy of a
+/// panel's name is a second thing to rename: `chrome::key_census` keeps the same rule for chords.
+#[test]
+fn the_tab_strip_describes_itself() {
+    let root = Fixture::new("strip-a11y")
+        .descriptor("wall", "alpha")
+        .place("wall", (0.0, 0.0))
+        .build("m");
+    let mut app = harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Meshes)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    app.update();
+
+    let mut lists = app.world_mut().query::<&bevy::a11y::AccessibilityNode>();
+    let roles: Vec<accesskit::Role> = lists.iter(app.world()).map(|n| n.0.role()).collect();
+    assert!(
+        roles.contains(&accesskit::Role::TabList),
+        "the door's strip has no `TabList` role, so nothing that cannot see the screen can tell \
+         these boxes are the way between panels: {roles:?}"
+    );
+    let tabs = roles.iter().filter(|r| **r == accesskit::Role::Tab).count();
+    assert!(
+        tabs >= 1,
+        "a `TabList` with no `Tab` in it describes nothing; found {tabs}"
+    );
+
+    let mut labelled = app
+        .world_mut()
+        .query::<(&emerge_mapper::tiles::Tab, &bevy::prelude::AccessibleLabel)>();
+    let pairs: Vec<(String, String)> = labelled
+        .iter(app.world())
+        .map(|(t, l)| (t.0.label().to_owned(), l.0.clone()))
+        .collect();
+    assert!(!pairs.is_empty(), "no tab carries a label to read out");
+    for (mode, label) in pairs {
+        assert_eq!(
+            label, mode,
+            "the spoken label and the drawn one must be the same string, or renaming a panel \
+             renames it in one place and not the other"
+        );
+    }
+}

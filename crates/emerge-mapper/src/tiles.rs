@@ -3257,12 +3257,24 @@ fn spawn_tab_strip(
     // a strip that had to out-rank the thing beneath it because both were competing for the same
     // ground. In the frame nothing overlaps, so neither number is needed.
     let strip = commands
-        .spawn(Node {
-            flex_direction: FlexDirection::Row,
-            column_gap: Val::Px(2.0),
-            align_items: AlignItems::Stretch,
-            ..default()
-        })
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(2.0),
+                align_items: AlignItems::Stretch,
+                ..default()
+            },
+            // **The editor's first accessibility, and the strip is the right place to start.**
+            //
+            // There was none at all — `AccessibilityNode` appeared zero times in `src/`. A screen
+            // reader met this application as an unlabelled tree of boxes, and the one thing it most
+            // needs to describe is which panel you are in and what the alternatives are. AccessKit
+            // has exactly that shape: a `TabList` of `Tab`s.
+            //
+            // Stated on the strip rather than derived, because nothing derives it — Bevy populates
+            // roles for its own widgets and these are not its widgets.
+            bevy::a11y::AccessibilityNode::from(accesskit::Node::new(accesskit::Role::TabList)),
+        ))
         .id();
     commands.entity(frame.door_strip).add_child(strip);
     commands
@@ -3278,6 +3290,11 @@ fn spawn_tab_strip(
                     // `style_tabs` lights it with, and it is all that was ever needed.
                     Hovered::default(),
                     Tab(mode),
+                    bevy::a11y::AccessibilityNode::from(accesskit::Node::new(accesskit::Role::Tab)),
+                    // The label the reader hears. `mode.label()` rather than a second string, so a
+                    // panel renamed once is renamed everywhere — the same rule `chrome::key_census`
+                    // keeps for chords.
+                    bevy::prelude::AccessibleLabel::new(mode.label()),
                     Node {
                         padding: UiRect::axes(Val::Px(16.0), Val::Px(8.0)),
                         align_items: AlignItems::Center,
