@@ -2,6 +2,11 @@
 
 > **Completed items live in `BACKLOG_ARCHIVE.md`** (split out 2026-07-30). This file lists only what is
 > still open. IDs are never reused, so an ID absent here has either shipped or was never issued.
+>
+> **The editor has its own file: `EDITOR_BACKLOG.md`** (split out 2026-08-18). `emerge-mapper` is not a game
+> dependency, so nothing in it can move a determinism golden and nothing in it waits on a milestone here. Its
+> IDs are `FVS-S-*`, a distinct epic from Push 12's `FVS-R-*` world-building series; an S item and an R item
+> touching the same file is expected. Completed S items archive to `BACKLOG_ARCHIVE.md` under their own heading.
 
 The containment loop, organized into **area pushes**: vertical slices each cohesive enough for one person or pair to drive to "done," bundling the core capability with the UI, relationships, determinism, and content that support it. Item IDs (`FVS-<epic>-<n>`) are stable across reorganizations — nothing was renumbered or dropped; the horizontal epics (A–N) were re-clustered into the nine pushes below.
 

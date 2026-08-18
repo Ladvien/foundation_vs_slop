@@ -85,6 +85,8 @@ fn spawn(mut commands: Commands) {
     commands
         .spawn((
             Node {
+                // PLACES-ITSELF-OK: a gizmo's arms and dots are placed by projecting a world axis, not by
+                // flow — `follow_the_camera` computes each position from the rig every time it turns.
                 position_type: PositionType::Absolute,
                 left: Val::Px(MARGIN),
                 bottom: Val::Px(MARGIN),
@@ -109,6 +111,8 @@ fn spawn(mut commands: Commands) {
             for (i, (_, colour, _)) in AXES.iter().enumerate() {
                 p.spawn((
                     Node {
+                        // PLACES-ITSELF-OK: a gizmo's arms and dots are placed by projecting a world axis, not by
+                        // flow — `follow_the_camera` computes each position from the rig every time it turns.
                         position_type: PositionType::Absolute,
                         width: Val::Px(REACH),
                         height: Val::Px(ARM),
@@ -122,6 +126,8 @@ fn spawn(mut commands: Commands) {
             for (i, (_, colour, name)) in AXES.iter().enumerate() {
                 p.spawn((
                     Node {
+                        // PLACES-ITSELF-OK: a gizmo's arms and dots are placed by projecting a world axis, not by
+                        // flow — `follow_the_camera` computes each position from the rig every time it turns.
                         position_type: PositionType::Absolute,
                         width: Val::Px(DOT),
                         height: Val::Px(DOT),

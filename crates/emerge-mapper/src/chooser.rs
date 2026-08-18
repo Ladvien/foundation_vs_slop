@@ -4002,7 +4002,12 @@ const CARD_ROOM: f32 = 200.0;
 fn header(text: &str) -> impl Bundle {
     (
         Text::new(text.to_owned()),
-        TextFont::from_font_size(crate::chrome::text::BODY),
+        // **`HEADING`, not `BODY`.** `MAPS`, `KIT INFO` and the rest are headings, and they were
+        // rendered at the body role — the same class of misuse the 2026-08-18 type pass found in the
+        // four tabs (a section heading at three different sizes, and the anim bench's declared/
+        // measured pair inverted). The role table exists so that "what does a heading measure" is
+        // answered in one place; a heading opting out of it is that answer going stale here first.
+        TextFont::from_font_size(crate::chrome::text::HEADING),
         TextColor(crate::chrome::KEY),
     )
 }

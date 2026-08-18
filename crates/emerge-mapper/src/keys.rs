@@ -25,6 +25,33 @@
 //! the slow one. So a binding carries its own label and the panel renders it next to the thing it
 //! does — §4.2's rule that *"verb chips are clickable and keyed, and each chip states its key."*
 //!
+//! # Routing is by CONTEXT, not by focus — settled 2026-08-18
+//!
+//! `docs/research/2026-08-18-reusable-scroll-and-tab-widgets.md` §3.5 assumes the other model: it
+//! routes keyboard paging to *"the scroll view that currently owns focus"*. **This editor does not
+//! work that way and is not going to.** `just_pressed(&ButtonInput, Live, Action)` is a *pull*
+//! helper each consumer polls, and `Live(Context, Stance)` is an ambient pair — there is no focused
+//! widget, and `InputFocus`/`TabIndex` appear nowhere in `src/`.
+//!
+//! Introducing focus *as a second routing model* was the alternative and it is the one thing this
+//! crate's rules forbid outright: two paths to "who gets this key", disagreeing on the day somebody
+//! clicks a row and then presses a verb. `Live` is decided **once** per frame in `Phase::Sense`
+//! precisely so no system sees a keyboard that changed owner mid-frame, and that guarantee is not
+//! available to a model where a click can move ownership.
+//!
+//! So focus stays out of routing, and is used for the two things it is actually for: the **a11y
+//! tree** (`Role::TabList`/`Tab` on the strip) and, when something wants it, a visible focus ring.
+//! `FeathersPlugins` brings `acquire_focus` and `click_to_focus`, and they are inert here because
+//! nothing carries `TabIndex` — which is the correct amount of inert, not an oversight.
+//!
+//! **The paging keys the design wanted are therefore not built either**, and that is the better
+//! outcome rather than a consolation. Every list here is walked with the arrows, and
+//! `chrome::Follow` scrolls the selection into view — so `PageUp`/`PageDown`/`Home`/`End` would be
+//! four more rows against a **hard twelve-row ceiling**
+//! (`no_context_carries_more_than_a_learnable_vocabulary`), buying a second way to do what the
+//! arrows already do. `docs/ui.md` §3.5's own finding is that a fast path beside a slow one does not
+//! work on its own; a fast path beside an *equivalent* one is worse.
+//!
 //! Held to ~12 per context, which Zheng et al. 2018 (`10.1145/3173574.3173823`) found is learnable to
 //! recall in about thirty minutes.
 

@@ -3457,3 +3457,27 @@ The repo's own precedent for this is FVS-N-23, demoted when FVS-N-25 measured th
 - **FVS-S-3/49 — `Door` in `TabView` / doors switch directly.** Skipped at the keyboard. Entering the
   MAP door needs a map name and from inside another door there is none — which
   `docs/2026-08-17-one-application.md` §7 lists as undecided. The menu stays the way between doors.
+
+### Closed 2026-08-18, second pass
+
+- **FVS-S-22b — The inline strip answers a click.** Closed by the shelf work (`0b8d94c`): the
+  hand-rolled `MESHES | KIT` pair became `shelf_strip`, whose chips carry `Hovered`, an active fill
+  and a `Pointer<Click>` observer routing through the same two fields the keys write.
+- **FVS-S-32 — The focus model.** Settled and written into `keys.rs`'s header: **routing is by
+  `Context`, not by focus.** A second answer to "who gets this key" is what this crate's rules
+  forbid, and `Live` is decided once per frame in `Phase::Sense` precisely so ownership cannot move
+  mid-frame — a guarantee unavailable to a model where a click can move it. Focus is kept for the
+  a11y tree and a possible focus ring. **The design's keyboard paging is therefore not built, and
+  that is the better outcome**: every list is walked with the arrows and `chrome::Follow` scrolls the
+  selection into view, so `PageUp`/`PageDown`/`Home`/`End` would be four more rows against a hard
+  twelve-row ceiling, buying a second way to do what the arrows already do.
+- **FVS-S-28 — The sweep is finished, and it is a test.** `tests/the_sweep_is_finished.rs`: nobody
+  spawns their own scroll container, there are exactly two strips and both are named, and nobody
+  places their own panel. The last of those took the `CHROME-OK`/`SORT-OK` shape after its first cut
+  flagged three correct nodes — a world-projected slot label, a hover overlay on a plot, and the
+  compass's arms — because a lint that calls those defects is a lint somebody turns off. Absolute is
+  allowed; it costs one `// PLACES-ITSELF-OK: <why>` line.
+- **FVS-S-34 — The chooser audit.** Ran. Clean on colour (zero raw literals) and on type; **uses none
+  of the row builders**, which is the fifth dialect the audit warned about with the front door as the
+  dialect. `header()` rendering headings at `text::BODY` was fixed in the pass as a role error; the
+  port and the missing scrolling are minted as FVS-S-34a and FVS-S-34b.

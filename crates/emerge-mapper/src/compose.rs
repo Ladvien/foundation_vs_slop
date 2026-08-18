@@ -1342,6 +1342,8 @@ fn rebuild_labels(
             TextFont::from_font_size(if slot.offset == 0 { LABEL_PX.0 } else { LABEL_PX.1 }),
             TextColor(if slot.offset == 0 { ACCENT } else { DIM }),
             Node {
+                // PLACES-ITSELF-OK: a world-space slot label, put where `place_labels` projects it. Flow
+                // has no opinion about where a point in the scene lands on screen.
                 position_type: PositionType::Absolute,
                 // Hidden until `place_labels` has a projection to put it at — a label at (0,0) for
                 // one frame is a label in the wrong place.

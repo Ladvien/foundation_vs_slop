@@ -78,53 +78,47 @@ Unchanged, and every item below is judged against them.
 
 ## 3. Open
 
-**FVS-S-32 · There is no focus model, and the design assumes one** · M
-The design's §3.5 routes keyboard paging to *"the scroll view that currently owns focus"*. Two halves
-of that do not exist here: `keys::just_pressed` is a **pull** helper each consumer polls, with no
-`Action` event to route, and `InputFocus`/`TabIndex` appear **zero times** in `src/` — the editor
-routes by `Live(Context, Stance)`, an ambient pair, and has never had a focused widget.
-**The ground moved in this overhaul's favour and the decision is still owed:** `Tab` is now free (the
-census retired `NextTab`), and `acquire_focus`/`click_to_focus` are live because `FeathersPlugins` is
-in the graph. So (a) introducing focus is cheaper than it was. But (b) — routing by `Context` like
-every other key here — remains the crate's grain, and **picking silently means shipping half of
-each**. *Blocks:* keyboard paging, and any roving-tabindex widget. · *Reading:* design §3.5, §5.3
+Five items closed on 2026-08-18 alongside the overhaul — see the archive. What is left is below, and
+**two of the four are content of the chooser audit rather than the audit itself**, which is done.
 
-**FVS-S-33 · Focus-by-click is undrivable by an agent, and the reason is already written down** · S
-`TabNavigationPlugin` registers `click_to_focus` globally, so a `Pointer<Press>` moves `InputFocus`.
-FVS-R-25 measured why that path is broken for agents: `bevy_picking` writes `Hovered` from the
-**window's** cursor, which `view::sense_pointer` deliberately never moves. **This overhaul narrowed
-it** — `surface::retarget_pointer` and `surface::inject_clicks` mean an injected cursor now reaches
-`Hovered` and an injected button now reaches picking — so the remaining question is only whether
-`InputFocus` follows. Settle it with FVS-S-32, and whatever that picks must be reachable **without a
-click**. *Do not attempt to fix the `Hovered` split here* — FVS-R-25 records that replacing it was
-tried and reverted. · *Deps:* FVS-S-32
+**FVS-S-34a · The chooser uses none of the shared row vocabulary** · M
+The audit ran. `chooser.rs` is clean where it was easy to be — **zero raw colour literals**, and its
+type is on the role table — and it uses **none of the row builders**: not `list_row`, `chip`,
+`text_field`, `list_heading`, `row_label`, `row_value`, `section`, `title`, `panel_root` or
+`scroll_list`. Thirty `chrome::` references and every one of them a constant. Spacing is `PAD` (5)
+and `GAP_ROW` (4), with `GAP_TIGHT`, `GAP_GROUP` and `CHIP_PAD` unused.
+It is **the fifth dialect the audit warned about, and it is the front door.** One thing was fixed in
+the audit pass because it was a role error rather than a style choice: `header()` rendered headings
+at `text::BODY`. The rest is a port, and it is worth doing as one change rather than opportunistically
+— the same argument the sweep makes. · *Touches:* `chooser.rs`
 
-**FVS-S-34 · `chooser.rs` has never had a full audit** · M
-Partly answered: the screen was re-laid onto the frame, its parallel sizing system deleted, its rows
-given a real value column, and its stale header rewritten. What has **not** happened is the treatment
-the four tabs got — a code catalog cross-checked against `chrome.rs`. It is 5,616 lines and it is the
-first thing an author sees. · *Touches:* `chooser.rs` (audit only)
+**FVS-S-34b · The chooser's lists cannot scroll** · S
+No `scroll_list` anywhere in it, and the panels are flex now — so a catalogue longer than the window
+overflows its panel with nothing to say so. It never mattered while the screen sized itself to its
+content; it does now. Needs a `Follow<K>` per list, per
+`tests/every_list_follows_its_selection.rs`. · *Deps:* FVS-S-34a is the natural home for it
 
-**FVS-S-22b · The inline MESHES/KIT strip is keyboard-only** · S
-`tiles::tab_strip` (`tiles.rs:6292`) is two words and a hint inside the candidate list, switching
-which list is shown. The **door** strip answers a click now; this one does not, which is the same
-parity defect (`docs/ui.md` §4.2) one level down. Left alone deliberately: its state is
-`Build::browsing`, an `Option` whose entry index has invariants worth reading before a second writer
-is added. · *Touches:* `tiles.rs`, `build.rs`
-
-**FVS-S-28 · Finish the sweep** · S
-Mostly done by construction — `scroll_list` is the one scroll container and the frame is the one
-layout — but the claim should be a ratchet rather than a belief. Extend the FVS-S-12 test to tab
-strips, so a hand-rolled one fails rather than being noticed in a capture. · *Deps:* FVS-S-22b
+**FVS-S-33 · Focus-by-click, now that routing is settled** · S
+`keys.rs`'s header records the decision taken 2026-08-18: **routing is by `Context`, not by focus**,
+because a second answer to "who gets this key" is the one thing this crate's rules forbid and `Live`
+is decided once per frame precisely so ownership cannot move mid-frame. Focus is therefore used only
+for the a11y tree and, if anything ever wants it, a visible ring — `acquire_focus` and
+`click_to_focus` are in the graph and inert because nothing carries `TabIndex`, which is the correct
+amount of inert.
+**What is left is small and real:** if anything is ever given a `TabIndex`, FVS-R-25's finding
+applies — `bevy_picking` writes `Hovered` from the *window's* cursor, so an agent clicking would
+focus whatever the physical pointer rests on. Whatever gets focus must be reachable without a click.
+*Do not attempt to fix the `Hovered` split* — FVS-R-25 records that replacing it was tried and
+reverted. · *Reading:* `keys.rs` header, FVS-R-25 in `BACKLOG.md`
 
 **FVS-S-30 · Devshot baselines, kept rather than taken** · S
 A full after-set exists at `debug_screenshots/after_{menu,map,kit_meshes,kit_tiles,kit_compose}.png`,
-captured through BRP with nobody's screen taken. They are **gitignored**, so they are a working set
-and not a baseline anybody else can diff against. Decide whether this repo wants committed reference
-frames at all — it has never had them, and the argument against is the same one that keeps derived
-assets out of git. · *Touches:* `debug_screenshots/`, `.gitignore`
-
----
+captured over BRP with nobody's screen taken. They are **gitignored**, so they are a working set and
+not a baseline anybody can diff against. The decision is whether this repo wants committed reference
+frames at all: it never has, the argument against is the one that keeps derived assets out of git,
+and the argument for is that four of this overhaul's defects were found by looking rather than by a
+test. **Recommendation: no.** The captures are cheap to retake now that an agent can take them
+without asking for the screen, which is what made them expensive before. · *Touches:* `.gitignore`
 
 ## 4. Explicitly not in scope
 

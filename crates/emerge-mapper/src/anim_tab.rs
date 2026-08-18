@@ -1223,6 +1223,8 @@ fn rebuild_slots(
                         wrap.spawn((
                             ImageNode::new(plots.hover.clone()),
                             Node {
+                                // PLACES-ITSELF-OK: the hover readout stacks ON the plot it belongs to,
+                                // filling its wrapper. Two images in one box is what absolute is for.
                                 position_type: PositionType::Absolute,
                                 left: Val::Px(0.0),
                                 top: Val::Px(0.0),

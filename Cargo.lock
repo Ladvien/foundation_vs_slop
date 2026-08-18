@@ -3295,6 +3295,7 @@ dependencies = [
 name = "emerge-mapper"
 version = "0.1.0"
 dependencies = [
+ "accesskit",
  "arboard",
  "base64 0.22.1",
  "bevy",
