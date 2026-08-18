@@ -79,32 +79,27 @@ Unchanged, and every item below is judged against them.
 
 ## 3. Open
 
-**Everything the overhaul and the chooser audit produced is closed** — see the archive, which carries
-the reasoning and the commit for each. Two items remain and **neither has code in it that anything is
-waiting on**: one is a hazard that only bites if a decision is reversed, the other is a question about
-what this repo commits.
+**Nothing.** Every `FVS-S-*` item is closed — see `BACKLOG_ARCHIVE.md` § *"`emerge-mapper` UI — the
+editor overhaul"*, which carries the reasoning and the commit for each, including the four closed by
+measurement rather than by building.
 
-**FVS-S-33 · Focus-by-click, now that routing is settled** · S
-`keys.rs`'s header records the decision taken 2026-08-18: **routing is by `Context`, not by focus**,
-because a second answer to "who gets this key" is the one thing this crate's rules forbid and `Live`
-is decided once per frame precisely so ownership cannot move mid-frame. Focus is therefore used only
-for the a11y tree and, if anything ever wants it, a visible ring — `acquire_focus` and
-`click_to_focus` are in the graph and inert because nothing carries `TabIndex`, which is the correct
-amount of inert.
-**What is left is small and real:** if anything is ever given a `TabIndex`, FVS-R-25's finding
-applies — `bevy_picking` writes `Hovered` from the *window's* cursor, so an agent clicking would
-focus whatever the physical pointer rests on. Whatever gets focus must be reachable without a click.
-*Do not attempt to fix the `Hovered` split* — FVS-R-25 records that replacing it was tried and
-reverted. · *Reading:* `keys.rs` header, FVS-R-25 in `BACKLOG.md`
+The two that were last to go were decisions rather than work, and both are now enforced rather than
+remembered:
 
-**FVS-S-30 · Devshot baselines, kept rather than taken** · S
-A full after-set exists at `debug_screenshots/after_{menu,map,kit_meshes,kit_tiles,kit_compose}.png`,
-captured over BRP with nobody's screen taken. They are **gitignored**, so they are a working set and
-not a baseline anybody can diff against. The decision is whether this repo wants committed reference
-frames at all: it never has, the argument against is the one that keeps derived assets out of git,
-and the argument for is that four of this overhaul's defects were found by looking rather than by a
-test. **Recommendation: no.** The captures are cheap to retake now that an agent can take them
-without asking for the screen, which is what made them expensive before. · *Touches:* `.gitignore`
+- **Focus traversal stays off** (FVS-S-33). Routing is by `Context`, per `keys.rs`'s header, and
+  `focus_traversal_stays_off_until_somebody_reopens_it` fails on a `TabIndex` without a
+  `// FOCUS-DECISION-REOPENED:` line. The point is not to forbid it — it is that FVS-R-25's finding
+  about click-to-focus is three documents deep, and nobody should meet it by accident.
+- **Reference frames are not committed** (FVS-S-30). This repo has never had them, the argument
+  against is the one that keeps derived assets out of git, and the captures are cheap to retake now
+  that an agent can take them without asking for the screen — which is what made them expensive.
+  `debug_screenshots/` stays gitignored.
+
+**If you are picking this up:** the two things most likely to want attention next are not on this
+list because nobody has asked for them. Compose still spaces itself with blank `Text` rows (its pane
+measures 2417 px of content in an 833 px viewport, which the new scrollbar made visible for the first
+time), and the widget layer's `TabView`/`VirtualList` were deliberately not built — the strip does
+what a `TabView` would, and virtualization is unwarranted until a pack over ~200 rows ships.
 
 ## 4. Explicitly not in scope
 

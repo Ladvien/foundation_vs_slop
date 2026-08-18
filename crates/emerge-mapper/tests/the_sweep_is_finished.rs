@@ -23,6 +23,37 @@ fn src_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
 }
 
+/// **Every line that is not inside a `#[cfg(test)]` module.**
+///
+/// It **skips each test module's body** rather than stopping at the first one, and that distinction
+/// is the whole value of this file. The first draft split on `"\n#[cfg(test)]"` and took the head —
+/// and `tiles.rs`'s first test module sits about a third of the way in, so **two thirds of the
+/// largest file in the crate was never scanned by any rule here**. Every ratchet in this file was
+/// reporting green over a third of a file.
+///
+/// `compose_is_read_only.rs` had already been bitten by exactly this and says so: *"a ratchet that
+/// cannot fail is worse than no ratchet, because it reads as a guarantee."* This is its
+/// implementation, borrowed rather than re-derived — test modules are declared at column zero and
+/// closed by a `}` at column zero, which is what makes it a rule rather than a parser.
+fn code_outside_tests(src: &str) -> String {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].starts_with("#[cfg(test)]") {
+            i += 1;
+            while i < lines.len() && lines[i] != "}" {
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        out.push(lines[i]);
+        i += 1;
+    }
+    out.join("\n")
+}
+
 /// Every `src/*.rs` except `chrome.rs`, which is where the shared shapes are allowed to live.
 fn panels() -> Vec<(String, String)> {
     let mut out = Vec::new();
@@ -37,9 +68,7 @@ fn panels() -> Vec<(String, String)> {
             continue;
         }
         let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
-        // Test modules are fixtures, not panels.
-        let live = src.split("\n#[cfg(test)]").next().unwrap_or(&src).to_string();
-        out.push((name, live));
+        out.push((name, code_outside_tests(&src)));
     }
     out
 }
@@ -252,6 +281,59 @@ fn a_global_observer_never_demands_a_doors_resource() {
          missing `Res<T>` panics rather than skipping, so the first click outside the editor takes \
          the application down. Take `Option<Res<..>>` and return early after the entity check, which \
          is the guard these already have and cannot reach:\n{}",
+        rogue.join("\n")
+    );
+}
+
+/// **Nothing carries a `TabIndex` while routing is by `Context`.**
+///
+/// `keys.rs`'s header records the decision taken 2026-08-18: routing is by `Live(Context, Stance)`,
+/// not by focus, because a second answer to "who gets this key" is what this crate's rules forbid
+/// and `Live` is decided once per frame in `Phase::Sense` precisely so ownership cannot move
+/// mid-frame.
+///
+/// `FeathersPlugins` brings `acquire_focus` and `click_to_focus` and they are **inert** — they only
+/// do anything for an entity with a `TabIndex`, and nothing has one. That is the correct amount of
+/// inert, and this is what keeps it true.
+///
+/// # Why a test rather than a note
+///
+/// The first thing a `TabIndex` would turn on is click-to-focus, and FVS-R-25 already measured what
+/// that does here: `bevy_picking` writes `Hovered` from the **window's** cursor, which
+/// `view::sense_pointer` deliberately never moves — so an agent clicking would focus whatever the
+/// *physical* pointer happens to be resting on. That finding is three documents deep and would not
+/// be found by somebody adding a focus ring on a Tuesday.
+///
+/// So adding one is allowed, and it costs a line saying the decision was reopened deliberately:
+/// `// FOCUS-DECISION-REOPENED: <why>`. The same `CHROME-OK` / `SORT-OK` shape as everything else
+/// here — the point is not to forbid it, it is that nobody does it by accident.
+#[test]
+fn focus_traversal_stays_off_until_somebody_reopens_it() {
+    let mut rogue = Vec::new();
+    for (file, src) in panels() {
+        let lines: Vec<&str> = src.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            let l = line.trim();
+            if l.starts_with("//") || !l.contains("TabIndex") {
+                continue;
+            }
+            let marked = l.contains("FOCUS-DECISION-REOPENED:")
+                || i.checked_sub(1)
+                    .and_then(|k| lines.get(k))
+                    .is_some_and(|p| p.contains("FOCUS-DECISION-REOPENED:"));
+            if !marked {
+                rogue.push(format!("{file}:{}: {l}", i + 1));
+            }
+        }
+    }
+    assert!(
+        rogue.is_empty(),
+        "a `TabIndex` turns on focus traversal, and this editor routes by `Context` on purpose — see \
+         `keys.rs`'s header. It also turns on click-to-focus, which FVS-R-25 measured as broken for \
+         agents here: `bevy_picking` writes `Hovered` from the WINDOW's cursor, which \
+         `view::sense_pointer` never moves, so an injected click would focus whatever the physical \
+         pointer rests on. Whatever gains focus must be reachable without a click. If that is \
+         understood and wanted, say so with `// FOCUS-DECISION-REOPENED: <why>`:\n{}",
         rogue.join("\n")
     );
 }

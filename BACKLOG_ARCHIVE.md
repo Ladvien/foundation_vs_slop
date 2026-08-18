@@ -3520,3 +3520,23 @@ The repo's own precedent for this is FVS-N-23, demoted when FVS-N-25 measured th
   rows side by side, wrapping mid-value. It is now conditional on the panel kind. **The suite stayed
   green through both states** — a capture is what caught it, which is the half of this a test could
   not have told me.
+
+- **FVS-S-33 — Focus traversal stays off, and a test says so.** Routing is by `Context`
+  (`keys.rs` header), so `acquire_focus`/`click_to_focus` are inert because nothing carries a
+  `TabIndex`. `focus_traversal_stays_off_until_somebody_reopens_it` keeps that true, with a
+  `// FOCUS-DECISION-REOPENED: <why>` escape — because the first thing a `TabIndex` turns on is
+  click-to-focus, and FVS-R-25 measured that as broken for agents here (`bevy_picking` writes
+  `Hovered` from the *window's* cursor, which `view::sense_pointer` never moves). That finding is
+  three documents deep and would not be met by somebody adding a focus ring on a Tuesday.
+- **FVS-S-30 — Reference frames are not committed.** Decided: no. `debug_screenshots/` stays
+  gitignored. The captures are cheap to retake now that an agent can take them without asking for the
+  author's screen, which is the thing that made them expensive.
+
+**And the scanner that found the last bug was itself the last bug.** `the_sweep_is_finished.rs`'s
+`panels()` split each file at its first `#[cfg(test)]` and kept the head — and `tiles.rs`'s first
+test module sits about a third of the way in, so **two thirds of the largest file in the crate was
+never scanned by any rule in that file**. Fixing it immediately surfaced a *sixth* observer,
+`on_tag_chip`, which had panicked at runtime during FVS-S-34a, been side-stepped by keeping the menu
+off the `Activate` bus, and never actually fixed. `compose_is_read_only.rs` had been bitten by
+exactly this and says why it matters: *"a ratchet that cannot fail is worse than no ratchet, because
+it reads as a guarantee."* Its implementation is borrowed rather than re-derived.

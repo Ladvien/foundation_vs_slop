@@ -5198,15 +5198,23 @@ fn holds_a_mesh(
 }
 
 /// Toggle one token on one axis.
+/// **`Option<ResMut<Project>>`, because this is a GLOBAL observer** — see [`on_cell_verb`].
+///
+/// This is the sixth, and it was found by fixing the *scanner* rather than by reading the code: the
+/// rule that catches these was truncating `tiles.rs` at its first `#[cfg(test)]` module, about a
+/// third of the way in, so everything past line ~1900 was reporting green over nothing. This one
+/// panicked at runtime during FVS-S-34a and was side-stepped by keeping the menu off the `Activate`
+/// bus; it was never actually fixed, and it stayed a live crash for any other caller.
 fn on_tag_chip(
     activate: On<Activate>,
     chips: Query<&TagChip>,
-    mut project: ResMut<Project>,
+    project: Option<ResMut<Project>>,
     mut state: ResMut<ImportState>,
 ) {
     let Ok(chip) = chips.get(activate.entity) else {
         return;
     };
+    let Some(mut project) = project else { return };
     // **Both the token and the vocabulary order come out first, owned.** What follows needs a mutable
     // borrow of the same `Project`, and the sort key cannot be read from it while that is held.
     let (token, order, effects_order) = {
