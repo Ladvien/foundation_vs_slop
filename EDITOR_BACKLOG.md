@@ -79,8 +79,10 @@ Unchanged, and every item below is judged against them.
 
 ## 3. Open
 
-Five items closed on 2026-08-18 alongside the overhaul — see the archive. What is left is below, and
-**two of the four are content of the chooser audit rather than the audit itself**, which is done.
+**Everything the overhaul and the chooser audit produced is closed** — see the archive, which carries
+the reasoning and the commit for each. Two items remain and **neither has code in it that anything is
+waiting on**: one is a hazard that only bites if a decision is reversed, the other is a question about
+what this repo commits.
 
 **FVS-S-33 · Focus-by-click, now that routing is settled** · S
 `keys.rs`'s header records the decision taken 2026-08-18: **routing is by `Context`, not by focus**,
