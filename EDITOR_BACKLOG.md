@@ -27,9 +27,17 @@ re-open it. That is the same move FVS-N-25 made on FVS-N-23, and it is the reaso
 
 `cargo test -p emerge-mapper` is **107 passing with 4 failures**, and those four are **pre-existing
 and not the editor's**: they open the shipped `site` kit, deleted 2026-08-16 and still owed 45 pieces
-(`FVS-R-39` in `BACKLOG.md`, which calls itself the only real gate in that file). `cargo test
---workspace` adds 31 more of the same cause on the game side. **Read any claim of green in this file
-as "the floor of 4 is unchanged"** — that is what every item below was verified against.
+(`FVS-R-39` in `BACKLOG.md`, which calls itself the only real gate in that file). **Read any claim of
+green in this file as "the floor of 4 is unchanged"** — that is what every item below was verified
+against.
+
+`cargo test --workspace` is **106 binaries green and 6 red, 56 failures, all of them `site`**: 31 in
+`foundation_vs_slop --lib` plus `site_descriptors` (8), `site_editor` (7), `mesh_measurement` (5),
+`importer_against_real_meshes` (1) and the editor's 4. That is FVS-R-39's own accounting — it names
+those four files by name — and it is worth stating in full here because **the first measurement of
+this taken during the overhaul said 36 and was an undercount**, having captured only two of the six
+red binaries. A floor quoted from a partial run is worse than no floor: it reads as a regression the
+next time somebody measures properly.
 
 ### What the overhaul left behind, for whoever is next
 
