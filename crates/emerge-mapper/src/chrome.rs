@@ -375,6 +375,10 @@ pub struct Frame {
     pub chrome_bar: Entity,
     /// The door's own strip of panels.
     pub door_strip: Entity,
+    /// Everything between the two bars. The editor fills its three slots; the **menu** puts its own
+    /// columns straight in here, because a menu has no docks and no viewport — the frame is the
+    /// window's shape, not the editor's.
+    pub body: Entity,
     pub left: Entity,
     /// The hole the world is drawn through. Carries [`ViewportSlot`].
     pub viewport: Entity,
@@ -521,6 +525,7 @@ pub fn spawn_frame(mut commands: Commands) {
         root,
         chrome_bar,
         door_strip,
+        body,
         left,
         viewport,
         right,
@@ -1510,6 +1515,14 @@ impl Plugin for ChromePlugin {
             // what makes the deferred `insert_resource` visible to the spawners.
             .add_systems(
                 OnEnter(crate::screen::Screen::Editor),
+                spawn_frame.in_set(FrameSet),
+            )
+            // **The menu gets the same frame**, and that is the point of it being the window's shape
+            // rather than the editor's: one answer to "how is this application laid out" instead of
+            // the two that let the menu drift into a fixed-pixel grid sitting in a window it did not
+            // fill.
+            .add_systems(
+                OnEnter(crate::screen::Screen::Menu),
                 spawn_frame.in_set(FrameSet),
             )
             .add_systems(

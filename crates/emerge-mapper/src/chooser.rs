@@ -11,24 +11,26 @@
 //! make a new one. **The piece count is the point** — it answers "is this the blank one" before
 //! anything is committed to.
 //!
-//! # Why this is a separate `App` and not a state inside the editor
+//! # This was a separate `App`, and the argument for it is worth keeping — as history
 //!
-//! `Project` is opened before the app is built and inserted before the editor's plugins
-//! (`harness.rs`), and in Bevy 0.19 a missing `Res<T>` **panics its system** (`lib.rs`, `docs/ui.md`
-//! §5). Around **sixty production systems across eight files** take `Res<Project>` or
-//! `ResMut<Project>`. A chooser that ran inside the editor's `App` with no project chosen yet would
-//! mean gating every one of them through set machinery this crate does not have — `keys::Phase` is
-//! its only `SystemSet` — where a single missed system is a first-frame panic.
+//! **Both screens are one application now** (`screen.rs`), asked for at the keyboard on 2026-08-16:
+//! *"can we not open a whole another editing window? I'd like to keep the same bevy application
+//! running across whether it's the UI or the editor."* Everything below is why it was not, until
+//! then — kept because the cost it names is real and was paid rather than avoided, and dated
+//! because a stale rationale in the present tense is worse than none: the next reader plans around
+//! it.
 //!
-//! Gating is *feasible*: `resource_exists` takes `Option<Res<T>>`, so the guard itself is safe. It
-//! is the **cost** that is the argument, not impossibility. So the chooser is its own `App` and
-//! launches the editor as a child process: one `App` per process, `Project` always present wherever
-//! the editor's plugins are, no gating and no teardown. `harness::build_headless` is untouched.
+//! `Project` is opened before the editor's plugins are added (`harness.rs`), and in Bevy 0.19 a
+//! missing `Res<T>` **panics its system** (`lib.rs`, `docs/ui.md` §5). Around **sixty production
+//! systems across eight files** take `Res<Project>` or `ResMut<Project>`. A chooser inside the
+//! editor's `App` with no project chosen yet meant gating every one of them, where a single missed
+//! system is a first-frame panic. Gating was always *feasible* — `resource_exists` takes
+//! `Option<Res<T>>` — and it was the **cost** that was the argument, not impossibility.
 //!
-//! The in-editor overlay — `Cmd+O` without a restart — needs the reload this avoids (despawn every
-//! `Placement` and `StampedPiece`, rebuild `Project`, reset the undo history, `next_id`, the
-//! selection, `Build` and drag state). That is deliberately a separate change, so its teardown risk
-//! does not land in the same commit as this UI.
+//! What paid it is `Screen`: every editor system runs `in_state(Screen::Editor)`, so on the menu
+//! none of them run and none of them reach for a `Project` that is not there. One state, rather
+//! than sixty run conditions. The process boundary went with it, and so did the exit code that used
+//! to carry the way back.
 //!
 //! # Ordering: fixed and alphabetical, and the reason is in the corpus
 //!
@@ -826,50 +828,6 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
-    }
-
-    /// **The screen is as tall as the lists it draws, and not one fixed number.**
-    ///
-    /// It *was* one fixed number, and a capture showed roughly a fifth of the window as empty
-    /// ground below the hint line. A constant cannot be right for both a four-kit root and a
-    /// twelve-kit one: it is padded for the first or clipped for the second. This is the guard
-    /// against quietly going back — a constant would make the two sides equal.
-    #[test]
-    fn the_screen_is_as_tall_as_what_it_has_to_draw() {
-        assert!(
-            content_h(20, 0) > content_h(4, 0),
-            "more kits than the floor must need more window"
-        );
-        assert!(
-            content_h(0, 20) > content_h(0, 4),
-            "more maps than the floor must need more window"
-        );
-        // **And below the floor, nothing moves.** Making a kit and removing it again resized the
-        // window twice; a delete prompt resized it a third time, under the hand about to answer it.
-        assert_eq!(
-            content_h(3, 1),
-            content_h(6, 2),
-            "small catalogues all get the same, static window"
-        );
-        // The taller column decides, so a screen full of maps is as tall as one full of kits — the
-        // two are alternatives, never a sum.
-        assert_eq!(content_h(20, 0), content_h(20, 3));
-    }
-
-    /// **`window_size` is measured in the units `WindowResolution::set` takes**, which are logical
-    /// pixels — and `WindowResolution::new`, the only thing `main.rs` can call, takes *physical*
-    /// ones. That mismatch made the window half its intended size on a scaled display, invisibly,
-    /// because the offscreen target carries its own size and every capture looked correct.
-    ///
-    /// Pinned as a relationship rather than a number: whatever the layout does, the window must be
-    /// the content scaled by `UI_SCALE`, because that is what multiplies every `Val::Px` in it.
-    #[test]
-    fn the_window_is_the_content_times_the_interface_scale() {
-        let (_, h) = window_size(4, 1);
-        assert!(
-            (h - content_h(4, 1) * UI_SCALE).abs() < 0.001,
-            "the window has to be the content at the scale the content is drawn at"
-        );
     }
 
     /// **The mirror must not be on the layer the offscreen camera renders.**
@@ -3154,40 +3112,34 @@ mod screen_tests {
         assert_eq!(last, Field::Note, "which is the last of the map's own properties");
     }
 
-    /// **The panel is tall enough for every row it draws**, which nothing checked.
+    /// **The inspector cannot hold fewer rows than it draws**, and that is now a property of the
+    /// layout rather than a sum somebody has to keep true.
     ///
-    /// `panel()` sets `height: Val::Px(..)` — fixed, not content-sized, so that a field never moves
-    /// under the hand about to type into it. The cost of that decision is that rows past the height
-    /// do not make the panel taller: `Overflow` is visible by default, so they draw **over** the
-    /// message row and off the bottom edge.
+    /// It used to be arithmetic. `panel()` set `height: Val::Px(..)` — fixed, so a field never moved
+    /// under the hand about to type into it — and the cost was that rows past the height did not
+    /// make the panel taller: `Overflow` is visible by default, so they drew **over** the message
+    /// row and off the bottom edge. The kit selection did exactly that the day it was added, four
+    /// settings sized the panel and it drew `1 + kits` rows more, and a text render of the screen
+    /// could not see it because every row was present and correct in the model.
     ///
-    /// The kit selection did exactly that the day it was added — four settings sized the panel and
-    /// it drew `1 + kits` rows more. **A text render of the screen cannot see it**, because the rows
-    /// are all present and correct in the model; only the arithmetic or a real frame can. So the
-    /// arithmetic is what is pinned, for every kit count either side of [`SETTINGS_KIT_FLOOR`].
+    /// The frame made the sum unnecessary: the inspector is content-sized and refuses to shrink, so
+    /// it is exactly as tall as its rows and the list above it gives up the difference. What is
+    /// pinned here is that shape — a fixed `height`, or a `flex_shrink` that lets it be squeezed,
+    /// brings the whole defect back.
     #[test]
-    fn the_settings_panel_is_tall_enough_for_every_row_it_draws() {
-        for n in [1usize, 2, SETTINGS_KIT_FLOOR, SETTINGS_KIT_FLOOR + 3] {
-            let kits: Vec<Kit> = (0..n)
-                .map(|i| kit(Some("k"), &format!("k{i}"), 1))
-                .collect();
-            let catalog = Catalog {
-                kits,
-                maps: vec![ok_map("hall")],
-            };
-            let mut c = Chooser::new(PathBuf::from("."), catalog, None);
-            c.focus = Focus::Settings;
-            c.map = 1;
-
-            let drawn = c.screen().settings.len();
-            let (_, info) = panel_heights(n, 1);
-            let holds = (info - PANEL_CHROME) / ROW_H;
-            assert!(
-                holds + 1e-3 >= drawn as f32,
-                "{n} kit(s): the panel holds {holds:.1} rows and draws {drawn} — the overflow lands \
-                 on the message row and then off the window"
-            );
-        }
+    fn the_inspector_is_sized_by_its_rows_and_not_by_a_number() {
+        let node = panel_node(info_panel());
+        assert_eq!(
+            node.height,
+            Val::Auto,
+            "a fixed height cannot be right for both a four-row inspector and a twelve-row one: it \
+             is padded for the first or it draws over the band for the second"
+        );
+        assert_eq!(
+            node.flex_shrink, 0.0,
+            "an inspector that can be squeezed is an inspector that clips its last row, which is \
+             the same defect with a different cause"
+        );
     }
 
     /// **The launch line, which is the whole output of this screen.**
@@ -3988,7 +3940,9 @@ impl Plugin for ChooserPlugin {
         // sync point between them, which is what `PostStartup` was standing in for.
         .add_systems(
             OnEnter(crate::screen::Screen::Menu),
-            (build_chooser, spawn_screen).chain(),
+            (build_chooser, spawn_screen, spawn_menu_bars)
+                .chain()
+                .after(crate::chrome::FrameSet),
         )
         // **The chooser's own entities die with the screen.** `DespawnOnExit` is Bevy's own
         // state-scoping, so this is one component per root rather than a teardown list somebody has
@@ -4007,7 +3961,6 @@ impl Plugin for ChooserPlugin {
                 type_into_field,
                 drive_chooser,
                 paint_chooser,
-                hold_the_panels_still,
             )
                 .chain()
                 .run_if(in_state(crate::screen::Screen::Menu)),
@@ -4022,131 +3975,6 @@ impl Plugin for ChooserPlugin {
         app.add_plugins(ChooserGuidePlugin);
     }
 }
-
-/// One column's width. **Both lists get the same one**, and the settings panel below spans exactly
-/// two of them plus the gap — so the three panels share a grid instead of each sizing itself to its
-/// longest row, which is what made the first version read as unrelated blobs.
-const COL: f32 = 300.0;
-
-/// How many columns stand side by side: kits, that kit's maps, that map's settings.
-const COLS: f32 = 2.0;
-
-/// **One list row, and everything under it, in logical pixels before [`UI_SCALE`].**
-///
-/// Measured off a capture rather than computed from font metrics — a height derived from ascenders
-/// and line gaps would be a second layout engine, disagreeing with the first the day a font
-/// changes. Two panels of known row counts in one frame give the slope and the intercept:
-/// a 5-row list and a 3-row list differed by exactly two rows' worth.
-const ROW_H: f32 = 17.9;
-
-/// A panel's fixed cost: its header line and its own padding, top and bottom.
-const PANEL_CHROME: f32 = 39.6;
-
-/// Between a list and the inspector standing under it.
-const COL_GAP: f32 = 19.2;
-
-/// The screen's fixed cost: the title line, the hint line, and the root's padding — plus a few
-/// pixels of ground under the hint, because a line of text ending exactly on the window edge reads
-/// as clipped whether or not a descender actually is.
-const SCREEN_CHROME: f32 = 87.0;
-
-/// Rows in `KIT INFO` — pieces, maps, opened-with.
-const KIT_FACTS: f32 = 3.0;
-
-/// Rows in `MAP INFO` — name, bounds, origin, note.
-const MAP_FACTS: f32 = 4.0;
-
-fn panel_h(rows: f32) -> f32 {
-    PANEL_CHROME + ROW_H * rows
-}
-
-/// **How tall this screen actually is**, for the lists it is about to draw.
-///
-/// It was a constant, and the constant was 15% too big: a capture showed roughly a fifth of the
-/// window as empty ground below the hint line. *"The empty half"* had already been reported once
-/// about an earlier layout, and a fixed height cannot be right for both a four-kit root and a
-/// twelve-kit one — it is either padded or clipped.
-///
-/// `maps` is the **largest** kit's map count, not the selected kit's, so walking the kit list does
-/// not resize the window under the author's hands.
-pub fn content_h(kits: usize, maps: usize) -> f32 {
-    let (list, info) = panel_heights(kits, maps);
-    // **The message row is always reserved, whether or not anything is being said.**
-    //
-    // It was added only when a message was up, and the window grew to make room. Reported at the
-    // keyboard: *"I press delete on one of the kits… there's this jarring redrawing of the UI where
-    // it bounces as the prompt message comes up"*, and then *"we should probably keep the UI window
-    // a static size."*
-    //
-    // Two rows of ground waiting for a sentence is a real cost, and it is smaller than the one it
-    // replaces: a window that changes shape at the exact moment it is asking whether to delete
-    // something moves the answer keys under the hand about to press them.
-    SCREEN_CHROME + list + COL_GAP + info + MESSAGE_ROWS * ROW_H
-}
-
-/// **The two heights this screen is built from: a list, and the panel under it.**
-///
-/// Both are *fixed*, and that is the whole point. Reported at the keyboard: *"make sure the input
-/// boxes don't move up and down as the menu changes — they should be statically fixed."* They did
-/// move, twice over. Each list sized itself to its own contents, so `MAP INFO` sat at whatever
-/// height that kit's map count left it at and jumped every time the selection crossed to a kit with
-/// a different number of maps; and the two columns' panels, sized independently, never agreed with
-/// each other either.
-///
-/// So one list height serves both columns — the **fullest** list in the whole catalogue, `+ new …`
-/// row included — and one info height serves both panels, the taller of the two fact counts. A
-/// field you are about to type into does not move because you looked somewhere else first.
-///
-/// Derived from the catalogue rather than fixed at startup, so creating a kit grows the screen
-/// once, everywhere, instead of overflowing a box that was measured before it existed.
-/// **How many kit rows `MAP INFO` is sized for before the window has to grow.**
-///
-/// The settings panel is `height: Val::Px(..)` — *fixed, not content-sized*, by the same decision
-/// that keeps the input boxes from moving. So rows past its height do not make it taller: with
-/// `Overflow` visible they draw **over** the message row and off the bottom edge, which is what the
-/// kit selection did the day it was added. A text render of the screen cannot show that; only the
-/// arithmetic or a frame can.
-///
-/// Six, measured rather than picked. The window is 566 px with the rows clipped; at a floor of 4 it
-/// is 674, at 6 it is 717, at 8 it is 759 — and 8 leaves six empty rows on the two-kit project,
-/// which is the *"empty half"* this layout has already been criticised for once. Six is the largest
-/// floor that is not mostly air, and it keeps `the_screen_is_as_tall_as_what_it_has_to_draw`'s
-/// three-versus-six comparison literally true: both are still small catalogues and still still.
-///
-/// Past six the screen grows, on the rule [`LIST_FLOOR`] already states — clipping a kit out of
-/// sight is worse than a resize.
-const SETTINGS_KIT_FLOOR: usize = 6;
-
-fn panel_heights(kits: usize, maps: usize) -> (f32, f32) {
-    // `+ 1` for the `+ new kit` / `+ new map` row every list opens with, and a floor so that making
-    // or removing one does not resize the window either — the same stillness the message row buys,
-    // applied to the other thing an author does here. Empty rows inside a list read as room for
-    // more; a window that changes shape reads as a fault.
-    let rows = kits.max(maps).max(LIST_FLOOR) as f32 + 1.0;
-    // `MAP INFO` holds its four settings, the `KITS` divider, and one row per bound kit — see
-    // [`SETTINGS_KIT_FLOOR`] for why the count is floored rather than exact.
-    let map_rows = MAP_FACTS + 1.0 + kits.max(SETTINGS_KIT_FLOOR) as f32;
-    (panel_h(rows), panel_h(KIT_FACTS.max(map_rows)))
-}
-
-/// How many list rows the panels hold before the window has to grow at all. Past this the screen
-/// does get taller — clipping a kit out of sight would be worse than a resize — but it only ever
-/// grows, never shrinks, so the common act of making one and removing it again moves nothing.
-const LIST_FLOOR: usize = 8;
-
-/// **Rows kept for a message or a question, and only while one is up.**
-///
-/// A capture of the delete prompt caught this: the question appeared, and the hint line under it
-/// went off the bottom edge — the screen had no room reserved for a message and did not make any.
-/// Two rows because a question naming both a map and its file wraps, and a clipped question about
-/// deleting a file is the worst line on this screen to lose.
-///
-/// Reserved on demand rather than always, because an empty band waiting for a message that is not
-/// there is the same defect as the fifth of a window this layout was just measured to be wasting.
-/// Three, not two, and the difference was measured rather than reasoned: at two the question fitted
-/// and the hint line under it ran to the last pixel row of the window. A message costs its own line
-/// *plus* the gap above it, which a row count expressed in text rows alone does not capture.
-const MESSAGE_ROWS: f32 = 3.0;
 
 /// **Room for a guide card, added to the window only while one is up.**
 ///
@@ -4164,45 +3992,6 @@ const MESSAGE_ROWS: f32 = 3.0;
 /// instruction is the failure this whole placement exists to avoid.
 const CARD_ROOM: f32 = 200.0;
 
-/// **The interface scale, and both halves of the binary read it from here.**
-///
-/// `UiScale` multiplies every `Val::Px` and every font size, so a window sized in raw pixels is a
-/// window that does not fit its own content — which is exactly what happened: a 672 px settings
-/// panel at 1.2 is 806, inside a 740 px window, and the values ran off the right edge.
-pub const UI_SCALE: f32 = 1.2;
-
-/// **How big the window has to be to hold this screen**, derived rather than guessed. Logical
-/// pixels — which is what `WindowResolution::set` takes, and *not* what `WindowResolution::new`
-/// takes; see `crate::surface`, which owns the target's size after the first frame for exactly that
-/// reason.
-pub fn window_size(kits: usize, maps: usize) -> (f32, f32) {
-    let content = COL * COLS + crate::chrome::PAD * (COLS - 1.0);
-    let width = (content + crate::chrome::PAD * 3.0) * UI_SCALE;
-    (width, content_h(kits, maps) * UI_SCALE)
-}
-
-fn panel(width: f32, height: f32, kind: PanelKind) -> impl Bundle {
-    (
-        Node {
-            flex_direction: FlexDirection::Column,
-            padding: UiRect::all(Val::Px(crate::chrome::PAD)),
-            row_gap: Val::Px(crate::chrome::GAP_ROW),
-            width: Val::Px(width),
-            // Fixed, not content-sized — see [`panel_heights`]. A short list leaves ground below
-            // its last row rather than pulling the panel under it upwards.
-            height: Val::Px(height),
-            ..default()
-        },
-        // **A different surface for a different kind of thing.** The inspector sits on the lighter
-        // ground the editor already uses for a slot, so it does not read as a third list — see
-        // [`PanelKind`] for why looking the same was the whole problem.
-        BackgroundColor(match kind {
-            PanelKind::List => crate::chrome::PANEL_BG,
-            PanelKind::Inspector => crate::chrome::SLOT_BG,
-        }),
-    )
-}
-
 /// **The words carrying the relationship, and they were the faintest thing on screen.**
 ///
 /// `MAPS IN emerge` and `SETTINGS FOR untitled_map` are the only text stating what belongs to what,
@@ -4217,121 +4006,175 @@ fn header(text: &str) -> impl Bundle {
     )
 }
 
-fn spawn_screen(
-    mut commands: Commands,
-    chooser: Res<Chooser>,
-    ui_camera: Query<Entity, With<crate::surface::SurfaceCamera>>,
-) {
-    let (kits, maps) = chooser.catalog.shape();
-    let (list_h, info_h) = panel_heights(kits, maps);
-    // **The UI is drawn to the offscreen camera**, which the window then mirrors — see
-    // `crate::surface`. Named explicitly rather than left to Bevy's default-camera pick, even
-    // though that camera carries `IsDefaultUiCamera` — being explicit is what the guide overlay's
-    // missing target cost once already.
-    let Ok(camera) = ui_camera.single() else {
-        // Loud, because the failure mode is an empty window and no other symptom. The silent
-        // version of this line cost an afternoon.
-        error!("no UI camera — the chooser cannot draw its screen");
-        return;
-    };
-    commands
-        .spawn((
-            UiTargetCamera(camera),
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                flex_direction: FlexDirection::Column,
-                padding: UiRect::all(Val::Px(crate::chrome::PAD * 1.5)),
-                row_gap: Val::Px(crate::chrome::GAP_ROW * 2.0),
-                ..default()
-            },
-            BackgroundColor(crate::chrome::VOID),
-        ))
-        .with_children(|root| {
-            root.spawn((
-                Text::new("emerge-mapper"),
-                TextFont::from_font_size(crate::chrome::text::TAB),
-                TextColor(crate::chrome::LABEL),
-            ));
-            // **Three columns, left to right, each one the contents of the selection beside it.**
-            //
-            // Reported at the keyboard: *"can we make it clearer that the settings refer to a map?
-            // the hierarchy of the data structure isn't clear."* It was not: three panels of equal
-            // weight, with the settings as a full-width footer under both lists, read as three
-            // siblings — when a kit *contains* maps and a map *has* settings.
-            //
-            // Columns are that containment made spatial, and each header names its parent
-            // (`MAPS IN emerge`, `SETTINGS FOR untitled_map`) so the chain is legible without
-            // relying on position alone. It is also exactly the order `Tab` walks, which was
-            // already true and previously invisible.
-            root.spawn(Node {
-                flex_direction: FlexDirection::Row,
-                column_gap: Val::Px(crate::chrome::PAD),
-                ..default()
-            })
-            .with_children(|row| {
-                // **Each column owns what belongs to it.** A map's settings sit under the map list;
-                // a kit's facts sit under the kit list. One shared panel could not say whose it was
-                // — and worse, it never followed the focus, so standing on a kit row you read a
-                // panel about a map two levels down.
-                //
-                // **Maps first, kits second**, asked for at the keyboard on 2026-08-16. The order
-                // was kits-then-maps from when a map lived *inside* a kit and the columns were that
-                // containment made spatial. Maps left the kit directories the same day
-                // (`project.rs`), so the nesting the order was drawing no longer exists: the map is
-                // the job and the kit is what it draws from.
-                row.spawn(Node {
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(crate::chrome::GAP_ROW * 2.0),
-                    ..default()
-                })
-                .with_children(|col| {
-                    col.spawn((panel(COL, list_h, PanelKind::List), ListPanel))
-                        .with_children(|p| {
-                            p.spawn((header("MAPS"), MapsHeader));
-                            p.spawn((Node::default(), MapList));
-                        });
-                    col.spawn((panel(COL, info_h, PanelKind::Inspector), InfoPanel))
-                        .with_children(|p| {
-                            p.spawn((header("MAP INFO"), SettingsHeader));
-                            p.spawn((Node::default(), SettingsList));
-                        });
-                });
-                row.spawn(Node {
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(crate::chrome::GAP_ROW * 2.0),
-                    ..default()
-                })
-                .with_children(|col| {
-                    col.spawn((panel(COL, list_h, PanelKind::List), ListPanel))
-                        .with_children(|p| {
-                            p.spawn(header("KITS"));
-                            p.spawn((Node::default(), KitList));
-                        });
-                    col.spawn((panel(COL, info_h, PanelKind::Inspector), InfoPanel))
-                        .with_children(|p| {
-                            p.spawn((header("KIT INFO"), KitInfoHeader));
-                            p.spawn((Node::default(), KitInfoList));
-                        });
-                });
-            });
-            // **The same size as the hint line below it**, and on the scale. It was 12, which is
-            // off the 9/10/11/13/15/18 scale entirely — and the emphasis it was reaching for is
-            // already carried by `DANGER`. Colour is how this editor shouts; size is what type
-            // role a thing has, and these two bottom lines have the same one.
-            root.spawn((
-                Text::new(String::new()),
-                TextFont::from_font_size(crate::chrome::text::BODY),
-                TextColor(crate::chrome::DANGER),
-                ProblemLine,
-            ));
-            root.spawn((
-                Text::new(String::new()),
-                TextFont::from_font_size(crate::chrome::text::BODY),
-                TextColor(crate::chrome::LABEL),
-                HintLine,
-            ));
+/// **The menu, drawn in the window's own frame.**
+///
+/// # It used to be a fixed-pixel grid in a window it did not fill
+///
+/// Two 300 px columns and panels whose height was computed from the catalogue — `panel_heights`,
+/// `content_h`, `ROW_H = 17.9` measured off a capture — with the whole thing dropped into whatever
+/// window there was. `fit_capture_to_window` said so outright: *"The layout is fixed-size and simply
+/// sits in whatever window there is."* On a 2560x1406 window that left about two fifths of the
+/// screen as ground nothing used, panels sized for twenty rows holding two, and a kit row wrapping
+/// across two lines into its own value column.
+///
+/// It is flex now, in [`crate::chrome::Frame`]'s body — the same frame the editor is drawn in, which
+/// is the point: the application has one answer to how it is laid out. The columns share the width
+/// evenly and the panels share the height, so the screen is full at any window size and a catalogue
+/// twice as long does not want a taller window.
+///
+/// **The columns are capped.** A two-column menu stretched across an ultrawide monitor puts a row's
+/// value a foot from its label, which is the alignment complaint this screen already had once, in
+/// the other direction.
+fn spawn_screen(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
+    // **A menu has no docks and no viewport, and saying so is load-bearing.**
+    //
+    // The frame builds all three for both screens, and the viewport carries `flex_grow: 1` because
+    // in the editor it is defined as whatever is left. Left standing on the menu it competes with
+    // the columns for that same slack and takes a third of the window — which showed up as a wide
+    // empty band down the left, columns a third narrower than their cap, and a kit row wrapping
+    // because of it. One symptom would have been chased; three from one cause is worth the two
+    // lines.
+    //
+    // `Display::None`, so they take no space at all rather than zero width and a gap each.
+    for slot in [frame.left, frame.viewport, frame.right] {
+        commands.entity(slot).insert(Node {
+            display: Display::None,
+            ..default()
         });
+    }
+    commands.entity(frame.body).insert(Node {
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Stretch,
+        justify_content: JustifyContent::Center,
+        column_gap: Val::Px(crate::chrome::PAD),
+        padding: UiRect::all(Val::Px(crate::chrome::PAD * 1.5)),
+        flex_grow: 1.0,
+        min_height: Val::Px(0.0),
+        ..default()
+    });
+
+    commands.entity(frame.body).with_children(|row| {
+        // **Maps first, kits second**, asked for at the keyboard on 2026-08-16. The order was
+        // kits-then-maps from when a map lived *inside* a kit and the columns were that containment
+        // made spatial. Maps left the kit directories the same day (`project.rs`), so the nesting
+        // the order was drawing no longer exists: the map is the job and the kit is what it draws
+        // from.
+        //
+        // **Each column owns what belongs to it.** A map's settings sit under the map list; a kit's
+        // facts sit under the kit list. One shared panel could not say whose it was — and worse, it
+        // never followed the focus, so standing on a kit row you read a panel about a map two levels
+        // down.
+        let column = || Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(crate::chrome::GAP_ROW * 2.0),
+            flex_grow: 1.0,
+            flex_basis: Val::Px(0.0),
+            max_width: Val::Px(COL_MAX),
+            min_width: Val::Px(0.0),
+            ..default()
+        };
+
+        row.spawn(column()).with_children(|col| {
+            col.spawn((list_panel(), ListPanel)).with_children(|p| {
+                p.spawn((header("MAPS"), MapsHeader));
+                p.spawn((Node::default(), MapList));
+            });
+            col.spawn((info_panel(), InfoPanel)).with_children(|p| {
+                p.spawn((header("MAP INFO"), SettingsHeader));
+                p.spawn((Node::default(), SettingsList));
+            });
+        });
+
+        row.spawn(column()).with_children(|col| {
+            col.spawn((list_panel(), ListPanel)).with_children(|p| {
+                p.spawn(header("KITS"));
+                p.spawn((Node::default(), KitList));
+            });
+            col.spawn((info_panel(), InfoPanel)).with_children(|p| {
+                p.spawn((header("KIT INFO"), KitInfoHeader));
+                p.spawn((Node::default(), KitInfoList));
+            });
+        });
+    });
+}
+
+/// **How wide a column is allowed to get.** Two columns filling an ultrawide monitor would put a
+/// row's value a foot from its label — the alignment complaint this screen has already had once,
+/// from the other direction (2026-08-16: *"the alignment of the columns of these list boxes ... don't
+/// align"*).
+const COL_MAX: f32 = 420.0;
+
+/// **The menu's own chrome and status.** The editor fills these two bars with a door's furniture;
+/// the menu has a name and a hint line, and they belong in the same places for the same reason.
+fn spawn_menu_bars(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
+    commands.entity(frame.chrome_bar).with_children(|bar| {
+        bar.spawn((
+            Text::new("emerge-mapper"),
+            TextFont::from_font_size(crate::chrome::text::BODY),
+            TextColor(crate::chrome::LABEL),
+        ));
+    });
+    commands.entity(frame.status).with_children(|band| {
+        // **The refusal first and the hint after it**, both on the same row: the band is one line
+        // and the problem is the half worth reading. `DANGER` carries the emphasis — colour is how
+        // this editor shouts, and size is what type role a thing has.
+        band.spawn((
+            Text::new(String::new()),
+            TextFont::from_font_size(crate::chrome::text::BODY),
+            TextColor(crate::chrome::DANGER),
+            ProblemLine,
+        ));
+        band.spawn(Node {
+            flex_grow: 1.0,
+            ..default()
+        });
+        band.spawn((
+            Text::new(String::new()),
+            TextFont::from_font_size(crate::chrome::text::BODY),
+            TextColor(crate::chrome::LABEL),
+            HintLine,
+        ));
+    });
+}
+
+/// **Read the `Node` back out of a panel bundle**, so a test can assert the shape rather than
+/// re-describe it. The bundle is the one the screen actually spawns; a test that rebuilt the numbers
+/// would be checking its own copy.
+#[cfg(test)]
+fn panel_node(bundle: (Node, BackgroundColor)) -> Node {
+    bundle.0
+}
+
+/// A list panel: takes the height that is left, so a long catalogue does not want a taller window.
+fn list_panel() -> (Node, BackgroundColor) {
+    (
+        Node {
+            flex_direction: FlexDirection::Column,
+            padding: UiRect::all(Val::Px(crate::chrome::PAD)),
+            row_gap: Val::Px(crate::chrome::GAP_ROW),
+            flex_grow: 1.0,
+            min_height: Val::Px(0.0),
+            ..default()
+        },
+        BackgroundColor(crate::chrome::PANEL_BG),
+    )
+}
+
+/// **An inspector, on a different surface from the list above it.** It sits on the lighter ground
+/// the editor already uses for a slot, so it does not read as a third list — looking the same was
+/// the whole problem (see [`PanelKind`]). Sized by its content, because a fact sheet with four rows
+/// in it should not be half the screen.
+fn info_panel() -> (Node, BackgroundColor) {
+    (
+        Node {
+            flex_direction: FlexDirection::Column,
+            padding: UiRect::all(Val::Px(crate::chrome::PAD)),
+            row_gap: Val::Px(crate::chrome::GAP_ROW),
+            flex_shrink: 0.0,
+            ..default()
+        },
+        BackgroundColor(crate::chrome::SLOT_BG),
+    )
 }
 
 /// A list panel, held to the height of the fullest list. See [`panel_heights`].
@@ -4341,31 +4184,6 @@ struct ListPanel;
 /// An inspector panel, held to a fixed height so the fields inside it never move.
 #[derive(Component)]
 struct InfoPanel;
-
-/// **Keep the panels where they are.**
-///
-/// The heights come from the catalogue, not from what each list happens to be showing, so walking
-/// the kit list — which changes what the map list contains — moves nothing. Re-applied every frame
-/// rather than set once at spawn, because creating a kit changes the catalogue and a box measured
-/// before that would clip its own last row.
-fn hold_the_panels_still(
-    chooser: Res<Chooser>,
-    mut lists: Query<&mut Node, (With<ListPanel>, Without<InfoPanel>)>,
-    mut infos: Query<&mut Node, (With<InfoPanel>, Without<ListPanel>)>,
-) {
-    let (kits, maps) = chooser.catalog.shape();
-    let (list_h, info_h) = panel_heights(kits, maps);
-    for mut n in &mut lists {
-        if n.height != Val::Px(list_h) {
-            n.height = Val::Px(list_h);
-        }
-    }
-    for mut n in &mut infos {
-        if n.height != Val::Px(info_h) {
-            n.height = Val::Px(info_h);
-        }
-    }
-}
 
 fn colour(tone: Tone) -> Color {
     match tone {
@@ -4440,16 +4258,35 @@ fn fill(commands: &mut Commands, at: Entity, rows: &[Row], kind: PanelKind) {
                 ..default()
             })
             .with_children(|line| {
+                // **The label takes the slack and the value never wraps.**
+                //
+                // Both halves were plain text in a `SpaceBetween` row with nothing saying which one
+                // yields, so in a 300 px column they both wrapped and a kit read as
+                // `> [=] 82 pieces · only one` / `furniture   on` — the value broken across two
+                // lines and interleaved with its own label. A row is a label column and a value
+                // column; this is what says so.
                 line.spawn((
                     Text::new(left.clone()),
                     TextFont::from_font_size(crate::chrome::text::TAB),
                     TextColor(c),
+                    Node {
+                        flex_grow: 1.0,
+                        // Without this a flex item's automatic minimum size is its content, so the
+                        // label refuses to shrink and pushes the value out of the row instead.
+                        min_width: Val::Px(0.0),
+                        ..default()
+                    },
                 ));
                 if !right.is_empty() {
                     line.spawn((
                         Text::new(right.clone()),
                         TextFont::from_font_size(crate::chrome::text::TAB),
                         TextColor(c),
+                        TextLayout::new(Justify::Right, LineBreak::NoWrap),
+                        Node {
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
                     ));
                 }
             });
@@ -5147,16 +4984,21 @@ mod render_tests {
 #[cfg(feature = "debugger")]
 fn room_for_the_card(
     guide: Res<bevy_debugger_bevy::Guide>,
-    chooser: Res<Chooser>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mut placement: ResMut<bevy_debugger_bevy::GuidePlacement>,
     mut extra: ResMut<ExtraRoom>,
 ) {
-    let (kits, maps) = chooser.catalog.shape();
-    let screen = content_h(kits, maps);
-    // The card hangs just under the hint line. That offset moved the day the screen's height stopped
-    // being a constant, so it is computed beside the height rather than fixed at plugin build — when
-    // the catalog is not yet known.
-    let top = screen - 4.0;
+    // **The card hangs just under the screen, and the screen is now the window.**
+    //
+    // It used to be placed under `content_h` — the menu's own computed height, back when the layout
+    // was a fixed-pixel grid measured from the catalogue. The frame fills the window, so there is no
+    // such number any more and the honest one is the window's own height. Logical pixels, because
+    // that is what the overlay places in.
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let screen = window.resolution.height();
+    let top = screen - CARD_ROOM - 4.0;
     if (placement.top - top).abs() > 0.5 {
         placement.top = top;
     }
