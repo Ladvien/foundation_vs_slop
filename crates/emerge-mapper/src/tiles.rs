@@ -3008,7 +3008,7 @@ struct PackHeader(String);
 
 /// One row for a tile already in the library, carrying its id.
 #[derive(Component, Clone)]
-struct LibraryRow(String);
+pub struct LibraryRow(pub String);
 
 /// The node the candidate list is rebuilt into.
 #[derive(Component)]
@@ -6306,38 +6306,172 @@ fn refresh_lines(
 /// `left`/`right` switch them, which costs no key: they were unbound on this tab while nothing was in
 /// hand, and `docs/tiles_tab_contract.md` recorded exactly why — *"There is one list on this tab, so
 /// there is nothing to switch between."* There are two now.
-fn tab_strip(p: &mut ChildSpawnerCommands, on_kit: bool, kit: usize) {
+/// **Which shelf the list is showing.** Three, in the order work moves through them.
+///
+/// This is not new state: the editor has always had it, spread across two fields nobody drew.
+/// `selected_library_id.is_none()` is *"the arrows are walking the candidates"* and
+/// `Build::browsing.is_some()` is *"the kit list is up"* — and `left`/`right` have always moved
+/// between them. What was missing was any way to see which one you were on, or that a third existed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Shelf {
+    /// Measured, not imported. The `NOT YET IMPORTED` packs.
+    Candidates,
+    /// In `library.ron` — a mesh the editor can build with.
+    Library,
+    /// The tiles already composed from them.
+    Kit,
+}
+
+impl Shelf {
+    /// **The pipeline, and it is why `right` always means deeper.** A mesh is imported into the
+    /// library and the library is composed into the kit, so the strip reads left to right in the
+    /// direction work actually moves. Both tabs then agree about what `left` and `right` mean, which
+    /// they did not when the strip drew a fixed pair regardless of tab.
+    const ORDER: [Shelf; 3] = [Shelf::Candidates, Shelf::Library, Shelf::Kit];
+
+    fn label(self, library: usize, candidates: usize, kit: usize) -> String {
+        match self {
+            Shelf::Candidates => format!("NOT IMPORTED ({candidates})"),
+            Shelf::Library => format!("MESHES ({library})"),
+            Shelf::Kit => format!("KIT ({kit})"),
+        }
+    }
+}
+
+/// A chip in the shelf strip, and which shelf it opens.
+#[derive(Component, Clone, Copy)]
+pub struct ShelfChip(pub Shelf);
+
+/// **The shelves this tab has, as a strip you can read and click.**
+///
+/// # `NOT YET IMPORTED` was a heading at the bottom of the same list
+///
+/// The Meshes tab drew `IN LIBRARY (43)`, its rows, then `NOT YET IMPORTED (696)` and a dozen
+/// collapsed packs — one list doing two jobs, with the second reachable only by scrolling past the
+/// first. Reported at the keyboard, 2026-08-18: *"the not yet imported way at the bottom is not
+/// intuitive."* It is worse than unintuitive: the two halves already have **separate walks** and
+/// **separate cursors**, and `left`/`right` already switched between them. The editor knew they were
+/// two shelves and drew them as one list.
+///
+/// So the strip shows the two shelves *this tab* has — the Meshes tab imports, the Tiles tab
+/// composes — and the list below shows one of them. Every count is of what is shown, per the same
+/// rule the headings kept.
+fn shelf_strip(
+    p: &mut ChildSpawnerCommands,
+    at: Shelf,
+    on_tiles: bool,
+    library: usize,
+    candidates: usize,
+    kit: usize,
+) {
     p.spawn(Node {
         flex_direction: FlexDirection::Row,
         column_gap: Val::Px(10.0),
+        row_gap: Val::Px(crate::chrome::GAP_TIGHT),
+        align_items: AlignItems::Center,
+        // **Wraps, because two counted chips and a hint do not fit `LIST_W`.** Measured in a
+        // capture: `left / right` was clipped at the panel edge, which is the same class of defect
+        // as the kit row that wrapped into its own value column — a fixed width and content that
+        // outgrew it. The hint drops to a second line rather than being cut, and on a wider panel
+        // it stays where it was.
+        flex_wrap: FlexWrap::Wrap,
         ..default()
     })
     .with_children(|row| {
-        for (label, active) in [
-            ("MESHES".to_owned(), !on_kit),
-            (format!("KIT ({kit})"), on_kit),
-        ] {
+        // A tab shows the two shelves its own keys reach: `Meshes` imports (candidates <-> library),
+        // `Tiles` composes (library <-> kit). Drawing all three everywhere would offer a chip whose
+        // key does nothing on this tab, which is the dead-affordance defect the strip has had before.
+        // **Taken from `ORDER`, not written out again.** A second list of the same three shelves is
+        // a second place for the pipeline to be stated, and the whole point of the order is that
+        // both tabs agree about it. Meshes takes the first pair, Tiles the second.
+        let shown = if on_tiles {
+            &Shelf::ORDER[1..3]
+        } else {
+            &Shelf::ORDER[0..2]
+        };
+        for shelf in shown {
+            let active = *shelf == at;
             row.spawn((
-                Text::new(label),
-                TextColor(if active { ACCENT } else { DIM }),
-                TextFont::from_font_size(crate::chrome::text::LABEL),
-            ));
+                ShelfChip(*shelf),
+                Hovered::default(),
+                Node {
+                    padding: crate::chrome::CHIP_PAD,
+                    ..default()
+                },
+                BackgroundColor(if active {
+                    crate::chrome::ROW_SELECTED
+                } else {
+                    Color::NONE
+                }),
+                bevy::picking::Pickable::default(),
+            ))
+            .with_children(|chip| {
+                chip.spawn((
+                    Text::new(shelf.label(library, candidates, kit)),
+                    TextColor(if active { ACCENT } else { DIM }),
+                    TextFont::from_font_size(crate::chrome::text::LABEL),
+                    TextLayout::new(Justify::Left, LineBreak::NoWrap),
+                    bevy::picking::Pickable::IGNORE,
+                ));
+            })
+            .observe(on_shelf_click);
         }
+        // **The idiom, named once.** `left` and `right` walk the strip in the direction it is drawn,
+        // which is the direction work moves — see [`Shelf::ORDER`].
         row.spawn((
-            // **`left` is bound now, so the hint can say it again.** It originally read "left
-            // back" over an unbound key; the first fix reworded the hint to name `Esc`, which made
-            // the prose honest and left the author pressing a key that did nothing. The second fix
-            // was the binding (`Action::KitLeave`) — the strip promised the idiom before the tab
-            // implemented it, and the promise was the right one.
-            Text::new(if on_kit {
-                "  right reopens / left back"
-            } else {
-                "  right for the kit"
-            }),
-            TextColor(DIM),
+            Text::new("left / right"),
+            TextColor(crate::chrome::LABEL),
             TextFont::from_font_size(crate::chrome::text::HINT),
+            TextLayout::new(Justify::Left, LineBreak::NoWrap),
         ));
     });
+}
+
+/// **A chip goes where its key goes**, through the same two fields the keys write — so the pointer
+/// and the keyboard cannot come to disagree about which shelf is up.
+fn on_shelf_click(
+    click: On<Pointer<Click>>,
+    chips: Query<&ShelfChip>,
+    project: Option<Res<Project>>,
+    filters: Option<Res<crate::filter::Filters>>,
+    suggestions: Option<Res<crate::labels::Suggestions>>,
+    mode: Option<Res<Mode>>,
+    mut state: Option<ResMut<ImportState>>,
+    mut build: Option<ResMut<crate::build::Build>>,
+) {
+    let (Ok(chip), Some(project), Some(filters), Some(suggestions), Some(mode), Some(state), Some(build)) = (
+        chips.get(click.entity),
+        project,
+        filters,
+        suggestions,
+        mode,
+        state.as_mut(),
+        build.as_mut(),
+    ) else {
+        return;
+    };
+    match chip.0 {
+        Shelf::Candidates => {
+            build.browsing = None;
+            state.selected_library_id = None;
+        }
+        Shelf::Library => {
+            build.browsing = None;
+            if state.selected_library_id.is_none() {
+                state.selected_library_id = library_ids(
+                    &project,
+                    &filters,
+                    *mode == Mode::Tiles,
+                    Some(&suggestions),
+                )
+                .first()
+                .cloned();
+            }
+            state.focused_pack = None;
+        }
+        // Row 0, exactly as `Action::KitEnter` does.
+        Shelf::Kit => build.browsing = Some(0),
+    }
 }
 
 /// The authored tiles, with the cursor and which one is open for editing.
@@ -6457,6 +6591,106 @@ struct KitRow(usize);
 #[derive(Component)]
 struct ListHeader;
 
+/// **The un-imported shelf: what has been measured and not brought in.**
+///
+/// Lifted out of `rebuild_candidates` when it stopped being the bottom half of the library's list
+/// and became a shelf of its own — see [`shelf_strip`]. The body is unchanged; what moved is that
+/// nothing is drawn above it, so a pack no longer starts wherever the library happened to end.
+fn draw_candidates(
+    p: &mut ChildSpawnerCommands,
+    state: &ImportState,
+    filters: &crate::filter::Filters,
+    project: &Project,
+    not_imported: usize,
+) {
+    let _ = not_imported;
+                if state.candidates.is_empty() {
+            p.spawn((
+                Text::new(if state.scanned {
+                    "every mesh under assets/ is already in the library"
+                } else {
+                    "press Tab to scan"
+                }),
+                TextColor(DIM),
+                TextFont::from_font_size(crate::chrome::text::BODY),
+            ));
+            return;
+        }
+        // **Grouped by pack.** A flat list this long is one you scroll past; grouped by where they came
+        // from it is a dozen headings, and an author importing a kit wants that kit rather than
+        // an alphabet.
+        //
+        // The directory, not `kind` — a candidate has no `kind` yet, that being the thing import
+        // is FOR. The folder an artist put it in is the only categorisation that exists before
+        // anyone has looked at it, and it is usually the right one.
+        // **Excluded packs fall to the bottom, under one collapsed group.**
+        //
+        // They used to sit in place, each folded and muted. That is honest but it is still one
+        // row per excluded pack scattered down a list an author is scrolling to find work in —
+        // and a kit that has excluded six packs pays six rows for a fact it already knows.
+        // Chosen at the keyboard, 2026-08-16: one `EXCLUDED` group at the end.
+        //
+        // Still *listed*, never hidden: a mesh that silently disappeared looks identical to one
+        // the scan never found, and there would be no way back except editing `project.ron` by
+        // hand. The group opens, its packs open, and `Shift+R` on a mesh inside restores it —
+        // which is why the group has to reach all the way down to a row.
+        // **The same partition the arrows walk** (`visible_packs`), so the rows on screen and
+        // the rows the keyboard steps through are one list built once. They were two, and the
+        // walk stepped index order while the list drew pack order — which is why the arrows
+        // stopped dead at a collapsed group.
+        let (offered, excluded_packs) = visible_packs(&state, &filters, &project.policy);
+        for (pack, members) in &offered {
+            draw_pack(p, pack, members, &state, false, !pack_is_open(&state, &project.policy, pack));
+        }
+
+        if !excluded_packs.is_empty() {
+            let meshes: usize = excluded_packs.iter().map(|(_, m)| m.len()).sum();
+            let packs_n = excluded_packs.len();
+            p.spawn((
+                UiButton,
+                Hovered::default(),
+                ExcludedHeader,
+                Node {
+                    width: Val::Percent(100.0),
+                    padding: CHIP_PAD,
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(6.0),
+                    margin: UiRect::top(Val::Px(8.0)),
+                    ..default()
+                },
+                BackgroundColor(HEADER_BG),
+            ))
+            .with_children(|row| {
+                row.spawn((
+                    Node { width: Val::Px(10.0), flex_shrink: 0.0, ..default() },
+                    Text::new(if state.excluded_open { "v" } else { ">" }),
+                    TextColor(MUTED),
+                    TextFont::from_font_size(crate::chrome::text::LABEL),
+                ));
+                row.spawn((
+                    Node { flex_grow: 1.0, ..default() },
+                    Text::new("EXCLUDED"),
+                    TextColor(MUTED),
+                    TextFont::from_font_size(crate::chrome::text::LABEL),
+                ));
+                // Names the state and the way out of it, per `docs/ui.md` §1.4.
+                row.spawn((
+                    Text::new(format!(
+                        "{packs_n} pack(s), {meshes} mesh(es) — {} restores one",
+                        keys::chord(Action::ExcludePack)
+                    )),
+                    TextColor(MUTED),
+                    TextFont::from_font_size(crate::chrome::text::LABEL),
+                ));
+            });
+            if state.excluded_open {
+                for (pack, members) in &excluded_packs {
+                    draw_pack(p, pack, members, &state, true, !pack_is_open(&state, &project.policy, pack));
+                }
+            }
+        }
+}
+
 /// Wholesale rather than diffed: it changes on a rescan and on nothing else, and a diffing rebuild of
 /// a list this long would be more code than the thing it saves.
 fn rebuild_candidates(
@@ -6500,11 +6734,22 @@ fn rebuild_candidates(
     let kit = emerge_core::census::of_catalog(&project.library, &project.compositions.compositions)
         .compositions;
 
+    // **Which shelf is up.** Not new state — see [`Shelf`]. The Tiles tab has only the library and
+    // the kit, so a transient `selected_library_id: None` there means "nothing picked yet", not
+    // "show me the candidates"; the walk seeds it on the first `down`.
+    let at = if browsing.is_some() {
+        Shelf::Kit
+    } else if on_tiles || state.selected_library_id.is_some() {
+        Shelf::Library
+    } else {
+        Shelf::Candidates
+    };
+
     // The strip rides the header node, not the list — frozen above the scroll. See [`ListHeader`].
     for header in &headers {
         commands.entity(header).despawn_related::<Children>();
         commands.entity(header).with_children(|p| {
-            tab_strip(p, browsing.is_some(), kit);
+            shelf_strip(p, at, on_tiles, in_library, not_imported, kit);
         });
     }
     for list in &lists {
@@ -6514,9 +6759,16 @@ fn rebuild_candidates(
                 kit_rows(p, &project, row);
                 return;
             }
-            // **What is already a tile**, above what could become one. Both halves are "configuring
-            // the tiles", and an editor that can add but not remove makes a mistyped import permanent.
-            crate::chrome::section(p, &format!("IN LIBRARY  ({in_library})"));
+            // **One shelf, because the strip above says which.** These two were stacked — the
+            // library's rows, then a `NOT YET IMPORTED` heading, then a dozen collapsed packs — so
+            // the second shelf was reachable only by scrolling past the first, and the count that
+            // told you how much was down there was itself below the fold. The headings are gone with
+            // the stacking: the chip carries the count now, and saying it twice is what
+            // `chrome.rs` exists to stop.
+            if at == Shelf::Candidates {
+                draw_candidates(p, &state, &filters, &project, not_imported);
+                return;
+            }
             for d in project
                 .library
                 .descriptors
@@ -6543,92 +6795,8 @@ fn rebuild_candidates(
                 );
             }
 
-            crate::chrome::section(p, &format!("NOT YET IMPORTED  ({not_imported})"));
-            if state.candidates.is_empty() {
-                p.spawn((
-                    Text::new(if state.scanned {
-                        "every mesh under assets/ is already in the library"
-                    } else {
-                        "press Tab to scan"
-                    }),
-                    TextColor(DIM),
-                    TextFont::from_font_size(crate::chrome::text::BODY),
-                ));
-                return;
-            }
-            // **Grouped by pack.** A flat list this long is one you scroll past; grouped by where they came
-            // from it is a dozen headings, and an author importing a kit wants that kit rather than
-            // an alphabet.
-            //
-            // The directory, not `kind` — a candidate has no `kind` yet, that being the thing import
-            // is FOR. The folder an artist put it in is the only categorisation that exists before
-            // anyone has looked at it, and it is usually the right one.
-            // **Excluded packs fall to the bottom, under one collapsed group.**
-            //
-            // They used to sit in place, each folded and muted. That is honest but it is still one
-            // row per excluded pack scattered down a list an author is scrolling to find work in —
-            // and a kit that has excluded six packs pays six rows for a fact it already knows.
-            // Chosen at the keyboard, 2026-08-16: one `EXCLUDED` group at the end.
-            //
-            // Still *listed*, never hidden: a mesh that silently disappeared looks identical to one
-            // the scan never found, and there would be no way back except editing `project.ron` by
-            // hand. The group opens, its packs open, and `Shift+R` on a mesh inside restores it —
-            // which is why the group has to reach all the way down to a row.
-            // **The same partition the arrows walk** (`visible_packs`), so the rows on screen and
-            // the rows the keyboard steps through are one list built once. They were two, and the
-            // walk stepped index order while the list drew pack order — which is why the arrows
-            // stopped dead at a collapsed group.
-            let (offered, excluded_packs) = visible_packs(&state, &filters, &project.policy);
-            for (pack, members) in &offered {
-                draw_pack(p, pack, members, &state, false, !pack_is_open(&state, &project.policy, pack));
-            }
+            draw_candidates(p, &state, &filters, &project, not_imported);
 
-            if !excluded_packs.is_empty() {
-                let meshes: usize = excluded_packs.iter().map(|(_, m)| m.len()).sum();
-                let packs_n = excluded_packs.len();
-                p.spawn((
-                    UiButton,
-                    Hovered::default(),
-                    ExcludedHeader,
-                    Node {
-                        width: Val::Percent(100.0),
-                        padding: CHIP_PAD,
-                        flex_direction: FlexDirection::Row,
-                        column_gap: Val::Px(6.0),
-                        margin: UiRect::top(Val::Px(8.0)),
-                        ..default()
-                    },
-                    BackgroundColor(HEADER_BG),
-                ))
-                .with_children(|row| {
-                    row.spawn((
-                        Node { width: Val::Px(10.0), flex_shrink: 0.0, ..default() },
-                        Text::new(if state.excluded_open { "v" } else { ">" }),
-                        TextColor(MUTED),
-                        TextFont::from_font_size(crate::chrome::text::LABEL),
-                    ));
-                    row.spawn((
-                        Node { flex_grow: 1.0, ..default() },
-                        Text::new("EXCLUDED"),
-                        TextColor(MUTED),
-                        TextFont::from_font_size(crate::chrome::text::LABEL),
-                    ));
-                    // Names the state and the way out of it, per `docs/ui.md` §1.4.
-                    row.spawn((
-                        Text::new(format!(
-                            "{packs_n} pack(s), {meshes} mesh(es) — {} restores one",
-                            keys::chord(Action::ExcludePack)
-                        )),
-                        TextColor(MUTED),
-                        TextFont::from_font_size(crate::chrome::text::LABEL),
-                    ));
-                });
-                if state.excluded_open {
-                    for (pack, members) in &excluded_packs {
-                        draw_pack(p, pack, members, &state, true, !pack_is_open(&state, &project.policy, pack));
-                    }
-                }
-            }
         });
     }
 }

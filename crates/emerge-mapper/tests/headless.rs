@@ -7494,9 +7494,31 @@ fn the_list_tab_strip_sits_outside_the_scroll_container() {
         Some(false),
         "the tab strip must have no scrolling ancestor — frozen above the list"
     );
-    assert_eq!(
-        scrolled(&mut app, "IN LIBRARY"),
-        Some(true),
+    // **The row MARKER, not a string.** This looked for the `IN LIBRARY` heading, which is gone —
+    // the shelf is a chip in the strip now and it carries the count, so saying it twice was the
+    // drift `chrome.rs` exists to stop. Re-pointing it at the row's text was the obvious fix and the
+    // wrong one: a descriptor id appears in the detail pane too, and the helper takes whichever the
+    // query reaches first. `LibraryRow` is what a row IS.
+    let row = app
+        .world_mut()
+        .query_filtered::<Entity, With<emerge_mapper::tiles::LibraryRow>>()
+        .iter(app.world())
+        .next()
+        .expect("the library shelf draws rows on the Tiles tab");
+    let mut e = row;
+    let mut inside_scroll = false;
+    while let Some(child_of) = app.world().get::<ChildOf>(e) {
+        e = child_of.0;
+        if app
+            .world()
+            .get::<Node>(e)
+            .is_some_and(|n| n.overflow.y == OverflowAxis::Scroll)
+        {
+            inside_scroll = true;
+        }
+    }
+    assert!(
+        inside_scroll,
         "the rows themselves still live in the scroll container"
     );
 }
