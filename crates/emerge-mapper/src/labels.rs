@@ -1047,7 +1047,71 @@ pub(crate) fn paint_labels_badge(
 /// puzzle. The lists arrive already deduplicated and in vocabulary order ([`vlm::validate`]'s
 /// contract, the `on_tag_chip` sort rule), so diffs show real changes only. Fields the suggestion
 /// does not carry stay untouched; undo covers regret like any other edit.
-pub fn apply_fields(d: &mut emerge_core::descriptor::Descriptor, s: &Suggestion) {
+/// **The effects a KIND implies, which no render can show.**
+///
+/// Reported from the keyboard, 2026-08-18: *"I just saw a lamp go by without `uses electricity` and
+/// a bed go by without `stamina-recharge`."* Measured against the run behind that: every light came
+/// back `["emit"]` and every bed, sofa, table, chair, drawer, bin and plant came back `[]`. Neither
+/// tag has ever been proposed by the model.
+///
+/// **That is the 2026-08-15 fix working exactly as written, and it should stay written.** A barrel
+/// came back tagged `uses-electricity`, so `vlm::axis_lines` now tells the model, for this axis
+/// only, *"do not infer it from what the object is made of, what it might contain, or where it
+/// might be plugged in"*. A lamp being plugged in is that inference. Loosening it would reopen the
+/// door that fix closed, and cost a 778-mesh run to find out.
+///
+/// So these two are not asked for. **A bed restores stamina because this game says beds do** — it
+/// is a property of the word, not of the picture, and the right oracle for it is a table. Same
+/// argument `PromptCtx::front_measured` already makes about symmetry: two renders cannot settle
+/// what a vertex buffer knows, and here two renders cannot settle what the design knows.
+///
+/// `emit` and `screen` are deliberately absent from this table. Those ARE visible — a luminous panel
+/// looks luminous — and they are the half the model is good at.
+const IMPLIED_BY_KIND: &[(&str, &str)] = &[
+    ("light", "uses-electricity"),
+    ("appliance", "uses-electricity"),
+    ("terminal", "uses-electricity"),
+    ("machinery", "uses-electricity"),
+    ("bed", "stamina-recharge"),
+];
+
+/// **Recompute the derived half of `effects` from `kind`** — the whole of it, so this is idempotent
+/// and there is one path rather than a merge.
+///
+/// It REMOVES as well as adds, and only ever touches the tokens [`IMPLIED_BY_KIND`] owns: a piece
+/// retyped from `light` to `decor` must stop claiming to use electricity, or the tag becomes a thing
+/// that can only ever be turned on. The consequence is that these two tokens are not hand-authorable
+/// — set the kind and the effect follows — which is what makes them trustworthy to read.
+///
+/// `order` is the effects axis in vocabulary order, so a settled list serializes identically to a
+/// hand-tagged one and a diff of the library shows real changes only (`tiles::on_tag_chip`'s rule).
+pub(crate) fn settle_implied_effects(
+    d: &mut emerge_core::descriptor::Descriptor,
+    order: &[String],
+) {
+    let owned = |e: &str| IMPLIED_BY_KIND.iter().any(|(_, eff)| *eff == e);
+    let mut want: Vec<&str> = Vec::new();
+    for (kind, eff) in IMPLIED_BY_KIND {
+        if d.kind.iter().any(|k| k == kind) && !want.contains(eff) {
+            want.push(eff);
+        }
+    }
+    d.effects
+        .retain(|e| !owned(e) || want.contains(&e.as_str()));
+    for eff in want {
+        if !d.effects.iter().any(|e| e == eff) {
+            d.effects.push(eff.to_owned());
+        }
+    }
+    d.effects
+        .sort_by_key(|t| order.iter().position(|o| o == t).unwrap_or(usize::MAX));
+}
+
+pub fn apply_fields(
+    d: &mut emerge_core::descriptor::Descriptor,
+    s: &Suggestion,
+    effects_order: &[String],
+) {
     d.kind = s.kind.clone();
     d.effects = s.effects.clone();
     d.look = s.look.clone();
@@ -1069,6 +1133,9 @@ pub fn apply_fields(d: &mut emerge_core::descriptor::Descriptor, s: &Suggestion)
     if let Some(group) = &s.group {
         d.placement.group = Some(group.clone());
     }
+    // **Inside, not beside.** The derived half of `effects` has to follow every kind that lands, and
+    // a caller that has to remember to call it is a caller that eventually does not.
+    settle_implied_effects(d, effects_order);
 }
 
 // ── the persistent cache ─────────────────────────────────────────────────────────────────────────
@@ -1211,6 +1278,94 @@ mod tests {
         )
         .unwrap_or_else(|e| panic!("{e}"));
         dir
+    }
+
+    /// **A lamp uses electricity because it is a lamp, not because a render shows a plug.**
+    ///
+    /// Reported from the keyboard, 2026-08-18. The model is never asked this, so the test is about
+    /// the table: what it adds, what it takes away again, and what it leaves alone.
+    #[test]
+    fn a_kind_implies_the_effects_no_render_can_show() {
+        use emerge_core::descriptor::Descriptor;
+        let order = effects_order();
+        let effects = |d: &Descriptor| d.effects.clone();
+
+        let mut d = Descriptor {
+            kind: vec!["light".to_owned()],
+            ..Default::default()
+        };
+        settle_implied_effects(&mut d, &order);
+        assert_eq!(effects(&d), vec!["uses-electricity".to_owned()]);
+
+        // **Derived means recomputed, not merged.** A piece retyped away from `light` must stop
+        // claiming to use electricity, or the tag is one that can only ever be turned on.
+        d.kind = vec!["decor".to_owned()];
+        settle_implied_effects(&mut d, &order);
+        assert!(
+            effects(&d).is_empty(),
+            "a kind that no longer implies it takes it away: {:?}",
+            effects(&d)
+        );
+
+        // It never touches the half the model IS good at — `emit` is visible, and stays.
+        d.kind = vec!["light".to_owned()];
+        d.effects = vec!["emit".to_owned()];
+        settle_implied_effects(&mut d, &order);
+        assert!(effects(&d).contains(&"emit".to_owned()));
+        assert!(effects(&d).contains(&"uses-electricity".to_owned()));
+
+        // Idempotent, because it is a recomputation rather than an append.
+        let once = effects(&d);
+        settle_implied_effects(&mut d, &order);
+        assert_eq!(effects(&d), once);
+
+        let mut bed = Descriptor {
+            kind: vec!["bed".to_owned()],
+            ..Default::default()
+        };
+        settle_implied_effects(&mut bed, &order);
+        assert_eq!(effects(&bed), vec!["stamina-recharge".to_owned()]);
+
+        // And it rides `apply_fields`, so the batch and `U` get it without asking.
+        let mut applied = Descriptor::default();
+        let mut s = suggestion();
+        s.kind = vec!["light".to_owned()];
+        s.effects = vec![];
+        apply_fields(&mut applied, &s, &order);
+        assert!(
+            applied.effects.iter().any(|e| e == "uses-electricity"),
+            "a proposal that says nothing about effects still lands with the implied one"
+        );
+    }
+
+    /// **Every word this rule names still exists in the shipped vocabulary.**
+    ///
+    /// The table is strings, so renaming a token in `vocab.ron` would leave the rule pointing at a
+    /// word nothing has — and it would fail by going quiet, which is the same failure mode as the
+    /// four unread affordance tokens that made `vocab.ron` a closed table in the first place. This
+    /// is that audit run from the other side: a reader with no token.
+    #[test]
+    fn the_implied_effects_table_names_only_shipped_tokens() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let text = std::fs::read_to_string(root.join("assets/emerge/vocab.ron"))
+            .unwrap_or_else(|e| panic!("the shipped vocabulary must be readable: {e}"));
+        let v: emerge_core::vocab::Vocabularies =
+            ron::from_str(&text).unwrap_or_else(|e| panic!("{e}"));
+        for (kind, effect) in IMPLIED_BY_KIND {
+            assert!(
+                v.kind.contains(kind),
+                "`{kind}` is not a kind in the shipped vocabulary"
+            );
+            assert!(
+                v.effects.contains(effect),
+                "`{effect}` is not an effect in the shipped vocabulary"
+            );
+        }
+    }
+
+    /// The DOES axis in vocabulary order, which `apply_fields` settles the derived half against.
+    fn effects_order() -> Vec<String> {
+        vocab().effects.names().map(str::to_owned).collect()
     }
 
     fn vocab() -> emerge_core::vocab::Vocabularies {
@@ -1644,10 +1799,17 @@ mod tests {
         let mut s = suggestion(); // kind: [light], effects: [emit], look: [], mount: OnWall, note: Some
         s.rooms = vec![];
         s.group = None;
-        apply_fields(&mut d, &s);
+        apply_fields(&mut d, &s, &effects_order());
 
         assert_eq!(d.kind, vec!["light".to_owned()], "kind replaced");
-        assert_eq!(d.effects, vec!["emit".to_owned()], "effects replaced");
+        // **Replacement, and then the settle** — the proposal carried `["emit"]` and the `light`
+        // kind adds the one effect no render can show. See `settle_implied_effects`; the axis is
+        // still replaced rather than merged, which is what the `worn` -> `[]` assertion below pins.
+        assert_eq!(
+            d.effects,
+            vec!["emit".to_owned(), "uses-electricity".to_owned()],
+            "effects replaced, then the kind's implied effect settled onto them"
+        );
         assert!(
             d.look.is_empty(),
             "an empty proposed axis clears — replacement, not union"
@@ -1670,7 +1832,7 @@ mod tests {
         let mut s = suggestion();
         s.rooms = vec!["kitchen".to_owned()];
         s.group = Some("cook_set".to_owned());
-        apply_fields(&mut d, &s);
+        apply_fields(&mut d, &s, &effects_order());
         assert_eq!(d.placement.rooms, vec!["kitchen".to_owned()]);
         assert_eq!(d.placement.group.as_deref(), Some("cook_set"));
 
@@ -1686,7 +1848,7 @@ mod tests {
         });
         let before_align_rotate = d.align.rotate;
         let before_extent = d.extent.clone();
-        apply_fields(&mut d, &s);
+        apply_fields(&mut d, &s, &effects_order());
         assert_eq!(d.align.front, Some(emerge_core::descriptor::Face::South));
         assert_eq!(d.align.rotate, before_align_rotate, "no rotation applied");
         assert_eq!(d.extent, before_extent, "no re-measure smuggled in");

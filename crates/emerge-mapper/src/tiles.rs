@@ -4612,6 +4612,10 @@ pub(crate) fn apply_suggestion(
         return;
     }
     let history_before = state.snapshot(project);
+    // **Read before the borrow.** `apply_fields` settles the derived half of `effects` and needs the
+    // axis in vocabulary order to do it, and that order cannot be read out of `project` while
+    // `project.measured` is mutably borrowed below. Same shape as `on_tag_chip`.
+    let effects_order: Vec<String> = project.vocab.effects.names().map(str::to_owned).collect();
     let Some((d, where_to)) = state.at_target(&target, &mut project.measured) else {
         state
             .status
@@ -4624,7 +4628,7 @@ pub(crate) fn apply_suggestion(
             .problem("not applied — the mesh changed under the proposal".to_owned());
         return;
     }
-    crate::labels::apply_fields(d, &entry.suggestion);
+    crate::labels::apply_fields(d, &entry.suggestion, &effects_order);
     state.record(history_before);
     let said = persist(
         project,
@@ -5126,15 +5130,18 @@ fn on_tag_chip(
     };
     // **Both the token and the vocabulary order come out first, owned.** What follows needs a mutable
     // borrow of the same `Project`, and the sort key cannot be read from it while that is held.
-    let (token, order) = {
+    let (token, order, effects_order) = {
         let names: Vec<String> = chip
             .axis
             .tokens(&project.vocab)
             .names()
             .map(str::to_owned)
             .collect();
+        // The DOES axis in vocabulary order, for the settle below. Read here for the same reason
+        // everything else in this block is: the write needs `project` mutably.
+        let effects: Vec<String> = project.vocab.effects.names().map(str::to_owned).collect();
         match names.get(chip.token) {
-            Some(t) => (t.clone(), names),
+            Some(t) => (t.clone(), names, effects),
             None => return,
         }
     };
@@ -5159,6 +5166,12 @@ fn on_tag_chip(
             list.push(token.clone());
             list.sort_by_key(|t| order.iter().position(|o| o == t).unwrap_or(usize::MAX));
         }
+    }
+    // **A kind typed by hand implies the same effects a labelled one does.** The rule is about the
+    // word, not about who wrote it — so `uses-electricity` follows a chip click exactly as it
+    // follows a proposal, and stops following when the kind is clicked off again.
+    if chip.axis == Axis::Kind {
+        crate::labels::settle_implied_effects(d, &effects_order);
     }
     let said = format!("{} tags updated", chip.axis.label().to_lowercase());
     state.record(history_before);
