@@ -9295,3 +9295,50 @@ fn the_frame_owns_position_and_carries_no_hover() {
         );
     }
 }
+
+/// **The tab strip answers a press, and it is not a `Button`.**
+///
+/// The chips looked pressable from the day they were written — `UiButton`, `Hovered`, a hover tint
+/// — and answered nothing: `on_tab_click` was deleted when the strip became per-door, leaving an
+/// affordance advertising a verb it did not have, against `docs/ui.md` §4.2's parity rule.
+///
+/// Restoring it **as a `Button`** was tried and regressed
+/// `the_tile_feedback_script_can_actually_be_followed`, because a focused `ui_widgets::Button` also
+/// fires `Activate` on `Enter` and the guide script's commit key changed panel out from under the
+/// step. The note left behind concluded it needed "a focus decision, not just an observer"; what it
+/// actually needed was for the chip to stop being a `Button`.
+///
+/// So this pins the shape rather than the behaviour, because the shape is what regressed: a `Tab`
+/// carrying `Button` is the `Enter`-steals-the-panel bug returning, and it would be found by a
+/// guide script rather than here.
+#[test]
+fn a_tab_is_not_a_button() {
+    let root = Fixture::new("tab-not-a-button")
+        .descriptor("wall", "alpha")
+        .place("wall", (0.0, 0.0))
+        .build("test_map");
+    let mut app = harness::build_headless(&root, "test_map", None)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    app.update();
+
+    let mut tabs = app
+        .world_mut()
+        .query_filtered::<(), With<emerge_mapper::tiles::Tab>>();
+    let count = tabs.iter(app.world()).count();
+    assert!(
+        count >= 1,
+        "expected the door's strip; found {count} tabs. A query that stops seeing them makes the \
+         assertion below vacuous."
+    );
+
+    let mut buttons = app.world_mut().query_filtered::<(), (
+        With<emerge_mapper::tiles::Tab>,
+        With<bevy::ui_widgets::Button>,
+    )>();
+    assert_eq!(
+        buttons.iter(app.world()).count(),
+        0,
+        "a tab carrying `Button` also fires `Activate` on `Enter`, which is how the commit key came \
+         to change panel out from under a guide step. It is a `Pointer<Click>` observer instead."
+    );
+}

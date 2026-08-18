@@ -3990,6 +3990,7 @@ impl Plugin for ChooserPlugin {
 /// left a third of the added height empty. The slack that remains is deliberate — a card is sized
 /// by its own text, so a number tight against one step would clip the next, and clipping an
 /// instruction is the failure this whole placement exists to avoid.
+#[cfg(feature = "debugger")]
 const CARD_ROOM: f32 = 200.0;
 
 /// **The words carrying the relationship, and they were the faintest thing on screen.**

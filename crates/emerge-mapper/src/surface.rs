@@ -150,6 +150,15 @@ impl Plugin for SurfacePlugin {
                     .after(PickingSystems::ProcessInput)
                     .before(PickingSystems::Backend),
             );
+
+        // **Guarded at the registration as well as the definition.** `debugger` is default-on for
+        // this editor, but a build without it must still compile — and a `cfg`'d system named in an
+        // unguarded `add_systems` is the shape that only fails on the configuration nobody runs.
+        #[cfg(feature = "debugger")]
+        app.add_systems(
+            First,
+            inject_clicks.after(bevy::picking::PickingSystems::Input),
+        );
     }
 }
 
@@ -387,6 +396,74 @@ fn fit_viewport_to_frame(
     });
     if !same {
         camera.viewport = Some(want);
+    }
+}
+
+/// **An injected click has to become a picking event, or the interface is look-but-do-not-touch.**
+///
+/// `retarget_pointer` gets an agent's cursor as far as `Hovered` — a row lights, a tab lights — and
+/// then nothing happens when the button goes down. The reason is one layer further in:
+/// `bevy_picking`'s `mouse_pick_events` reads **`WindowEvent`** messages, and takes a press's
+/// position from the real cursor it has been tracking (`bevy_picking-0.19.0/src/input.rs:161`,
+/// `position: *cursor_last`). The debugger writes `MouseButtonInput` messages, which `InputPlugin`
+/// folds into `ButtonInput` — so the button is pressed as far as every key handler in this editor is
+/// concerned, and invisible to every observer.
+///
+/// That gap is why the tab strip could be *hovered* over BRP and not *clicked*, and it would have
+/// been read as "the observer is wrong" by whoever looked next.
+///
+/// So when — and only when — an agent has taken the cursor, the button drives picking too:
+/// `PointerAction::Press`/`Release` at [`crate::view::Pointer`]'s position on the surface. **The
+/// gate is the injected cursor**, not a flag of its own, because that is already the crate's rule
+/// for who owns the pointer (`bevy_debugger_bevy::cursor_position`: *"Precedence, not fallback"*).
+/// With no injected cursor this writes nothing and the real mouse takes its ordinary path, so a
+/// person's click is never doubled.
+///
+/// `First`, after `PickingSystems::Input`, because `PointerInput` is *consumed* in `PreUpdate` by
+/// `ProcessInput` — emitted any later and it would be read a frame after the press.
+#[cfg(feature = "debugger")]
+fn inject_clicks(
+    surface: Option<Res<Surface>>,
+    injected: Option<Res<bevy_debugger_bevy::DebugCursor>>,
+    pointer: Option<Res<crate::view::Pointer>>,
+    mut presses: MessageReader<bevy::input::mouse::MouseButtonInput>,
+    mut out: MessageWriter<bevy::picking::pointer::PointerInput>,
+) {
+    use bevy::input::ButtonState;
+    use bevy::picking::pointer::{Location, PointerAction, PointerButton, PointerId, PointerInput};
+
+    let (Some(surface), Some(injected), Some(pointer)) = (surface, injected, pointer) else {
+        return;
+    };
+    // No injected cursor means the real mouse owns the pointer, and `mouse_pick_events` is already
+    // doing this job with the position winit gave it.
+    if injected.0.is_none() {
+        presses.clear();
+        return;
+    }
+    let Some(at) = pointer.0 else {
+        presses.clear();
+        return;
+    };
+    let location = Location {
+        target: bevy::camera::NormalizedRenderTarget::Image(ImageRenderTarget {
+            handle: surface.image.clone(),
+            scale_factor: 1.0,
+        }),
+        position: at,
+    };
+    for press in presses.read() {
+        let button = match press.button {
+            bevy::input::mouse::MouseButton::Left => PointerButton::Primary,
+            bevy::input::mouse::MouseButton::Right => PointerButton::Secondary,
+            bevy::input::mouse::MouseButton::Middle => PointerButton::Middle,
+            _ => continue,
+        };
+        let action = match press.state {
+            ButtonState::Pressed => PointerAction::Press(button),
+            ButtonState::Released => PointerAction::Release(button),
+        };
+        out.write(PointerInput::new(PointerId::Mouse, location.clone(), action));
     }
 }
 

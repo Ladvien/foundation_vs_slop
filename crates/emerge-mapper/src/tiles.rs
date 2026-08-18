@@ -2910,7 +2910,7 @@ pub(crate) struct ExcludedHeader;
 /// One tab in the strip, carrying the mode it selects. `pub(crate)` so the anim bench's stale
 /// badge can find its own tab and repaint the label in place.
 #[derive(Component, Clone, Copy)]
-pub(crate) struct Tab(pub(crate) Mode);
+pub struct Tab(pub Mode);
 
 /// The tab's name, so the active one can be lit without touching its key.
 #[derive(Component)]
@@ -3275,7 +3275,8 @@ fn spawn_tab_strip(
                 // `Action::tab_slot(i)`, so `1` is the door's first panel whichever panel that is.
                 let chord = Action::tab_slot(i).map(crate::keys::chord);
                 p.spawn((
-                    UiButton,
+                    // **Deliberately not a `UiButton`** — see [`click_tab`]. `Hovered` is what
+                    // `style_tabs` lights it with, and it is all that was ever needed.
                     Hovered::default(),
                     Tab(mode),
                     Node {
@@ -3331,19 +3332,21 @@ fn spawn_tab_strip(
                         },
                         TabBadge,
                     ));
-                });
+                })
+                .observe(click_tab);
             }
         });
 }
 
-/// **The tab chips are keyboard-driven, and the pointer does not reach them.**
+/// **The tab chips answer the pointer again, and this is the record of how.**
 ///
-/// `on_tab_click` was deleted when the strip became per-door; the chip is still a `ui_widgets::Button`
-/// carrying `Hovered`, and `style_tabs` still lights it — so it advertises a press it does not answer.
-/// Restoring the observer was tried here and regressed `the_tile_feedback_script_can_actually_be_followed`:
-/// a focused `Button` also fires `Activate` on `Enter`, so the script's commit key changed panel out
-/// from under the step. Wiring it back needs a focus decision, not just an observer — until then the
-/// honest fix is the other direction, and `docs/ui.md` §4.2's parity rule says which.
+/// `on_tab_click` was deleted when the strip became per-door, and for a while the chip was a
+/// `ui_widgets::Button` carrying `Hovered` that `style_tabs` lit — advertising a press it did not
+/// answer. Restoring the observer regressed `the_tile_feedback_script_can_actually_be_followed`,
+/// because a focused `Button` also fires `Activate` on `Enter` and the script's commit key changed
+/// panel out from under the step. The note left here concluded it "needs a focus decision, not just
+/// an observer", and that was one word too strong: it needed the chip to stop being a `Button`.
+/// [`click_tab`] is the answer — a `Pointer<Click>` observer, no focus, no `Activate`.
 /// Light the active tab. The inactive one stays legible rather than greyed to nothing — a tab you
 /// cannot read is a tab you do not know is there.
 fn style_tabs(
@@ -3610,14 +3613,57 @@ fn tab_shortcuts(
         let Some(action) = Action::tab_slot(i) else {
             continue;
         };
-        if keys::just_pressed(&keyboard, *live, action) && *mode != want {
-            *mode = want;
-            if want == Mode::Meshes && !state.scanned {
-                scan(&project, &mut state);
-            }
+        if keys::just_pressed(&keyboard, *live, action) {
+            enter_tab(want, &project, &mut mode, &mut state);
             return;
         }
     }
+}
+
+/// **Go to a panel** — the one step, so the key and the click cannot come to mean different things.
+///
+/// The scan-on-arrival is the part that would drift: entering Meshes for the first time is what
+/// fills the library list, and a second way in that forgot it would show an empty tab exactly once,
+/// on the path nobody tested.
+fn enter_tab(want: Mode, project: &Project, mode: &mut Mode, state: &mut ImportState) {
+    if *mode == want {
+        return;
+    }
+    *mode = want;
+    if want == Mode::Meshes && !state.scanned {
+        scan(project, state);
+    }
+}
+
+/// **The strip answers a press, and it is not a `Button`.**
+///
+/// The chips have looked pressable since they were written — `UiButton`, `Hovered`, a hover tint —
+/// and answered nothing: `on_tab_click` was deleted when the strip became per-door, leaving an
+/// affordance advertising a verb it did not have. `docs/ui.md` §4.2's parity rule says everything
+/// reachable by mouse is reachable by keyboard *and the reverse*.
+///
+/// Restoring it as a `Button` was tried and **regressed
+/// `the_tile_feedback_script_can_actually_be_followed`**: a focused `ui_widgets::Button` also fires
+/// `Activate` on `Enter`, so the guide script's commit key changed panel out from under the step.
+/// The note left behind said wiring it back "needs a focus decision, not just an observer" — and
+/// that reading was one word too strong. It needs the chip to stop being a `Button`. A press is a
+/// press; `Enter` belongs to whatever has the keyboard, and a tab strip never should.
+///
+/// So: no `Button`, no `Activate`, no focus — a `Pointer<Click>` observer that walks the same
+/// [`enter_tab`] the key does. It bubbles, so a click on the chip's chord or label reaches the chip.
+fn click_tab(
+    click: On<Pointer<Click>>,
+    tabs: Query<&Tab>,
+    project: Option<Res<Project>>,
+    mode: Option<ResMut<Mode>>,
+    state: Option<ResMut<ImportState>>,
+) {
+    let (Ok(tab), Some(project), Some(mut mode), Some(mut state)) =
+        (tabs.get(click.entity), project, mode, state)
+    else {
+        return;
+    };
+    enter_tab(tab.0, &project, &mut mode, &mut state);
 }
 
 /// **`R` rescans**, because meshes arrive while the editor is open — an importer that only sees what
