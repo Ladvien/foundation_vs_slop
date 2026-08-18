@@ -881,7 +881,7 @@ mod tests {
     #[test]
     fn the_mirror_is_not_on_the_layer_it_mirrors() {
         assert_ne!(
-            MIRROR_LAYER, 0,
+            crate::surface::MIRROR_LAYER, 0,
             "layer 0 is where the UI camera draws; a mirror there renders its own target"
         );
     }
@@ -3971,7 +3971,6 @@ impl Plugin for ChooserPlugin {
             root: self.root.clone(),
             preselect: self.preselect.clone(),
         })
-        .add_plugins(ChooserCapturePlugin)
         // **`PostStartup`, not `Startup.after(..)`.** Ordering systems does not flush commands: a
         // camera spawned in `Startup` does not exist in the World until that schedule ends, so an
         // `.after()` here found no camera, returned early, and drew no interface at all — a black
@@ -3983,7 +3982,7 @@ impl Plugin for ChooserPlugin {
         // sync point between them, which is what `PostStartup` was standing in for.
         .add_systems(
             OnEnter(crate::screen::Screen::Menu),
-            (build_chooser, spawn_capture_rig, spawn_screen).chain(),
+            (build_chooser, spawn_screen).chain(),
         )
         // **The chooser's own entities die with the screen.** `DespawnOnExit` is Bevy's own
         // state-scoping, so this is one component per root rather than a teardown list somebody has
@@ -3991,7 +3990,7 @@ impl Plugin for ChooserPlugin {
         // worth spending a whole reload to avoid.
         .add_systems(
             OnExit(crate::screen::Screen::Menu),
-            (tear_down_menu, give_back_the_ui_scale),
+            tear_down_menu,
         )
         // **Text before chords, as `keys::Phase` orders them in the editor**: a field with the
         // keyboard consumes a keystroke before anything reads it as a verb, or typing `n` into a
@@ -4168,7 +4167,7 @@ pub const UI_SCALE: f32 = 1.2;
 
 /// **How big the window has to be to hold this screen**, derived rather than guessed. Logical
 /// pixels — which is what `WindowResolution::set` takes, and *not* what `WindowResolution::new`
-/// takes; see [`fit_capture_to_window`], which owns the size after the first frame for exactly that
+/// takes; see `crate::surface`, which owns the target's size after the first frame for exactly that
 /// reason.
 pub fn window_size(kits: usize, maps: usize) -> (f32, f32) {
     let content = COL * COLS + crate::chrome::PAD * (COLS - 1.0);
@@ -4215,13 +4214,14 @@ fn header(text: &str) -> impl Bundle {
 fn spawn_screen(
     mut commands: Commands,
     chooser: Res<Chooser>,
-    ui_camera: Query<Entity, With<UiCamera>>,
+    ui_camera: Query<Entity, With<crate::surface::SurfaceCamera>>,
 ) {
     let (kits, maps) = chooser.catalog.shape();
     let (list_h, info_h) = panel_heights(kits, maps);
     // **The UI is drawn to the offscreen camera**, which the window then mirrors — see
-    // `ChooserCapturePlugin`. Named explicitly rather than left to Bevy's default-camera pick,
-    // because with two cameras present "the default" is not a thing to rely on.
+    // `crate::surface`. Named explicitly rather than left to Bevy's default-camera pick, even
+    // though that camera carries `IsDefaultUiCamera` — being explicit is what the guide overlay's
+    // missing target cost once already.
     let Ok(camera) = ui_camera.single() else {
         // Loud, because the failure mode is an empty window and no other symptom. The silent
         // version of this line cost an afternoon.
@@ -5154,7 +5154,7 @@ fn room_for_the_card(
     if (placement.top - top).abs() > 0.5 {
         placement.top = top;
     }
-    // Declared, not applied — `fit_capture_to_window` is the one writer of the window's size.
+    // Declared, not applied — `crate::surface` is the one writer of the render target's size.
     let want = if guide.visible { CARD_ROOM } else { 0.0 };
     if extra.0 != want {
         extra.0 = want;
@@ -5252,36 +5252,6 @@ impl Plugin for ChooserGuidePlugin {
 // Seeing this screen without touching the one you are using
 // ------------------------------------------------------------------------------------------------
 
-/// **An offscreen frame of the chooser — panels included — that does not need the window in front.**
-///
-/// `crates/emerge-mapper/src/debug_capture.rs` records the measurement that makes this necessary:
-/// `Screenshot::primary_window()` reads the window surface, which macOS keeps current only while the
-/// window is on screen, and the same capture returns *"7,188 distinct colours focused and 1 — a flat
-/// rectangle — with something else in front."* Making that path produce a frame means raising the
-/// window, which steals the machine from whoever is at it.
-///
-/// That file also records why its own mirror cannot help: **Bevy draws a UI tree to one camera**, so
-/// an offscreen camera in the editor never receives the interface. That is true of the editor, whose
-/// UI targets the window camera and whose subject is a 3-D map. It is not a law.
-///
-/// This screen is nothing *but* interface, so the arrangement is inverted: the UI renders to an
-/// **image**, and the window shows that image. The capture is then the same pixels an author is
-/// looking at, whether or not the window is in front — and reviewing a layout change stops depending
-/// on somebody else being at the keyboard to say what they see.
-///
-/// # Why two cameras is safe here
-///
-/// The trap `view.rs` names is that `Single<.., With<Camera2d>>` **silently skips** on a non-unique
-/// match. This app has no such query, and the guide overlay deliberately spawns no camera of its own
-/// — its own doc says so, for this reason. Both cameras are marked, so any query added later can
-/// filter positively rather than by type.
-/// **The layer the window camera sees, and the offscreen one does not.**
-///
-/// Both cameras default to layer 0, so the sprite showing the render target was drawn *by* the
-/// camera that renders into it — the same texture as colour attachment and sampled source in one
-/// pass. The result is a frame of flat `000000`, no warning, no error, nothing in the log.
-const MIRROR_LAYER: usize = 1;
-
 /// **How much taller than the screen the window has to be**, in logical pixels.
 ///
 /// Zero except while a guide card is up. It exists so that exactly one system writes the window's
@@ -5289,12 +5259,6 @@ const MIRROR_LAYER: usize = 1;
 /// target to it, and two systems writing one window is the shape of every resize flicker there is.
 #[derive(Resource, Default)]
 pub struct ExtraRoom(pub f32);
-
-pub struct ChooserCapturePlugin;
-
-/// The camera the UI tree is drawn to. Everything visible is on this one.
-#[derive(Component)]
-pub struct UiCamera;
 
 /// **Scan disk and build the screen's state, every time the menu is entered.**
 ///
@@ -5369,248 +5333,12 @@ fn build_chooser(mut commands: Commands, opening: Res<MenuOpening>, existing: Op
 #[derive(Resource)]
 pub struct Chosen(pub crate::args::Opened);
 
-/// **Everything the menu screen spawned, gone when it leaves.**
+/// **The menu's entities, gone — through the one rule that decides what a screen owns.**
 ///
-/// A sweep rather than a list of markers: the chooser spawns a UI root, two cameras and a mirror
-/// sprite, and a teardown naming them one by one is a list that goes stale the first time somebody
-/// adds a third camera. Everything it owns is reachable from a root with no parent, so despawning
-/// those is complete by construction — and the window is the one thing that outlives both screens.
-/// **Give the interface scale back on the way out.**
-///
-/// `fit_capture_to_window` multiplies `UiScale` by the window's scale factor — 2.4 on a 2x display —
-/// because the menu renders to an offscreen image at *physical* size and a sprite halves it back for
-/// the window. That is right for the menu and wrong for everything else: the editor draws straight
-/// to the window with no halving sprite, so it inherited the doubling and drew every panel and glyph
-/// twice as large.
-///
-/// Invisible while the two screens were two processes with two `UiScale`s. It is one application
-/// now, so the value has an owner per screen and this is the handover.
-fn give_back_the_ui_scale(mut ui_scale: ResMut<UiScale>) {
-    ui_scale.0 = crate::chrome::EDITOR_UI_SCALE;
+/// This used to spell the reachability rule as its own query, which is how it came to sweep away
+/// `crate::surface`'s cameras: `screen::scene_roots` had learned to exclude them and this copy had
+/// not. See [`crate::screen::despawn_scene`], which is now the only place the rule is written.
+fn tear_down_menu(world: &mut World) {
+    crate::screen::despawn_scene(world);
 }
 
-fn tear_down_menu(
-    mut commands: Commands,
-    roots: Query<
-        Entity,
-        (
-            Or<(With<Transform>, With<Node>)>,
-            Without<ChildOf>,
-            Without<Window>,
-            Without<bevy::window::Monitor>,
-        ),
-    >,
-) {
-    for e in &roots {
-        commands.entity(e).try_despawn();
-    }
-}
-
-/// The camera that shows [`UiCamera`]'s image in the window. Draws one sprite and nothing else.
-#[derive(Component)]
-pub struct WindowCamera;
-
-impl Plugin for ChooserCapturePlugin {
-    fn build(&self, app: &mut App) {
-        // **`spawn_capture_rig` is registered by `ChooserPlugin`, not here.** Both it and
-        // `spawn_screen` run on `OnEnter(Menu)` and the screen needs the camera to already exist, so
-        // one plugin owns the order — two plugins adding to one schedule and hoping is exactly the
-        // shape that drew a black window.
-        app.init_resource::<ExtraRoom>().add_systems(
-            Update,
-            fit_capture_to_window.run_if(in_state(crate::screen::Screen::Menu)),
-        );
-    }
-}
-
-#[derive(Component)]
-struct Mirror;
-
-fn spawn_capture_rig(
-    mut commands: Commands,
-    mut images: ResMut<Assets<Image>>,
-    chooser: Res<Chooser>,
-    clear: Option<Res<ClearColor>>,
-) {
-    use bevy::camera::visibility::RenderLayers;
-    use bevy::camera::{ImageRenderTarget, RenderTarget};
-    use bevy::render::render_resource::{
-        Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
-    };
-
-    let (kits, maps) = chooser.catalog.shape();
-    let (w, h) = window_size(kits, maps);
-    let size = Extent3d {
-        // A starting size only. **`fit_capture_to_window` owns it**, in physical pixels taken from
-        // the window itself — see there for why that matters and what it cost to get wrong.
-        width: w as u32,
-        height: h as u32,
-        depth_or_array_layers: 1,
-    };
-    let mut image = Image {
-        texture_descriptor: TextureDescriptor {
-            label: Some("emerge-mapper chooser capture"),
-            size,
-            dimension: TextureDimension::D2,
-            format: TextureFormat::Bgra8UnormSrgb,
-            mip_level_count: 1,
-            sample_count: 1,
-            // `COPY_SRC` is what lets the frame be read back — without it the capture reports a
-            // target it cannot read rather than writing a file.
-            usage: TextureUsages::TEXTURE_BINDING
-                | TextureUsages::COPY_DST
-                | TextureUsages::COPY_SRC
-                | TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        },
-        ..default()
-    };
-    image.resize(size);
-    let handle = images.add(image);
-
-    let ground = clear.map_or(Color::BLACK, |c| c.0);
-    commands.spawn((
-        // **The offscreen camera stays on the default layer and the mirror does not** — see
-        // [`MIRROR_LAYER`]. Without that split this camera drew the sprite showing its own render
-        // target, and the frame came back a flat `000000` with nothing in the log at all.
-        //
-        // **And it is the default UI camera**, which is what puts *everyone's* interface on the
-        // image rather than only this file's. Bevy picks the highest-order camera rendering to the
-        // primary window when a node names none (`bevy_ui-0.19.0/src/ui_node.rs:2934`) — so the
-        // guide overlay, which spawns its root without a `UiTargetCamera`, went to the window
-        // camera instead. The window grew to make room for a card that then appeared in no capture.
-        bevy::ui::IsDefaultUiCamera,
-        UiCamera,
-        Camera2d,
-        Camera {
-            // Before the window camera, so a capture taken this frame shows this frame.
-            order: -1,
-            clear_color: bevy::camera::ClearColorConfig::Custom(ground),
-            ..default()
-        },
-        // `RenderTarget` is its own component in 0.19 — one of `Camera`'s `#[require]`s, not a
-        // field on it. Listed in `CLAUDE.md` among the traps already paid for.
-        // Overwritten every frame from the window's own scale factor; see
-        // `fit_capture_to_window`. A fixed 1.0 here is what made the interface soft.
-        RenderTarget::Image(ImageRenderTarget {
-            handle: handle.clone(),
-            scale_factor: 1.0,
-        }),
-    ));
-    commands.spawn((
-        WindowCamera,
-        Camera2d,
-        Camera {
-            order: 0,
-            ..default()
-        },
-        // Sees the mirror and nothing else. The UI is not on this layer, so it reaches the window
-        // only by way of the image — one rendering path, and the capture is the same pixels.
-        RenderLayers::layer(MIRROR_LAYER),
-    ));
-    // Its scale is set by `fit_capture_to_window`: a `Camera2d`'s default projection makes one
-    // world unit one *logical* pixel, and the target is sized in *physical* ones, so the sprite is
-    // drawn at `1 / scale_factor` to cover exactly the window it mirrors.
-    commands.spawn((
-        Mirror,
-        Sprite::from_image(handle.clone()),
-        RenderLayers::layer(MIRROR_LAYER),
-    ));
-    // Only the debugger needs to be told which image to read; the rig itself is not optional,
-    // because it is how this screen is drawn at all.
-    #[cfg(feature = "debugger")]
-    commands.insert_resource(bevy_debugger_bevy::DebugCaptureTarget { image: handle });
-    #[cfg(not(feature = "debugger"))]
-    let _ = handle;
-}
-
-/// Scale the mirrored sprite so the window shows the image at its own size, whatever the window is.
-///
-/// Without this the sprite draws at the image's pixel size against a camera in logical units, and
-/// the screen an author sees is twice the size of the one being captured.
-fn fit_capture_to_window(
-    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
-    target: Query<&bevy::camera::RenderTarget, With<UiCamera>>,
-    mut mirror: Query<&mut Transform, With<Mirror>>,
-    mut ui_scale: ResMut<UiScale>,
-    mut images: ResMut<Assets<Image>>,
-) {
-    use bevy::render::render_resource::Extent3d;
-
-    let (Ok(window), Ok(target), Ok(mut mirror)) =
-        (windows.single(), target.single(), mirror.single_mut())
-    else {
-        return;
-    };
-    let bevy::camera::RenderTarget::Image(t) = target else {
-        return;
-    };
-    let handle = t.handle.clone();
-
-    // **The menu no longer sizes the window.** It used to, in logical units, from the same numbers
-    // the layout uses — and that was right while the chooser was its own process and owned its own
-    // window. Both screens share one window now (`screen.rs`), so a screen that shrank it to its own
-    // content handed the editor a window sized for a menu: reported at the keyboard, 2026-08-16 —
-    // *"when you switch from the main menu into one of the maps or kits, the scale of everything is
-    // way too big and crowds out the UI."*
-    //
-    // The layout is fixed-size and simply sits in whatever window there is. `window_size` survives
-    // because it still says how much room the screen wants, which is what a caller sizing a window
-    // at startup would ask.
-
-    // **The target is sized in PHYSICAL pixels, and this is what makes the type sharp.**
-    //
-    // Reported at the keyboard: *"why isn't the text sharper? that feels like text rendered at a
-    // lower resolution and then zoomed in on."* It was exactly that. The interface renders to an
-    // image and the window shows that image, so the image *is* the resolution the interface is
-    // rasterised at — and it was sized in logical pixels. On a 2x display the window's surface is
-    // 1554 px wide and the texture was 777, upscaled by the sprite. Every glyph edge was an
-    // interpolation between texels that were never rendered.
-    //
-    // Taking the size from the window's own `physical_*` rather than multiplying the logical size
-    // by the scale factor keeps the two exactly equal — no rounding to disagree about.
-    let sf = window.scale_factor().max(1.0);
-    let (iw, ih) = (
-        window.resolution.physical_width().max(1),
-        window.resolution.physical_height().max(1),
-    );
-    // **`UiScale` is what carries the density, not the target's `scale_factor`.**
-    //
-    // The obvious move is `ImageRenderTarget { scale_factor: sf }` — layout in logical units,
-    // raster in physical ones. Bevy's own field doc says otherwise: *"This should almost always be
-    // 1.0"* (`bevy_camera-0.19.0/src/camera.rs:989`), and off that path it renders nothing at all —
-    // a flat `000000` frame with an empty log, twice.
-    //
-    // So the target stays at 1.0 and its pixels ARE its logical units, which means the interface
-    // has to be laid out at the physical size to fill it. `UiScale` multiplies every `Val::Px` and
-    // every font size, so scaling it by the window's factor lays the same design out twice as
-    // large in a twice-as-large target — and rasterises every glyph at that size, which is the
-    // whole point. The sprite then halves it back for the window.
-    let want_ui = UI_SCALE * sf;
-    if ui_scale.0 != want_ui {
-        ui_scale.0 = want_ui;
-    }
-    // And the sprite shrinks by the same factor, because a `Camera2d` world unit is one logical
-    // pixel: a `1554`-texel image drawn at `0.5` covers `777` logical pixels — the whole window,
-    // one texel per physical pixel, which is what sharp means here.
-    let want = Vec3::new(1.0 / sf, 1.0 / sf, 1.0);
-    if mirror.scale != want {
-        mirror.scale = want;
-    }
-    // Same rule for the image: `get_mut` marks the asset modified, so ask first.
-    let already = images.get(&handle).map(|i| {
-        (
-            i.texture_descriptor.size.width,
-            i.texture_descriptor.size.height,
-        )
-    });
-    if already != Some((iw, ih))
-        && let Some(mut image) = images.get_mut(&handle)
-    {
-        image.resize(Extent3d {
-            width: iw,
-            height: ih,
-            depth_or_array_layers: 1,
-        });
-    }
-}

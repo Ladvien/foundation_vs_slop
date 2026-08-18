@@ -52,8 +52,6 @@ pub mod chooser;
 pub mod chrome;
 pub mod compass;
 pub mod compose;
-#[cfg(feature = "debugger")]
-pub mod debug_capture;
 pub mod devshot;
 pub mod editor;
 pub mod fill;
@@ -68,6 +66,7 @@ pub mod notice;
 pub mod project;
 pub mod screen;
 pub mod stages;
+pub mod surface;
 pub mod thumbs;
 pub mod tiles;
 pub mod view;

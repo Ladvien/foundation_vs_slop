@@ -9103,3 +9103,88 @@ fn the_first_arrow_press_lands_on_the_first_piece() {
         binding(Action::TileListNext).chord
     );
 }
+
+/// **The whole application draws into one surface, and an agent reads that surface.**
+///
+/// Before this existed, `bevy_debugger/screenshot` mirrored only the *world* into a square image and
+/// could never show a panel — Bevy draws a UI tree to one camera — so every question about the
+/// interface fell back to a window capture, which macOS only keeps current while the window is on
+/// screen. Answering "what does this panel look like" meant taking the display of whoever was at the
+/// machine.
+///
+/// Four facts hold it together and each one has already been broken once:
+///
+/// 1. **The surface exists**, built in `SurfacePlugin::build` rather than in `Startup` — `bevy_state`
+///    runs its transition schedule *before* the startup ones, so `OnEnter(Editor)` fires first and
+///    `view::setup` panicked on a missing `Res<Surface>`.
+/// 2. **Its three cameras survive a screen change.** They were swept away by a teardown that spelled
+///    the "every root a screen owns" rule as its own second copy, which left the editor with no
+///    camera for its interface and *nothing in the log*.
+/// 3. **Exactly one camera is the default UI camera**, or Bevy warns and picks by order — and the
+///    order pick only ever considers cameras rendering to the window, which this one does not.
+/// 4. **The map camera renders into the same image**, so a capture carries the world as well as the
+///    interface.
+#[test]
+fn the_application_draws_into_one_surface_an_agent_can_read() {
+    let root = Fixture::new("one-surface")
+        .descriptor("wall", "alpha")
+        .place("wall", (0.0, 0.0))
+        .build("test_map");
+    let mut app = harness::build_headless(&root, "test_map", None)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    app.update();
+
+    let surface = app
+        .world()
+        .get_resource::<emerge_mapper::surface::Surface>()
+        .expect("the surface is how this application draws — no resource means no interface at all");
+    let image = surface.image.clone();
+
+    let mut ground = app
+        .world_mut()
+        .query_filtered::<(), With<emerge_mapper::surface::SurfaceGround>>();
+    let mut ui = app
+        .world_mut()
+        .query_filtered::<(), With<emerge_mapper::surface::SurfaceCamera>>();
+    let mut window = app
+        .world_mut()
+        .query_filtered::<(), With<emerge_mapper::surface::WindowCamera>>();
+    let mut mirror = app
+        .world_mut()
+        .query_filtered::<(), With<emerge_mapper::surface::Mirror>>();
+    assert_eq!(ground.iter(app.world()).count(), 1, "one clearing pass");
+    assert_eq!(
+        ui.iter(app.world()).count(),
+        1,
+        "the interface's camera was swept away by a teardown once, and nothing logged"
+    );
+    assert_eq!(window.iter(app.world()).count(), 1, "one camera on the window");
+    assert_eq!(mirror.iter(app.world()).count(), 1, "one sprite carrying it");
+
+    let mut defaults = app
+        .world_mut()
+        .query_filtered::<(), (With<bevy::camera::Camera>, With<bevy::ui::IsDefaultUiCamera>)>();
+    assert_eq!(
+        defaults.iter(app.world()).count(),
+        1,
+        "two would make Bevy warn and fall back to the highest-order WINDOW camera — which the \
+         surface camera is not, so the interface would leave the image silently"
+    );
+
+    let mut world_cams = app
+        .world_mut()
+        .query_filtered::<&bevy::camera::RenderTarget, With<emerge_mapper::view::MainCamera>>();
+    let target = world_cams
+        .iter(app.world())
+        .next()
+        .cloned()
+        .expect("the map camera");
+    match target {
+        bevy::camera::RenderTarget::Image(t) => assert_eq!(
+            t.handle, image,
+            "the map must render into the same surface, or a capture shows an interface floating \
+             over nothing"
+        ),
+        other => panic!("the map camera renders to {other:?}, not to the surface"),
+    }
+}

@@ -44,6 +44,9 @@ use bevy::prelude::*;
 /// `KeysPlugin` is first because it owns `keys::Live`, which three of the others read as a `Res<_>`.
 pub fn add_editor_plugins(app: &mut App) -> &mut App {
     app.add_plugins((
+        // **First, because it is how this application draws.** Every camera below targets
+        // the surface it owns, and `view::setup` reads `Res<Surface>` on `OnEnter(Editor)`.
+        crate::surface::SurfacePlugin,
         crate::keys::KeysPlugin,
         crate::chrome::ChromePlugin,
         crate::view::ViewPlugin,
@@ -100,10 +103,12 @@ pub fn add_debugger_plugins(app: &mut App) -> &mut App {
     app.add_plugins((
         bevy_debugger_bevy::DebuggerPlugin,
         bevy::remote::http::RemoteHttpPlugin::default().with_port(port),
-        // Owns the offscreen camera and image the screenshot method captures. Without it that
-        // method reports a missing target rather than falling back to window capture — which would
-        // need the window raised, and is the whole thing this avoids.
-        crate::debug_capture::DebugCapturePlugin,
+        // **The capture target is `crate::surface`'s, and it is in the SHARED list, not this one.**
+        // There used to be a `DebugCapturePlugin` here owning a second `Camera3d` that mirrored the
+        // map into a square image — and it could never see a panel, because Bevy draws a UI tree to
+        // one camera. The editor now draws world and interface into one surface and shows it in the
+        // window, so the image an agent reads is the image the author is looking at. That belongs
+        // in the shared list because it is how the application draws, not a debugging addition.
     ))
 }
 

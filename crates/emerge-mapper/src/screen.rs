@@ -96,12 +96,26 @@ fn open_the_door(world: &mut World) {
 /// named, because there is no such reachability rule for them and a stale `Project` is precisely the
 /// thing that must not survive into the next door.
 fn close_the_door(world: &mut World) {
+    despawn_scene(world);
+    crate::args::Opened::remove_from(world);
+}
+
+/// **Despawn every root a screen could have spawned.** The one implementation, called by both
+/// screens' teardowns.
+///
+/// It was two: this and `chooser::tear_down_menu`, which spelled the same reachability rule as its
+/// own query — and the copies drifted the first time the rule gained a clause. `crate::surface` was
+/// excluded from [`scene_roots`] and swept away by the other one anyway, which left the editor with
+/// no camera for its interface, seventy-six UI nodes computing a target of nothing, and a window
+/// that still drew the world because the map camera holds the image handle directly. Nothing logged.
+///
+/// So the rule lives in [`scene_roots`] and nobody writes it a second time.
+pub(crate) fn despawn_scene(world: &mut World) {
     for e in scene_roots(world) {
         if let Ok(entity) = world.get_entity_mut(e) {
             entity.despawn();
         }
     }
-    crate::args::Opened::remove_from(world);
 }
 
 /// **Every root a screen could have spawned** — and nothing else.
@@ -121,6 +135,11 @@ pub(crate) fn scene_roots(world: &mut World) -> Vec<Entity> {
             Without<ChildOf>,
             Without<Window>,
             Without<bevy::window::Monitor>,
+            // **And the surface, for the same reason.** It is not something a screen made — it is
+            // how this application draws at all, spawned once at `Startup` and shared by both
+            // screens. Sweeping it away on a door change left the next screen with no camera to
+            // render into and no clue why.
+            Without<crate::surface::SurfaceRig>,
         )>()
         .iter(world)
         .collect()

@@ -142,11 +142,24 @@ impl Plugin for ViewPlugin {
     }
 }
 
-fn setup(mut commands: Commands, rig: Res<Rig>) {
+fn setup(mut commands: Commands, rig: Res<Rig>, surface: Res<crate::surface::Surface>) {
     commands.spawn((
         Name::new("editor camera"),
         MainCamera,
         Camera3d::default(),
+        // **The world goes into the surface, not into the window** — `crate::surface` owns why, and
+        // owns the pass order so the three cameras writing one image are one list rather than three
+        // numbers in three files. `ClearColorConfig::None`, because `SurfaceGround` already cleared
+        // this frame and a second clear here would be the only thing the interface ever saw.
+        Camera {
+            order: crate::surface::ORDER_WORLD,
+            clear_color: bevy::camera::ClearColorConfig::None,
+            ..default()
+        },
+        bevy::camera::RenderTarget::Image(bevy::camera::ImageRenderTarget {
+            handle: surface.image.clone(),
+            scale_factor: 1.0,
+        }),
         Projection::from(OrthographicProjection {
             scaling_mode: ScalingMode::FixedVertical {
                 viewport_height: rig.height,
@@ -280,6 +293,18 @@ pub fn sense_pointer(
         // against — `viewport_to_world` needs a camera with a viewport — so this is honestly `None`.
         None => None,
     };
+    // **Into the surface's space, which is physical pixels**, and this is the one place it happens.
+    //
+    // A window reports its cursor in logical pixels, and every camera in this application renders
+    // into an image sized in physical ones at `scale_factor: 1.0` — so the image's logical pixels
+    // *are* physical pixels (`crate::surface`, "the one conversion"). Converting here rather than at
+    // each reader is what keeps `cursor_ground`'s fourteen call sites and `over_ui`'s factor correct
+    // without touching either: against an image target `target_scaling_factor()` is 1.0, so a
+    // pointer already in surface space is multiplied by one.
+    let next = match (&window, next) {
+        (Some(w), Some(at)) => Some(at * w.scale_factor().max(1.0)),
+        _ => None,
+    };
     if pointer.0 != next {
         pointer.0 = next;
     }
@@ -305,8 +330,12 @@ pub fn sense_pointer(
 /// the node sizes by layout, so applying it here would count it twice.
 ///
 /// **Viewport offset is deliberately not subtracted.** The backend does it for cameras rendering to
-/// part of a target; the caller here is the window camera, and the editor's other camera renders to
-/// an offscreen image the pointer never enters.
+/// part of a target; every camera here fills its target.
+///
+/// **The factor is now 1.0, and the arithmetic is unchanged by that.** `MainCamera` renders into
+/// `crate::surface`'s image, whose `target_scaling_factor()` is 1.0, and [`sense_pointer`] already
+/// put the pointer in that image's space. Reading the factor from the camera rather than assuming a
+/// window is what let this survive the move without an edit — keep it that way.
 pub fn over_ui<'a>(
     cursor: Option<Vec2>,
     scale_factor: f32,
