@@ -3942,7 +3942,7 @@ impl Plugin for ChooserPlugin {
             OnEnter(crate::screen::Screen::Menu),
             (build_chooser, spawn_screen, spawn_menu_bars)
                 .chain()
-                .after(crate::chrome::FrameSet),
+                .after(crate::chrome::FrameSystems),
         )
         // **The chooser's own entities die with the screen.** `DespawnOnExit` is Bevy's own
         // state-scoping, so this is one component per root rather than a teardown list somebody has
@@ -4440,6 +4440,17 @@ fn on_row_click(
     let (Ok(row), Some(chooser)) = (rows.get(click.entity), chooser.as_mut()) else {
         return;
     };
+    // **The same three refusals `drive_chooser` makes, because they are about the SCREEN and not
+    // about the keyboard.** A click that moved the cursor while `delete \`hall\`?` was up left the
+    // question naming one map and the highlight on another — which is `drive_chooser`'s own words
+    // for "how a confirmation deletes the wrong thing", reachable again by pointer the moment the
+    // rows learned to answer one. `editing` is the same argument: a click that moved the selection
+    // out from under an open field left the field swallowing keys for a row nobody was standing on.
+    if chooser.editing || chooser.ask.is_some() {
+        return;
+    }
+    // And a stale refusal goes with the move, exactly as `step`/`section` clear it.
+    chooser.problem = None;
     match row.pane {
         RowPane::Kits => {
             chooser.focus = Focus::Kits;

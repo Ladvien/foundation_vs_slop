@@ -171,7 +171,7 @@ impl Plugin for ComposePlugin {
             )
             .add_systems(
                 OnEnter(crate::screen::Screen::Editor),
-                spawn_compose_panel.after(crate::chrome::FrameSet),
+                spawn_compose_panel.after(crate::chrome::FrameSystems),
             )
             // **Before anything reads `selected`, and not gated on the mode.** The list can shrink
             // while another tab is live — capturing on the Map rewrites the whole set — and a reader

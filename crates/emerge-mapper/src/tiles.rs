@@ -3120,7 +3120,7 @@ impl Plugin for TilesPlugin {
             .add_systems(
                 OnEnter(crate::screen::Screen::Editor),
                 (spawn_tab_strip, spawn_tiles_panel, scan_on_entering_the_kits_door)
-                    .after(crate::chrome::FrameSet),
+                    .after(crate::chrome::FrameSystems),
             )
             .add_systems(
                 Update,
@@ -3429,7 +3429,12 @@ fn style_tabs(
             bg.0 = want_bg;
         }
         let want_border = if active { ACCENT } else { Color::NONE };
-        *border = BorderColor::all(want_border);
+        // Guarded like every other write in this function. `BorderColor` is change-detected and the
+        // UI extraction reads that, so an unconditional assignment dirtied the whole strip sixty
+        // times a second for a colour that changes when a tab does.
+        if border.top != want_border {
+            *border = BorderColor::all(want_border);
+        }
 
         for child in children.iter() {
             if let Ok(mut colour) = names.get_mut(child) {
@@ -3652,11 +3657,25 @@ fn tab_shortcuts(
 /// The scan-on-arrival is the part that would drift: entering Meshes for the first time is what
 /// fills the library list, and a second way in that forgot it would show an empty tab exactly once,
 /// on the path nobody tested.
-fn enter_tab(want: Mode, project: &Project, mode: &mut Mode, state: &mut ImportState) {
-    if *mode == want {
+///
+/// **It takes the `ResMut`s, not `&mut Mode`.** Passing `&mut mode` where the parameter is
+/// `&mut Mode` deref-*muts* the `ResMut` at the call site, and `Mut::deref_mut` calls
+/// `set_changed()` — so `Mode` was marked changed before this function could refuse, on every press
+/// of the slot key you are already on and every click of the chip you are already standing on.
+/// `stage_camera` reads exactly that flag, so it restored the canonical stage framing and threw
+/// away the author's pan and zoom, which is the discard `MapView` exists to prevent. Measured:
+/// a helper taking `&mut T` reports `is_changed()` after a no-op, an in-place compare does not.
+/// Read through `Deref`, write through `DerefMut`, and only then.
+fn enter_tab(
+    want: Mode,
+    project: &Project,
+    mode: &mut ResMut<Mode>,
+    state: &mut ResMut<ImportState>,
+) {
+    if **mode == want {
         return;
     }
-    *mode = want;
+    **mode = want;
     if want == Mode::Meshes && !state.scanned {
         scan(project, state);
     }
@@ -6495,27 +6514,47 @@ fn on_shelf_click(
     ) else {
         return;
     };
+    // The census counts, never a panel — `census_is_the_one_counter` forbids reading
+    // `compositions.compositions.len()` here, and it is the number `Action::KitEnter` guards on.
+    let kit_len =
+        emerge_core::census::of_catalog(&project.library, &project.compositions.compositions)
+            .compositions;
     match chip.0 {
         Shelf::Candidates => {
             build.browsing = None;
             state.selected_library_id = None;
+            state.status.note("candidates".to_owned());
         }
+        // **The shape `Action::FocusLibrary` already has**, arm for arm — including the refusal.
+        // A chip that answered an empty library with nothing at all was the same press saying two
+        // different things depending on how it was made.
         Shelf::Library => {
             build.browsing = None;
-            if state.selected_library_id.is_none() {
-                state.selected_library_id = library_ids(
-                    &project,
-                    &filters,
-                    *mode == Mode::Tiles,
-                    Some(&suggestions),
-                )
-                .first()
-                .cloned();
+            match library_ids(&project, &filters, *mode == Mode::Tiles, Some(&suggestions)).first()
+            {
+                Some(first) => {
+                    if state.selected_library_id.is_none() {
+                        state.selected_library_id = Some(first.clone());
+                    }
+                    state.focused_pack = None;
+                    state.status.note("library".to_owned());
+                }
+                None => state.status.note("the library is empty".to_owned()),
             }
-            state.focused_pack = None;
         }
-        // Row 0, exactly as `Action::KitEnter` does.
-        Shelf::Kit => build.browsing = Some(0),
+        // Row 0, exactly as `Action::KitEnter` does — **including its refusal**, which this arm used
+        // to drop. `KitEnter` guards `kit == 0` so `browsing` is never set on an empty kit; without
+        // the guard a click on `KIT (0)` walked into `compositions.get(0)`'s `None` arm, the branch
+        // whose own comment calls itself "unreachable rather than unlikely".
+        Shelf::Kit => {
+            if kit_len == 0 {
+                state
+                    .status
+                    .note("no tiles in the kit yet - build one and press Cmd+S".to_owned());
+            } else {
+                build.browsing = Some(0);
+            }
+        }
     }
 }
 
@@ -6646,94 +6685,96 @@ fn draw_candidates(
     state: &ImportState,
     filters: &crate::filter::Filters,
     project: &Project,
-    not_imported: usize,
 ) {
-    let _ = not_imported;
-                if state.candidates.is_empty() {
-            p.spawn((
-                Text::new(if state.scanned {
-                    "every mesh under assets/ is already in the library"
-                } else {
-                    "press Tab to scan"
-                }),
-                TextColor(DIM),
-                TextFont::from_font_size(crate::chrome::text::BODY),
-            ));
-            return;
-        }
-        // **Grouped by pack.** A flat list this long is one you scroll past; grouped by where they came
-        // from it is a dozen headings, and an author importing a kit wants that kit rather than
-        // an alphabet.
-        //
-        // The directory, not `kind` — a candidate has no `kind` yet, that being the thing import
-        // is FOR. The folder an artist put it in is the only categorisation that exists before
-        // anyone has looked at it, and it is usually the right one.
-        // **Excluded packs fall to the bottom, under one collapsed group.**
-        //
-        // They used to sit in place, each folded and muted. That is honest but it is still one
-        // row per excluded pack scattered down a list an author is scrolling to find work in —
-        // and a kit that has excluded six packs pays six rows for a fact it already knows.
-        // Chosen at the keyboard, 2026-08-16: one `EXCLUDED` group at the end.
-        //
-        // Still *listed*, never hidden: a mesh that silently disappeared looks identical to one
-        // the scan never found, and there would be no way back except editing `project.ron` by
-        // hand. The group opens, its packs open, and `Shift+R` on a mesh inside restores it —
-        // which is why the group has to reach all the way down to a row.
-        // **The same partition the arrows walk** (`visible_packs`), so the rows on screen and
-        // the rows the keyboard steps through are one list built once. They were two, and the
-        // walk stepped index order while the list drew pack order — which is why the arrows
-        // stopped dead at a collapsed group.
-        let (offered, excluded_packs) = visible_packs(&state, &filters, &project.policy);
-        for (pack, members) in &offered {
-            draw_pack(p, pack, members, &state, false, !pack_is_open(&state, &project.policy, pack));
-        }
+    if state.candidates.is_empty() {
+        // `Tab` is Feathers' now — `keys::Action::NextTab` was retired with it, so the old
+        // "press Tab to scan" named a key that does nothing: the dead affordance this editor keeps
+        // finding. Read from the census, so renaming the chord renames the sentence.
+        let say = if state.scanned {
+            "every mesh under assets/ is already in the library".to_owned()
+        } else {
+            format!("press {} to scan", crate::keys::chord(Action::Rescan))
+        };
+        p.spawn((
+            Text::new(say),
+            TextColor(DIM),
+            TextFont::from_font_size(crate::chrome::text::BODY),
+        ));
+        return;
+    }
+    // **Grouped by pack.** A flat list this long is one you scroll past; grouped by where they came
+    // from it is a dozen headings, and an author importing a kit wants that kit rather than
+    // an alphabet.
+    //
+    // The directory, not `kind` — a candidate has no `kind` yet, that being the thing import
+    // is FOR. The folder an artist put it in is the only categorisation that exists before
+    // anyone has looked at it, and it is usually the right one.
+    // **Excluded packs fall to the bottom, under one collapsed group.**
+    //
+    // They used to sit in place, each folded and muted. That is honest but it is still one
+    // row per excluded pack scattered down a list an author is scrolling to find work in —
+    // and a kit that has excluded six packs pays six rows for a fact it already knows.
+    // Chosen at the keyboard, 2026-08-16: one `EXCLUDED` group at the end.
+    //
+    // Still *listed*, never hidden: a mesh that silently disappeared looks identical to one
+    // the scan never found, and there would be no way back except editing `project.ron` by
+    // hand. The group opens, its packs open, and `Shift+R` on a mesh inside restores it —
+    // which is why the group has to reach all the way down to a row.
+    // **The same partition the arrows walk** (`visible_packs`), so the rows on screen and
+    // the rows the keyboard steps through are one list built once. They were two, and the
+    // walk stepped index order while the list drew pack order — which is why the arrows
+    // stopped dead at a collapsed group.
+    let (offered, excluded_packs) = visible_packs(&state, &filters, &project.policy);
+    for (pack, members) in &offered {
+        draw_pack(p, pack, members, &state, false, !pack_is_open(&state, &project.policy, pack));
+    }
 
-        if !excluded_packs.is_empty() {
-            let meshes: usize = excluded_packs.iter().map(|(_, m)| m.len()).sum();
-            let packs_n = excluded_packs.len();
-            p.spawn((
-                UiButton,
-                Hovered::default(),
-                ExcludedHeader,
-                Node {
-                    width: Val::Percent(100.0),
-                    padding: CHIP_PAD,
-                    flex_direction: FlexDirection::Row,
-                    column_gap: Val::Px(6.0),
-                    margin: UiRect::top(Val::Px(8.0)),
-                    ..default()
-                },
-                BackgroundColor(HEADER_BG),
-            ))
-            .with_children(|row| {
-                row.spawn((
-                    Node { width: Val::Px(10.0), flex_shrink: 0.0, ..default() },
-                    Text::new(if state.excluded_open { "v" } else { ">" }),
-                    TextColor(MUTED),
-                    TextFont::from_font_size(crate::chrome::text::LABEL),
-                ));
-                row.spawn((
-                    Node { flex_grow: 1.0, ..default() },
-                    Text::new("EXCLUDED"),
-                    TextColor(MUTED),
-                    TextFont::from_font_size(crate::chrome::text::LABEL),
-                ));
-                // Names the state and the way out of it, per `docs/ui.md` §1.4.
-                row.spawn((
-                    Text::new(format!(
-                        "{packs_n} pack(s), {meshes} mesh(es) — {} restores one",
-                        keys::chord(Action::ExcludePack)
-                    )),
-                    TextColor(MUTED),
-                    TextFont::from_font_size(crate::chrome::text::LABEL),
-                ));
-            });
-            if state.excluded_open {
-                for (pack, members) in &excluded_packs {
-                    draw_pack(p, pack, members, &state, true, !pack_is_open(&state, &project.policy, pack));
-                }
+    if !excluded_packs.is_empty() {
+        let meshes: usize = excluded_packs.iter().map(|(_, m)| m.len()).sum();
+        let packs_n = excluded_packs.len();
+        p.spawn((
+            UiButton,
+            Hovered::default(),
+            ExcludedHeader,
+            Node {
+                width: Val::Percent(100.0),
+                padding: CHIP_PAD,
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(6.0),
+                margin: UiRect::top(Val::Px(8.0)),
+                ..default()
+            },
+            BackgroundColor(HEADER_BG),
+        ))
+        .with_children(|row| {
+            row.spawn((
+                Node { width: Val::Px(10.0), flex_shrink: 0.0, ..default() },
+                Text::new(if state.excluded_open { "v" } else { ">" }),
+                TextColor(MUTED),
+                TextFont::from_font_size(crate::chrome::text::LABEL),
+            ));
+            row.spawn((
+                Node { flex_grow: 1.0, ..default() },
+                Text::new("EXCLUDED"),
+                TextColor(MUTED),
+                TextFont::from_font_size(crate::chrome::text::LABEL),
+            ));
+            // Names the state and the way out of it, per `docs/ui.md` §1.4.
+            row.spawn((
+                Text::new(format!(
+                    "{packs_n} pack(s), {meshes} mesh(es) — {} restores one",
+                    keys::chord(Action::ExcludePack)
+                )),
+                TextColor(MUTED),
+                TextFont::from_font_size(crate::chrome::text::LABEL),
+            ));
+        });
+        if state.excluded_open {
+            for (pack, members) in &excluded_packs {
+                draw_pack(p, pack, members, &state, true, !pack_is_open(&state, &project.policy, pack));
             }
         }
+    }
 }
 
 /// Wholesale rather than diffed: it changes on a rescan and on nothing else, and a diffing rebuild of
@@ -6811,7 +6852,7 @@ fn rebuild_candidates(
             // the stacking: the chip carries the count now, and saying it twice is what
             // `chrome.rs` exists to stop.
             if at == Shelf::Candidates {
-                draw_candidates(p, &state, &filters, &project, not_imported);
+                draw_candidates(p, &state, &filters, &project);
                 return;
             }
             for d in project
@@ -6839,9 +6880,6 @@ fn rebuild_candidates(
                     },
                 );
             }
-
-            draw_candidates(p, &state, &filters, &project, not_imported);
-
         });
     }
 }

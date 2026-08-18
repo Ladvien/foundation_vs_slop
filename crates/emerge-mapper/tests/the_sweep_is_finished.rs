@@ -210,15 +210,27 @@ fn nobody_places_their_own_panel() {
 /// skipped every function in between. It found eight observers in `tiles.rs` and silently missed the
 /// one this whole test exists for. Caught by breaking the code on purpose and watching the lint stay
 /// green, which is the only way that class of hole is ever found.
+///
+/// **And `pub fn` counts.** Anchoring on `"\nfn "` alone skipped every exported observer — four of
+/// this crate's twenty-nine, including `filter::on_click`, which is `pub` for the ordinary reason
+/// that it is registered from another module. That is the shape an observer takes the moment it is
+/// shared, so the anchor was blind to the ones most likely to grow the parameter this test forbids.
 fn signatures(src: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let bytes = src.as_bytes();
     let mut from = 0usize;
-    while let Some(at) = src[from..].find("\nfn ") {
-        let start = from + at + 1;
-        let Some(open_rel) = src[start..].find('(') else { break };
-        let open = start + open_rel;
-        let name = src[start + 3..open].trim().to_string();
+    while let Some((at, kw)) = ["\nfn ", "\npub fn ", "\npub(crate) fn ", "\npub(super) fn "]
+        .iter()
+        .filter_map(|p| src[from..].find(p).map(|at| (at, *p)))
+        .min_by_key(|(at, _)| *at)
+    {
+        // **The name starts after the keyword, and so does the search for the parameter list** —
+        // `pub(crate) fn` carries a `(` of its own, and looking from the line start found that one
+        // instead, then sliced backwards past it.
+        let name_at = from + at + kw.len();
+        let Some(open_rel) = src[name_at..].find('(') else { break };
+        let open = name_at + open_rel;
+        let name = src[name_at..open].trim().to_string();
         let mut depth = 0usize;
         let mut i = open;
         let mut close = None;
@@ -249,10 +261,37 @@ fn a_global_observer_never_demands_a_doors_resource() {
     // `screen::OWNERSHIP`, where these four are the `Project` class.
     const DOOR_OWNED: &[&str] = &["Project", "OpenMap", "Door", "Mode"];
 
+    /// **Path prefixes off, so `Res<crate::project::Project>` is the same needle as `Res<Project>`.**
+    /// The literal match found only the short form, and both spellings are ordinary in this crate —
+    /// `on_shelf_click` writes `Option<Res<crate::filter::Filters>>` three parameters from a bare
+    /// `Res<Project>`. A guard that a rename of an import can slip past is not a guard.
+    fn strip_paths(params: &str) -> String {
+        let mut out = String::with_capacity(params.len());
+        let mut word = String::new();
+        let mut chars = params.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c.is_alphanumeric() || c == '_' {
+                word.push(c);
+                continue;
+            }
+            if c == ':' && chars.peek() == Some(&':') {
+                chars.next();
+                word.clear();
+                continue;
+            }
+            out.push_str(&word);
+            word.clear();
+            out.push(c);
+        }
+        out.push_str(&word);
+        out
+    }
+
     let mut rogue = Vec::new();
     let mut seen = 0usize;
     for (file, src) in panels() {
         for (name, params) in signatures(&src) {
+            let params = strip_paths(&params);
             // Only observers — the ones that fire application-wide.
             if !params.contains("On<") {
                 continue;

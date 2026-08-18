@@ -140,10 +140,24 @@ pub(crate) fn scene_roots(world: &mut World) -> Vec<Entity> {
             // screens. Sweeping it away on a door change left the next screen with no camera to
             // render into and no clue why.
             Without<crate::surface::SurfaceRig>,
+            // **And the guide card, which is the same shape and the same mistake.** It is spawned
+            // once in `Startup` by `bevy_debugger_bevy::GuideOverlayPlugin` and never respawned, so
+            // one sweep took the agent-to-human channel down for the rest of the process:
+            // `paint_guide` then iterates nothing, `tick_guide` goes on scoring checkpoints, and
+            // `guide` answers OK over a card that is not on screen. Every launch reached it —
+            // `--door` transitions out of the menu on the first frame.
+            NotTheGuideCard,
         )>()
         .iter(world)
         .collect()
 }
+
+/// The guide overlay's exclusion from [`scene_roots`], in the one shape that survives the feature
+/// being off: an empty filter matches everything, which is what "there is no card" means.
+#[cfg(feature = "debugger")]
+type NotTheGuideCard = Without<bevy_debugger_bevy::GuideOverlay>;
+#[cfg(not(feature = "debugger"))]
+type NotTheGuideCard = ();
 
 /// **What a door change does to a resource** — the answer, for every one of them, in one place.
 ///

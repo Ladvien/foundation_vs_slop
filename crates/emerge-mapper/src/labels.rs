@@ -27,8 +27,13 @@ use crate::project::Project;
 use crate::tiles::EditTarget;
 use crate::vlm::{self, Provenance, Suggestion, VlmConfig};
 
-/// Bumped when the cache's own shape changes.
-pub const CACHE_VERSION: u32 = 1;
+/// Bumped when the cache's own shape changes — **2 as of 2026-08-18**, when `NeedsTurn` gained its
+/// required `turns` count.
+///
+/// It is a weaker gate than it looks, and the note is the point: `warm_entries` reads this field
+/// only after the whole file has deserialized, so a change that makes an entry *unparseable* is
+/// never seen by it. That is why the parse failure warns rather than returning quietly.
+pub const CACHE_VERSION: u32 = 2;
 
 /// The cache file, relative to the project root — gitignored with the rest of `target/`.
 pub const CACHE_PATH: &str = "target/vlm_suggestions.ron";
@@ -1175,8 +1180,21 @@ fn warm_entries(
     let Ok(text) = std::fs::read_to_string(root.join(CACHE_PATH)) else {
         return out;
     };
-    let Ok(file) = ron::from_str::<CacheFile>(&text) else {
-        return out;
+    // **Loud, because this is where a whole run goes missing.** A schema change to `Suggestion`
+    // makes the file unparseable, and the `version` field below cannot catch it — the version is
+    // read AFTER the entries are deserialized, so it never gets a turn. `NeedsTurn::turns` was
+    // exactly that change: every cached proposal from before it became unreadable, and the silent
+    // `return` dropped an eighteen-hour walk of 778 meshes with nothing in the log to say so.
+    let file = match ron::from_str::<CacheFile>(&text) {
+        Ok(file) => file,
+        Err(e) => {
+            warn!(
+                "the suggestion cache at {} could not be read and is being ignored - a labelling \
+                 run that has not been applied is lost. Delete it to stop this warning. ({e})",
+                root.join(CACHE_PATH).display()
+            );
+            return out;
+        }
     };
     if file.version != CACHE_VERSION {
         return out;

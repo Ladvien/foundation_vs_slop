@@ -27,7 +27,21 @@ use std::path::{Path, PathBuf};
 
 /// The modules that draw. Widening this list is fine; it is here so the scan states what it covers
 /// rather than implying it covers everything.
-const WATCHED: &[&str] = &["chrome.rs", "surface.rs", "notice.rs", "compass.rs"];
+const WATCHED: &[&str] = &[
+    "chrome.rs",
+    "surface.rs",
+    "notice.rs",
+    "compass.rs",
+    // Added 2026-08-18, after `tiles::style_tabs` shipped an unconditional per-frame `BorderColor`
+    // write with every other write in the same function guarded.
+    //
+    // **And it is worth saying that widening the scan is not what would have caught it.** The counts
+    // are per BODY, so a function with four guarded writes and one unguarded one balances: this
+    // rule finds a system that guards NOTHING, not a system that misses one write. Localising the
+    // count to each write is the next version of this file, and until it exists that limit is
+    // stated here rather than assumed away.
+    "tiles.rs",
+];
 
 /// A write to one of these is a write the layout or render world reads.
 const WATCHED_WRITES: &[&str] = &[
@@ -38,20 +52,60 @@ const WATCHED_WRITES: &[&str] = &[
     ".top =",
     ".width =",
     ".height =",
+    // `*border = BorderColor::all(..)` is a whole-component write and looks nothing like the field
+    // assignments above it, which is exactly why it was missed.
+    "= BorderColor::all(",
 ];
 
 fn src_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
 }
 
+/// The offset of the next top-level `fn` and how far past the line start its name begins.
+/// Handles `fn`, `pub fn`, `pub(crate) fn` and `pub(super) fn` — anything else is not top level here.
+fn next_fn(rest: &str) -> Option<(usize, usize)> {
+    ["\nfn ", "\npub fn ", "\npub(crate) fn ", "\npub(super) fn "]
+        .iter()
+        .filter_map(|p| rest.find(p).map(|at| (at, p.len())))
+        .min_by_key(|(at, _)| *at)
+}
+
+/// **Skip past each test module, never truncate at the first.** The naive version split on the
+/// first `#[cfg(test)]` and kept the head — and `chrome.rs`'s first test module is at line 1917 of
+/// 2395, so a fifth of the file this rule exists for was never read. `the_sweep_is_finished.rs`
+/// records the same hole being found the hard way in `tiles.rs`, and `compose_is_read_only.rs` says
+/// why it matters: *"a ratchet that cannot fail is worse than no ratchet, because it reads as a
+/// guarantee."* Borrowed from those two rather than re-derived, a third time.
+fn code_outside_tests(src: &str) -> String {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].starts_with("#[cfg(test)]") {
+            i += 1;
+            while i < lines.len() && lines[i] != "}" {
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        out.push(lines[i]);
+        i += 1;
+    }
+    out.join("\n")
+}
+
 /// Split a file into `(fn name, body)` for every top-level `fn`, test modules excluded.
+///
+/// **`pub fn` counts.** Anchoring on `"\nfn "` skipped every exported function, which in `chrome.rs`
+/// is 22 of 29 — including `hide_idle_scrollbars`, the system this module's own doc holds up as the
+/// example of the rule. Same anchor bug as `the_sweep_is_finished.rs::signatures`.
 fn functions(src: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    // `#[cfg(test)]` at column zero starts the test module; everything after it is fixtures.
-    let live = src.split("\n#[cfg(test)]").next().unwrap_or(src);
-    let mut rest = live;
-    while let Some(at) = rest.find("\nfn ") {
-        let after = &rest[at + 4..];
+    let live = code_outside_tests(src);
+    let mut rest = live.as_str();
+    while let Some((at, skip)) = next_fn(rest) {
+        let after = &rest[at + skip..];
         let name: String = after.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
         let Some(open) = after.find('{') else { break };
         let mut depth = 0usize;
@@ -97,8 +151,15 @@ fn count_writes(body: &str) -> usize {
 /// Comparisons that could be guarding a write. `!=` and `==` both are: this crate writes
 /// `if x != want { x = want }` in some places and `if x == want { return }` in others, and a
 /// `set_if`-style helper hides the comparison in a call — so a body that delegates counts too.
+///
+/// **`set(&mut ..)` is NOT counted, and that was a measured mistake.** Passing `&mut` of a field of a
+/// `Mut<T>` into a helper runs `Mut::deref_mut`, which calls `set_changed()` *before* the helper's
+/// own comparison happens — so the shape guards the write and not the dirty flag, which is the only
+/// half anything downstream reads. Crediting it meant this lint certified the one pattern that
+/// provably defeats the rule it enforces. Verified with a probe: a helper of that shape reports
+/// `is_changed()` after a no-op; an in-place compare does not.
 fn count_guards(body: &str) -> usize {
-    body.matches("!=").count() + body.matches("==").count() + body.matches("set(&mut ").count()
+    body.matches("!=").count() + body.matches("==").count()
 }
 
 #[test]
@@ -162,7 +223,7 @@ fn the_scan_actually_finds_drawing_systems() {
         .map(|(n, _)| n)
         .collect();
     assert!(
-        found.len() >= 3,
+        found.len() >= 6,
         "the scan found only {} drawing systems in chrome.rs — if the parser has stopped seeing \
          them, the rule above is being enforced against nothing: {found:?}",
         found.len()

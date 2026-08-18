@@ -177,7 +177,6 @@ impl Stance {
 /// Everything the editor can be asked to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
-    /// Cycle the panels this door holds.
     /// Jump to this door's first, second or third panel. **Three, because the widest door holds
     /// three** — Kit is Meshes/Tiles/Compose. A fourth would be a fourth row here and a fourth in
     /// every context's list, which is what the twelve-row cap is for.

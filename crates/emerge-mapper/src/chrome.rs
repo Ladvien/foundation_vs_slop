@@ -216,8 +216,16 @@ impl Plugin for WidgetsPlugin {
 /// `docs/ui.md` §5 says of `bevy_feathers`: *"its visuals are Bevy's editor skin — do not adopt
 /// them"*, and *"Do not add a UI framework crate"*. Both stand. What is adopted is the **mechanism**
 /// — a token table, a themed scrollbar, and focus outlines that would otherwise be hand-written
-/// badly — and every colour in it comes from the constants above. Feathers' own greys are
-/// overwritten wholesale; none reaches the screen.
+/// badly — and every colour this editor states comes from the constants above.
+///
+/// **What is NOT true, and was written here as if it were:** Feathers' greys are not overwritten
+/// wholesale. `create_dark_theme()` populates 137 tokens and the table below replaces 14, so 123 of
+/// Bevy's editor greys are live in the resource. Nothing in this crate spawns a Feathers-themed
+/// widget today, so none of them reaches the screen — but that is a fact about the call sites, not
+/// about this function, and the first themed widget anybody adds will render in somebody else's
+/// skin. Seeding from `ThemeProps::default()` instead is what would make the paragraph above true;
+/// it is a decision about what a missing token should look like, not a typo, so it is named here
+/// rather than taken.
 ///
 /// The editor already deviates from that section once, deliberately and on the record (the full font
 /// face, where the game keeps Bevy's 95-codepoint default). This is the second, and the same shape:
@@ -231,10 +239,12 @@ impl Plugin for WidgetsPlugin {
 /// below is a reference to a const, never a literal, and `tests/chrome_census.rs` fails on a literal
 /// in this file's theme.
 ///
-/// A token this table misses renders **fuchsia** and warns once (`UiTheme::color`). That is already
-/// the house convention: [`scaled`] and [`ink`] both answer their own error case *"loudly in magenta
-/// rather than with a silent guess"*. Feathers picked the same one independently, which is why
-/// seeding is not optional and a miss is not quiet.
+/// `UiTheme::color` renders **fuchsia** and warns once for a token it has no entry for — the house
+/// convention, which [`scaled`] and [`ink`] also keep (*"loudly in magenta rather than with a silent
+/// guess"*). **That alarm cannot currently fire here**, and the difference matters: seeding from
+/// `create_dark_theme()` gives every token an entry, so `color`'s `None` arm is unreachable and a
+/// token this table misses answers with Bevy's grey rather than shouting. The safety property this
+/// paragraph used to claim is the one thing the seeding gives up.
 pub fn theme() -> bevy::feathers::theme::ThemeProps {
     use bevy::feathers::tokens;
     let mut props = bevy::feathers::dark_theme::create_dark_theme();
@@ -486,7 +496,7 @@ pub struct ViewportSlot;
 
 /// Everything that spawns into a dock runs after this.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FrameSet;
+pub struct FrameSystems;
 
 /// Height of the two bars. Fixed, because a bar that changed height as its content changed would
 /// move the viewport under the author's hands.
@@ -496,7 +506,7 @@ const BAR_H: f32 = 26.0;
 ///
 /// The `Frame` resource is how [`panel_root`] finds the dock to put a panel in; BSN-style name
 /// lookup does not exist here and a marker query would need a flush between the frame and the first
-/// panel. Ordering is [`FrameSet`], which every panel spawner runs `after`.
+/// panel. Ordering is [`FrameSystems`], which every panel spawner runs `after`.
 pub fn spawn_frame(mut commands: Commands) {
     let bar = |extra: Node| -> Node {
         Node {
@@ -1295,6 +1305,13 @@ pub fn row_value(row: &mut ChildSpawnerCommands, text: impl Into<String>, colour
 /// **A chip** — one small clickable word. [`CHIP_PAD`] and a permanent 1 px border whose COLOUR
 /// asks the questions (a ghost proposal lights it [`SUGGEST`]; everything else runs [`Color::NONE`]),
 /// so a chip never changes size when its state does.
+///
+/// **`marker` must not contain a `Node`, and the failure is a panic rather than a warning.** This
+/// builder spawns one, and a bundle carrying two of the same component panics at spawn in Bevy 0.19
+/// naming the component and not the call site — the trap the repo's `CLAUDE.md` already records for
+/// `button_visual()`. To adjust the node, `.insert(Node { .. })` on the returned `EntityCommands`,
+/// which overrides rather than duplicates. The same holds for [`list_row`], [`quiet_row`] and
+/// [`text_field`], which each carry a `Node` of their own.
 pub fn chip<'a>(
     parent: &'a mut ChildSpawnerCommands,
     marker: impl Bundle,
@@ -1670,7 +1687,13 @@ fn paint_name_box(
     // `Text` is change-detected, so writing an unchanged string would re-lay the box continuously.
     // Three separate loops rather than one over a tuple: the queries have different filters, so they
     // are different types and cannot share an array.
-    fn set(text: &mut Text, want: &str) {
+    //
+    // **It takes `&mut Mut<Text>`, not `&mut Text`.** Coercing a `Mut<Text>` down to `&mut Text` at
+    // the call site runs `Mut::deref_mut`, which calls `set_changed()` — so the string was compared
+    // and the component was dirtied anyway, every frame, which is exactly what the comment above
+    // says this guard exists to stop. Reading `text.0` through `&mut Mut<_>` uses `Deref`; only the
+    // assignment reaches `DerefMut`.
+    fn set(text: &mut Mut<Text>, want: &str) {
         if text.0 != want {
             text.0 = want.to_owned();
         }
@@ -1771,7 +1794,7 @@ impl Plugin for ChromePlugin {
             // what makes the deferred `insert_resource` visible to the spawners.
             .add_systems(
                 OnEnter(crate::screen::Screen::Editor),
-                spawn_frame.in_set(FrameSet),
+                spawn_frame.in_set(FrameSystems),
             )
             // **The menu gets the same frame**, and that is the point of it being the window's shape
             // rather than the editor's: one answer to "how is this application laid out" instead of
@@ -1779,7 +1802,7 @@ impl Plugin for ChromePlugin {
             // fill.
             .add_systems(
                 OnEnter(crate::screen::Screen::Menu),
-                spawn_frame.in_set(FrameSet),
+                spawn_frame.in_set(FrameSystems),
             )
             .add_systems(
                 OnEnter(crate::screen::Screen::Editor),
@@ -1789,7 +1812,7 @@ impl Plugin for ChromePlugin {
                     spawn_chrome_bar,
                     spawn_status_band,
                 )
-                    .after(FrameSet),
+                    .after(FrameSystems),
             )
             // Every list row's hover, in one place — the rows themselves are spawned by
             // change-gated rebuilds that never see mouse motion.
@@ -1799,7 +1822,12 @@ impl Plugin for ChromePlugin {
             // place that has to know which screens have lists.
             .add_systems(
                 Update,
-                (style_list_rows, hide_idle_scrollbars, paint_the_leaving_prompt),
+                (
+                    style_list_rows,
+                    hide_idle_scrollbars,
+                    paint_the_leaving_prompt,
+                    repaint_where_you_are,
+                ),
             )
             // `flash_live_rows` after the rebuild, so a row spawned this frame is lit this frame
             // rather than one frame late — which for a tap is the difference between a readout and
@@ -2262,9 +2290,38 @@ pub fn spawn_chrome_bar(
     });
 }
 
-/// The bar's right-hand end: which door, on what. Marked so a test can find it.
+/// The bar's right-hand end: which door, on what. Marked so a test can find it — and so
+/// [`repaint_where_you_are`] can keep it true.
 #[derive(Component)]
 pub struct WhereYouAre;
+
+/// **The bar says what the title says, for as long as both are on screen.**
+///
+/// [`spawn_chrome_bar`] runs once, at `OnEnter(Editor)`, and nothing repainted this — so renaming a
+/// map with `N` moved `main::name_the_window`'s title and left the bar reading the old name for the
+/// rest of the session. That is exactly the drift [`subject`] was extracted to make impossible,
+/// arriving through the half that was never wired: one function deciding the name is worth nothing
+/// if only one of its two readers ever asks it.
+///
+/// Compared before writing, per the standing rule — `Text` is change-detected and this runs every
+/// frame.
+pub fn repaint_where_you_are(
+    door: Option<Res<crate::tiles::Door>>,
+    open_map: Option<Res<crate::project::OpenMap>>,
+    project: Option<Res<crate::project::Project>>,
+    mut bar: Query<&mut Text, With<WhereYouAre>>,
+) {
+    let Some(door) = door else { return };
+    let want = match subject(open_map.as_deref(), project.as_deref()) {
+        Some(name) => format!("{} \u{00b7} {name}", door.label()),
+        None => door.label().to_owned(),
+    };
+    for mut text in &mut bar {
+        if text.0 != want {
+            text.0 = want.clone();
+        }
+    }
+}
 
 /// **Every panel this editor has.** The status band speaks for whichever one is live, so it names
 /// them all and `notice::paint_notices` picks — rather than five bands each hidden by its own tab.

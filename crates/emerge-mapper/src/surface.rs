@@ -18,7 +18,7 @@
 //! `bevy_devshot`, which reads the **window surface** — and macOS keeps that current only while the
 //! window is actually on screen (7,188 distinct colours focused, **1** behind something else). So
 //! looking at a panel meant taking the display of whoever was at the machine, which is the one thing
-//! `crate::debug_capture` was written to avoid.
+//! the deleted `debug_capture` module was written to avoid.
 //!
 //! Rendering to an image and mirroring it to the window has no such dependency. `chooser.rs` already
 //! did exactly this — for sharpness rather than for capture — and this module is that rig lifted to

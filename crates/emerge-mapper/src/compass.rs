@@ -163,14 +163,6 @@ fn spawn(mut commands: Commands) {
         });
 }
 
-/// **Write only on a change.** `Node` is change-detected and `ui_layout_system` reads that; a value
-/// re-assigned to what it already was still marks the component dirty.
-fn set<T: PartialEq>(slot: &mut T, want: T) {
-    if *slot != want {
-        *slot = want;
-    }
-}
-
 /// **Place every arm and dot from the camera's basis.**
 ///
 /// Runs each frame because the rig EASES between detents — `Q` does not snap, it swings, and a
@@ -201,15 +193,23 @@ fn follow_the_camera(
         // enforces — `Node` and `UiTransform` are change-detected, and a system that dirties them
         // sixty times a second makes that detection meaningless for everyone downstream. Found by
         // that test on its first run.
-        set(&mut node.width, Val::Px(length));
-        set(
-            &mut node.left,
+        //
+        // **Compared in place, never through a `&mut T` helper.** `set(&mut node.width, ..)` looks
+        // like a guard and is not one: taking `&mut` of a field of a `Mut<Node>` runs
+        // `Mut::deref_mut`, which calls `set_changed()` before the comparison inside the helper ever
+        // happens — so the write was guarded and the DIRTY FLAG was not, which is the only half
+        // anything downstream reads. Measured: a helper of that shape reports `is_changed()` after a
+        // no-op; this shape does not.
+        let (w, l, t) = (
+            Val::Px(length),
             Val::Px(centre + dir.x * length * 0.5 - length * 0.5),
-        );
-        set(
-            &mut node.top,
             Val::Px(centre + dir.y * length * 0.5 - ARM * 0.5),
         );
+        if node.width != w || node.left != l || node.top != t {
+            node.width = w;
+            node.left = l;
+            node.top = t;
+        }
         // `Rot2` turns clockwise, and UI y grows down — the two flips cancel, so a plain `atan2`
         // of the UI-space direction is the angle, with no sign correction.
         let turn = Rot2::radians(reach.y.atan2(reach.x));
@@ -226,8 +226,14 @@ fn follow_the_camera(
         };
         let (on_screen, toward) = crate::view::axis_on_screen(*axis, &rig);
         let reach = on_screen * REACH;
-        set(&mut node.left, Val::Px(centre + reach.x - DOT * 0.5));
-        set(&mut node.top, Val::Px(centre + reach.y - DOT * 0.5));
+        let (l, t) = (
+            Val::Px(centre + reach.x - DOT * 0.5),
+            Val::Px(centre + reach.y - DOT * 0.5),
+        );
+        if node.left != l || node.top != t {
+            node.left = l;
+            node.top = t;
+        }
         // **The arm going away from you is dimmer.** Without this all three read as equally near,
         // which is the one thing an isometric view cannot tell you by length: at this elevation the
         // three axes project to exactly equal lengths, by definition of *isometric*.

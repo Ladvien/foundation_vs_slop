@@ -892,7 +892,7 @@ impl Plugin for EditorPlugin {
                     spawn_clone_tile,
                     spawn_target_tile,
                     spawn_existing,
-                ).after(crate::chrome::FrameSet)
+                ).after(crate::chrome::FrameSystems)
                     .chain()
                     // The Map door's own furniture: a palette bound to a map, the bounds floor, the
                     // rows already placed. `spawn_existing` takes `Res<OpenMap>`, which no other
