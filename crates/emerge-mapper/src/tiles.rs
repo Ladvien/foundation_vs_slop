@@ -2603,6 +2603,48 @@ impl ImportState {
         }
     }
 
+    /// **Put the highlight on this piece** — the one cursor the lists, the detail pane and the
+    /// stage all read.
+    ///
+    /// Asked for at the keyboard, 2026-08-18: *"when I hit Shift+L and label all, it should
+    /// automatically switch to what's being labeled."* A walk of hundreds photographs one piece at
+    /// a time and the panel said only how many were done, so the piece the model was being asked
+    /// about was the one thing on screen that nothing pointed at — Nielsen's visibility-of-system-
+    /// status failure in its third form, *"the user cannot identify where he is standing in the
+    /// interaction process"* (Nasir 2024, arXiv:2408.06955 §4.3.1.2, restating Nielsen 1994b).
+    ///
+    /// **The highlight is three facts, so this is three writes.** [`Self::selected_library_id`] is
+    /// the discriminant — a candidate has to take the focus off the library list or the pane keeps
+    /// showing the row that had it — and [`Self::focused_pack`] is the other half of the same
+    /// cursor: a highlight standing on a pack heading is not standing on a mesh.
+    ///
+    /// **The fold is not cosmetic.** `keep_candidate_selection_visible` moves the selection off any
+    /// row the author cannot see, so a selection set inside a folded pack is undone on the next
+    /// frame. Since the first scan folds every pack this kit does not draw from, that is most of
+    /// them — the follow would be silently inert exactly when a walk crosses into a new pack.
+    pub(crate) fn focus_on(&mut self, target: &EditTarget) {
+        match target {
+            EditTarget::Library(id) => {
+                self.selected_library_id = Some(id.clone());
+                self.focused_pack = None;
+            }
+            EditTarget::Candidate(mesh) => {
+                // Gone since the walk was built — a rescan, a removal. Leave the highlight where
+                // the author can see it rather than moving it somewhere arbitrary.
+                let Some(ix) = self.candidates.iter().position(|c| &c.mesh == mesh) else {
+                    return;
+                };
+                // The key `packs` groups by, read the way `packs` reads it, so the fold this opens
+                // is the one the row is under.
+                self.folded_packs
+                    .remove(mesh.rsplit_once('/').map_or(".", |(dir, _)| dir));
+                self.selected = ix;
+                self.selected_library_id = None;
+                self.focused_pack = None;
+            }
+        }
+    }
+
     /// The descriptor a captured target names, wherever the focus has since moved to.
     ///
     /// `None` when the target is gone — a library entry removed, or a candidate dropped by a rescan.
@@ -3681,6 +3723,74 @@ mod pack_fold_tests {
     use super::*;
     use emerge_core::descriptor::Descriptor;
     use emerge_core::library::Library;
+
+    /// **The walk moves the highlight onto the piece it is asking about, and opens the pack that
+    /// piece is in.**
+    ///
+    /// Asked for at the keyboard, 2026-08-18: *"when I hit Shift+L and label all, it should
+    /// automatically switch to what's being labeled."*
+    ///
+    /// The unfold is the half worth pinning. [`keep_candidate_selection_visible`] takes the
+    /// selection off any row that is not on screen, so a follow into a folded pack is undone on the
+    /// next frame — and since the first scan folds every pack the kit does not draw from, the
+    /// feature would look intermittent rather than broken: it would work on whichever pack happened
+    /// to be open.
+    #[test]
+    fn a_walk_moves_the_highlight_onto_the_piece_it_is_labeling() {
+        use emerge_core::import::Candidate;
+        use emerge_core::policy::Policy;
+
+        let mesh = |pack: &str, name: &str| Candidate {
+            mesh: format!("{pack}/{name}.glb"),
+            proposed: Descriptor::default(),
+            measured: None,
+            front_detail: None,
+            triangles: 0,
+            findings: Vec::new(),
+        };
+        let mut state = ImportState::default();
+        state.candidates = vec![mesh("alpha", "one"), mesh("beta", "two")];
+        state.folded_packs.insert("beta".to_owned());
+        // Where the author left the cursor: a library row, with the candidate list's own highlight
+        // parked on a pack heading.
+        state.selected = 0;
+        state.selected_library_id = Some("lamp_tall".to_owned());
+        state.focused_pack = Some("alpha".to_owned());
+
+        state.focus_on(&EditTarget::Candidate("beta/two.glb".to_owned()));
+
+        assert_eq!(state.selected, 1, "the highlight is on the piece being labeled");
+        assert_eq!(
+            state.selected_library_id, None,
+            "a candidate takes the focus off the library list, or the pane keeps showing the row \
+             that had it"
+        );
+        assert_eq!(
+            state.focused_pack, None,
+            "the highlight is on a mesh, not still on a heading"
+        );
+        // Asked of `pack_is_open`, which is the one place allowed to answer it — see
+        // `every_list_follows_its_selection::what_is_on_screen_is_decided_in_one_place`.
+        assert!(
+            pack_is_open(&state, &Policy::default(), "beta"),
+            "the pack it is in is opened, or the next frame moves the selection back off it"
+        );
+        let rows = candidate_list_rows(&state, &crate::filter::Filters::default(), &Policy::default());
+        assert!(
+            rows.contains(&ListRow::Mesh(1)),
+            "and the row is genuinely on screen: {rows:?}"
+        );
+
+        // A library row is the same cursor in its other state.
+        state.focus_on(&EditTarget::Library("lamp_tall".to_owned()));
+        assert_eq!(state.selected_library_id.as_deref(), Some("lamp_tall"));
+
+        // A piece that has gone since the walk was built leaves the highlight where it is, rather
+        // than moving it somewhere arbitrary.
+        state.focus_on(&EditTarget::Candidate("gamma/three.glb".to_owned()));
+        assert_eq!(state.selected, 1);
+        assert_eq!(state.selected_library_id.as_deref(), Some("lamp_tall"));
+    }
 
     /// A piece named `id` whose mesh lives in `pack`.
     fn piece(id: &str, pack: &str) -> Descriptor {

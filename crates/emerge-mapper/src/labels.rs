@@ -949,6 +949,10 @@ pub(crate) fn answer_overwrite(
 /// switching tabs to do other work.
 pub(crate) fn drive_batch(
     project: Option<Res<Project>>,
+    // **Which tab is showing**, for the follow below — `Option` because `Screen::Editor` can run one
+    // pass with no door loaded (`screen::open_the_door`), and in Bevy 0.19 a missing `Res` panics its
+    // system rather than skipping it.
+    mode: Option<Res<crate::tiles::Mode>>,
     mut state: ResMut<crate::tiles::ImportState>,
     mut queue: ResMut<LabelQueue>,
     tasks: Res<LabelTasks>,
@@ -975,6 +979,16 @@ pub(crate) fn drive_batch(
         .status
         .note(format!("labeling {done}/{total} - `{name}`"));
     queue.current = Some(name.to_string());
+    // **The highlight goes where the walk goes** — `ImportState::focus_on` carries the reason.
+    //
+    // **Only on the Meshes tab**, and that half is the interesting one: this walk deliberately
+    // survives the author switching tabs (see the note on this function), and on the Tiles tab the
+    // very same cursor is what `Enter` drops into the tile being assembled. Following there would
+    // put a piece nobody chose into somebody's assembly every twenty-five seconds, so the follow
+    // stops at the tab that is showing the walk.
+    if mode.as_deref() == Some(&crate::tiles::Mode::Meshes) {
+        state.focus_on(&target);
+    }
     rig.push_unique(crate::label_booth::ShotJob {
         target,
         mesh,
