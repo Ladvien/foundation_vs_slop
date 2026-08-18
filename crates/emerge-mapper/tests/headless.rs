@@ -9512,3 +9512,62 @@ fn the_tab_strip_describes_itself() {
         );
     }
 }
+
+/// **The way out asks a question, and every door can show it.**
+///
+/// Reported at the keyboard, 2026-08-18: *"the command o button doesn't work when I click on it or
+/// when I press the shortcut key."* Both fired correctly. `editor::leave_for_menu` arms
+/// `EditorState::leaving` and writes the question into `EditorState::status` — and
+/// `notice::paint_notices` picks a status **by tab**, so on the Kit and Rigs doors the words went to
+/// a status nothing renders. The author pressed the key, saw nothing, and never learned that `Esc`
+/// was waiting to confirm. A dead key and an invisible prompt are indistinguishable from the outside,
+/// which is why this is asserted on the door where it broke rather than on the Map.
+#[test]
+fn the_leaving_question_is_visible_on_a_door_that_is_not_the_map() {
+    let root = Fixture::new("leaving-visible")
+        .descriptor("wall", "alpha")
+        .place("wall", (0.0, 0.0))
+        .build("m");
+    // The Kit door: the one whose panel shows `ImportState`, not `EditorState`.
+    let mut app = harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Meshes)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    app.update();
+
+    let quiet = |app: &mut App| -> Vec<(bevy::ui::Display, String)> {
+        app.world_mut()
+            .query_filtered::<(&bevy::ui::Node, &Text), With<emerge_mapper::chrome::LeavingPrompt>>()
+            .iter(app.world())
+            .map(|(n, t)| (n.display, t.0.clone()))
+            .collect()
+    };
+
+    let before = quiet(&mut app);
+    assert_eq!(before.len(), 1, "the band carries exactly one leaving prompt");
+    assert_eq!(
+        before[0].0,
+        bevy::ui::Display::None,
+        "nothing is being asked, so nothing should be on the band"
+    );
+
+    // What `Cmd+O` and the `< kits & maps` click both call.
+    {
+        let mut state = app
+            .world_mut()
+            .resource_mut::<emerge_mapper::editor::EditorState>();
+        emerge_mapper::editor::leave_for_menu(false, &mut state);
+    }
+    app.update();
+
+    let after = quiet(&mut app);
+    assert_eq!(
+        after[0].0,
+        bevy::ui::Display::Flex,
+        "the question is armed and the author can see nothing — which is the bug, and it reads as a \
+         dead key rather than as a missing prompt"
+    );
+    assert!(
+        after[0].1.contains("Esc"),
+        "the prompt must name the key that answers it; `Esc` is the whole point of asking. Got: {:?}",
+        after[0].1
+    );
+}

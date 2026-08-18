@@ -115,6 +115,22 @@ pub const BOUNDS_LINE: Color = Color::srgb(0.42, 0.38, 0.30);
 /// once drifts. Darker than [`PANEL_BG`], so a panel reads as a surface laid on nothing.
 pub const VOID: Color = Color::srgb(0.035, 0.033, 0.030);
 
+/// **The window's own chrome** — the bar above the door strip and the band at its foot.
+///
+/// Reported at the keyboard: the two bars read as bands, but only just. They were on [`HEADER_BG`],
+/// which is a *group heading inside a panel* — a word for separating blocks on one surface, not for
+/// saying "this strip is not part of any panel". Two roles on one colour, which is the drift
+/// `chrome.rs` exists to stop, so window chrome gets its own word.
+///
+/// Derived from [`SLOT_BG`] rather than picked, because the relationship is the point: chrome sits a
+/// step above panel ground and a step below an inspector slot, so a back button on `SLOT_BG` still
+/// reads as raised *against* the bar it sits on.
+pub const BAR_BG: Color = scaled(SLOT_BG, 0.78);
+
+/// **The hairline that ends a bar.** Luminance, not hue — `docs/ui.md` §1.3 is explicit that
+/// separation is on luminance alone, and a chrome edge is the last thing that should spend saturation.
+pub const BAR_EDGE: Color = scaled(ROW_SELECTED, 0.62);
+
 /// A chrome colour scaled toward black, for a quieter sibling of a named colour — so the derived
 /// value cannot drift from its parent the way `compose`'s hand-halved ACCENT could have.
 pub const fn scaled(colour: Color, k: f32) -> Color {
@@ -497,8 +513,12 @@ pub fn spawn_frame(mut commands: Commands) {
 
     let chrome_bar = commands
         .spawn((
-            bar(Node::default()),
-            BackgroundColor(HEADER_BG),
+            bar(Node {
+                border: UiRect::bottom(Val::Px(1.0)),
+                ..default()
+            }),
+            BackgroundColor(BAR_BG),
+            BorderColor::all(BAR_EDGE),
             bevy::picking::Pickable::IGNORE,
         ))
         .id();
@@ -573,8 +593,12 @@ pub fn spawn_frame(mut commands: Commands) {
 
     let status = commands
         .spawn((
-            bar(Node::default()),
-            BackgroundColor(HEADER_BG),
+            bar(Node {
+                border: UiRect::top(Val::Px(1.0)),
+                ..default()
+            }),
+            BackgroundColor(BAR_BG),
+            BorderColor::all(BAR_EDGE),
             bevy::picking::Pickable::IGNORE,
         ))
         .id();
@@ -1740,7 +1764,10 @@ impl Plugin for ChromePlugin {
             // **Ungated by screen**, unlike the systems below it: the menu draws rows too, and the
             // query simply matches nothing on a screen that has none. Gating it would be a second
             // place that has to know which screens have lists.
-            .add_systems(Update, (style_list_rows, hide_idle_scrollbars))
+            .add_systems(
+                Update,
+                (style_list_rows, hide_idle_scrollbars, paint_the_leaving_prompt),
+            )
             // `flash_live_rows` after the rebuild, so a row spawned this frame is lit this frame
             // rather than one frame late — which for a tap is the difference between a readout and
             // a flicker.
@@ -2216,6 +2243,37 @@ pub const ALL_TABS: &[crate::tiles::Mode] = &[
     crate::tiles::Mode::Compose,
 ];
 
+/// The band's leftmost slot: the question the way out asks, on every door.
+#[derive(Component)]
+pub struct LeavingPrompt;
+
+/// **Show the leaving question wherever the author is.**
+///
+/// `Option<Res<..>>` because `EditorState` belongs to the editor screen and this system is on the
+/// shared `Update`; a missing `Res<T>` panics its system in Bevy 0.19 rather than skipping it.
+///
+/// Compares before writing, per the standing rule — the text is rebuilt from the same `Status` the
+/// prompt writes, so it would otherwise be assigned every frame the question is up.
+pub fn paint_the_leaving_prompt(
+    editor: Option<Res<crate::editor::EditorState>>,
+    mut prompt: Query<(&mut Node, &mut Text), With<LeavingPrompt>>,
+) {
+    let Some(editor) = editor else { return };
+    // The status carries the words — the dirty branch names three keys, the clean one names `Esc` —
+    // so this shows what `leave_for_menu` already said rather than a second copy of it.
+    let want = editor.leaving.then(|| editor.status.line().to_owned());
+    for (mut node, mut text) in &mut prompt {
+        let display = if want.is_some() { Display::Flex } else { Display::None };
+        if node.display != display {
+            node.display = display;
+        }
+        let line = want.clone().unwrap_or_default();
+        if text.0 != line {
+            text.0 = line;
+        }
+    }
+}
+
 /// **One band at the foot of the window: what went wrong, and what the keys are.**
 ///
 /// Both of these were spawned *inside* each panel, once per tab, which had two costs. The banner
@@ -2236,6 +2294,29 @@ pub const ALL_TABS: &[crate::tiles::Mode] = &[
 /// landed.
 pub fn spawn_status_band(mut commands: Commands, frame: Res<Frame>) {
     commands.entity(frame.status).with_children(|band| {
+        // **The way out asks a question, and until now most doors could not show it.**
+        //
+        // `editor::leave_for_menu` arms `EditorState::leaving` and writes the question into
+        // `EditorState::status` — and `notice::paint_notices` picks the status by tab, so on the Kit
+        // and Rigs doors it went to a status nothing renders. Both `Cmd+O` and the `< kits & maps`
+        // button fired correctly and **nothing appeared**, which reads exactly like a dead key.
+        // Reported at the keyboard, 2026-08-18: *"the command o button doesn't work when I click on
+        // it or when I press the shortcut key."*
+        //
+        // It is a question about the *window* — "leave this door?" — so it belongs on the window's
+        // own band rather than in whichever panel happens to be showing. That is the same argument
+        // that moved the way out itself out of the panels.
+        band.spawn((
+            LeavingPrompt,
+            Text::new(String::new()),
+            TextFont::from_font_size(text::BODY),
+            TextColor(ACCENT),
+            Node {
+                display: Display::None,
+                margin: UiRect::right(Val::Px(GAP_GROUP)),
+                ..default()
+            },
+        ));
         problem_banner(band, ALL_TABS);
         band.spawn((
             Node {
