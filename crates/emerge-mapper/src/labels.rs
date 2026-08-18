@@ -696,6 +696,17 @@ pub struct LabelQueue {
 }
 
 impl LabelQueue {
+    /// **Arm the batch's self-confirmation without running a batch**, for a test.
+    ///
+    /// The righting path is only reachable through `auto_apply`, and a headless test cannot get
+    /// there the ordinary way: the walk starts with a photo shoot, and the booth needs a GPU. This
+    /// is the one flag between a staged proposal and `tiles::apply_suggestion`, so setting it is
+    /// what lets a test ask the question the batch asks.
+    #[cfg(any(test, feature = "debugger"))]
+    pub fn auto_apply_for_test(&mut self) {
+        self.auto_apply = true;
+    }
+
     pub fn running(&self) -> bool {
         !self.queue.is_empty()
     }
@@ -1670,7 +1681,8 @@ mod tests {
         s.front = Some(emerge_core::descriptor::Face::South);
         s.needs_turn = Some(crate::vlm::NeedsTurn {
             axis: "x".to_owned(),
-            why: "lying down".to_owned(),
+            turns: 2,
+            why: "standing on its head".to_owned(),
         });
         let before_align_rotate = d.align.rotate;
         let before_extent = d.extent.clone();

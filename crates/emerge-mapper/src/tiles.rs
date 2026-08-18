@@ -211,6 +211,16 @@ pub struct ImportState {
     pub selected_library_id: Option<String>,
     /// Packs the author has folded away.
     pub folded_packs: std::collections::HashSet<String>,
+    /// **How many times the labeler has turned each mesh to right it**, keyed by mesh path.
+    ///
+    /// A righting re-photographs the piece and asks again, so a model that keeps saying "not
+    /// upright" turns it for ever — four quarter turns is where it started, which makes the loop
+    /// silent as well as endless. [`MAX_RIGHTINGS`] is the ceiling; past it the proposal is dropped
+    /// with a sentence rather than retried.
+    ///
+    /// Session bookkeeping rather than descriptor state, so it is deliberately absent from
+    /// [`Snapshot`]: undoing a turn must not hand the loop its budget back.
+    pub righted: std::collections::BTreeMap<String, u8>,
     /// **The pack heading the arrows are standing on**, when they are on one rather than a mesh.
     ///
     /// The walk used to step mesh rows only, so a collapsed pack was visible and unreachable: at the
@@ -1304,8 +1314,13 @@ impl RotateAxis {
         }
     }
     /// This axis's component of a rotation, bumped by a quarter turn.
-    fn bumped(self, r: (i32, i32, i32)) -> (i32, i32, i32) {
-        let step = |v: i32| (v + 90).rem_euclid(360);
+    /// Advance this axis by `quarters` 90-degree steps, wrapping at a full turn.
+    ///
+    /// The count exists because the labeler can now ask for two — an asset authored upside down —
+    /// and turning it twice as two separate acts would be two undo entries, two re-measures and a
+    /// moment in between where the piece is on its side and something else could read it.
+    fn bumped(self, r: (i32, i32, i32), quarters: u8) -> (i32, i32, i32) {
+        let step = |v: i32| (v + 90 * i32::from(quarters)).rem_euclid(360);
         match self {
             RotateAxis::X => (step(r.0), r.1, r.2),
             RotateAxis::Y => (r.0, step(r.1), r.2),
@@ -1345,6 +1360,7 @@ impl RotateAxis {
 /// not trigger one.
 fn rotate_mesh(
     axis: RotateAxis,
+    quarters: u8,
     force: bool,
     project: &mut Project,
     state: &mut ImportState,
@@ -1386,7 +1402,7 @@ fn rotate_mesh(
     let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
         return false;
     };
-    let want = axis.bumped(d.align.rotate.unwrap_or((0, 0, 0)));
+    let want = axis.bumped(d.align.rotate.unwrap_or((0, 0, 0)), quarters);
     let before = d.align.rotate;
     // A rotation of nothing is not a rotation — keep the field absent rather than storing an
     // identity nobody authored, so a descriptor that was never turned still says so.
@@ -1401,7 +1417,7 @@ fn rotate_mesh(
     // here only because divisions are derived from the extent that just changed.
     let lattice = match (axis, div_before) {
         (RotateAxis::Y, Some(div)) => {
-            d.subgrid = d.subgrid.take().map(|g| g.rotated(1, div));
+            d.subgrid = d.subgrid.take().map(|g| g.rotated(quarters, div));
             String::new()
         }
         // A Y turn on a piece whose divisions would not derive has no cells worth moving either:
@@ -1436,7 +1452,7 @@ fn on_rotate_click(
     let Ok(axis) = axes.get(activate.entity) else {
         return;
     };
-    rotate_mesh(*axis, held_shift(&keyboard), &mut project, &mut state);
+    rotate_mesh(*axis, 1, held_shift(&keyboard), &mut project, &mut state);
 }
 
 /// **Shift, held, meaning "I know — do it anyway".**
@@ -2098,7 +2114,7 @@ fn lattice_keys(
         (Action::RotateMeshZ, RotateAxis::Z),
     ] {
         if pressed(action) {
-            rotate_mesh(axis, held_shift(&keyboard), &mut project, &mut state);
+            rotate_mesh(axis, 1, held_shift(&keyboard), &mut project, &mut state);
             return;
         }
     }
@@ -4484,6 +4500,14 @@ fn auto_apply_batch(
     );
 }
 
+/// **How many times one mesh may be turned by the labeler before the loop is called a loop.**
+///
+/// Two, because one is the answer and the second is the correction: an odd turn taken the wrong way
+/// round comes back as "still not upright" and the second attempt fixes it (see
+/// [`crate::vlm::NeedsTurn::turns`] for why the direction is not asked for). A third means the model
+/// and the mesh disagree about which way is up, and four quarter turns is where it started.
+pub(crate) const MAX_RIGHTINGS: u8 = 2;
+
 /// **Apply one proposal, wherever the decision came from.**
 ///
 /// `U` is one caller; a batch running with auto-confirm is the other. Extracted rather than
@@ -4517,7 +4541,39 @@ pub(crate) fn apply_suggestion(
         } else {
             RotateAxis::Z
         };
-        if rotate_mesh(axis, false, project, state) {
+        // **The turn is a write, and `rotate_mesh` writes to the FOCUSED piece** — so the focus has
+        // to be the target before it runs, and it was not. This function is handed an explicit
+        // target (that is the whole point of `at_target` below), while `rotate_mesh` reads
+        // `ImportState::editing` because its other callers are the N/P keys, where the focus IS the
+        // subject. A batch that met a lying-down mesh therefore turned whichever row the author had
+        // left highlighted — and wrote the file if that row was a library entry. Same shape as the
+        // bug `at_target` exists for, one function further along.
+        state.focus_on(&target);
+        let attempt = {
+            let n = state.righted.entry(entry.mesh.clone()).or_insert(0);
+            *n += 1;
+            *n
+        };
+        // **A candidate's lattice is the scan's output, so the turn may clear it and re-derive it;
+        // a library row's may be hand-authored, so it still refuses.**
+        //
+        // `autoscan_candidate` marks a candidate's cells the moment it is selected — and since the
+        // walk now selects what it labels, EVERY candidate the labeler reaches has a lattice by the
+        // time its answer comes back. `rotate_mesh` refuses an X or Z turn over authored cells, so
+        // without this the righting would refuse every candidate it was asked about: the feature
+        // would exist and never fire. The distinction is the one `autoscan_candidate` already draws
+        // for exactly this reason — nothing a candidate holds has reached disk, and undo covers the
+        // turn either way.
+        let derived_lattice = matches!(target, EditTarget::Candidate(_));
+        let turned = attempt <= MAX_RIGHTINGS
+            && rotate_mesh(axis, turn.turns, derived_lattice, project, state);
+        if turned {
+            if derived_lattice {
+                // **Re-derived in the frame the piece is now in.** The turn cleared the lattice, and
+                // leaving it cleared would be a silent state change a moment after the scan that
+                // filled it — the same argument that makes turning and re-measuring one action.
+                let _ = scan_mesh(project, state);
+            }
             suggestions.remove(&target);
             generation.0 = generation.0.wrapping_add(1);
             let Some(d) = state.placed_at_target(&target, &project).cloned() else {
@@ -4525,10 +4581,34 @@ pub(crate) fn apply_suggestion(
             };
             let said = crate::labels::request_photos(target, &d, label_tasks, rig);
             state.status.note(format!(
-                "righted about {} — {said}",
+                "righted `{name}` {} quarter turn(s) about {} — {said}",
+                turn.turns,
                 turn.axis.to_uppercase()
             ));
+            return;
         }
+        // **A righting that cannot happen drops the proposal**, and that is not tidiness: a refusal
+        // used to leave the entry staged, and `auto_apply_batch` reaches for the first staged entry
+        // every frame — so a piece that could not be turned was retried sixty times a second,
+        // rewriting the status line, for the rest of the session. Dropping it terminates, and the
+        // labels are not applied because they were judged from an orientation the piece should not
+        // have been in.
+        suggestions.remove(&target);
+        generation.0 = generation.0.wrapping_add(1);
+        let why = if attempt > MAX_RIGHTINGS {
+            format!(
+                "`{name}` has been righted {MAX_RIGHTINGS} times and still says it is not upright \
+                 — turning it again would be a loop. Turn it by hand with N/P and press L."
+            )
+        } else {
+            format!(
+                "`{name}` could not be turned, so its labels were judged from the wrong \
+                 orientation and have been dropped — the refusal above says why. Turn it by hand \
+                 with N/P and press L."
+            )
+        };
+        warn!("{why}");
+        state.status.problem(why);
         return;
     }
     let history_before = state.snapshot(project);
@@ -7765,6 +7845,48 @@ mod scale_field_tests {
             Some((0.306, 0.106)),
             "the reservation is the extent — the scale is a render instruction, not a multiplier"
         );
+    }
+}
+
+#[cfg(test)]
+mod righting_tests {
+    use super::*;
+
+    /// **A turn count steps ninety degrees at a time, and two of them is upside down.**
+    ///
+    /// The count is what the labeler now sends (`vlm::NeedsTurn::turns`), and this is the whole of
+    /// what it means: `bumped` is the only place `align.rotate` moves, so a wrong step here is a
+    /// mesh stored at an orientation it does not have — the invariant `rotate_mesh` exists to hold.
+    #[test]
+    fn a_turn_count_steps_ninety_degrees_at_a_time() {
+        assert_eq!(RotateAxis::X.bumped((0, 0, 0), 1), (90, 0, 0));
+        assert_eq!(
+            RotateAxis::X.bumped((0, 0, 0), 2),
+            (180, 0, 0),
+            "two quarter turns is the answer for a piece standing on its head"
+        );
+        assert_eq!(RotateAxis::Z.bumped((0, 0, 0), 3), (0, 0, 270));
+
+        // It accumulates on what the descriptor already carries, and wraps at a full turn.
+        assert_eq!(RotateAxis::X.bumped((270, 0, 0), 2), (90, 0, 0));
+        assert_eq!(
+            RotateAxis::X.bumped((90, 0, 0), 3),
+            (0, 0, 0),
+            "four quarters is where it started, which is why the gate refuses 4"
+        );
+
+        // And it never touches an axis it was not asked about.
+        assert_eq!(RotateAxis::Y.bumped((90, 0, 270), 2), (90, 180, 270));
+    }
+
+    /// **The ceiling is two, and the second attempt is the one that has to be allowed.**
+    ///
+    /// An odd turn taken the wrong way round comes back as "still not upright" — the direction is
+    /// not asked for (`vlm::NeedsTurn::turns`) — so a ceiling of one would leave every 3-turn piece
+    /// unrighted and blame the model.
+    #[test]
+    fn the_righting_ceiling_leaves_room_for_the_correction() {
+        assert_eq!(MAX_RIGHTINGS, 2);
     }
 }
 

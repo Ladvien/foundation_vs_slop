@@ -221,8 +221,27 @@ pub struct TokenProposal {
 /// judgement that one is needed.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NeedsTurn {
-    /// `"x"` or `"z"` — the horizontal axis of the righting quarter turn.
+    /// `"x"` or `"z"` — the horizontal axis of the righting turn.
     pub axis: String,
+    /// **How many 90-degree quarter turns about that axis**, 1 to 3.
+    ///
+    /// It was one, implied, and that is only enough for a piece lying on its side. An asset
+    /// authored upside down needs two, and the only way to say so was to right it once, re-shoot
+    /// it, and let the model ask again — a second photograph and a second inference, about
+    /// twenty-five seconds, to express a number the model already knew. Asked for at the keyboard,
+    /// 2026-08-18: *"if the mesh is upside down, it can detect that, and send back a command to
+    /// rotate it so many times (snapped to grid)."*
+    ///
+    /// **Quarter turns, because that is what the descriptor can hold**: `align.rotate` is three
+    /// integer degrees stepped by `RotateAxis::bumped`, so 90 is the smallest expressible turn and
+    /// 4 is where it started. 0 is spelled `needs_turn: null`.
+    ///
+    /// **The direction is not asked for**, deliberately. A turn is always in the `+` sense, so a
+    /// piece needing a quarter turn the other way is `3` — and telling a model which visual result
+    /// `+90` produces would mean stating a handedness convention this prompt cannot verify. `2` is
+    /// the case that has no such ambiguity, and it is the one that was asked for. An odd turn taken
+    /// the wrong way is corrected by the re-photograph the righting already performs.
+    pub turns: u8,
     pub why: String,
 }
 
@@ -514,9 +533,14 @@ pub fn build_prompt(vocab: &Vocabularies, ctx: &PromptCtx) -> (String, String) {
          (a sofa fronts where you sit, a screen where it is watched): \"north\", \"east\", \
          \"south\", \"west\", or null for items with no front (symmetric props).\n\
          {front_measured}\
-         needs_turn - null when the asset stands upright as authored. ONLY when it clearly lies \
-         on its side or back, {{\"axis\": \"x\"|\"z\", \"why\": \"...\"}} names the horizontal \
-         quarter turn that would stand it up. Never guess; unsure means null.\n\
+         needs_turn - null when the asset stands upright as authored. ONLY when it clearly does \
+         not - lying on its side or back, or standing on its head - \
+         {{\"axis\": \"x\"|\"z\", \"turns\": 1|2|3, \"why\": \"...\"}} names the turn that \
+         would stand it up. `axis` is the horizontal axis it turns about; `turns` is HOW MANY \
+         90-degree quarter turns about that axis: 2 for upside down, 1 for lying on its side, 3 \
+         for a side turn the other way. If it lies on its side and you cannot tell which way it \
+         should tip, say 1 - the asset is re-photographed after the turn and you will be asked \
+         again. Never guess that a piece is wrong; unsure means null.\n\
          rooms - snake_case room names where this belongs. Prefer names already in use: \
          [{rooms_in_use}].\n\
          group - an optional snake_case set name for items placed together. Prefer names already \
@@ -637,6 +661,10 @@ pub struct RawMount {
 pub struct RawTurn {
     #[serde(default)]
     pub axis: String,
+    /// **Required when `needs_turn` is present**, and `Option` only so its absence is a gate
+    /// rejection with a sentence rather than a silent `0`. See [`NeedsTurn::turns`].
+    #[serde(default)]
+    pub turns: Option<u8>,
     #[serde(default)]
     pub why: String,
 }
@@ -826,18 +854,41 @@ pub fn validate(raw: RawSuggestion, vocab: &Vocabularies) -> Result<Suggestion, 
     };
     let needs_turn = match &raw.needs_turn {
         None => None,
-        Some(t) => match t.axis.as_str() {
-            "x" | "z" => Some(NeedsTurn {
-                axis: t.axis.clone(),
-                why: t.why.clone(),
-            }),
-            other => {
+        Some(t) => {
+            if !matches!(t.axis.as_str(), "x" | "z") {
                 return Err(format!(
-                    "`{other}` is not a righting axis; needs_turn.axis is \"x\" or \"z\" — a \
-                     y turn changes the facing, which is `front`'s to say"
+                    "`{}` is not a righting axis; needs_turn.axis is \"x\" or \"z\" — a \
+                     y turn changes the facing, which is `front`'s to say",
+                    t.axis
                 ));
             }
-        },
+            // **A missing count is refused rather than assumed to be 1.** The old shape meant one
+            // quarter turn by omission; carrying that forward as a default would make the two
+            // answers "turn it once" and "you forgot to say" the same wire message, which is the
+            // one thing a gate exists to keep apart. The reprompt costs a round trip and says
+            // exactly what to add.
+            let turns = match t.turns {
+                Some(n @ 1..=3) => n,
+                Some(other) => {
+                    return Err(format!(
+                        "`{other}` is not a turn count; needs_turn.turns is 1, 2 or 3 quarter \
+                         turns — 4 is where it started, and 0 is spelled `needs_turn: null`"
+                    ));
+                }
+                None => {
+                    return Err(
+                        "needs_turn needs a `turns` count: 1, 2 or 3 quarter turns about that \
+                         axis (2 for an asset standing on its head)"
+                            .to_owned(),
+                    );
+                }
+            };
+            Some(NeedsTurn {
+                axis: t.axis.clone(),
+                turns,
+                why: t.why.clone(),
+            })
+        }
     };
     let confidence = match raw.confidence.as_deref() {
         Some("high") => Confidence::High,
@@ -1522,12 +1573,50 @@ mod tests {
         assert!(validate(raw(r#"{"what": "x", "front": "up"}"#), &v).is_err());
 
         let got = validate(
-            raw(r#"{"what": "a barrel on its side", "needs_turn": {"axis": "x", "why": "authored lying down"}}"#),
+            raw(r#"{"what": "a barrel on its side", "needs_turn": {"axis": "x", "turns": 1, "why": "authored lying down"}}"#),
             &v,
         )
         .unwrap_or_else(|e| panic!("{e}"));
         let turn = got.needs_turn.unwrap_or_else(|| panic!("no turn"));
         assert_eq!(turn.axis, "x");
+        assert_eq!(turn.turns, 1);
+
+        // **Two quarter turns is the answer for an asset standing on its head** — the case the count
+        // was added for. Asked for at the keyboard, 2026-08-18.
+        let got = validate(
+            raw(r#"{"what": "a lamp upside down", "needs_turn": {"axis": "z", "turns": 2, "why": "on its head"}}"#),
+            &v,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(got.needs_turn.map(|t| (t.axis, t.turns)), Some(("z".to_owned(), 2)));
+
+        // **A count outside 1..=3 is refused rather than clamped.** 4 quarter turns is where it
+        // started and 0 is `needs_turn: null`, so both are answers the gate can only guess at.
+        for bad in ["0", "4", "255"] {
+            let full = format!(r#"{{"what": "x", "needs_turn": {{"axis": "x", "turns": {bad}, "why": ""}}}}"#);
+            let e = validate(raw(&full), &v)
+                .err()
+                .unwrap_or_else(|| panic!("accepted turns: {bad}"));
+            assert!(e.contains("turn count"), "{bad} rejected by count: {e}");
+        }
+
+        // **A missing count is refused, not read as 1.** The old wire shape meant one turn by
+        // omission; keeping that as a default would make "turn it once" and "you forgot to say"
+        // the same message.
+        let e = validate(
+            raw(r#"{"what": "x", "needs_turn": {"axis": "x", "why": "lying down"}}"#),
+            &v,
+        )
+        .err()
+        .unwrap_or_else(|| panic!("accepted a turn with no count"));
+        assert!(e.contains("turns"), "the refusal names the field: {e}");
+
+        // And the prompt asks for what the gate demands.
+        let (system, _) = build_prompt(&v, &ctx());
+        assert!(
+            system.contains("\"turns\": 1|2|3") && system.contains("2 for upside down"),
+            "the prompt states the count and what 2 means"
+        );
         let e = validate(
             raw(r#"{"what": "x", "needs_turn": {"axis": "y", "why": ""}}"#),
             &v,

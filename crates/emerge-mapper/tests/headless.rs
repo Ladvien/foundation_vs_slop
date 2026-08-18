@@ -7949,6 +7949,102 @@ fn a_mesh_awaiting_a_proposal_stays_out_of_the_tiles_palette() {
     );
 }
 
+/// **A walk rights the piece it asked about — not the row the author left highlighted — and it
+/// stops asking.**
+///
+/// Asked for at the keyboard, 2026-08-18: *"if the mesh is upside down, it can detect that, and
+/// send back a command to rotate it so many times (snapped to grid) to get it upright?"*
+///
+/// Three properties, and the middle one is a bug this test exists to keep fixed:
+///
+/// - **The count is obeyed.** `needs_turn.turns` is quarter turns; two of them is 180 degrees, in
+///   one act rather than two photograph-and-re-ask cycles.
+/// - **The turn lands on the TARGET.** `rotate_mesh` writes to the *focused* piece, because its
+///   other callers are the N/P keys where the focus is the subject — so a batch, which carries an
+///   explicit target, turned whichever row the author happened to be standing on, and wrote the
+///   file when that row was a library entry. Nothing failed; the wrong mesh simply went sideways.
+/// - **It stops.** A righting re-photographs and asks again, so a model that keeps saying "not
+///   upright" turns a piece for ever — and four quarter turns is where it started, so the loop is
+///   silent as well as endless. Past `MAX_RIGHTINGS` the proposal is dropped with a sentence.
+#[cfg(feature = "debugger")]
+#[test]
+fn a_walk_rights_the_piece_it_asked_about_and_then_stops() {
+    use emerge_mapper::labels::{Entry, LabelQueue, Suggestions};
+    use emerge_mapper::project::Project;
+    use emerge_mapper::tiles::{EditTarget, ImportState};
+    use emerge_mapper::vlm::NeedsTurn;
+
+    let root = Fixture::new("righting")
+        .descriptor("on_its_head", "alpha")
+        .descriptor("innocent", "alpha")
+        .build("m");
+    let mut app = harness::build_headless(&root, "m", None)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+
+    // The author's highlight is on the row the walk is NOT asking about.
+    app.world_mut()
+        .resource_mut::<ImportState>()
+        .selected_library_id = Some("innocent".to_owned());
+
+    let ask = |app: &mut App, turns: u8| {
+        let mut e = Entry::for_test("alpha/on_its_head.glb");
+        e.suggestion.needs_turn = Some(NeedsTurn {
+            axis: "x".to_owned(),
+            turns,
+            why: "authored on its head".to_owned(),
+        });
+        app.world_mut().resource_mut::<Suggestions>().insert(
+            &EditTarget::Library("on_its_head".to_owned()),
+            e,
+        );
+        app.world_mut()
+            .resource_mut::<LabelQueue>()
+            .auto_apply_for_test();
+        app.update();
+    };
+    let rotate_of = |app: &App, id: &str| {
+        app.world()
+            .resource::<Project>()
+            .measured
+            .get(id)
+            .and_then(|d| d.align.rotate)
+    };
+
+    ask(&mut app, 2);
+    assert_eq!(
+        rotate_of(&app, "on_its_head"),
+        Some((180, 0, 0)),
+        "two quarter turns about X is one half turn, applied in one act"
+    );
+    assert_eq!(
+        rotate_of(&app, "innocent"),
+        None,
+        "the row the author was standing on is untouched — the turn follows the target"
+    );
+    assert!(
+        app.world().resource::<Suggestions>().pending() == 0,
+        "the proposal is spent: the piece is re-photographed and asked again"
+    );
+
+    // The second ask is the correction an odd turn taken the wrong way needs, so it is allowed.
+    ask(&mut app, 1);
+    assert_eq!(rotate_of(&app, "on_its_head"), Some((270, 0, 0)));
+
+    // The third is a loop. The proposal is dropped rather than turned, and the mesh stays put.
+    ask(&mut app, 1);
+    assert_eq!(
+        rotate_of(&app, "on_its_head"),
+        Some((270, 0, 0)),
+        "past the ceiling nothing more is turned"
+    );
+    assert_eq!(
+        app.world().resource::<Suggestions>().pending(),
+        0,
+        "and the proposal does not stay staged: `auto_apply_batch` reaches for the first staged \
+         entry every frame, so a refusal that kept it would retry sixty times a second for ever"
+    );
+}
+
 /// **A tile is named by its author, not by the editor.**
 ///
 /// Asked for at the keyboard, 2026-08-15: *"can we make sure that naming tiles that we create is
