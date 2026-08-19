@@ -1218,22 +1218,40 @@ pub(crate) fn settle_implied_effects(
     d: &mut emerge_core::descriptor::Descriptor,
     order: &[String],
 ) {
+    d.effects = settled_effects(&d.kind, &d.effects, order);
+}
+
+/// **The effects a kind implies, folded into a set — as a value, not a mutation.**
+///
+/// Extracted so the *preview* can answer the same question the apply does. The DOES chips ghost-lit
+/// `suggestion.effects`, which is the model's raw answer — and the model is deliberately never
+/// asked for these two tokens (see [`IMPLIED_BY_KIND`]). So a bed's proposal showed
+/// `effects: []` while applying it wrote `stamina-recharge`, and an author watching proposals go
+/// by concluded the model would not acknowledge a bed. Reported at the keyboard 2026-08-19:
+/// *"for the life of me, I can't get the VLM to acknowledge a bed is a place to recharge
+/// stamina."* It never will. The editor does — and the preview now says so.
+///
+/// "A preview is a promise" is `build.rs`'s line about the ghost, and it is the same rule.
+pub(crate) fn settled_effects(kind: &[String], effects: &[String], order: &[String]) -> Vec<String> {
     let owned = |e: &str| IMPLIED_BY_KIND.iter().any(|(_, eff)| *eff == e);
     let mut want: Vec<&str> = Vec::new();
-    for (kind, eff) in IMPLIED_BY_KIND {
-        if d.kind.iter().any(|k| k == kind) && !want.contains(eff) {
+    for (k, eff) in IMPLIED_BY_KIND {
+        if kind.iter().any(|held| held == k) && !want.contains(eff) {
             want.push(eff);
         }
     }
-    d.effects
-        .retain(|e| !owned(e) || want.contains(&e.as_str()));
+    let mut out: Vec<String> = effects
+        .iter()
+        .filter(|e| !owned(e) || want.contains(&e.as_str()))
+        .cloned()
+        .collect();
     for eff in want {
-        if !d.effects.iter().any(|e| e == eff) {
-            d.effects.push(eff.to_owned());
+        if !out.iter().any(|e| e == eff) {
+            out.push(eff.to_owned());
         }
     }
-    d.effects
-        .sort_by_key(|t| order.iter().position(|o| o == t).unwrap_or(usize::MAX));
+    out.sort_by_key(|t| order.iter().position(|o| o == t).unwrap_or(usize::MAX));
+    out
 }
 
 pub fn apply_fields(
@@ -1395,6 +1413,54 @@ pub(crate) fn save_cache(project: Option<Res<Project>>, suggestions: Res<Suggest
 
 #[cfg(test)]
 mod tests {
+
+    /// **The preview promises what applying will do, including the half the model never proposes.**
+    ///
+    /// `IMPLIED_BY_KIND` is deliberately not asked of the model — a bed recharges stamina because
+    /// this game says beds do, and no render can show it. That made the proposal preview *wrong*
+    /// rather than merely quiet: the DOES chips ghost-lit `suggestion.effects`, so a bed read
+    /// `effects: []` while applying it wrote `stamina-recharge`. Reported at the keyboard as the
+    /// model refusing to acknowledge a bed; it was the preview refusing to admit what the editor
+    /// would do.
+    ///
+    /// Pinned as an equality between the two paths, because "they agree" is the whole property —
+    /// either could drift and the bug returns.
+    #[test]
+    fn the_preview_settles_effects_exactly_as_applying_does() {
+        let order: Vec<String> = ["emit", "screen", "uses-electricity", "stamina-recharge"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let bed = vec!["bed".to_owned()];
+
+        // What the model actually returns for a bed: nothing on this axis.
+        let previewed = settled_effects(&bed, &[], &order);
+        assert!(
+            previewed.iter().any(|e| e == "stamina-recharge"),
+            "a bed's PREVIEW must show the effect applying will add, or the chips promise \
+             something the apply then contradicts: {previewed:?}"
+        );
+
+        // And the apply agrees, token for token and in the same order.
+        let mut d = emerge_core::descriptor::Descriptor {
+            kind: bed,
+            ..Default::default()
+        };
+        settle_implied_effects(&mut d, &order);
+        assert_eq!(
+            d.effects, previewed,
+            "the preview and the apply are one answer; when they were two, the preview was the \
+             one that was wrong"
+        );
+
+        // A kind that implies nothing still previews nothing — the guard that keeps this from
+        // becoming "every piece recharges stamina".
+        assert!(
+            settled_effects(&["seating".to_owned()], &[], &order).is_empty(),
+            "a chair implies no effect at all"
+        );
+    }
+
     use super::*;
     use crate::vlm::{Confidence, Suggestion};
 

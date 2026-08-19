@@ -7871,6 +7871,11 @@ fn rebuild_detail(
             // Tag chips, one row per axis. Every token the project has, lit when this piece carries
             // it — so an author sees the whole vocabulary rather than having to remember it, which is
             // the difference between a closed vocabulary being a help and being an obstacle.
+            // Vocabulary order for the effects axis, so a settled preview lists its tokens in the
+            // same order the applied descriptor will — `on_tag_chip`'s rule, so a diff of the
+            // library shows real changes only.
+            let effects_order: Vec<String> =
+                project.vocab.effects.names().map(str::to_owned).collect();
             for axis in [Axis::Kind, Axis::Effects, Axis::Look, Axis::Surfaces] {
                 let vocab = axis.tokens(&project.vocab);
                 if vocab.tokens.is_empty() {
@@ -7882,12 +7887,23 @@ fn rebuild_detail(
                     Axis::Look => d.look.clone(),
                     Axis::Surfaces => d.offers.surfaces.clone(),
                 };
-                // The model's proposed set for this axis — the chips' third state.
+                // **What applying would actually write** — the chips' third state.
+                //
+                // For every axis but `effects` that is the model's answer verbatim. `effects` has a
+                // derived half the model is deliberately never asked for (`labels::IMPLIED_BY_KIND`
+                // — a bed recharges stamina because this game says beds do, and no render can show
+                // it), so ghosting the raw answer meant a bed's proposal read `effects: []` while
+                // applying it wrote `stamina-recharge`. Reported as the model refusing to
+                // acknowledge a bed; it was the preview refusing to admit what the editor would do.
                 let proposed: Vec<String> = proposal
                     .as_ref()
                     .map(|e| match axis {
                         Axis::Kind => e.suggestion.kind.clone(),
-                        Axis::Effects => e.suggestion.effects.clone(),
+                        Axis::Effects => crate::labels::settled_effects(
+                            &e.suggestion.kind,
+                            &e.suggestion.effects,
+                            &effects_order,
+                        ),
                         Axis::Look => e.suggestion.look.clone(),
                         Axis::Surfaces => e.suggestion.offers_surfaces.clone(),
                     })
