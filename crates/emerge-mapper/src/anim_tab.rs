@@ -165,9 +165,58 @@ struct BenchLine;
 
 pub struct AnimTabPlugin;
 
+/// **The rig list follows its selection**, the same way the palette and the mesh lists do.
+///
+/// It was the one scrollable list with no follower at all: the arrows moved `BenchState::selected`
+/// and the highlight walked off the bottom while the list stood still. Added when the other two were
+/// re-keyed — *"can we fix that and get it pinned across the board?"*, 2026-08-16 — because "across
+/// the board" is only true if the list that never had one gets one too.
+///
+/// Keyed on the selection through `chrome::Follow`, not on `BenchState::is_changed`: this resource
+/// carries a status line and a measurement queue, both written most frames, which is precisely the
+/// churn that made the other two followers dead code.
+fn keep_rig_selection_on_screen(
+    state: Res<BenchState>,
+    rows: Query<(&RigRow, &ComputedNode, &UiGlobalTransform)>,
+    mut lists: Query<
+        (&ComputedNode, &UiGlobalTransform, &mut ScrollPosition),
+        (With<RigList>, Without<RigRow>),
+    >,
+    mut follow: Local<crate::chrome::Follow<usize>>,
+) {
+    if !follow.should_scroll(Some(state.selected)) {
+        return;
+    }
+    // A UI node's transform is its CENTRE, so the edges are the half-size either side.
+    let Some((row_mid, row_half)) = rows
+        .iter()
+        .find(|(r, _, _)| r.0 == state.selected)
+        .map(|(_, n, t)| (t.translation.y, n.size.y * 0.5))
+    else {
+        return;
+    };
+    for (list, list_tf, mut scroll) in &mut lists {
+        // Physical in, logical out — `ComputedNode` and `UiGlobalTransform` are physical pixels,
+        // `ScrollPosition` is logical.
+        if let Some(want) = crate::chrome::scroll_to_reveal(
+            (row_mid, row_half),
+            (list_tf.translation.y, list.size.y * 0.5),
+            scroll.0.y,
+            list.inverse_scale_factor,
+        ) {
+            scroll.0.y = want;
+        }
+    }
+}
+
 impl Plugin for AnimTabPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<BenchState>()
+        app.add_systems(
+            Update,
+            keep_rig_selection_on_screen
+                .run_if(in_state(crate::screen::Screen::Editor)),
+        )
+        .init_resource::<BenchState>()
             .init_resource::<crate::anim_watch::RigWatch>()
             .init_resource::<crate::anim_watch::MeasureQueue>()
             .init_resource::<crate::anim_watch::BenchReports>()
@@ -181,7 +230,7 @@ impl Plugin for AnimTabPlugin {
             // by the REAL machinery, which is the whole reason emerge-anim is a crate.
             .add_plugins(emerge_anim::PoseBlendPlugin)
             .add_systems(
-                Startup,
+                OnEnter(crate::screen::Screen::Editor),
                 (
                     spawn_panels,
                     crate::anim_plots::create_plot_images,
@@ -189,11 +238,11 @@ impl Plugin for AnimTabPlugin {
                     // The persisted cache warms the reports before the first frame, so the STALE
                     // badge is truthful at startup rather than after the tab's first audit.
                     crate::anim_cache::load_bench_cache,
-                ),
+                ).after(crate::chrome::FrameSystems),
             )
             .add_systems(
                 Update,
-                (
+                ((
                     load_on_entry,
                     // Ungated: `keys::just_pressed` now refuses an `Anim` binding unless the Anim
                     // tab owns the keyboard, so a run condition here would be the second census
@@ -243,7 +292,8 @@ impl Plugin for AnimTabPlugin {
                         crate::anim_stage::refresh_scrub_ui,
                         crate::anim_plots::drive_plot_hover,
                     ),
-                ),
+                ),)
+                    .run_if(in_state(crate::screen::Screen::Editor)),
             )
             .add_observer(on_rig_click)
             .add_observer(on_jump_click)
@@ -253,9 +303,10 @@ impl Plugin for AnimTabPlugin {
     }
 }
 
-fn spawn_panels(mut commands: Commands) {
+fn spawn_panels(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
     crate::chrome::panel_root(
         &mut commands,
+        &frame,
         crate::chrome::Side::Left,
         crate::chrome::TILES_CONTROLS_W,
         true,
@@ -264,12 +315,10 @@ fn spawn_panels(mut commands: Commands) {
     .insert(AnimRoot)
     .with_children(|p| {
         crate::chrome::title(p, "ANIMATION");
-        crate::chrome::problem_banner(p, &[crate::tiles::Mode::Anim]);
-        crate::chrome::shortcut_hint(p);
         p.spawn((
             Text::new(""),
             TextColor(DIM),
-            TextFont::from_font_size(10.0),
+            TextFont::from_font_size(crate::chrome::text::LABEL),
             Node {
                 margin: UiRect::top(Val::Px(6.0)),
                 ..default()
@@ -294,6 +343,7 @@ fn spawn_panels(mut commands: Commands) {
 
     crate::chrome::panel_root(
         &mut commands,
+        &frame,
         crate::chrome::Side::Right,
         crate::chrome::LIST_W,
         true,
@@ -727,7 +777,7 @@ fn rebuild_list(
                     row.spawn((
                         Text::new((*name).to_owned()),
                         TextColor(TEXT),
-                        TextFont::from_font_size(10.0),
+                        TextFont::from_font_size(crate::chrome::text::LABEL),
                     ));
                 });
             }
@@ -815,7 +865,7 @@ fn rebuild_slots(
                         }
                     )),
                     TextColor(if bad > 0 { DANGER } else { TEXT }),
-                    TextFont::from_font_size(11.0),
+                    TextFont::from_font_size(crate::chrome::text::BODY),
                 ));
                 for (ix, n) in names.iter().enumerate() {
                     let Some(report) = reports.as_ref().and_then(|r| r.by_rig.get(*n)) else {
@@ -854,18 +904,18 @@ fn rebuild_slots(
                             head.spawn((
                                 Text::new((*n).to_owned()),
                                 TextColor(TEXT),
-                                TextFont::from_font_size(11.0),
+                                TextFont::from_font_size(crate::chrome::text::BODY),
                             ));
                             head.spawn((
                                 Text::new(word),
                                 TextColor(tint),
-                                TextFont::from_font_size(9.0),
+                                TextFont::from_font_size(crate::chrome::text::HINT),
                             ));
                         });
                         row.spawn((
                             Text::new(first),
                             TextColor(LABEL),
-                            TextFont::from_font_size(9.0),
+                            TextFont::from_font_size(crate::chrome::text::HINT),
                         ));
                     });
                 }
@@ -876,14 +926,14 @@ fn rebuild_slots(
                 p.spawn((
                     Text::new("no rig selected"),
                     TextColor(DIM),
-                    TextFont::from_font_size(11.0),
+                    TextFont::from_font_size(crate::chrome::text::BODY),
                 ));
                 return;
             };
             p.spawn((
                 Text::new(rig.mesh.clone()),
                 TextColor(ACCENT),
-                TextFont::from_font_size(11.0),
+                TextFont::from_font_size(crate::chrome::text::BODY),
             ));
             // **The staged figure's controls, directly under the rig they belong to.**
             //
@@ -901,7 +951,7 @@ fn rebuild_slots(
                     p.spawn((
                         Text::new("measuring..."),
                         TextColor(DIM),
-                        TextFont::from_font_size(9.0),
+                        TextFont::from_font_size(crate::chrome::text::HINT),
                     ));
                 }
                 Some(report) => {
@@ -917,13 +967,13 @@ fn rebuild_slots(
                         p.spawn((
                             Text::new(line),
                             TextColor(colour),
-                            TextFont::from_font_size(9.0),
+                            TextFont::from_font_size(crate::chrome::text::HINT),
                         ));
                         for d in &report.diff {
                             p.spawn((
                                 Text::new(d.clone()),
                                 TextColor(DANGER),
-                                TextFont::from_font_size(9.0),
+                                TextFont::from_font_size(crate::chrome::text::HINT),
                                 Node {
                                     // One panel inset of indent — `PAD`, not a bare 12, so the
                                     // provenance block steps in by the same unit the panel does.
@@ -974,7 +1024,7 @@ fn rebuild_slots(
                         },
                         Text::new(format!("{i} - clip {}", slot.clip)),
                         TextColor(LABEL),
-                        TextFont::from_font_size(10.0),
+                        TextFont::from_font_size(crate::chrome::text::LABEL),
                         TextLayout::new(Justify::Left, LineBreak::NoWrap),
                     ));
                     row.spawn((
@@ -987,12 +1037,15 @@ fn rebuild_slots(
                         // A gait is the only kind carrying measured numbers, so it is the only one
                         // worth picking out of the column.
                         TextColor(if kind == "gait" { ACCENT } else { DIM }),
-                        TextFont::from_font_size(10.0),
+                        TextFont::from_font_size(crate::chrome::text::LABEL),
                     ));
                     row.spawn((
                         Text::new(detail),
                         TextColor(TEXT),
-                        TextFont::from_font_size(10.0),
+                        // **The value, not the label** — this is the measured number the author came
+                        // to the bench to check. The audit found this pairing rendered inverted,
+                        // the declared half larger than the measured one.
+                        TextFont::from_font_size(crate::chrome::text::BODY),
                     ));
                     // The transient adopt-exclude chip — gaits only, since adopt writes nothing
                     // else. The durable form is `keep:` in the manifest; this is "not this once".
@@ -1032,7 +1085,7 @@ fn rebuild_slots(
                     p.spawn((
                         Text::new(sub.join(" | ")),
                         TextColor(DIM),
-                        TextFont::from_font_size(9.0),
+                        TextFont::from_font_size(crate::chrome::text::HINT),
                         Node {
                             margin: UiRect::left(Val::Px(84.0)),
                             ..default()
@@ -1052,7 +1105,7 @@ fn rebuild_slots(
                             p.spawn((
                                 Text::new(line),
                                 TextColor(DIM),
-                                TextFont::from_font_size(9.0),
+                                TextFont::from_font_size(crate::chrome::text::HINT),
                                 Node {
                                     margin: UiRect::left(Val::Px(84.0)),
                                     ..default()
@@ -1077,7 +1130,7 @@ fn rebuild_slots(
                     p.spawn((
                         Text::new(format!("{ok} measurement(s) agree with the manifest")),
                         TextColor(DIM),
-                        TextFont::from_font_size(9.0),
+                        TextFont::from_font_size(crate::chrome::text::HINT),
                     ));
                 }
                 for f in findings.iter().filter(|f| f.level != Level::Ok) {
@@ -1087,7 +1140,7 @@ fn rebuild_slots(
                             Level::Note => LABEL,
                             _ => DANGER,
                         }),
-                        TextFont::from_font_size(9.0),
+                        TextFont::from_font_size(crate::chrome::text::HINT),
                     ));
                 }
             }
@@ -1127,7 +1180,7 @@ fn rebuild_slots(
                         legend.spawn((
                             Text::new(label),
                             TextColor(crate::anim_plots::slot_ui_color(rank)),
-                            TextFont::from_font_size(9.0),
+                            TextFont::from_font_size(crate::chrome::text::HINT),
                         ));
                         rank += 1;
                     }
@@ -1141,7 +1194,7 @@ fn rebuild_slots(
                     p.spawn((
                         Text::new(caption),
                         TextColor(LABEL),
-                        TextFont::from_font_size(9.0),
+                        TextFont::from_font_size(crate::chrome::text::HINT),
                         Node {
                             margin: UiRect::top(Val::Px(4.0)),
                             ..default()
@@ -1170,6 +1223,8 @@ fn rebuild_slots(
                         wrap.spawn((
                             ImageNode::new(plots.hover.clone()),
                             Node {
+                                // PLACES-ITSELF-OK: the hover readout stacks ON the plot it belongs to,
+                                // filling its wrapper. Two images in one box is what absolute is for.
                                 position_type: PositionType::Absolute,
                                 left: Val::Px(0.0),
                                 top: Val::Px(0.0),
@@ -1187,13 +1242,13 @@ fn rebuild_slots(
                 p.spawn((
                     Text::new(String::new()),
                     TextColor(DIM),
-                    TextFont::from_font_size(9.0),
+                    TextFont::from_font_size(crate::chrome::text::HINT),
                     crate::anim_plots::PlotReadout,
                 ));
                 p.spawn((
                     Text::new("top-down trace (fwd = up; arrow = declared cycle along measured travel; dim arrow = measured, G)"),
                     TextColor(LABEL),
-                    TextFont::from_font_size(9.0),
+                    TextFont::from_font_size(crate::chrome::text::HINT),
                     Node {
                         margin: UiRect::top(Val::Px(4.0)),
                         ..default()

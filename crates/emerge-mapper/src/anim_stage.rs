@@ -766,12 +766,12 @@ pub(crate) fn spawn_chips(p: &mut ChildSpawnerCommands, rig: &emerge_core::rigs:
     p.spawn((
         Text::new("click: solo · mod-click: mix in/out"),
         TextColor(LABEL),
-        TextFont::from_font_size(9.0),
+        TextFont::from_font_size(crate::chrome::text::HINT),
     ));
     p.spawn((
         Text::new(String::new()),
         TextColor(DIM),
-        TextFont::from_font_size(9.0),
+        TextFont::from_font_size(crate::chrome::text::HINT),
         ScrubLine,
     ));
 }

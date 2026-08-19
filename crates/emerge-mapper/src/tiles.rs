@@ -26,12 +26,12 @@ use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, Button as UiButton};
-use emerge_core::descriptor::{mount_label, mount_options, Descriptor};
+use emerge_core::descriptor::{Descriptor, mount_label, mount_options};
 use emerge_core::import::{self, Candidate, Severity};
 
 use crate::chrome::{
-    ACCENT, CHIP_PAD, DANGER, DIM, HEADER_BG, LABEL, MARGIN, MIN_FIELD_H, PANEL_BG, ROW_BG,
-    ROW_HOVER, ROW_SELECTED, TEXT,
+    ACCENT, CHIP_PAD, DANGER, DIM, HEADER_BG, LABEL, MIN_FIELD_H, MUTED, PANEL_BG,
+    ROW_BG, ROW_HOVER, ROW_SELECTED, TEXT,
 };
 use crate::keys::{self, Action};
 use crate::project::Project;
@@ -52,30 +52,109 @@ pub enum Mode {
     Compose,
 }
 
-impl Mode {
-    /// **The tabs, in the order they are shown** — and the order `Tab` cycles, and the order the
-    /// number keys run in. One list, so the strip and the keyboard cannot disagree.
-    ///
-    /// Map first: it is the job, and configuring tiles is what you do in order to do it. **Anim
-    /// last**, because it is the odd one out — Map, Tiles and Compose are three views of building a
-    /// level, and the rig bench is a different job that happens to live in the same binary. Grouping
-    /// the three that share a subject puts the boundary where the work changes rather than where the
-    /// tabs were added.
-    ///
-    /// **Map still first**, and the three kit tabs after it in hierarchy order:
-    /// `docs/research/2026-08-08-kitbashing-guidance.md` — *"A good kit is hierarchical: parts ->
-    /// sub-assemblies -> assemblies."* A mesh is a part, a tile is a sub-assembly, a composition is an
-    /// assembly. Ordering those three by level was the whole reason for the split; moving Map out of
-    /// first place was not, and the original argument for it still holds — it is the job, and the
-    /// other tabs are what you do in order to do it.
-    ///
-    /// **This used to be four**, with meshes and tiles sharing one tab and a mode key between them.
-    /// The mode was the giveaway: every other level already had a tab and only that one carried two.
-    /// A tab strip is a mode nobody can forget, so the split retired the indicator along with the
-    /// mode (FVS-R-21).
-    pub const ALL: [Mode; 5] =
-        [Mode::Map, Mode::Meshes, Mode::Tiles, Mode::Compose, Mode::Anim];
+/// **Which door the editor was entered by.**
+///
+/// A door is one *entity* you can work on, and it shows the panels that entity needs — no more.
+/// Reported at the keyboard, 2026-08-16: *"when I select a kit and I press enter, I'm still getting
+/// [map], meshes, tiles, compose, anim. we really need this to reflect just what's needed to put
+/// kits together."*
+///
+/// # Why two and not five
+///
+/// The first cut was one door per panel, and building it produced the measurement that ruled that
+/// out: **four shipped guides cross doors mid-flow**, `room_from_nothing.json` seven times. Meshes,
+/// Tiles and Compose are not three jobs — they are one job at three levels of assembly
+/// (`docs/research/2026-08-08-kitbashing-guidance.md`: *"parts -> sub-assemblies -> assemblies"*),
+/// and an author moves between them constantly while making one kit. Splitting them put a process
+/// boundary inside a single act.
+///
+/// So the boundary goes where the *entity* changes rather than where the panel does: **making
+/// reusable content** on one side, **using it to build a level** on the other. Chosen at the
+/// keyboard, 2026-08-16: *"Kit and Map, two doors."*
+///
+/// [`Door::Rigs`] is a third because it crosses with neither — no guide enters it, and a rig is a
+/// character asset rather than level content. It was already its own door by an earlier decision and
+/// nothing in the crossing measurement argued against it.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum Door {
+    /// Make reusable content: meshes → tiles → compositions.
+    Kit,
+    /// Build the level out of it.
+    #[default]
+    Map,
+    /// The rig bench.
+    Rigs,
+}
 
+impl Door {
+    /// The doors, in the order the menu lists them.
+    pub const ALL: [Door; 3] = [Door::Kit, Door::Map, Door::Rigs];
+
+    /// **The panels this door shows**, in hierarchy order.
+    ///
+    /// The Kit door shows three, and that is the point of the two-door shape: a mesh is a part, a
+    /// tile is a sub-assembly, a composition is an assembly, and an author walks up and down that
+    /// ladder while making one kit. What it does *not* show is the Map.
+    pub fn tabs(self) -> &'static [Mode] {
+        match self {
+            Door::Kit => &[Mode::Meshes, Mode::Tiles, Mode::Compose],
+            Door::Map => &[Mode::Map],
+            Door::Rigs => &[Mode::Anim],
+        }
+    }
+
+    /// Where this door opens. The first of [`Self::tabs`], which is never empty.
+    pub fn opens_on(self) -> Mode {
+        self.tabs().first().copied().unwrap_or_default()
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Door::Kit => "KIT",
+            Door::Map => "MAP",
+            Door::Rigs => "RIGS",
+        }
+    }
+
+    /// The `--door` spelling. Lowercase of [`Self::label`], so the flag and the title cannot drift.
+    pub fn from_flag(flag: &str) -> Option<Door> {
+        Door::ALL
+            .into_iter()
+            .find(|d| d.label().eq_ignore_ascii_case(flag))
+    }
+
+    /// **Run condition: is the Maps door open?**
+    ///
+    /// A condition rather than a check in `Plugin::build`, and that distinction cost a crash. The
+    /// door used to be known before the app ran — it was a process — so `EditorPlugin` could read it
+    /// at build time and simply not register the map-only half. With both screens in one application
+    /// the door is chosen at runtime, so at build time there is none: the check read
+    /// `unwrap_or_default()`, got `Map`, and registered `spawn_existing` on every door — which then
+    /// panicked on the Kit door for a `Res<OpenMap>` that does not exist there.
+    ///
+    /// `Option<Res<Door>>`, because **every run condition is evaluated** and this one is asked in the
+    /// menu too, where there is no door at all.
+    pub fn map_door_is_open(door: Option<Res<Door>>) -> bool {
+        door.is_some_and(|d| *d == Door::Map)
+    }
+
+    /// Does this door show that panel? The one place `Mode` and `Door` are compared.
+    pub fn shows(self, mode: Mode) -> bool {
+        self.tabs().contains(&mode)
+    }
+
+    /// **The door that shows this panel.** Every `Mode` belongs to exactly one, by construction of
+    /// [`Self::tabs`] — so a caller can name the panel it wants and let the door follow, rather than
+    /// stating both and risking a pair that disagree.
+    pub fn showing(mode: Mode) -> Door {
+        Door::ALL
+            .into_iter()
+            .find(|d| d.shows(mode))
+            .unwrap_or_default()
+    }
+}
+
+impl Mode {
     pub fn label(self) -> &'static str {
         match self {
             Mode::Map => "MAP",
@@ -83,20 +162,6 @@ impl Mode {
             Mode::Tiles => "TILES",
             Mode::Anim => "ANIM",
             Mode::Compose => "COMPOSE",
-        }
-    }
-
-    /// The number key that jumps straight here.
-    ///
-    /// A direct key per tab as well as `Tab` to cycle, because cycling is fine for two and useless
-    /// for four — and `docs/ui.md` §4.2 wants everything reachable by mouse reachable by keyboard.
-    pub fn action(self) -> crate::keys::Action {
-        match self {
-            Mode::Map => crate::keys::Action::MapTab,
-            Mode::Meshes => crate::keys::Action::MeshesTab,
-            Mode::Tiles => crate::keys::Action::TilesTab,
-            Mode::Anim => crate::keys::Action::AnimTab,
-            Mode::Compose => crate::keys::Action::ComposeTab,
         }
     }
 
@@ -146,6 +211,34 @@ pub struct ImportState {
     pub selected_library_id: Option<String>,
     /// Packs the author has folded away.
     pub folded_packs: std::collections::HashSet<String>,
+    /// **How many times the labeler has turned each mesh to right it**, keyed by mesh path.
+    ///
+    /// A righting re-photographs the piece and asks again, so a model that keeps saying "not
+    /// upright" turns it for ever — four quarter turns is where it started, which makes the loop
+    /// silent as well as endless. [`MAX_RIGHTINGS`] is the ceiling; past it the proposal is dropped
+    /// with a sentence rather than retried.
+    ///
+    /// Session bookkeeping rather than descriptor state, so it is deliberately absent from
+    /// [`Snapshot`]: undoing a turn must not hand the loop its budget back.
+    pub righted: std::collections::BTreeMap<String, u8>,
+    /// **The pack heading the arrows are standing on**, when they are on one rather than a mesh.
+    ///
+    /// The walk used to step mesh rows only, so a collapsed pack was visible and unreachable: at the
+    /// top of the first open pack, `Up` had nowhere to go while 33 headings sat above it on screen,
+    /// and the only way to open one was the mouse. Reported at the keyboard three times, last on
+    /// 2026-08-16 — *"it goes up until the one right above it is a collapsed mesh folder, and then it
+    /// just does nothing."*
+    ///
+    /// `None` means the highlight is on [`Self::selected`], a mesh. The two are one cursor in two
+    /// states rather than two cursors, so nothing has to decide which is "really" selected.
+    pub focused_pack: Option<String>,
+    /// **Whether the `EXCLUDED` group at the bottom of the candidate list is open.**
+    ///
+    /// Its own flag rather than a reserved key in [`Self::folded_packs`], because a sentinel string
+    /// there is one real pack away from a collision — and a pack called `EXCLUDED` is not a silly
+    /// name for a folder of things somebody excluded. Closed by default: the group exists to get
+    /// these out of the way.
+    pub excluded_open: bool,
     /// **This tab's history**, most recent last. See [`Snapshot`].
     pub undo: Vec<Snapshot>,
     /// What has been undone here and can be put back. Cleared by any new edit on this tab.
@@ -197,7 +290,6 @@ impl ImportState {
     }
 }
 
-
 /// **Where a tile is examined, far from the map.**
 ///
 /// The tiles tab is about ONE piece, and the map behind it was noise — worse than noise, because a
@@ -237,8 +329,7 @@ fn stage_camera(
     let want_lift = state.placed(&project).map(stage_lift).unwrap_or(0.0);
     let lift_moved = *mode == Mode::Meshes && (staged.0 - want_lift).abs() > 1e-4;
     // A preset cycle is a discrete event on the Anim tab, exactly like a lift on the Tiles tab.
-    let preset_moved =
-        *mode == Mode::Anim && preset.as_ref().is_some_and(|p| p.is_changed());
+    let preset_moved = *mode == Mode::Anim && preset.as_ref().is_some_and(|p| p.is_changed());
     // And a re-laid strip is one on the Compose tab. `StagedCarousel` is written only when the strip
     // actually changes — a carousel step, a group added, an envelope resized — so this is the same
     // discrete-event shape and not a per-frame write that would take panning away.
@@ -279,12 +370,8 @@ fn stage_camera(
                     elevation: rig.elevation,
                 });
             }
-            let (focus_y, height, elevation, yaw_snap) = preset
-                .as_deref()
-                .copied()
-                .unwrap_or_default()
-                .0
-                .framing();
+            let (focus_y, height, elevation, yaw_snap) =
+                preset.as_deref().copied().unwrap_or_default().0.framing();
             rig.focus = crate::anim_stage::BENCH_STAGE + Vec3::Y * focus_y;
             rig.height = height;
             rig.elevation = elevation;
@@ -322,8 +409,7 @@ fn stage_camera(
             // **Focused halfway up, not on the floor.** The groups rise from the ground plane, so
             // aiming at it put a 2.4 m tile in the top half of the frame with the bottom empty —
             // seen in a captured frame, and the same correction the Tiles arm makes with `want_lift`.
-            rig.focus =
-                crate::compose::COMPOSE_STAGE + Vec3::Y * carousel.0.tallest * 0.5;
+            rig.focus = crate::compose::COMPOSE_STAGE + Vec3::Y * carousel.0.tallest * 0.5;
             rig.height = crate::compose::framing_height(carousel.0.extent, carousel.0.tallest)
                 .min(crate::view::MAX_ZOOM);
             rig.elevation = crate::view::ISO_ELEVATION;
@@ -512,16 +598,22 @@ impl NoteEdit {
     }
 }
 
+/// **`Option<Res<Project>>`, because this is a GLOBAL observer.** See [`on_cell_verb`] for the whole
+/// argument; the short form is that it fires for any `Activate` anywhere in the application, and
+/// `Project` belongs to a door. The entity query below is the real "is this mine" guard — it just
+/// cannot run until the parameters have been validated, and in Bevy 0.19 a missing `Res<T>` panics
+/// at that point rather than skipping.
 fn on_note_click(
     activate: On<Activate>,
     fields: Query<&NoteField>,
-    project: Res<Project>,
+    project: Option<Res<Project>>,
     mut edit: ResMut<NoteEdit>,
     mut state: ResMut<ImportState>,
 ) {
     if fields.get(activate.entity).is_err() {
         return;
     }
+    let Some(project) = project else { return };
     // Seeded with what is there, unlike the id and the tokens: a description is *edited*, not
     // replaced, and retyping a sentence to change one word is not an interaction.
     // From `measured`, which is what a description is written back to — reading the layered library
@@ -534,7 +626,9 @@ fn on_note_click(
         return;
     };
     edit.active = Some((target, now));
-    state.status.note("describe it — Enter to keep it, Esc to leave it".to_owned());
+    state
+        .status
+        .note("describe it — Enter to keep it, Esc to leave it".to_owned());
 }
 
 /// Typing a description. Free text, so unlike an id nothing is forced as you type.
@@ -552,12 +646,16 @@ fn note_keys(
         }
         match &event.logical_key {
             Key::Enter => {
-                let Some((target, raw)) = edit.active.take() else { return };
+                let Some((target, raw)) = edit.active.take() else {
+                    return;
+                };
                 let text = raw.trim().to_owned();
                 // The piece this field was opened on, not whatever has the focus now.
                 let before = state.snapshot(&project);
                 let Some((d, where_to)) = state.at_target(&target, &mut project.measured) else {
-                    state.status.problem("the description was not kept — that tile is gone".to_owned());
+                    state
+                        .status
+                        .problem("the description was not kept — that tile is gone".to_owned());
                     return;
                 };
                 // Empty clears, the same rule the edge and anchor tokens follow — one keystroke path
@@ -569,7 +667,7 @@ fn note_keys(
                 } else {
                     format!("described: {text}")
                 };
-    state.status.say(persist(&mut project, where_to, said));
+                state.status.say(persist(&mut project, where_to, said));
             }
             Key::Escape => {
                 edit.active = None;
@@ -659,7 +757,9 @@ fn bake_width(d: &mut Descriptor, want: f32) -> Result<f32, String> {
         return Err("it has no measured footprint, so a width has nothing to resize".to_owned());
     };
     if !w.is_finite() || w <= 0.0 {
-        return Err(format!("it measures {w} m wide, so no resize reaches {want} m"));
+        return Err(format!(
+            "it measures {w} m wide, so no resize reaches {want} m"
+        ));
     }
     // The ratio against the PLACED width — which is the number on screen, so typing it back is a
     // no-op by construction and nothing compounds.
@@ -749,17 +849,23 @@ fn scale_keys(
                 };
                 let text = raw.trim().to_owned();
                 if text.is_empty() {
-                    state.status.note("width unchanged — nothing typed".to_owned());
+                    state
+                        .status
+                        .note("width unchanged — nothing typed".to_owned());
                     return;
                 }
                 let Ok(want) = text.parse::<f32>() else {
-                    state.status.problem(format!("`{text}` is not a number of metres"));
+                    state
+                        .status
+                        .problem(format!("`{text}` is not a number of metres"));
                     return;
                 };
                 // Taken before the write, which is the only moment the old value still exists.
                 let before = state.snapshot(&project);
                 let Some((d, where_to)) = state.at_target(&target, &mut project.measured) else {
-                    state.status.problem("the width was not kept — that tile is gone".to_owned());
+                    state
+                        .status
+                        .problem("the width was not kept — that tile is gone".to_owned());
                     return;
                 };
                 let id = d.id.clone();
@@ -774,7 +880,9 @@ fn scale_keys(
                 };
                 // The width it already stands at: nothing changed, so nothing to record or write.
                 if r == 1.0 {
-                    state.status.note(format!("{id} already stands {want:.2} m wide"));
+                    state
+                        .status
+                        .note(format!("{id} already stands {want:.2} m wide"));
                     return;
                 }
                 let (w, dep) = d.extent.footprint.unwrap_or((want, 0.0));
@@ -799,7 +907,8 @@ fn scale_keys(
                     for c in ch.chars() {
                         // One point, and never as the first character — `.5` parses, but a field that
                         // shows a leading point invites `..5`, which does not.
-                        let ok = c.is_ascii_digit() || (c == '.' && !raw.contains('.') && !raw.is_empty());
+                        let ok = c.is_ascii_digit()
+                            || (c == '.' && !raw.contains('.') && !raw.is_empty());
                         if ok && raw.len() < 6 {
                             raw.push(c);
                         }
@@ -862,7 +971,9 @@ fn on_mount_height_click(
     // Starts empty, the same call `on_size_field_click` and `on_scale_click` make — seeding it means
     // the first digit appends to the number already there.
     edit.active = Some((target, String::new()));
-    state.status.note("height: type the metres up the wall, Enter to keep it, Esc to leave it alone".to_owned());
+    state.status.note(
+        "height: type the metres up the wall, Enter to keep it, Esc to leave it alone".to_owned(),
+    );
 }
 
 /// Digits and a single point, filtered at the keystroke — the rule `size_edit_keys` states.
@@ -884,43 +995,58 @@ fn mount_height_keys(
                 };
                 let text = raw.trim().to_owned();
                 if text.is_empty() {
-                    state.status.note("height unchanged — nothing typed".to_owned());
+                    state
+                        .status
+                        .note("height unchanged — nothing typed".to_owned());
                     return;
                 }
                 let Ok(want) = text.parse::<f32>() else {
-                    state.status.problem(format!("`{text}` is not a number of metres"));
+                    state
+                        .status
+                        .problem(format!("`{text}` is not a number of metres"));
                     return;
                 };
                 // **Zero is legal, below the floor is not.** A wall marking at skirting height is a
                 // real thing to author; a negative one is under the floor, where no wall is.
                 if !want.is_finite() || want < 0.0 {
-                    state.status.problem(format!("a wall mount cannot sit at {text} m"));
+                    state
+                        .status
+                        .problem(format!("a wall mount cannot sit at {text} m"));
                     return;
                 }
-                let found = state
-                    .at_target(&target, &mut project.measured)
-                    .and_then(|(d, where_to)| {
-                        d.mount.as_ref().map(|m| (d.id.clone(), m.clone(), where_to))
-                    });
+                let found =
+                    state
+                        .at_target(&target, &mut project.measured)
+                        .and_then(|(d, where_to)| {
+                            d.mount
+                                .as_ref()
+                                .map(|m| (d.id.clone(), m.clone(), where_to))
+                        });
                 let Some((id, mount, where_to)) = found else {
-                    state.status.problem("the height was not kept — that tile is gone".to_owned());
+                    state
+                        .status
+                        .problem("the height was not kept — that tile is gone".to_owned());
                     return;
                 };
                 // Refused by name rather than silently ignored: the field is only drawn for mounts
                 // that carry a height, so reaching here means the mount changed under an open field.
                 let Some(next) = emerge_core::descriptor::with_mount_height(&mount, want) else {
-                    state.status.problem(format!("`{id}` is not on a wall, so it has no height to set"));
+                    state.status.problem(format!(
+                        "`{id}` is not on a wall, so it has no height to set"
+                    ));
                     return;
                 };
                 let before = state.snapshot(&project);
                 let Some((d, _)) = state.at_target(&target, &mut project.measured) else {
-                    state.status.problem("the height was not kept — that tile is gone".to_owned());
+                    state
+                        .status
+                        .problem("the height was not kept — that tile is gone".to_owned());
                     return;
                 };
                 d.mount = Some(next);
                 state.record(before);
                 let said = format!("{id} — {want:.2} m up the wall");
-    state.status.say(persist(&mut project, where_to, said));
+                state.status.say(persist(&mut project, where_to, said));
             }
             Key::Escape => {
                 edit.active = None;
@@ -968,7 +1094,11 @@ fn tile_history_keys(
         return;
     }
     let verb = if back { "undo" } else { "redo" };
-    let taken = if back { state.undo.pop() } else { state.redo.pop() };
+    let taken = if back {
+        state.undo.pop()
+    } else {
+        state.redo.pop()
+    };
     let Some(want) = taken else {
         state.status.note(format!("nothing to {verb} on this tab"));
         return;
@@ -980,15 +1110,42 @@ fn tile_history_keys(
     // other way a descriptor can vanish (undoing an Accept, redoing a remove), and skipping the same
     // guard here rewrote `library.ron` out from under a map that still referenced it: every
     // `resolve_y` from then on refused the whole map, and the two files disagreed on disk.
-    let mut missing: Vec<&str> = project
-        .map
-        .placements
+    // **Every map in the project gets a vote, not just the one that used to be open.** This read
+    // `project.map` — whichever map the author happened to have loaded — so restoring a snapshot
+    // that dropped a piece another map placed was allowed, and that map stopped resolving with
+    // nothing pointing back at the edit. See `Project::maps_that_place`.
+    let mut dropped: Vec<&str> = want
+        .measured
+        .descriptors
         .iter()
-        .map(|p| p.descriptor.as_str())
-        .filter(|id| !want.measured.descriptors.iter().any(|d| &d.id == id))
+        .map(|d| d.id.as_str())
         .collect();
-    missing.sort_unstable();
-    missing.dedup();
+    dropped.sort_unstable();
+    let gone: Vec<&str> = project
+        .measured
+        .descriptors
+        .iter()
+        .map(|d| d.id.as_str())
+        .filter(|id| dropped.binary_search(id).is_err())
+        .collect();
+    let mut missing: Vec<String> = Vec::new();
+    for id in gone {
+        match project.maps_that_place(id) {
+            Ok(maps) if !maps.is_empty() => missing.push(format!("{id}` in `{}", maps.join("`, `"))),
+            Ok(_) => {}
+            // A project whose maps cannot be read cannot answer this, and guessing "nobody places
+            // it" is how a guard stops guarding. Refuse and say which file.
+            Err(e) => {
+                if back {
+                    state.undo.push(want);
+                } else {
+                    state.redo.push(want);
+                }
+                state.status.problem(format!("cannot {verb}: {e}"));
+                return;
+            }
+        }
+    }
     if !missing.is_empty() {
         let named = missing.join("`, `");
         // Back where it came from — refusing must not also cost the entry.
@@ -998,7 +1155,7 @@ fn tile_history_keys(
             state.redo.push(want);
         }
         state.status.problem(format!(
-            "cannot {verb}: the map still places `{named}` — remove or undo those placements first"
+            "cannot {verb}: `{named}` still places it — remove or undo those placements first"
         ));
         return;
     }
@@ -1083,7 +1240,7 @@ fn header_button(row: &mut ChildSpawnerCommands, header: FillHeader, glyph: &str
         b.spawn((
             Text::new(glyph.to_owned()),
             TextColor(LABEL),
-            TextFont::from_font_size(9.0),
+            TextFont::from_font_size(crate::chrome::text::HINT),
         ));
     });
 }
@@ -1116,16 +1273,29 @@ fn cell_glyph(c: Option<&emerge_core::descriptor::SubCell>) -> &'static str {
     }
 }
 
+/// **`Option<ResMut<Project>>`, and every global observer here needs the same.**
+///
+/// This fires for *any* `Activate` in the application, not only ones inside this panel — and
+/// `Project` is a **door's** resource, removed by `screen::close_the_door`. On `Screen::Menu` it does
+/// not exist, and in Bevy 0.19 a missing `Res<T>` **panics its system** rather than skipping
+/// (`bevy_ecs/error/handler.rs:130`).
+///
+/// The `Query` below is the real guard — a menu row has no `CellVerb` — but parameters are validated
+/// *before* a body runs, so it never got the chance. This was invisible for as long as
+/// `chrome::list_row` was only ever called by editor panels; the moment the menu adopted the shared
+/// row vocabulary, the first click on it took the whole application down. Found 2026-08-18 by
+/// FVS-S-34a, and `tests/the_sweep_is_finished.rs` now fails on a sixth.
 fn on_cell_verb(
     activate: On<Activate>,
     verbs: Query<&CellVerb>,
     mut edit: ResMut<CellEdit>,
-    mut project: ResMut<Project>,
+    project: Option<ResMut<Project>>,
     mut state: ResMut<ImportState>,
 ) {
     let Ok(verb) = verbs.get(activate.entity) else {
         return;
     };
+    let Some(mut project) = project else { return };
     apply_verb(*verb, &mut edit, &mut project, &mut state);
 }
 
@@ -1134,12 +1304,7 @@ fn on_cell_verb(
 /// Split out of the observer so the keyboard is not a second implementation of the same four verbs —
 /// `docs/ui.md` §4.2 requires everything reachable by mouse to be reachable by keyboard, and the way
 /// that requirement usually gets met is by writing it twice and letting the two drift.
-fn apply_verb(
-    verb: CellVerb,
-    edit: &mut CellEdit,
-    project: &mut Project,
-    state: &mut ImportState,
-) {
+fn apply_verb(verb: CellVerb, edit: &mut CellEdit, project: &mut Project, state: &mut ImportState) {
     let Some(at) = edit.at else {
         state.status.note("pick a cell first".to_owned());
         return;
@@ -1168,8 +1333,13 @@ impl RotateAxis {
         }
     }
     /// This axis's component of a rotation, bumped by a quarter turn.
-    fn bumped(self, r: (i32, i32, i32)) -> (i32, i32, i32) {
-        let step = |v: i32| (v + 90).rem_euclid(360);
+    /// Advance this axis by `quarters` 90-degree steps, wrapping at a full turn.
+    ///
+    /// The count exists because the labeler can now ask for two — an asset authored upside down —
+    /// and turning it twice as two separate acts would be two undo entries, two re-measures and a
+    /// moment in between where the piece is on its side and something else could read it.
+    fn bumped(self, r: (i32, i32, i32), quarters: u8) -> (i32, i32, i32) {
+        let step = |v: i32| (v + 90 * i32::from(quarters)).rem_euclid(360);
         match self {
             RotateAxis::X => (step(r.0), r.1, r.2),
             RotateAxis::Y => (r.0, step(r.1), r.2),
@@ -1207,13 +1377,21 @@ impl RotateAxis {
 /// Returns whether the piece actually turned — the labeler's apply chains a re-photograph on a
 /// successful righting turn, and a refusal (the authored-cells guard, an unopenable GLB) must
 /// not trigger one.
-fn rotate_mesh(axis: RotateAxis, force: bool, project: &mut Project, state: &mut ImportState) -> bool {
+fn rotate_mesh(
+    axis: RotateAxis,
+    quarters: u8,
+    force: bool,
+    project: &mut Project,
+    state: &mut ImportState,
+) -> bool {
     let Some(d) = state.editing(&project.measured) else {
         state.status.note("no tile is selected".to_owned());
         return false;
     };
     let Some(mesh) = d.mesh.clone() else {
-        state.status.problem(format!("`{}` has no mesh to turn", d.id));
+        state
+            .status
+            .problem(format!("`{}` has no mesh to turn", d.id));
         return false;
     };
     let authored_cells = d.subgrid.as_ref().map_or(0, |g| g.cells.len());
@@ -1243,7 +1421,7 @@ fn rotate_mesh(axis: RotateAxis, force: bool, project: &mut Project, state: &mut
     let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
         return false;
     };
-    let want = axis.bumped(d.align.rotate.unwrap_or((0, 0, 0)));
+    let want = axis.bumped(d.align.rotate.unwrap_or((0, 0, 0)), quarters);
     let before = d.align.rotate;
     // A rotation of nothing is not a rotation — keep the field absent rather than storing an
     // identity nobody authored, so a descriptor that was never turned still says so.
@@ -1258,7 +1436,7 @@ fn rotate_mesh(axis: RotateAxis, force: bool, project: &mut Project, state: &mut
     // here only because divisions are derived from the extent that just changed.
     let lattice = match (axis, div_before) {
         (RotateAxis::Y, Some(div)) => {
-            d.subgrid = d.subgrid.take().map(|g| g.rotated(1, div));
+            d.subgrid = d.subgrid.take().map(|g| g.rotated(quarters, div));
             String::new()
         }
         // A Y turn on a piece whose divisions would not derive has no cells worth moving either:
@@ -1283,17 +1461,23 @@ fn rotate_mesh(axis: RotateAxis, force: bool, project: &mut Project, state: &mut
 }
 
 /// The chip.
+/// **`Option<Res<Project>>`, because this is a GLOBAL observer.** See [`on_cell_verb`] for the whole
+/// argument; the short form is that it fires for any `Activate` anywhere in the application, and
+/// `Project` belongs to a door. The entity query below is the real "is this mine" guard — it just
+/// cannot run until the parameters have been validated, and in Bevy 0.19 a missing `Res<T>` panics
+/// at that point rather than skipping.
 fn on_rotate_click(
     activate: On<Activate>,
     axes: Query<&RotateAxis>,
     keyboard: Res<ButtonInput<KeyCode>>,
-    mut project: ResMut<Project>,
+    project: Option<ResMut<Project>>,
     mut state: ResMut<ImportState>,
 ) {
     let Ok(axis) = axes.get(activate.entity) else {
         return;
     };
-    rotate_mesh(*axis, held_shift(&keyboard), &mut project, &mut state);
+    let Some(mut project) = project else { return };
+    rotate_mesh(*axis, 1, held_shift(&keyboard), &mut project, &mut state);
 }
 
 /// **Shift, held, meaning "I know — do it anyway".**
@@ -1376,7 +1560,9 @@ fn scan_mesh(project: &mut Project, state: &mut ImportState) -> Option<Derived> 
         return None;
     };
     let Some(mesh) = d.mesh.clone() else {
-        state.status.problem(format!("`{}` has no mesh to scan", d.id));
+        state
+            .status
+            .problem(format!("`{}` has no mesh to scan", d.id));
         return None;
     };
     // **The rotation the divisions were derived with.** `div` comes from the piece's `extent`, which
@@ -1427,14 +1613,14 @@ fn scan_mesh(project: &mut Project, state: &mut ImportState) -> Option<Derived> 
         .map(|g| emerge_core::adjacency::derive_edges(g, div))
         .unwrap_or_default();
     let id = d.id.clone();
-    let said = format!(
-        "scanned {mesh}: {} of {total} cells solid",
-        cells.len()
-    );
+    let said = format!("scanned {mesh}: {} of {total} cells solid", cells.len());
     state.record(history_before);
     state.status.say(persist(project, where_to, said));
 
-    Some(Derived { id, cells: proposal })
+    Some(Derived {
+        id,
+        cells: proposal,
+    })
 }
 
 /// **Write derived tokens onto a descriptor's lattice**, returning how many cells actually moved.
@@ -1443,7 +1629,10 @@ fn scan_mesh(project: &mut Project, state: &mut ImportState) -> Option<Derived> 
 /// result is loadable, and once on the real descriptor when it is. Two spellings of "apply the
 /// proposal" would be two things to keep in step, and the whole point of the candidate is that it is
 /// the *same* edit.
-fn apply_edges(d: &mut emerge_core::descriptor::Descriptor, cells: &[((u32, u32, u32), &'static str)]) -> usize {
+fn apply_edges(
+    d: &mut emerge_core::descriptor::Descriptor,
+    cells: &[((u32, u32, u32), &'static str)],
+) -> usize {
     let grid = d.lattice_mut();
     let mut written = 0usize;
     for (at, token) in cells {
@@ -1598,16 +1787,22 @@ fn autoscan_candidate(
 }
 
 /// The chip.
+/// **`Option<Res<Project>>`, because this is a GLOBAL observer.** See [`on_cell_verb`] for the whole
+/// argument; the short form is that it fires for any `Activate` anywhere in the application, and
+/// `Project` belongs to a door. The entity query below is the real "is this mine" guard — it just
+/// cannot run until the parameters have been validated, and in Bevy 0.19 a missing `Res<T>` panics
+/// at that point rather than skipping.
 fn on_scan_mesh(
     activate: On<Activate>,
     buttons: Query<&ScanMeshButton>,
-    mut project: ResMut<Project>,
+    project: Option<ResMut<Project>>,
     mut state: ResMut<ImportState>,
     mut derived: ResMut<DerivedEdges>,
 ) {
     if buttons.get(activate.entity).is_err() {
         return;
     }
+    let Some(mut project) = project else { return };
     // **Only the asked-for scan stages a proposal** — see `scan_mesh`'s note on why the automatic
     // one must not.
     if let Some(proposal) = scan_mesh(&mut project, &mut state) {
@@ -1667,8 +1862,8 @@ fn apply_verb_to(
     match verb {
         CellVerb::Solid => {
             // Taken before the write — the only moment the old value still exists.
-    let history_before = state.snapshot(&project);
-    let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
+            let history_before = state.snapshot(&project);
+            let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
                 return;
             };
             // **A span is set, not toggled.** Toggling many cells at once flips a mixed row into its
@@ -1687,13 +1882,13 @@ fn apply_verb_to(
                 }
             };
             d.settle_lattice();
-    state.record(history_before);
-    state.status.say(persist(project, where_to, said));
+            state.record(history_before);
+            state.status.say(persist(project, where_to, said));
         }
         CellVerb::Clear => {
             // Taken before the write — the only moment the old value still exists.
-    let history_before = state.snapshot(&project);
-    let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
+            let history_before = state.snapshot(&project);
+            let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
                 return;
             };
             if let Some(grid) = d.subgrid.as_mut() {
@@ -1707,8 +1902,8 @@ fn apply_verb_to(
             } else {
                 format!("cell {},{},{} cleared", first.0, first.1, first.2)
             };
-    state.record(history_before);
-    state.status.say(persist(project, where_to, said));
+            state.record(history_before);
+            state.status.say(persist(project, where_to, said));
         }
         CellVerb::Edge => {
             // Starts empty, and Enter on an empty field CLEARS the token — one keystroke path for
@@ -1763,6 +1958,16 @@ pub struct LatticePick(pub Option<((u32, u32, u32), Option<emerge_core::descript
 ///
 /// `mount_height` is the only thing that decides which mounts have a height, so this cannot disagree
 /// with the field that edits it.
+/// **How high a staged piece stands above the stage floor**, for every tab that stages one.
+///
+/// The mount's own height, then the mesh's correction on top — the order [`emerge_core::stack::datum`]
+/// applies them in, which is what a placed piece's `y` is resolved from. Shared by the Meshes stage
+/// and the Tiles ghost because they were 0.31 m apart: the ghost used `build::BROUGHT_IN`'s flat
+/// lift, so the same piece stood at two heights depending on which tab you were looking at.
+pub(crate) fn staged_lift(d: &Descriptor) -> f32 {
+    stage_lift(d) + d.align.y_offset.unwrap_or(0.0)
+}
+
 fn stage_lift(d: &Descriptor) -> f32 {
     d.mount
         .as_ref()
@@ -1781,7 +1986,9 @@ fn stage_box(state: &ImportState, project: &Project) -> Option<(Vec3, Vec3, (u32
     // the author clicks one cell and writes another.
     let (w, dep) = emerge_core::descriptor::placed_footprint(d)?;
     // The same floor `draw_subgrid` gives a flat piece, so a decal can still be picked.
-    let h = emerge_core::descriptor::placed_height(d).unwrap_or(0.0).max(0.05);
+    let h = emerge_core::descriptor::placed_height(d)
+        .unwrap_or(0.0)
+        .max(0.05);
     // **Lifted with the mesh.** The picker turns a click into a cell by dividing this box by `div`,
     // so a box left on the floor under a mesh drawn 1.8 m up would hand every click the wrong cell —
     // or no cell, since the ray would miss it entirely.
@@ -1924,22 +2131,22 @@ fn lattice_keys(
     // one too — and it goes through the same `scan_mesh` the chip calls, not a second copy.
     if pressed(Action::ScanMesh) {
         // **Only the asked-for scan stages a proposal** — see `scan_mesh`'s note on why the automatic
-    // one must not.
-    if let Some(proposal) = scan_mesh(&mut project, &mut state) {
-        let count = proposal.cells.len();
-        let (changed, same) = proposal.delta(
-            state
-                .editing(&project.measured)
-                .and_then(|d| d.subgrid.as_ref()),
-        );
-        *derived = DerivedEdges(Some(proposal));
-        state.status.note(format!(
+        // one must not.
+        if let Some(proposal) = scan_mesh(&mut project, &mut state) {
+            let count = proposal.cells.len();
+            let (changed, same) = proposal.delta(
+                state
+                    .editing(&project.measured)
+                    .and_then(|d| d.subgrid.as_ref()),
+            );
+            *derived = DerivedEdges(Some(proposal));
+            state.status.note(format!(
             "{count} boundary cell(s) read from the mesh — {changed} would change, {same} already \
              match. {} keeps them, {} throws them away",
             crate::keys::chord(crate::keys::Action::AcceptEdges),
             crate::keys::chord(crate::keys::Action::Cancel),
         ));
-    }
+        }
         return;
     }
     for (action, axis) in [
@@ -1948,7 +2155,7 @@ fn lattice_keys(
         (Action::RotateMeshZ, RotateAxis::Z),
     ] {
         if pressed(action) {
-            rotate_mesh(axis, held_shift(&keyboard), &mut project, &mut state);
+            rotate_mesh(axis, 1, held_shift(&keyboard), &mut project, &mut state);
             return;
         }
     }
@@ -2032,11 +2239,15 @@ fn cell_keys(
                 // target was never opened by a verb, so there is nothing it could mean; that is a
                 // bug rather than an author error, and it says so instead of guessing at a cell.
                 let Some(targets) = edit.pending.take() else {
-                    state.status.problem(format!("`{raw}` was not kept — this field was opened without a cell."));
+                    state.status.problem(format!(
+                        "`{raw}` was not kept — this field was opened without a cell."
+                    ));
                     return;
                 };
                 let Some(target) = edit.target.take() else {
-                    state.status.problem(format!("`{raw}` was not kept — this field was opened without a tile."));
+                    state.status.problem(format!(
+                        "`{raw}` was not kept — this field was opened without a tile."
+                    ));
                     return;
                 };
                 let token = emerge_core::naming::to_snake_case(&raw);
@@ -2059,7 +2270,9 @@ fn cell_keys(
                 // destroyed it along with whichever edit the snapshot actually belonged to.
                 let history_before = state.snapshot(&project);
                 let Some((d, where_to)) = state.at_target(&target, &mut project.measured) else {
-                    state.status.problem(format!("`{raw}` was not kept — that tile is gone."));
+                    state
+                        .status
+                        .problem(format!("`{raw}` was not kept — that tile is gone."));
                     return;
                 };
                 let mut wrote = 0usize;
@@ -2113,22 +2326,30 @@ fn cell_keys(
 }
 
 /// Fill a row, a column or a whole layer with the verb the chips last used.
+/// **`Option<Res<Project>>`, because this is a GLOBAL observer.** See [`on_cell_verb`] for the whole
+/// argument; the short form is that it fires for any `Activate` anywhere in the application, and
+/// `Project` belongs to a door. The entity query below is the real "is this mine" guard — it just
+/// cannot run until the parameters have been validated, and in Bevy 0.19 a missing `Res<T>` panics
+/// at that point rather than skipping.
 fn on_fill_header(
     activate: On<Activate>,
     headers: Query<&FillHeader>,
     mut edit: ResMut<CellEdit>,
-    mut project: ResMut<Project>,
+    project: Option<ResMut<Project>>,
     mut state: ResMut<ImportState>,
 ) {
     let Ok(header) = headers.get(activate.entity) else {
         return;
     };
+    let Some(mut project) = project else { return };
     let Ok((dx, _, dz)) = focused_div(&state, &project) else {
         return;
     };
     let y = header.layer;
     let cells: Vec<(u32, u32, u32)> = match header.span {
-        Span::Layer => (0..dz).flat_map(|z| (0..dx).map(move |x| (x, y, z))).collect(),
+        Span::Layer => (0..dz)
+            .flat_map(|z| (0..dx).map(move |x| (x, y, z)))
+            .collect(),
         Span::Column(x) => (0..dz).map(|z| (x, y, z)).collect(),
         Span::Row(z) => (0..dx).map(|x| (x, y, z)).collect(),
     };
@@ -2159,12 +2380,53 @@ fn refresh_cells(
     note_edit: Res<NoteEdit>,
     scale_edit: Res<ScaleEdit>,
     mut cells: Query<(&CellButton, &CellLayer, &Hovered, &mut BackgroundColor)>,
-    mut glyphs: Query<(&CellGlyph, &CellLayer, &mut Text, &mut TextColor), (Without<SelectedCellLine>, Without<NoteReadout>, Without<ScaleReadout>)>,
-    mut lines: Query<(&mut Text, &mut TextColor), (With<SelectedCellLine>, Without<CellGlyph>, Without<NoteReadout>, Without<ScaleReadout>)>,
-    mut notes: Query<(&mut Text, &mut TextColor), (With<NoteReadout>, Without<CellGlyph>, Without<SelectedCellLine>, Without<ScaleReadout>)>,
-    mut widths: Query<(&mut Text, &mut TextColor), (With<ScaleReadout>, Without<CellGlyph>, Without<SelectedCellLine>, Without<NoteReadout>, Without<MountHeightReadout>)>,
+    mut glyphs: Query<
+        (&CellGlyph, &CellLayer, &mut Text, &mut TextColor),
+        (
+            Without<SelectedCellLine>,
+            Without<NoteReadout>,
+            Without<ScaleReadout>,
+        ),
+    >,
+    mut lines: Query<
+        (&mut Text, &mut TextColor),
+        (
+            With<SelectedCellLine>,
+            Without<CellGlyph>,
+            Without<NoteReadout>,
+            Without<ScaleReadout>,
+        ),
+    >,
+    mut notes: Query<
+        (&mut Text, &mut TextColor),
+        (
+            With<NoteReadout>,
+            Without<CellGlyph>,
+            Without<SelectedCellLine>,
+            Without<ScaleReadout>,
+        ),
+    >,
+    mut widths: Query<
+        (&mut Text, &mut TextColor),
+        (
+            With<ScaleReadout>,
+            Without<CellGlyph>,
+            Without<SelectedCellLine>,
+            Without<NoteReadout>,
+            Without<MountHeightReadout>,
+        ),
+    >,
     height_edit: Res<HeightEdit>,
-    mut heights: Query<(&mut Text, &mut TextColor), (With<MountHeightReadout>, Without<CellGlyph>, Without<SelectedCellLine>, Without<NoteReadout>, Without<ScaleReadout>)>,
+    mut heights: Query<
+        (&mut Text, &mut TextColor),
+        (
+            With<MountHeightReadout>,
+            Without<CellGlyph>,
+            Without<SelectedCellLine>,
+            Without<NoteReadout>,
+            Without<ScaleReadout>,
+        ),
+    >,
 ) {
     // As placed, so the cells shown are the cells that exist. See [`ImportState::placed`].
     let Some(d) = state.placed(&project) else {
@@ -2210,7 +2472,9 @@ fn refresh_cells(
                 at.0,
                 at.1,
                 at.2,
-                grid.at(at).map(describe_cell).unwrap_or_else(|| "open".to_owned())
+                grid.at(at)
+                    .map(describe_cell)
+                    .unwrap_or_else(|| "open".to_owned())
             ),
         },
         None => "no cell picked".to_owned(),
@@ -2219,7 +2483,11 @@ fn refresh_cells(
         if text.0 != detail {
             text.0 = detail.clone();
         }
-        let tint = if cell_edit.active.is_some() { ACCENT } else { DIM };
+        let tint = if cell_edit.active.is_some() {
+            ACCENT
+        } else {
+            DIM
+        };
         if colour.0 != tint {
             colour.0 = tint;
         }
@@ -2333,7 +2601,10 @@ impl ImportState {
     /// so it must show the measurements: displaying a wall stretched to this facility's 2.40 m while
     /// writing the mesh's authored height back is the "preview that lies" this crate keeps being
     /// written to avoid.
-    pub fn editing<'a>(&'a self, library: &'a emerge_core::library::Library) -> Option<&'a Descriptor> {
+    pub fn editing<'a>(
+        &'a self,
+        library: &'a emerge_core::library::Library,
+    ) -> Option<&'a Descriptor> {
         match &self.selected_library_id {
             Some(id) => library.get(id),
             None => self.current().map(|c| &c.proposed),
@@ -2389,7 +2660,51 @@ impl ImportState {
     pub fn target(&self) -> Option<EditTarget> {
         match &self.selected_library_id {
             Some(id) => Some(EditTarget::Library(id.clone())),
-            None => self.current().map(|c| EditTarget::Candidate(c.mesh.clone())),
+            None => self
+                .current()
+                .map(|c| EditTarget::Candidate(c.mesh.clone())),
+        }
+    }
+
+    /// **Put the highlight on this piece** — the one cursor the lists, the detail pane and the
+    /// stage all read.
+    ///
+    /// Asked for at the keyboard, 2026-08-18: *"when I hit Shift+L and label all, it should
+    /// automatically switch to what's being labeled."* A walk of hundreds photographs one piece at
+    /// a time and the panel said only how many were done, so the piece the model was being asked
+    /// about was the one thing on screen that nothing pointed at — Nielsen's visibility-of-system-
+    /// status failure in its third form, *"the user cannot identify where he is standing in the
+    /// interaction process"* (Nasir 2024, arXiv:2408.06955 §4.3.1.2, restating Nielsen 1994b).
+    ///
+    /// **The highlight is three facts, so this is three writes.** [`Self::selected_library_id`] is
+    /// the discriminant — a candidate has to take the focus off the library list or the pane keeps
+    /// showing the row that had it — and [`Self::focused_pack`] is the other half of the same
+    /// cursor: a highlight standing on a pack heading is not standing on a mesh.
+    ///
+    /// **The fold is not cosmetic.** `keep_candidate_selection_visible` moves the selection off any
+    /// row the author cannot see, so a selection set inside a folded pack is undone on the next
+    /// frame. Since the first scan folds every pack this kit does not draw from, that is most of
+    /// them — the follow would be silently inert exactly when a walk crosses into a new pack.
+    pub(crate) fn focus_on(&mut self, target: &EditTarget) {
+        match target {
+            EditTarget::Library(id) => {
+                self.selected_library_id = Some(id.clone());
+                self.focused_pack = None;
+            }
+            EditTarget::Candidate(mesh) => {
+                // Gone since the walk was built — a rescan, a removal. Leave the highlight where
+                // the author can see it rather than moving it somewhere arbitrary.
+                let Some(ix) = self.candidates.iter().position(|c| &c.mesh == mesh) else {
+                    return;
+                };
+                // The key `packs` groups by, read the way `packs` reads it, so the fold this opens
+                // is the one the row is under.
+                self.folded_packs
+                    .remove(mesh.rsplit_once('/').map_or(".", |(dir, _)| dir));
+                self.selected = ix;
+                self.selected_library_id = None;
+                self.focused_pack = None;
+            }
         }
     }
 
@@ -2487,8 +2802,14 @@ fn commit_measured(
 ) -> Result<std::path::PathBuf, String> {
     // Rebuild the layered view from the edited measurements, and prove it still holds together,
     // before anything touches the disk.
-    let library = project.policy.apply(&measured)?;
-    library.validate_lattices(project.policy.face_bands)?;
+    // **The authoring kit's own layer**, since patches are per-kit and `Policy::apply` refuses a
+    // rule that matches nothing.
+    let layered = project.policy.apply(&measured)?;
+    // **Then the merge, because the palette is every bound kit.** Replacing `project.library` with
+    // the single kit's layer here would drop every other kit's pieces out of the palette the moment
+    // a mesh was imported — the edit would look like it had deleted the rest of the project.
+    let library = project.merged_with(&layered)?;
+    library.validate_lattices(project.lattice.face_bands)?;
     let masks = library.resolve(&project.vocab)?;
 
     let path = project.library_path.clone();
@@ -2500,9 +2821,21 @@ fn commit_measured(
     // library replacing it is now standing on screen in a form the project no longer describes.
     // Derived here rather than declared by the fifteen edit paths that reach this door — see
     // `Project::touched`.
-    project.touched.extend(changed_ids(&project.library, &library));
+    project
+        .touched
+        .extend(changed_ids(&project.library, &library));
 
     project.measured = measured;
+    // The kit's own layer moves too. Without this the next `merged_with` would rebuild from the
+    // layer as it was at open, and the second import in a session would undo the first.
+    if let Some(k) = project
+        .kits
+        .iter_mut()
+        .find(|k| k.dir == project.emerge_dir)
+    {
+        k.measured = project.measured.clone();
+        k.library = layered;
+    }
     project.library = library;
     project.masks = masks;
     project.remeasure_triangles();
@@ -2514,7 +2847,10 @@ fn commit_measured(
 /// `Descriptor` derives `PartialEq`, so this is the whole of "did this piece change". An id that
 /// only exists in `old` is a removal, and a removed descriptor has no placements left to redraw —
 /// `commit_measured` refuses a removal the map still uses.
-fn changed_ids(old: &emerge_core::library::Library, new: &emerge_core::library::Library) -> Vec<String> {
+fn changed_ids(
+    old: &emerge_core::library::Library,
+    new: &emerge_core::library::Library,
+) -> Vec<String> {
     new.descriptors
         .iter()
         .filter(|d| old.get(&d.id) != Some(*d))
@@ -2529,11 +2865,18 @@ mod changed_ids_tests {
     use emerge_core::library::Library;
 
     fn lib(ds: Vec<Descriptor>) -> Library {
-        Library { version: 1, note: None, descriptors: ds }
+        Library {
+            version: 1,
+            note: None,
+            descriptors: ds,
+        }
     }
 
     fn piece(id: &str, y_offset: Option<f32>) -> Descriptor {
-        let mut d = Descriptor { id: id.to_owned(), ..Descriptor::default() };
+        let mut d = Descriptor {
+            id: id.to_owned(),
+            ..Descriptor::default()
+        };
         d.align.y_offset = y_offset;
         d
     }
@@ -2607,10 +2950,14 @@ pub enum Persist {
     Library,
 }
 
+/// The `EXCLUDED` group's heading — clicking it opens or closes the group.
+#[derive(Component)]
+pub(crate) struct ExcludedHeader;
+
 /// One tab in the strip, carrying the mode it selects. `pub(crate)` so the anim bench's stale
 /// badge can find its own tab and repaint the label in place.
 #[derive(Component, Clone, Copy)]
-pub(crate) struct Tab(pub(crate) Mode);
+pub struct Tab(pub Mode);
 
 /// The tab's name, so the active one can be lit without touching its key.
 #[derive(Component)]
@@ -2677,7 +3024,10 @@ impl Axis {
             Axis::Surfaces => "OFFERS",
         }
     }
-    fn tokens<'a>(self, v: &'a emerge_core::vocab::Vocabularies) -> &'a emerge_core::vocab::Vocabulary {
+    fn tokens<'a>(
+        self,
+        v: &'a emerge_core::vocab::Vocabularies,
+    ) -> &'a emerge_core::vocab::Vocabulary {
         match self {
             Axis::Kind => &v.kind,
             Axis::Effects => &v.effects,
@@ -2705,7 +3055,7 @@ struct PackHeader(String);
 
 /// One row for a tile already in the library, carrying its id.
 #[derive(Component, Clone)]
-struct LibraryRow(String);
+pub struct LibraryRow(pub String);
 
 /// The node the candidate list is rebuilt into.
 #[derive(Component)]
@@ -2758,7 +3108,8 @@ pub struct TilesPlugin;
 
 impl Plugin for TilesPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Mode>()
+        app.init_resource::<Door>()
+            .init_resource::<Mode>()
             .init_resource::<ImportState>()
             .init_resource::<MapView>()
             .init_resource::<CellEdit>()
@@ -2776,16 +3127,23 @@ impl Plugin for TilesPlugin {
             // a missing one panics rather than skipping (`CLAUDE.md`).
             .init_resource::<crate::build::Build>()
             .init_resource::<crate::build::TileHistory>()
-            .add_systems(Startup, (spawn_tab_strip, spawn_tiles_panel))
+            .add_systems(
+                OnEnter(crate::screen::Screen::Editor),
+                (spawn_tab_strip, spawn_tiles_panel, scan_on_entering_the_kits_door)
+                    .after(crate::chrome::FrameSystems),
+            )
             .add_systems(
                 Update,
-                (
+                ((
                     // **Gated by the context, not by a run condition.** `2` typed into a filter or
                     // an id used to jump the author to another tab mid-word; `keys::just_pressed`
                     // now refuses every one of these unless the Tiles tab owns the keyboard, so the
                     // `not_typing` conditions that used to say the same thing are gone rather than
                     // duplicated. `Phase::Act` puts them all ahead of the text fields below.
-                    toggle_mode.in_set(crate::keys::Phase::Act),
+                    (
+                        tab_shortcuts.in_set(crate::keys::Phase::Act),
+                        rescan_key.in_set(crate::keys::Phase::Act),
+                    ),
                     move_selection.in_set(crate::keys::Phase::Act),
                     // **The two lattice walkers, nested as one.** A system tuple caps at twenty and
                     // this pair is one idea on two tabs: Meshes walks a mesh's own lattice, Tiles
@@ -2797,17 +3155,12 @@ impl Plugin for TilesPlugin {
                         accept_derived_edges
                             .in_set(crate::keys::Phase::Act)
                             .after(lattice_keys),
-                        // **After the tab is settled**, because arriving on the Tiles tab is what
-                        // opens a tile — and `toggle_mode`/`tab_shortcuts` are the two systems that
-                        // decide which tab that is. Unordered, they share `Phase::Act` with this
-                        // one, so whether the tile opened on the arrival frame or the next was
-                        // Bevy's choice rather than ours: the first assertion after a tab key was
-                        // true only sometimes. A frame's delay is invisible to an author and a coin
-                        // flip is not something to build a contract on.
-                        crate::build::build_keys
-                            .in_set(crate::keys::Phase::Act)
-                            .after(toggle_mode)
-                            .after(tab_shortcuts),
+                        // The ordering against the tab systems is gone with them: a door is
+                        // settled before the first frame, so nothing can change which panel this
+                        // runs under while it runs. What it used to guard against — the tile
+                        // opening on the arrival frame or the next, by Bevy's choice — cannot
+                        // happen when there is no arrival.
+                        crate::build::build_keys.in_set(crate::keys::Phase::Act),
                         // The tile resizes to its contents, and that has to be after whatever
                         // changed them — see `build::refit_tile`.
                         crate::build::refit_tile
@@ -2851,7 +3204,7 @@ impl Plugin for TilesPlugin {
                     suggestion_keys.in_set(crate::keys::Phase::Act),
                     commit_candidate.in_set(crate::keys::Phase::Act),
                     remove_tile.in_set(crate::keys::Phase::Act),
-                    tab_shortcuts.in_set(crate::keys::Phase::Act),
+                    focus_filter.in_set(crate::keys::Phase::Act),
                     apply_mode,
                     stage_camera,
                     // **The text fields, last.** `cell_keys` and `commit_candidate` both take
@@ -2859,8 +3212,11 @@ impl Plugin for TilesPlugin {
                     // run the field first, clear its own typing flag, and let the same `Enter` fall
                     // through to "add to library". Six descriptors arrived in `library.ron` that way.
                     rename_candidate.in_set(crate::keys::Phase::Text),
-                    cell_keys.in_set(crate::keys::Phase::Text),
-                    style_tabs,
+                    (
+                        cell_keys.in_set(crate::keys::Phase::Text),
+                        crate::build::naming_keys.in_set(crate::keys::Phase::Text),
+                    ),
+                    (style_tabs, paint_label_progress, auto_apply_batch),
                     rebuild_candidates.run_if(
                         resource_changed::<ImportState>
                             .or_else(resource_changed::<crate::filter::Filters>)
@@ -2876,7 +3232,7 @@ impl Plugin for TilesPlugin {
                     rebuild_detail.run_if(
                         resource_changed::<ImportState>
                             .or_else(resource_changed::<crate::labels::LabelGeneration>)
-                            .or_else(resource_changed::<Mode>)
+                            .or_else(resource_exists_and_changed::<Mode>)
                             .or_else(resource_changed::<crate::build::Build>),
                     ),
                     refresh_lines,
@@ -2888,23 +3244,25 @@ impl Plugin for TilesPlugin {
                         crate::build::drive_build_preview,
                         crate::build::draw_build_grid,
                     ),
-                ),
+                ),)
+                    .run_if(in_state(crate::screen::Screen::Editor)),
             )
             // A second `add_systems` rather than a nested tuple — `add_systems` caps a tuple at 20
             // in 0.19, and nesting would imply these belong together for a reason.
             .add_systems(
                 Update,
-                (
+                ((
                     note_keys.in_set(crate::keys::Phase::Text),
                     scale_keys.in_set(crate::keys::Phase::Text),
                     mount_height_keys.in_set(crate::keys::Phase::Text),
                     tile_history_keys.in_set(crate::keys::Phase::Act),
                     demote_tile.in_set(crate::keys::Phase::Act),
+                    exclude_pack.in_set(crate::keys::Phase::Act),
                     disarm_demote.run_if(resource_changed::<ImportState>),
                     refresh_cells,
-                ),
+                ),)
+                    .run_if(in_state(crate::screen::Screen::Editor)),
             )
-            .add_observer(on_tab_click)
             .add_observer(on_cell_click)
             .add_observer(on_cell_verb)
             .add_observer(on_scan_mesh)
@@ -2916,35 +3274,74 @@ impl Plugin for TilesPlugin {
             .add_observer(on_candidate_click)
             .add_observer(on_library_click)
             .add_observer(on_pack_click)
+            .add_observer(on_excluded_click)
             .add_observer(on_tag_chip);
     }
 }
 
-/// The tab strip. Always visible, above whichever panel is showing.
+/// **The strip of panels this door holds** — three on the Kit door, one on the others.
 ///
-/// A key alone was not enough. `Tab` cycles the mode and always did, but a mode you can only reach by
-/// pressing something is a mode you have to be told about — and an editor that has to be explained
-/// has a bug in its front page. The strip says both things at once: which jobs exist, and which one
-/// you are doing.
-fn spawn_tab_strip(mut commands: Commands) {
-    commands
+/// The strip exists because a mode reachable only by a keypress is a mode you have to be told about,
+/// and an editor that has to be explained has a bug in its front page. What changed with the doors
+/// is its *scope*: it lists what this door shows rather than everything the binary can do, so the
+/// Kit door never offers the Map.
+///
+/// A one-tab door draws a one-entry strip, which reads as a title. That is deliberate rather than a
+/// special case — one loop, one shape, and a door that gains a panel is one arm in [`Door::tabs`].
+///
+/// **`Option<Res<Door>>`, like every other `OnEnter(Editor)` spawner here** (`labels::warm_cache`,
+/// `anim_cache::load_bench_cache`, `thumbs::setup`): the door is a door's resource, so a screen
+/// entered without one draws no strip rather than aborting the process. `screen::open_the_door`
+/// already says so on the log in the one case that reaches it.
+fn spawn_tab_strip(
+    mut commands: Commands,
+    door: Option<Res<Door>>,
+    frame: Res<crate::chrome::Frame>,
+) {
+    let Some(door) = door else { return };
+    // **Into the frame's own band, not floating over the window.** It was absolute at
+    // `left: MARGIN, top: MARGIN` with `GlobalZIndex(101)` to sit above the panels it overlapped —
+    // a strip that had to out-rank the thing beneath it because both were competing for the same
+    // ground. In the frame nothing overlaps, so neither number is needed.
+    let strip = commands
         .spawn((
             Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(MARGIN),
-                top: Val::Px(MARGIN),
                 flex_direction: FlexDirection::Row,
                 column_gap: Val::Px(2.0),
+                align_items: AlignItems::Stretch,
                 ..default()
             },
-            GlobalZIndex(101),
+            // **The editor's first accessibility, and the strip is the right place to start.**
+            //
+            // There was none at all — `AccessibilityNode` appeared zero times in `src/`. A screen
+            // reader met this application as an unlabelled tree of boxes, and the one thing it most
+            // needs to describe is which panel you are in and what the alternatives are. AccessKit
+            // has exactly that shape: a `TabList` of `Tab`s.
+            //
+            // Stated on the strip rather than derived, because nothing derives it — Bevy populates
+            // roles for its own widgets and these are not its widgets.
+            bevy::a11y::AccessibilityNode::from(accesskit::Node::new(accesskit::Role::TabList)),
         ))
+        .id();
+    commands.entity(frame.door_strip).add_child(strip);
+    commands
+        .entity(strip)
         .with_children(|p| {
-            for mode in Mode::ALL {
+            for (i, &mode) in door.tabs().iter().enumerate() {
+                // **The key this door gives that slot**, which is why it is read off the index and
+                // not off the mode: `tab_shortcuts` walks `door.tabs()` and takes
+                // `Action::tab_slot(i)`, so `1` is the door's first panel whichever panel that is.
+                let chord = Action::tab_slot(i).map(crate::keys::chord);
                 p.spawn((
-                    UiButton,
+                    // **Deliberately not a `UiButton`** — see [`click_tab`]. `Hovered` is what
+                    // `style_tabs` lights it with, and it is all that was ever needed.
                     Hovered::default(),
                     Tab(mode),
+                    bevy::a11y::AccessibilityNode::from(accesskit::Node::new(accesskit::Role::Tab)),
+                    // The label the reader hears. `mode.label()` rather than a second string, so a
+                    // panel renamed once is renamed everywhere — the same rule `chrome::key_census`
+                    // keeps for chords.
+                    bevy::prelude::AccessibleLabel::new(mode.label()),
                     Node {
                         padding: UiRect::axes(Val::Px(16.0), Val::Px(8.0)),
                         align_items: AlignItems::Center,
@@ -2962,20 +3359,27 @@ fn spawn_tab_strip(mut commands: Commands) {
                     // failure: offering a fast path beside a slow one does not work on its own, and
                     // users plateau on the slow one. The key has to be visible at the moment of use,
                     // which is `docs/ui.md` §4.2's "each chip states its key".
-                    tab.spawn((
-                        Text::new(crate::keys::chord(mode.action())),
-                        TextColor(LABEL),
-                        TextFont::from_font_size(10.0),
-                        Node {
-                            margin: UiRect::right(Val::Px(7.0)),
-                            ..default()
-                        },
-                        TabKey,
-                    ));
+                    //
+                    // It went missing when the strip became per-door and `Mode::action` — a key per
+                    // panel — stopped existing; the citation above stayed, and `style_tabs` kept
+                    // querying a marker nothing spawned. A one-tab door has a slot key too, so the
+                    // `Option` is only ever `None` past the fourth panel.
+                    if let Some(chord) = chord {
+                        tab.spawn((
+                            Text::new(chord),
+                            TextColor(LABEL),
+                            TextFont::from_font_size(crate::chrome::text::LABEL),
+                            Node {
+                                margin: UiRect::right(Val::Px(7.0)),
+                                ..default()
+                            },
+                            TabKey,
+                        ));
+                    }
                     tab.spawn((
                         Text::new(mode.label()),
                         TextColor(LABEL),
-                        TextFont::from_font_size(13.0),
+                        TextFont::from_font_size(crate::chrome::text::TAB),
                         TextLayout::new(Justify::Left, LineBreak::NoWrap),
                         TabLabel,
                     ));
@@ -2983,7 +3387,7 @@ fn spawn_tab_strip(mut commands: Commands) {
                     tab.spawn((
                         Text::new(String::new()),
                         TextColor(DANGER),
-                        TextFont::from_font_size(10.0),
+                        TextFont::from_font_size(crate::chrome::text::LABEL),
                         TextLayout::new(Justify::Left, LineBreak::NoWrap),
                         Node {
                             margin: UiRect::left(Val::Px(7.0)),
@@ -2991,37 +3395,32 @@ fn spawn_tab_strip(mut commands: Commands) {
                         },
                         TabBadge,
                     ));
-                });
+                })
+                .observe(click_tab);
             }
         });
 }
 
-/// Clicking a tab selects it — and scans on the first visit to the tiles tab, exactly as the key
-/// does, so the two ways in behave the same.
-fn on_tab_click(
-    activate: On<Activate>,
-    tabs: Query<&Tab>,
-    project: Res<Project>,
-    mut mode: ResMut<Mode>,
-    mut state: ResMut<ImportState>,
-) {
-    let Ok(tab) = tabs.get(activate.entity) else {
-        return;
-    };
-    if *mode == tab.0 {
-        return;
-    }
-    *mode = tab.0;
-    if *mode == Mode::Meshes && !state.scanned {
-        scan(&project, &mut state);
-    }
-}
-
+/// **The tab chips answer the pointer again, and this is the record of how.**
+///
+/// `on_tab_click` was deleted when the strip became per-door, and for a while the chip was a
+/// `ui_widgets::Button` carrying `Hovered` that `style_tabs` lit — advertising a press it did not
+/// answer. Restoring the observer regressed `the_tile_feedback_script_can_actually_be_followed`,
+/// because a focused `Button` also fires `Activate` on `Enter` and the script's commit key changed
+/// panel out from under the step. The note left here concluded it "needs a focus decision, not just
+/// an observer", and that was one word too strong: it needed the chip to stop being a `Button`.
+/// [`click_tab`] is the answer — a `Pointer<Click>` observer, no focus, no `Activate`.
 /// Light the active tab. The inactive one stays legible rather than greyed to nothing — a tab you
 /// cannot read is a tab you do not know is there.
 fn style_tabs(
     mode: Res<Mode>,
-    mut tabs: Query<(&Tab, &Hovered, &mut BackgroundColor, &mut BorderColor, &Children)>,
+    mut tabs: Query<(
+        &Tab,
+        &Hovered,
+        &mut BackgroundColor,
+        &mut BorderColor,
+        &Children,
+    )>,
     mut names: Query<&mut TextColor, (With<TabLabel>, Without<TabKey>)>,
     mut chords: Query<&mut TextColor, (With<TabKey>, Without<TabLabel>)>,
 ) {
@@ -3040,7 +3439,12 @@ fn style_tabs(
             bg.0 = want_bg;
         }
         let want_border = if active { ACCENT } else { Color::NONE };
-        *border = BorderColor::all(want_border);
+        // Guarded like every other write in this function. `BorderColor` is change-detected and the
+        // UI extraction reads that, so an unconditional assignment dirtied the whole strip sixty
+        // times a second for a colour that changes when a tab does.
+        if border.top != want_border {
+            *border = BorderColor::all(want_border);
+        }
 
         for child in children.iter() {
             if let Ok(mut colour) = names.get_mut(child) {
@@ -3059,25 +3463,27 @@ fn style_tabs(
     }
 }
 
-/// The number keys jump straight to a tab, and scan on first arrival exactly as `Tab` and a click do.
+/// **`F` puts the cursor in the filter box** — the keyboard half of a control that had only a
+/// mouse half.
 ///
-/// Three ways in, one behaviour — `docs/ui.md` §4.2: everything reachable by mouse is reachable by
-/// keyboard and vice versa.
-fn tab_shortcuts(
+/// `docs/ui.md` §4.2 is the rule this satisfies: everything reachable by mouse is reachable by
+/// keyboard and vice versa. The box was the standing exception — `filter::on_click` was its only
+/// writer — on the tab whose whole argument is that keystrokes are faster than reaching for the
+/// mouse, and with a 45-piece library to narrow.
+///
+/// **Leaving is already owned by `filter::keys`**, which runs in `Phase::Text`: `Enter` blurs and
+/// `Esc` blurs and clears. That ordering is also what stops this from being the `xseam` bug again —
+/// while the box holds focus the context is `Typing`, so the `Enter` that leaves it cannot also
+/// reach `BuildDrop` in the same frame, and by the next frame it is no longer `just_pressed`.
+fn focus_filter(
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<crate::keys::Live>,
-    project: Res<Project>,
-    mut mode: ResMut<Mode>,
-    mut state: ResMut<ImportState>,
+    mut filters: ResMut<crate::filter::Filters>,
 ) {
-    for want in Mode::ALL {
-        if keys::just_pressed(&keyboard, *live, want.action()) && *mode != want {
-            *mode = want;
-            if want == Mode::Meshes && !state.scanned {
-                scan(&project, &mut state);
-            }
-            return;
-        }
+    if crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::FocusFilter) {
+        // The pane this tab's list is filtered by — the same one `rebuild_candidates` reads, so the
+        // box that takes the keys is the box above the rows they narrow.
+        filters.take_focus(crate::filter::Pane::Candidates);
     }
 }
 
@@ -3094,9 +3500,10 @@ const TILES_PANEL_TABS: &[Mode] = &[Mode::Meshes, Mode::Tiles];
 /// panel that is not pinned to the bottom of the viewport is never reached. 318 candidates scrolled
 /// in a 300 px window. Now it is `chrome::scroll_list` inside a `full_height` panel, which is bounded
 /// by construction.
-fn spawn_tiles_panel(mut commands: Commands) {
+fn spawn_tiles_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
     crate::chrome::panel_root(
         &mut commands,
+        &frame,
         crate::chrome::Side::Left,
         crate::chrome::TILES_CONTROLS_W,
         // Pinned to the bottom as well, so the detail block below has a bounded height to scroll
@@ -3114,14 +3521,11 @@ fn spawn_tiles_panel(mut commands: Commands) {
         // it. The detail pane and the problem log below take the other shape, `TILES_PANEL_TABS`:
         // they are single nodes whose *contents* the live tab decides, so duplicating them would be
         // two copies to keep in step rather than one node that says which tabs it is for.
-        crate::chrome::problem_banner(p, &[Mode::Meshes]);
-        crate::chrome::problem_banner(p, &[Mode::Tiles]);
-        crate::chrome::shortcut_hint(p);
 
         p.spawn((
             Text::new(""),
             TextColor(DIM),
-            TextFont::from_font_size(10.0),
+            TextFont::from_font_size(crate::chrome::text::LABEL),
             Node {
                 margin: UiRect::top(Val::Px(6.0)),
                 ..default()
@@ -3134,6 +3538,11 @@ fn spawn_tiles_panel(mut commands: Commands) {
         // taller than the panel. Bounded and scrollable beats running off the bottom edge, which is
         // where the "no facing is derived" note was going. The one builder, plus this pane's own
         // gap to the summary above it.
+        //
+        // FOLLOW-OK: content, not a list. `build_detail` and the candidate block draw sections and
+        // prose lines — there is no row here the arrows walk, so there is no selection to keep on
+        // screen. The scroll exists for HEIGHT, and the pane above it (`CandidateList`) is the one
+        // with a selection and has `keep_selection_on_screen`.
         crate::chrome::scroll_list(p, (DetailPane, crate::notice::CopyPane(TILES_PANEL_TABS)))
             .entry::<Node>()
             .and_modify(|mut n| n.margin.top = Val::Px(8.0));
@@ -3141,7 +3550,7 @@ fn spawn_tiles_panel(mut commands: Commands) {
         p.spawn((
             Text::new(""),
             TextColor(ACCENT),
-            TextFont::from_font_size(10.0),
+            TextFont::from_font_size(crate::chrome::text::LABEL),
             Node {
                 margin: UiRect::top(Val::Px(8.0)),
                 ..default()
@@ -3159,6 +3568,7 @@ fn spawn_tiles_panel(mut commands: Commands) {
     // does not mean learning a second layout.
     crate::chrome::panel_root(
         &mut commands,
+        &frame,
         crate::chrome::Side::Right,
         crate::chrome::LIST_W,
         true,
@@ -3169,80 +3579,278 @@ fn spawn_tiles_panel(mut commands: Commands) {
     // "NOT YET IMPORTED (317)") with live counts, and a static one above them said the same thing
     // twice and disagreed with the first section.
     .with_children(|p| {
+        // **The batch, while it runs** — above the list it is filling. See `paint_label_progress`.
+        p.spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(crate::chrome::GAP_TIGHT),
+                margin: UiRect::bottom(Val::Px(crate::chrome::GAP_ROW)),
+                display: Display::None,
+                ..default()
+            },
+            LabelProgress,
+        ))
+        .with_children(|b| {
+            b.spawn((
+                Text::new(""),
+                TextColor(ACCENT),
+                TextFont::from_font_size(crate::chrome::text::LABEL),
+                LabelProgressText,
+            ));
+            // The bar: a dim trough with a bright fill whose WIDTH is the fraction. Two nodes,
+            // because a bar is the one readout where the number is not the point — the eye reads
+            // "how much is left" without reading anything.
+            b.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    height: Val::Px(4.0),
+                    ..default()
+                },
+                BackgroundColor(crate::chrome::SLOT_BG),
+            ))
+            .with_children(|trough| {
+                trough.spawn((
+                    Node {
+                        width: Val::Percent(0.0),
+                        height: Val::Percent(100.0),
+                        ..default()
+                    },
+                    BackgroundColor(ACCENT),
+                    LabelProgressBar,
+                ));
+            });
+            b.spawn((
+                Text::new(""),
+                TextColor(DIM),
+                TextFont::from_font_size(crate::chrome::text::HINT),
+                LabelProgressNow,
+            ));
+        });
         crate::filter::spawn(p, crate::filter::Pane::Candidates);
         // The strip sits OUTSIDE the scroll container, so it cannot scroll away — see [`ListHeader`].
         p.spawn((
-            Node { flex_direction: FlexDirection::Column, ..default() },
+            Node {
+                flex_direction: FlexDirection::Column,
+                ..default()
+            },
             ListHeader,
         ));
         crate::chrome::scroll_list(p, CandidateList);
     });
 }
 
-/// Tab swaps the job. `R` rescans, because meshes arrive while the editor is open — an importer that
-/// only sees what was on disk at launch is one you have to restart to use.
-fn toggle_mode(
+/// **The number keys jump straight to a panel of this door**, in strip order.
+///
+/// `1` is this door's first panel, not the binary's — so on the Kit door `1` is Meshes. Everything
+/// reachable by mouse is reachable by keyboard (`docs/ui.md` §4.2), and the strip is what both read.
+fn tab_shortcuts(
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<crate::keys::Live>,
     project: Res<Project>,
+    door: Res<Door>,
     mut mode: ResMut<Mode>,
     mut state: ResMut<ImportState>,
 ) {
-    let want_scan = if keys::just_pressed(&keyboard, *live, Action::NextTab) {
-        // Cycle, not toggle: a third tab then costs a row in `Mode::ALL` and nothing else.
-        let at = Mode::ALL.iter().position(|m| m == &*mode).unwrap_or(0);
-        *mode = Mode::ALL[(at + 1) % Mode::ALL.len()];
-        *mode == Mode::Meshes && !state.scanned
-    } else {
-        *mode == Mode::Meshes && keys::just_pressed(&keyboard, *live, Action::Rescan)
-    };
+    for (i, &want) in door.tabs().iter().enumerate() {
+        let Some(action) = Action::tab_slot(i) else {
+            continue;
+        };
+        if keys::just_pressed(&keyboard, *live, action) {
+            enter_tab(want, &project, &mut mode, &mut state);
+            return;
+        }
+    }
+}
 
-    if want_scan {
+/// **Go to a panel** — the one step, so the key and the click cannot come to mean different things.
+///
+/// The scan-on-arrival is the part that would drift: entering Meshes for the first time is what
+/// fills the library list, and a second way in that forgot it would show an empty tab exactly once,
+/// on the path nobody tested.
+///
+/// **It takes the `ResMut`s, not `&mut Mode`.** Passing `&mut mode` where the parameter is
+/// `&mut Mode` deref-*muts* the `ResMut` at the call site, and `Mut::deref_mut` calls
+/// `set_changed()` — so `Mode` was marked changed before this function could refuse, on every press
+/// of the slot key you are already on and every click of the chip you are already standing on.
+/// `stage_camera` reads exactly that flag, so it restored the canonical stage framing and threw
+/// away the author's pan and zoom, which is the discard `MapView` exists to prevent. Measured:
+/// a helper taking `&mut T` reports `is_changed()` after a no-op, an in-place compare does not.
+/// Read through `Deref`, write through `DerefMut`, and only then.
+fn enter_tab(
+    want: Mode,
+    project: &Project,
+    mode: &mut ResMut<Mode>,
+    state: &mut ResMut<ImportState>,
+) {
+    if **mode == want {
+        return;
+    }
+    **mode = want;
+    // **A receipt does not follow you to the next tab.**
+    //
+    // Meshes and Tiles share one `ImportState`, so its single `note` string — only ever overwritten,
+    // never cleared — outlived every switch between them. See `chrome::Status::clear_note` for the
+    // report that closes and the BRP measurement showing the rotation it seemed to announce was not
+    // happening. Cleared here rather than in a system watching `Mode`, because this is the one door
+    // both the slot key and the chip click come through, and because clearing *before* the scan
+    // below means a tab that has something to say still gets to say it.
+    //
+    // Only the note. A problem is a state the editor is in and outlives a tab on purpose.
+    state.status.clear_note();
+    if want == Mode::Meshes && !state.scanned {
+        scan(project, state);
+    }
+}
+
+/// **The strip answers a press, and it is not a `Button`.**
+///
+/// The chips have looked pressable since they were written — `UiButton`, `Hovered`, a hover tint —
+/// and answered nothing: `on_tab_click` was deleted when the strip became per-door, leaving an
+/// affordance advertising a verb it did not have. `docs/ui.md` §4.2's parity rule says everything
+/// reachable by mouse is reachable by keyboard *and the reverse*.
+///
+/// Restoring it as a `Button` was tried and **regressed
+/// `the_tile_feedback_script_can_actually_be_followed`**: a focused `ui_widgets::Button` also fires
+/// `Activate` on `Enter`, so the guide script's commit key changed panel out from under the step.
+/// The note left behind said wiring it back "needs a focus decision, not just an observer" — and
+/// that reading was one word too strong. It needs the chip to stop being a `Button`. A press is a
+/// press; `Enter` belongs to whatever has the keyboard, and a tab strip never should.
+///
+/// So: no `Button`, no `Activate`, no focus — a `Pointer<Click>` observer that walks the same
+/// [`enter_tab`] the key does. It bubbles, so a click on the chip's chord or label reaches the chip.
+fn click_tab(
+    click: On<Pointer<Click>>,
+    tabs: Query<&Tab>,
+    project: Option<Res<Project>>,
+    mode: Option<ResMut<Mode>>,
+    state: Option<ResMut<ImportState>>,
+) {
+    let (Ok(tab), Some(project), Some(mut mode), Some(mut state)) =
+        (tabs.get(click.entity), project, mode, state)
+    else {
+        return;
+    };
+    enter_tab(tab.0, &project, &mut mode, &mut state);
+}
+
+/// **`R` rescans**, because meshes arrive while the editor is open — an importer that only sees what
+/// was on disk at launch is one you have to restart to use.
+fn rescan_key(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<crate::keys::Live>,
+    project: Res<Project>,
+    mode: Res<Mode>,
+    mut state: ResMut<ImportState>,
+) {
+    if *mode == Mode::Meshes && keys::just_pressed(&keyboard, *live, Action::Rescan) {
         scan(&project, &mut state);
     }
 }
 
-/// **Which mesh directories the open map actually places from.**
+/// **The Kits door walks the mesh directory on the way in.**
 ///
-/// A pack is "in use" when a row of this map names a descriptor whose mesh lives in it. Stamped
-/// groups count: a stamp is a reference to rows, and the rows name descriptors like any other — a
-/// map built entirely from compositions would otherwise report every pack unused.
-///
-/// A composition set that will not expand is **reported, not swallowed**. It means `compositions.ron`
-/// and the library disagree, which is worth knowing on its own; the fold is only a view preference,
-/// so the scan carries on with what the placements alone say rather than refusing to open the tab.
-fn packs_the_map_builds_from(
-    project: &Project,
-    state: &mut ImportState,
-) -> std::collections::HashSet<String> {
-    let dir_of = |id: &str| -> Option<String> {
-        let mesh = project.library.get(id)?.mesh.as_deref()?;
-        Some(mesh.rsplit_once('/').map_or(".", |(dir, _)| dir).to_owned())
+/// The scan used to be triggered by *arriving* on the Meshes tab — from a click, a number key or
+/// `Tab`. A door is arrived at once, before the first frame, so this is that trigger with the
+/// switching removed rather than a new behaviour.
+fn scan_on_entering_the_kits_door(
+    project: Option<Res<Project>>,
+    door: Option<Res<Door>>,
+    mut state: ResMut<ImportState>,
+) {
+    let (Some(project), Some(door)) = (project, door) else {
+        return;
     };
-    let mut used: std::collections::HashSet<String> = project
-        .map
-        .placements
-        .iter()
-        .filter_map(|p| dir_of(&p.descriptor))
-        .collect();
-    if project.map.stamps.is_empty() {
-        return used;
+    if door.opens_on() == Mode::Meshes && !state.scanned {
+        scan(&project, &mut state);
     }
-    match emerge_core::composition::expand(
-        &project.map,
-        &project.map.stamps,
-        &project.compositions.compositions,
-        &project.library,
-    ) {
-        Ok(expansion) => {
-            used.extend(expansion.placements.iter().filter_map(|p| dir_of(&p.descriptor)));
+}
+
+/// **`Shift+R` — this pack is not what the kit is built from, or it is again.**
+///
+/// One key, both directions: the row already says which state it is in, and a separate restore verb
+/// would be a second way to say the same thing. Written to the kit's `project.ron` through
+/// `policy::rewrite_exclude`, which splices the one field and leaves the file's prose alone.
+pub fn exclude_pack(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<keys::Live>,
+    mode: Res<Mode>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<ImportState>,
+) {
+    if *mode != Mode::Meshes || !keys::just_pressed(&keyboard, *live, Action::ExcludePack) {
+        return;
+    }
+    // The pack of whatever is highlighted — the same directory `packs()` groups by.
+    let Some(pack) = state
+        .candidates
+        .get(state.selected)
+        .map(|c| c.mesh.rsplit_once('/').map_or(".", |(d, _)| d).to_owned())
+    else {
+        state
+            .status
+            .problem("nothing selected — highlight a mesh in the pack first".to_owned());
+        return;
+    };
+
+    let mut exclude = project.policy.exclude.clone();
+    let had = exclude.iter().any(|e| e.trim_end_matches('/') == pack);
+    if had {
+        exclude.retain(|e| e.trim_end_matches('/') != pack);
+    } else {
+        exclude.push(pack.clone());
+        exclude.sort();
+    }
+
+    let path = project.emerge_dir.join(emerge_core::policy::POLICY_FILE);
+    let written = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))
+        .and_then(|text| emerge_core::policy::rewrite_exclude(&text, &exclude))
+        .and_then(|out| emerge_core::ron_surgery::save_atomic(&path, &out));
+    match written {
+        Err(e) => state.status.problem(format!("not excluded: {e}")),
+        Ok(()) => {
+            // **The file is the truth, so the resource follows it** rather than being written
+            // alongside — one description of what this kit excludes, not two.
+            project.policy.exclude = exclude;
+            state.status.note(if had {
+                format!("`{pack}` is back — it can be imported and labelled again")
+            } else {
+                format!("`{pack}` excluded from this kit — it will not be offered or labelled")
+            });
         }
-        Err(e) => state.status.problem(format!(
-            "the stamped groups do not resolve, so the packs behind them are not counted as in \
-             use: {e}"
-        )),
     }
-    used
+}
+
+/// **Which mesh directories the kit being authored draws on.**
+///
+/// A pack is "in use" when a descriptor in *this kit's* `library.ron` names a mesh inside it.
+///
+/// # It asked about the map until the doors split, and that question has no answer here
+///
+/// The first rule was **library membership**, and it was wrong by one step: the site kit and the
+/// furniture kit are both in the merged library, so a dozen unrelated packs opened at once. The fix
+/// was to ask what the open map placed from — right while every door had a map behind it.
+///
+/// The Kits door does not. Its whole subject is one kit, chosen on the way in, and there is no map
+/// in the session to ask about. So the question moves to the level the door is actually about: not
+/// the merged library (the rule that was rejected), and not a map (the rule that has no answer), but
+/// **the authoring kit's own measurements**.
+///
+/// That answers the original complaint directly — a session spent on one kit opens that kit's packs
+/// and folds every other — and it drops the composition expansion this used to need, along with its
+/// failure path, because a kit's library cannot fail to resolve against itself.
+///
+/// **This is a deliberate behaviour change, not a port.** An author who imported a mesh into a kit
+/// but has not placed it on any map now finds its pack open rather than folded. That is the right
+/// answer on a door whose job is importing and labelling meshes.
+fn packs_the_kit_draws_from(project: &Project) -> std::collections::HashSet<String> {
+    project
+        .measured
+        .descriptors
+        .iter()
+        .filter_map(|d| d.mesh.as_deref())
+        .map(|mesh| mesh.rsplit_once('/').map_or(".", |(dir, _)| dir).to_owned())
+        .collect()
 }
 
 #[cfg(test)]
@@ -3250,7 +3858,74 @@ mod pack_fold_tests {
     use super::*;
     use emerge_core::descriptor::Descriptor;
     use emerge_core::library::Library;
-    use emerge_core::map::{Map, Placed};
+
+    /// **The walk moves the highlight onto the piece it is asking about, and opens the pack that
+    /// piece is in.**
+    ///
+    /// Asked for at the keyboard, 2026-08-18: *"when I hit Shift+L and label all, it should
+    /// automatically switch to what's being labeled."*
+    ///
+    /// The unfold is the half worth pinning. [`keep_candidate_selection_visible`] takes the
+    /// selection off any row that is not on screen, so a follow into a folded pack is undone on the
+    /// next frame — and since the first scan folds every pack the kit does not draw from, the
+    /// feature would look intermittent rather than broken: it would work on whichever pack happened
+    /// to be open.
+    #[test]
+    fn a_walk_moves_the_highlight_onto_the_piece_it_is_labeling() {
+        use emerge_core::import::Candidate;
+        use emerge_core::policy::Policy;
+
+        let mesh = |pack: &str, name: &str| Candidate {
+            mesh: format!("{pack}/{name}.glb"),
+            proposed: Descriptor::default(),
+            measured: None,
+            front_detail: None,
+            triangles: 0,
+            findings: Vec::new(),
+        };
+        let mut state = ImportState::default();
+        state.candidates = vec![mesh("alpha", "one"), mesh("beta", "two")];
+        state.folded_packs.insert("beta".to_owned());
+        // Where the author left the cursor: a library row, with the candidate list's own highlight
+        // parked on a pack heading.
+        state.selected = 0;
+        state.selected_library_id = Some("lamp_tall".to_owned());
+        state.focused_pack = Some("alpha".to_owned());
+
+        state.focus_on(&EditTarget::Candidate("beta/two.glb".to_owned()));
+
+        assert_eq!(state.selected, 1, "the highlight is on the piece being labeled");
+        assert_eq!(
+            state.selected_library_id, None,
+            "a candidate takes the focus off the library list, or the pane keeps showing the row \
+             that had it"
+        );
+        assert_eq!(
+            state.focused_pack, None,
+            "the highlight is on a mesh, not still on a heading"
+        );
+        // Asked of `pack_is_open`, which is the one place allowed to answer it — see
+        // `every_list_follows_its_selection::what_is_on_screen_is_decided_in_one_place`.
+        assert!(
+            pack_is_open(&state, &Policy::default(), "beta"),
+            "the pack it is in is opened, or the next frame moves the selection back off it"
+        );
+        let rows = candidate_list_rows(&state, &crate::filter::Filters::default(), &Policy::default());
+        assert!(
+            rows.contains(&ListRow::Mesh(1)),
+            "and the row is genuinely on screen: {rows:?}"
+        );
+
+        // A library row is the same cursor in its other state.
+        state.focus_on(&EditTarget::Library("lamp_tall".to_owned()));
+        assert_eq!(state.selected_library_id.as_deref(), Some("lamp_tall"));
+
+        // A piece that has gone since the walk was built leaves the highlight where it is, rather
+        // than moving it somewhere arbitrary.
+        state.focus_on(&EditTarget::Candidate("gamma/three.glb".to_owned()));
+        assert_eq!(state.selected, 1);
+        assert_eq!(state.selected_library_id.as_deref(), Some("lamp_tall"));
+    }
 
     /// A piece named `id` whose mesh lives in `pack`.
     fn piece(id: &str, pack: &str) -> Descriptor {
@@ -3265,67 +3940,361 @@ mod pack_fold_tests {
     ///
     /// A test that read the real `assets/` would fail the day somebody imports a kit, and importing
     /// kits is the thing this editor exists to do. Everything the rule under test reads is plain
-    /// data: a library, and a map naming rows in it.
-    fn project_placing(placed: &[&str]) -> Project {
+    /// data: the authoring kit's measurements.
+    ///
+    /// `library` is the **merged** view and holds `wall` as well, so the test can tell "in this kit"
+    /// apart from "in the library" — which is exactly the distinction the rejected first rule missed.
+    fn kit_holding(ids: &[&str]) -> Project {
+        let all = [piece("wall", "alpha"), piece("crate", "beta"), piece("lamp", "beta")];
         let measured = Library {
             version: emerge_core::library::LIBRARY_VERSION,
             note: None,
-            descriptors: vec![piece("wall", "alpha"), piece("crate", "beta"), piece("lamp", "beta")],
+            descriptors: all
+                .iter()
+                .filter(|d| ids.contains(&d.id.as_str()))
+                .cloned()
+                .collect(),
+        };
+        let library = Library {
+            version: emerge_core::library::LIBRARY_VERSION,
+            note: None,
+            descriptors: all.to_vec(),
         };
         Project {
             root: std::path::PathBuf::from("/nonexistent"),
             emerge_dir: std::path::PathBuf::from("/nonexistent"),
+            project_dir: std::path::PathBuf::from("/nonexistent"),
+            maps_dir: std::path::PathBuf::from("/nonexistent/maps"),
+            kits: Vec::new(),
+            namespace: "nonexistent".to_owned(),
             library_path: std::path::PathBuf::from("/nonexistent/library.ron"),
             vocab: emerge_core::vocab::Vocabularies::default(),
             compositions: emerge_core::composition::Compositions::default(),
-            library: measured.clone(),
+            library,
             measured,
             policy: emerge_core::policy::Policy::default(),
+            lattice: emerge_core::kits::Lattice::default(),
             masks: Vec::new(),
-            map: Map {
-                placements: placed
-                    .iter()
-                    .enumerate()
-                    .map(|(i, d)| Placed {
-                        id: format!("{d}@{i}"),
-                        descriptor: (*d).to_owned(),
-                        ..Placed::default()
-                    })
-                    .collect(),
-                ..Map::default()
-            },
-            map_path: std::path::PathBuf::from("/nonexistent/m.map.ron"),
-            dirty: false,
+            // **No map anywhere in this fixture**, which is the point: the rule under test is about
+            // a kit, and the Kits door has no map to consult. See `project::OpenMap`.
             touched: Vec::new(),
             triangles: Vec::new(),
         }
     }
 
-    /// **Open exactly the packs this map places from.** The rule used to be library membership,
-    /// which is the wrong question by one step: every pack here is fully in the library, and only
-    /// the ones the map draws on should be open.
+    /// **`Up` at the top of an open pack steps onto the headings above it.**
+    ///
+    /// The scenario the diagnostic caught, 2026-08-16, after two failed attempts at this bug. The
+    /// log said it plainly: `selected=157 rows=91 folded=33 at=Some(0) first=Some(157)` — the cursor
+    /// was at the top of the visible *mesh* rows and every candidate above it lived in one of 33
+    /// collapsed packs. `Up` did nothing because, walking meshes only, there was nowhere to go —
+    /// while 33 headings sat on screen above the cursor, reachable by mouse alone.
+    ///
+    /// So the fix was not "skip the collapsed folders": there was nothing beyond them to skip TO.
+    /// It was to let the cursor stand on a heading, which makes every visible row reachable and lets
+    /// `Enter` open one without the mouse.
     #[test]
-    fn a_pack_counts_as_in_use_only_when_the_map_places_from_it() {
+    fn up_from_the_first_mesh_lands_on_the_heading_above_it() {
+        use emerge_core::import::Candidate;
+        use emerge_core::policy::Policy;
+
+        let mesh = |pack: &str, name: &str| Candidate {
+            mesh: format!("{pack}/{name}.glb"),
+            proposed: emerge_core::descriptor::Descriptor::default(),
+            measured: None,
+            front_detail: None,
+            triangles: 0,
+            findings: Vec::new(),
+        };
         let mut state = ImportState::default();
-        let used = packs_the_map_builds_from(&project_placing(&["crate"]), &mut state);
-        assert!(used.contains("beta"), "`beta` holds the placed piece");
-        assert!(!used.contains("alpha"), "`alpha` is in the library but this map never places it");
+        state.candidates = vec![
+            mesh("alpha", "one"),   // 0 — in a FOLDED pack, like 157's neighbours above it
+            mesh("beta", "two"),    // 1 — the first open pack
+            mesh("beta", "three"),  // 2
+        ];
+        state.folded_packs.insert("alpha".to_owned());
+        let filters = crate::filter::Filters::default();
+        let policy = Policy::default();
+
+        // What is on screen: `alpha`'s heading (folded, no rows), `beta`'s heading, then its meshes.
+        let rows = candidate_list_rows(&state, &filters, &policy);
+        assert_eq!(
+            rows,
+            vec![
+                ListRow::Header("alpha".to_owned()),
+                ListRow::Header("beta".to_owned()),
+                ListRow::Mesh(1),
+                ListRow::Mesh(2),
+            ],
+            "a folded pack contributes its heading and no meshes"
+        );
+
+        // The cursor on the first mesh of the first OPEN pack — exactly where `Up` used to die.
+        state.selected = 1;
+        state.focused_pack = None;
+        let at = rows
+            .iter()
+            .position(|r| *r == ListRow::Mesh(1))
+            .unwrap_or_default();
+
+        // Up once: onto `beta`'s own heading.
+        put_cursor(&mut state, &rows[at.saturating_sub(1)]);
+        assert_eq!(state.focused_pack.as_deref(), Some("beta"));
+
+        // Up again: onto the FOLDED pack's heading — which is the row that used to be unreachable.
+        put_cursor(&mut state, &rows[at.saturating_sub(2)]);
+        assert_eq!(
+            state.focused_pack.as_deref(),
+            Some("alpha"),
+            "the collapsed folder is reachable, which is what makes it openable from the keyboard"
+        );
+
+        // And the mesh cursor is not left behind pointing at something else.
+        assert!(
+            state.focused_pack.is_some(),
+            "one cursor in two states — a heading and a mesh must never be highlighted at once"
+        );
     }
 
-    /// A map that places nothing draws on no pack — the state a fresh map opens into.
+    /// **The arrows jump over a collapsed group and land on the next open row.**
+    ///
+    /// The behaviour itself, not the predicate under it. Reported at the keyboard, 2026-08-16, after
+    /// the predicate alone had been fixed: *"as soon as it hits a collapsed group, you can't go
+    /// anymore… I want it to jump over the collapsed groups up to the next uncollapsed selection."*
+    ///
+    /// The remaining half was **order**: the walk stepped candidates by index while the list drew
+    /// them grouped by pack, and excluded packs are drawn last however early their indices are. So
+    /// the row after the last visible one before a fold was, by index, inside the fold. Walking the
+    /// drawn order removes the question — a folded pack contributes no rows, so its neighbours are
+    /// adjacent and there is no skipping logic to get wrong.
     #[test]
-    fn an_empty_map_builds_from_no_pack_at_all() {
+    fn the_arrows_step_over_a_collapsed_group() {
+        use emerge_core::import::Candidate;
+        use emerge_core::policy::Policy;
+
+        // `Candidate` has no `Default` — it is what a measurement produces — so the fields the walk
+        // never reads are given their empty values here.
+        let mesh = |pack: &str, name: &str| Candidate {
+            mesh: format!("{pack}/{name}.glb"),
+            proposed: emerge_core::descriptor::Descriptor::default(),
+            measured: None,
+            front_detail: None,
+            triangles: 0,
+            findings: Vec::new(),
+        };
         let mut state = ImportState::default();
-        assert!(packs_the_map_builds_from(&project_placing(&[]), &mut state).is_empty());
+        state.candidates = vec![
+            mesh("alpha", "one"),   // 0
+            mesh("beta", "two"),    // 1  <- beta gets folded
+            mesh("beta", "three"),  // 2
+            mesh("gamma", "four"),  // 3
+        ];
+        let filters = crate::filter::Filters::default();
+        let policy = Policy::default();
+
+        // Everything open: every row is walkable, in drawn order.
+        assert_eq!(candidate_rows(&state, &filters, &policy), vec![0, 1, 2, 3]);
+
+        // Fold `beta`: its two rows leave the walk entirely, so `alpha/one` and `gamma/four` become
+        // neighbours — which IS the jump. One press moves 0 -> 3.
+        state.folded_packs.insert("beta".to_owned());
+        let rows = candidate_rows(&state, &filters, &policy);
+        assert_eq!(rows, vec![0, 3], "a folded pack contributes no rows: {rows:?}");
+        let at = rows.iter().position(|&i| i == 0).unwrap_or_default();
+        assert_eq!(
+            rows.get(at + 1).copied(),
+            Some(3),
+            "down from the row above a collapsed group lands below it, not inside it"
+        );
+        // And back up again, the same way.
+        let at = rows.iter().position(|&i| i == 3).unwrap_or_default();
+        assert_eq!(rows.get(at.saturating_sub(1)).copied(), Some(0));
+    }
+
+    /// **An excluded pack is drawn last, so it is walked last** — whatever its index.
+    ///
+    /// The half that made the ordering bug certain rather than merely likely: `beta` here sits in
+    /// the middle by index and at the end on screen, so an index-order walk would have stepped into
+    /// it from `alpha` while the eye was on `gamma`.
+    #[test]
+    fn the_walk_takes_the_excluded_group_last_and_only_when_it_is_open() {
+        use emerge_core::import::Candidate;
+        use emerge_core::policy::Policy;
+
+        // `Candidate` has no `Default` — it is what a measurement produces — so the fields the walk
+        // never reads are given their empty values here.
+        let mesh = |pack: &str, name: &str| Candidate {
+            mesh: format!("{pack}/{name}.glb"),
+            proposed: emerge_core::descriptor::Descriptor::default(),
+            measured: None,
+            front_detail: None,
+            triangles: 0,
+            findings: Vec::new(),
+        };
+        let mut state = ImportState::default();
+        state.candidates = vec![
+            mesh("alpha", "one"),   // 0
+            mesh("beta", "two"),    // 1  <- excluded, drawn last
+            mesh("gamma", "three"), // 2
+        ];
+        let filters = crate::filter::Filters::default();
+        let policy = Policy {
+            exclude: vec!["beta".to_owned()],
+            ..Policy::default()
+        };
+
+        // Group closed: it is not on screen, so it is not walked.
+        assert_eq!(candidate_rows(&state, &filters, &policy), vec![0, 2]);
+
+        // Group open: its rows join the walk, at the END — which is where they are drawn.
+        state.excluded_open = true;
+        assert_eq!(
+            candidate_rows(&state, &filters, &policy),
+            vec![0, 2, 1],
+            "drawn order, not index order — this is the whole defect"
+        );
+    }
+
+    /// **A folded pack's rows are not walked**, because they are not on screen.
+    ///
+    /// Reported at the keyboard, 2026-08-16: *"whenever I scroll up, it doesn't skip collapsed
+    /// groups."* The arrows stepped `state.selected` through every candidate the filter kept, and
+    /// folding was decided somewhere else entirely — so the highlight walked into packs nobody could
+    /// see. The collapsed `EXCLUDED` group made it loud, everything in it being folded by
+    /// construction.
+    ///
+    /// Worse than cosmetic, and the same argument the filter version already carries: **`Accept`
+    /// acts on the selection**, so a walk that lands somewhere invisible can import a mesh the author
+    /// never looked at.
+    #[test]
+    fn the_walk_skips_whatever_is_folded_away() {
+        use emerge_core::policy::Policy;
+        let excluded = Policy {
+            exclude: vec!["characters".to_owned()],
+            ..Policy::default()
+        };
+        let mut state = ImportState::default();
+
+        // An ordinary pack, open.
+        assert!(pack_is_open(&state, &Policy::default(), "ozea_kit"));
+        // Folded by the author: its rows are not drawn, so they are not walked.
+        state.folded_packs.insert("ozea_kit".to_owned());
+        assert!(!pack_is_open(&state, &Policy::default(), "ozea_kit"));
+
+        // Excluded, with the group closed: not drawn either.
+        let mut state = ImportState::default();
+        assert!(!pack_is_open(&state, &excluded, "characters"));
+        // Excluded, with the group opened: drawn, so walkable — which is what makes `Shift+R`
+        // reachable, since it acts on the pack of the highlighted mesh.
+        state.excluded_open = true;
+        assert!(pack_is_open(&state, &excluded, "characters"));
+        // ...unless it is also folded inside the group.
+        state.folded_packs.insert("characters".to_owned());
+        assert!(!pack_is_open(&state, &excluded, "characters"));
+    }
+
+    /// **An id that would rename the whole kit is refused at the door.**
+    ///
+    /// `Library::namespace` is unanimous-or-refuse: one namespaced id among a kit's flat ones changes
+    /// what the kit claims to implement, and `kits::bound_library` then refuses to open the project.
+    /// So a single import can make a project unopenable — which is exactly what happened on
+    /// 2026-08-16, when `low_poly_furniture/shower` (named after its pack folder) landed beside 387
+    /// flat ids in a kit bound as `furniture`.
+    ///
+    /// The rule is the same shape as every other check on that door: refuse the keystroke that
+    /// causes it, and name the fix, rather than let the next launch discover it.
+    #[test]
+    fn an_id_from_another_namespace_cannot_join_this_kit() {
+        // The kit this is about: bound as `furniture`, ids flat.
+        let bound = "furniture";
+        for (id, ok) in [
+            ("shower", true),
+            ("furniture/shower", true),
+            ("low_poly_furniture/shower", false),
+            ("site/wall", false),
+        ] {
+            let agrees = match id.split_once('/') {
+                None => true,
+                Some((ns, _)) => ns == bound,
+            };
+            assert_eq!(
+                agrees, ok,
+                "`{id}` joining a kit bound as `{bound}`: the check is on the namespace the id \
+                 declares, and a bare name declares none"
+            );
+        }
+    }
+
+    /// **An excluded pack leaves the ordinary list and joins one group at the bottom.**
+    ///
+    /// The partition is the whole feature, so it is asserted on the data rather than on the drawn
+    /// rows: `draw_pack` is called for the offered packs in place, and for the excluded ones only
+    /// under the `EXCLUDED` heading and only when it is open. Chosen at the keyboard, 2026-08-16 —
+    /// one group at the end rather than a muted row left in place per pack.
+    ///
+    /// **Never dropped**, which is the property that matters: a mesh that silently disappeared looks
+    /// identical to one the scan never found, and `Shift+R` needs a row to stand on to restore it.
+    #[test]
+    fn an_excluded_pack_leaves_the_list_for_the_group_and_is_still_reachable() {
+        use emerge_core::policy::Policy;
+        let policy = Policy {
+            exclude: vec!["characters".to_owned()],
+            ..Policy::default()
+        };
+        assert!(policy.excludes("characters/rig.glb"), "the pack is excluded");
+        assert!(!policy.excludes("ozea_kit/crate.glb"), "and nothing else is");
+
+        // The partition the list draws with — offered packs keep their place, excluded ones do not
+        // vanish, they move.
+        let packs = ["ozea_kit", "characters", "props"];
+        let (offered, excluded): (Vec<&str>, Vec<&str>) =
+            packs.iter().partition(|p| !policy.excludes(p));
+        assert_eq!(offered, vec!["ozea_kit", "props"], "the list keeps what the kit uses");
+        assert_eq!(excluded, vec!["characters"], "and the group holds the rest");
+        assert_eq!(
+            offered.len() + excluded.len(),
+            packs.len(),
+            "every pack is somewhere — the group is a fold, not a filter"
+        );
+    }
+
+    /// **Open exactly the packs this kit draws on.** Two rules were tried before this one: library
+    /// membership opened every pack in the merged library, and "what the open map places from" has
+    /// no answer on a door with no map. The kit's own measurements are the level the door is about.
+    #[test]
+    fn a_pack_counts_as_in_use_only_when_the_kit_draws_on_it() {
+        let used = packs_the_kit_draws_from(&kit_holding(&["crate"]));
+        assert!(used.contains("beta"), "`beta` holds this kit's piece");
+        assert!(
+            !used.contains("alpha"),
+            "`alpha` is in the merged library but not in the kit being authored"
+        );
+    }
+
+    /// A kit with nothing in it draws on no pack — the state a fresh kit opens into.
+    #[test]
+    fn an_empty_kit_draws_on_no_pack_at_all() {
+        assert!(packs_the_kit_draws_from(&kit_holding(&[])).is_empty());
     }
 
     /// One pack, two pieces, counted once — the rule is about directories, not rows.
     #[test]
     fn two_pieces_from_one_pack_name_it_once() {
-        let mut state = ImportState::default();
-        let used = packs_the_map_builds_from(&project_placing(&["crate", "lamp"]), &mut state);
+        let used = packs_the_kit_draws_from(&kit_holding(&["crate", "lamp"]));
         assert_eq!(used.len(), 1);
         assert!(used.contains("beta"));
+    }
+
+    /// **An imported-but-unplaced mesh has its pack open**, which the map-based rule got wrong.
+    ///
+    /// This is the behaviour change the move buys, stated as a test rather than left implicit: the
+    /// Kits door exists to bring meshes in and label them, and folding away the pack holding the
+    /// mesh you just imported is the opposite of what that door is for.
+    #[test]
+    fn a_mesh_in_the_kit_but_on_no_map_still_opens_its_pack() {
+        let project = kit_holding(&["crate"]);
+        // No map exists in this fixture at all, which is the state the Kits door runs in.
+        assert!(packs_the_kit_draws_from(&project).contains("beta"));
     }
 }
 
@@ -3344,7 +4313,7 @@ pub(crate) fn scan(project: &Project, state: &mut ImportState) {
             // Only the FIRST scan seeds this — a rescan mid-session must not stomp the folds the
             // author has since toggled by hand.
             if !state.scanned {
-                let used = packs_the_map_builds_from(project, state);
+                let used = packs_the_kit_draws_from(project);
                 state.folded_packs = packs(&found)
                     .into_iter()
                     .map(|(pack, _)| pack)
@@ -3368,10 +4337,24 @@ pub(crate) fn scan(project: &Project, state: &mut ImportState) {
             // the first one opens to provide it — a tab must never open with its selection hidden.
             state.selected = 0;
             let grouped = packs(&state.candidates);
-            match grouped.iter().find(|(pack, _)| !state.folded_packs.contains(pack)) {
+            // **Through `pack_is_open`, so "can the author see it" is one question.** This asked only
+            // about `folded_packs` and knew nothing about exclusion — so once excluded packs went
+            // into their own collapsed group, a fresh scan could open with the highlight inside it,
+            // which is the exact thing the paragraph above forbids.
+            match grouped
+                .iter()
+                .find(|(pack, _)| pack_is_open(&state, &project.policy, pack))
+            {
                 Some((_, members)) => state.selected = members.first().copied().unwrap_or(0),
                 None => {
-                    if let Some((pack, members)) = grouped.first() {
+                    // Nothing is showing. Open the first pack this kit actually uses — never an
+                    // excluded one, which the author took out on purpose and which cannot be
+                    // imported anyway.
+                    if let Some((pack, members)) = grouped
+                        .iter()
+                        .find(|(pack, _)| !project.policy.excludes(pack))
+                        .or_else(|| grouped.first())
+                    {
                         state.folded_packs.remove(pack);
                         state.selected = members.first().copied().unwrap_or(0);
                     }
@@ -3408,7 +4391,9 @@ fn rename_candidate(
                     mesh,
                     raw: String::new(),
                 });
-                state.status.note("type an id — Enter to keep it, Esc to leave it alone".to_owned());
+                state
+                    .status
+                    .note("type an id — Enter to keep it, Esc to leave it alone".to_owned());
             }
         }
         // **Drain before leaving**, so the `I` that opened the field is not still waiting to be read
@@ -3428,18 +4413,16 @@ fn rename_candidate(
                 };
                 let id = emerge_core::naming::to_snake_case(&rename.raw);
                 if id.is_empty() {
-                    state.status.note("an id cannot be empty; nothing was changed".to_owned());
+                    state
+                        .status
+                        .note("an id cannot be empty; nothing was changed".to_owned());
                 } else {
                     // The candidate this field was opened on, found by the mesh it names rather than
                     // by wherever the selection has since moved to.
                     // Recorded like every other candidate edit — the snapshot history carries the
                     // candidate list precisely so pre-Accept work is not outside it.
                     let history_before = state.snapshot(&project);
-                    match state
-                        .candidates
-                        .iter_mut()
-                        .find(|c| c.mesh == rename.mesh)
-                    {
+                    match state.candidates.iter_mut().find(|c| c.mesh == rename.mesh) {
                         Some(c) => {
                             c.proposed.id = id.clone();
                             state.record(history_before);
@@ -3447,12 +4430,10 @@ fn rename_candidate(
                         }
                         // Only reachable if a rescan dropped the mesh mid-rename, which is a real
                         // thing `R` can do. Saying so beats renaming whatever is selected now.
-                        None => {
-                            state.status.problem(format!(
-                                "`{id}` was not kept — `{}` is no longer in the scan.",
-                                rename.mesh
-                            )
-                        )}
+                        None => state.status.problem(format!(
+                            "`{id}` was not kept — `{}` is no longer in the scan.",
+                            rename.mesh
+                        )),
                     }
                 }
             }
@@ -3508,7 +4489,10 @@ fn cycle_mount(
     //
     // Matched on the *current* mount rather than the list's, so the carry happens only when there is
     // genuinely a height to carry: floor -> wall gets the list's default, wall -> wall keeps yours.
-    let had = d.mount.as_ref().and_then(emerge_core::descriptor::mount_height);
+    let had = d
+        .mount
+        .as_ref()
+        .and_then(emerge_core::descriptor::mount_height);
     // **Found by kind, not by value.** `Mount` compares its payload too, so once a height is
     // authorable this lookup stops matching the moment it is anything but the list's `1.8` — and a
     // miss here reads as `map_or(0, ..)`, which would silently reset the piece to `on floor`. Asking
@@ -3577,14 +4561,91 @@ fn suggestion_keys(
     if discard {
         if suggestions.remove(&target).is_some() {
             generation.0 = generation.0.wrapping_add(1);
-            state.status.note(format!("discarded the proposed labels for `{name}`"));
+            state
+                .status
+                .note(format!("discarded the proposed labels for `{name}`"));
         } else {
             state.status.note("no proposed labels here".to_owned());
         }
         return;
     }
+    apply_suggestion(
+        target,
+        &name,
+        &mut project,
+        &mut state,
+        &mut suggestions,
+        &mut generation,
+        &label_tasks,
+        &mut rig,
+    );
+}
+
+/// **A batch confirms what it proposes, one per frame.**
+///
+/// The commit door still exists and still guards the single `L`: one mesh is a decision an author
+/// is standing in front of. A walk of hundreds is a different act — asked for at the keyboard,
+/// 2026-08-15 — and the confirmation is the decision to start it. Everything downstream is the same
+/// path `U` takes, including the guards and the righting branch, so a batch cannot write something
+/// a keypress would have refused.
+///
+/// One per frame rather than draining: `apply_suggestion` may re-photograph a piece it had to right
+/// first, and a loop here would queue those shots faster than the booth can take them.
+fn auto_apply_batch(
+    queue: Res<crate::labels::LabelQueue>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<ImportState>,
+    mut suggestions: ResMut<crate::labels::Suggestions>,
+    mut generation: ResMut<crate::labels::LabelGeneration>,
+    label_tasks: Res<crate::labels::LabelTasks>,
+    mut rig: ResMut<crate::label_booth::ShotRig>,
+) {
+    if !queue.auto_apply() || queue.paused() {
+        return;
+    }
+    let Some(target) = suggestions.first_target() else {
+        return;
+    };
+    let name = crate::labels::name_of(&target).to_owned();
+    apply_suggestion(
+        target,
+        &name,
+        &mut project,
+        &mut state,
+        &mut suggestions,
+        &mut generation,
+        &label_tasks,
+        &mut rig,
+    );
+}
+
+/// **How many times one mesh may be turned by the labeler before the loop is called a loop.**
+///
+/// Two, because one is the answer and the second is the correction: an odd turn taken the wrong way
+/// round comes back as "still not upright" and the second attempt fixes it (see
+/// [`crate::vlm::NeedsTurn::turns`] for why the direction is not asked for). A third means the model
+/// and the mesh disagree about which way is up, and four quarter turns is where it started.
+pub(crate) const MAX_RIGHTINGS: u8 = 2;
+
+/// **Apply one proposal, wherever the decision came from.**
+///
+/// `U` is one caller; a batch running with auto-confirm is the other. Extracted rather than
+/// duplicated because the interesting part is not the field copy — it is the two guards around it
+/// (the piece may have gone, the mesh may have changed under the proposal) and the righting branch,
+/// and a second copy of those is a second set of rules to keep in step.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_suggestion(
+    target: EditTarget,
+    name: &str,
+    project: &mut Project,
+    state: &mut ImportState,
+    suggestions: &mut crate::labels::Suggestions,
+    generation: &mut crate::labels::LabelGeneration,
+    label_tasks: &crate::labels::LabelTasks,
+    rig: &mut crate::label_booth::ShotRig,
+) {
     let Some(entry) = suggestions.get(&target).cloned() else {
-        state.status.note("no proposed labels here — L asks the model".to_owned());
+        state.status.note("no proposed labels here".to_owned());
         return;
     };
     // **A lying-down piece is righted FIRST, and the labels are re-asked** — the model judged a
@@ -3594,31 +4655,105 @@ fn suggestion_keys(
     // authored-cells guard — a refusal keeps the suggestion and says why), discards the stale
     // suggestion, and re-photographs the upright piece for fresh labels.
     if let Some(turn) = &entry.suggestion.needs_turn {
-        let axis = if turn.axis == "x" { RotateAxis::X } else { RotateAxis::Z };
-        if rotate_mesh(axis, false, &mut project, &mut state) {
+        let axis = if turn.axis == "x" {
+            RotateAxis::X
+        } else {
+            RotateAxis::Z
+        };
+        // **The turn is a write, and `rotate_mesh` writes to the FOCUSED piece** — so the focus has
+        // to be the target before it runs, and it was not. This function is handed an explicit
+        // target (that is the whole point of `at_target` below), while `rotate_mesh` reads
+        // `ImportState::editing` because its other callers are the N/P keys, where the focus IS the
+        // subject. A batch that met a lying-down mesh therefore turned whichever row the author had
+        // left highlighted — and wrote the file if that row was a library entry. Same shape as the
+        // bug `at_target` exists for, one function further along.
+        state.focus_on(&target);
+        let attempt = {
+            let n = state.righted.entry(entry.mesh.clone()).or_insert(0);
+            *n += 1;
+            *n
+        };
+        // **A candidate's lattice is the scan's output, so the turn may clear it and re-derive it;
+        // a library row's may be hand-authored, so it still refuses.**
+        //
+        // `autoscan_candidate` marks a candidate's cells the moment it is selected — and since the
+        // walk now selects what it labels, EVERY candidate the labeler reaches has a lattice by the
+        // time its answer comes back. `rotate_mesh` refuses an X or Z turn over authored cells, so
+        // without this the righting would refuse every candidate it was asked about: the feature
+        // would exist and never fire. The distinction is the one `autoscan_candidate` already draws
+        // for exactly this reason — nothing a candidate holds has reached disk, and undo covers the
+        // turn either way.
+        let derived_lattice = matches!(target, EditTarget::Candidate(_));
+        let turned = attempt <= MAX_RIGHTINGS
+            && rotate_mesh(axis, turn.turns, derived_lattice, project, state);
+        if turned {
+            if derived_lattice {
+                // **Re-derived in the frame the piece is now in.** The turn cleared the lattice, and
+                // leaving it cleared would be a silent state change a moment after the scan that
+                // filled it — the same argument that makes turning and re-measuring one action.
+                let _ = scan_mesh(project, state);
+            }
             suggestions.remove(&target);
             generation.0 = generation.0.wrapping_add(1);
             let Some(d) = state.placed_at_target(&target, &project).cloned() else {
                 return;
             };
-            let said = crate::labels::request_photos(target, &d, &label_tasks, &mut rig);
-            state.status.note(format!("righted about {} — {said}", turn.axis.to_uppercase()));
+            let said = crate::labels::request_photos(target, &d, label_tasks, rig);
+            state.status.note(format!(
+                "righted `{name}` {} quarter turn(s) about {} — {said}",
+                turn.turns,
+                turn.axis.to_uppercase()
+            ));
+            return;
         }
+        // **A righting that cannot happen drops the proposal**, and that is not tidiness: a refusal
+        // used to leave the entry staged, and `auto_apply_batch` reaches for the first staged entry
+        // every frame — so a piece that could not be turned was retried sixty times a second,
+        // rewriting the status line, for the rest of the session. Dropping it terminates, and the
+        // labels are not applied because they were judged from an orientation the piece should not
+        // have been in.
+        suggestions.remove(&target);
+        generation.0 = generation.0.wrapping_add(1);
+        let why = if attempt > MAX_RIGHTINGS {
+            format!(
+                "`{name}` has been righted {MAX_RIGHTINGS} times and still says it is not upright \
+                 — turning it again would be a loop. Turn it by hand with N/P and press L."
+            )
+        } else {
+            format!(
+                "`{name}` could not be turned, so its labels were judged from the wrong \
+                 orientation and have been dropped — the refusal above says why. Turn it by hand \
+                 with N/P and press L."
+            )
+        };
+        warn!("{why}");
+        state.status.problem(why);
         return;
     }
-    let project = &mut *project;
     let history_before = state.snapshot(project);
+    // **Read before the borrow.** `apply_fields` settles the derived half of `effects` and needs the
+    // axis in vocabulary order to do it, and that order cannot be read out of `project` while
+    // `project.measured` is mutably borrowed below. Same shape as `on_tag_chip`.
+    let effects_order: Vec<String> = project.vocab.effects.names().map(str::to_owned).collect();
     let Some((d, where_to)) = state.at_target(&target, &mut project.measured) else {
-        state.status.problem("not applied — that piece is gone".to_owned());
+        state
+            .status
+            .problem("not applied — that piece is gone".to_owned());
         return;
     };
     if d.mesh.as_deref() != Some(entry.mesh.as_str()) {
-        state.status.problem("not applied — the mesh changed under the proposal".to_owned());
+        state
+            .status
+            .problem("not applied — the mesh changed under the proposal".to_owned());
         return;
     }
-    crate::labels::apply_fields(d, &entry.suggestion);
+    crate::labels::apply_fields(d, &entry.suggestion, &effects_order);
     state.record(history_before);
-    let said = persist(project, where_to, format!("applied proposed labels to `{name}`"));
+    let said = persist(
+        project,
+        where_to,
+        format!("applied proposed labels to `{name}`"),
+    );
     // A refused write keeps the proposal staged for another try. This used to ask
     // `said.starts_with("NOT WRITTEN")` — a control-flow decision made by sniffing a message for a
     // prefix the function it came from was free to reword. `persist` returns a `Result` now, so the
@@ -3663,8 +4798,46 @@ fn commit_candidate(
     live: Res<crate::keys::Live>,
     mut project: ResMut<Project>,
     mut state: ResMut<ImportState>,
+    queue: Res<crate::labels::LabelQueue>,
 ) {
-    if !keys::just_pressed(&keyboard, *live, Action::Accept) {
+    let accept = keys::just_pressed(&keyboard, *live, Action::Accept);
+    // **Space is the heading key, and only the heading key.** It was unbound on this tab, so
+    // pressing it on a collapsed pack did nothing — reported at the keyboard 2026-08-18. It joins
+    // `Enter` on a heading and is deliberately inert everywhere else, which is why it is its own
+    // action: a second key on `Accept` would have made Space commit a tile.
+    let fold = keys::just_pressed(&keyboard, *live, Action::FoldPack);
+    if !accept && !fold {
+        return;
+    }
+    // **`Enter` acts on the row the cursor is on.** On a pack heading that means opening or closing
+    // it — the arrows can stand on a heading now, and a key that did nothing there would be the
+    // reason to reach for the mouse. Same rule the chooser's settings panel follows: one key, one
+    // meaning, down the whole list.
+    if let Some(pack) = state.focused_pack.clone() {
+        // **The toggle already knows the answer**, so it is not asked again: `remove` reports
+        // whether it was folded, which is exactly whether this press opened it. Re-reading
+        // `folded_packs` here would be a second reader of the visibility rule, which is the thing
+        // `every_list_follows_its_selection.rs` exists to stop — and it caught this.
+        let opened = state.folded_packs.remove(&pack);
+        if !opened {
+            state.folded_packs.insert(pack.clone());
+        }
+        state.status.note(format!(
+            "`{pack}` {}",
+            if opened { "opened" } else { "closed" }
+        ));
+        return;
+    }
+    // **Off a heading, Space has nothing to say.** Everything below commits a tile, and that is
+    // `Enter`'s verb alone — see the binding's own note.
+    if !accept {
+        return;
+    }
+    // **A question owns `Enter` while it is up.** `labels::answer_overwrite` reads the same key in
+    // the same phase, and reading a key does not consume it — so without this the `Enter` that
+    // answers "re-label everything" would also add the highlighted candidate to the library. That is
+    // the `xseam` shape (`keys.rs`), which put six descriptors in `library.ron` the first time.
+    if queue.ask.is_some() {
         return;
     }
     if let Some(id) = state.selected_library_id.clone() {
@@ -3688,12 +4861,58 @@ fn commit_candidate(
         return;
     };
     if candidate.blocked() {
-        state.status.problem("this mesh cannot be measured, so there is nothing to add".to_owned());
+        state
+            .status
+            .problem("this mesh cannot be measured, so there is nothing to add".to_owned());
+        return;
+    }
+    // **A mesh this kit excludes cannot be imported into it.**
+    //
+    // `Policy::exclude` meant two small things and not the one it says: the label batch skipped it
+    // and the pack row drew it greyed. Nothing stopped `Enter` putting it in the library anyway, so
+    // an excluded character rig could still reach a map — which is what an author excludes it to
+    // prevent. Asked for at the keyboard, 2026-08-16: *"how can I mark them as not being imported in
+    // the kits section so that they don't show up in the maps?"*
+    //
+    // Refused rather than hidden: the row stays on the list saying what it is, which is the same
+    // draw-the-constraint rule the kit ticks follow (Vicente & Rasmussen, `10.1109/21.156574`). A
+    // mesh that vanished would read as a scan that missed it.
+    if project.policy.excludes(&candidate.mesh) {
+        state.status.problem(format!(
+            "`{}` is excluded from this kit, so it cannot be imported into it. Shift+R on its \
+             pack puts the pack back.",
+            leaf(&candidate.mesh)
+        ));
         return;
     }
     let descriptor = candidate.proposed.clone();
     if descriptor.id.trim().is_empty() {
         state.status.note("give it an id first (I)".to_owned());
+        return;
+    }
+    // **A new id has to agree with the kit it is joining.**
+    //
+    // `Library::namespace` is unanimous-or-refuse, so ONE namespaced id among a kit's flat ones
+    // changes what the whole kit claims to be — and `kits::bound_library` then refuses to open the
+    // project at all. That is not a hypothetical: on 2026-08-16 an import named `low_poly_furniture/
+    // shower` after its pack folder, landed it beside 387 flat ids in a kit bound as `furniture`,
+    // and the next launch could not open the project. Nothing checked, because the commit door asked
+    // about duplicates and emptiness and never about the namespace.
+    //
+    // Refused here rather than at the next open, which is the whole point of a commit door: the
+    // failure belongs to the keystroke that caused it, not to a launch tomorrow.
+    if let Some((ns, _)) = descriptor.id.split_once('/')
+        && ns != project.namespace
+    {
+        state.status.problem(format!(
+            "`{}` would join this kit as `{ns}/*`, but it is bound as `{}`. Name it `{}` — or \
+             `{}/{}` if you mean to qualify it.",
+            descriptor.id,
+            project.namespace,
+            descriptor.id.rsplit('/').next().unwrap_or(&descriptor.id),
+            project.namespace,
+            descriptor.id.rsplit('/').next().unwrap_or(&descriptor.id),
+        ));
         return;
     }
     if project.library.get(&descriptor.id).is_some() {
@@ -3765,7 +4984,9 @@ fn remove_tile(
         return;
     }
     let Some(id) = state.selected_library_id.clone() else {
-        state.status.note("select a library tile to remove it".to_owned());
+        state
+            .status
+            .note("select a library tile to remove it".to_owned());
         return;
     };
     let before = state.snapshot(&project);
@@ -3773,7 +4994,9 @@ fn remove_tile(
         Ok(path) => {
             state.selected_library_id = None;
             state.record(before);
-            state.status.note(format!("removed `{id}` from the library"));
+            state
+                .status
+                .note(format!("removed `{id}` from the library"));
             info!("removed `{id}` from {}", path.display());
         }
         Err(e) => state.status.problem(format!("not removed: {e}")),
@@ -3795,15 +5018,13 @@ fn remove_tile(
 /// interesting failure: removing a piece can strand another that rested on a surface only it
 /// offered, and it can leave a policy patch matching nothing.
 fn take_out_of_library(id: &str, project: &mut Project) -> Result<std::path::PathBuf, String> {
-    let used = project
-        .map
-        .placements
-        .iter()
-        .filter(|p| p.descriptor == id)
-        .count();
-    if used > 0 {
+    // **Every map in the project, not the one that happened to be open.** See
+    // `Project::maps_that_place` for what the narrow version let through.
+    let used = project.maps_that_place(id)?;
+    if !used.is_empty() {
         return Err(format!(
-            "`{id}` is used by {used} placement(s) in this map — remove those first"
+            "`{id}` is placed by {} — remove those placements first",
+            used.iter().map(|m| format!("`{m}`")).collect::<Vec<_>>().join(", ")
         ));
     }
     // **Compositions are the second referrer of a descriptor id, and they are stricter than a map.**
@@ -3831,10 +5052,18 @@ fn take_out_of_library(id: &str, project: &mut Project) -> Result<std::path::Pat
             "`{id}` is a member of {}: {}. It cannot be sent back while they hold it — the project \
              would stop opening with `compositions.ron` naming a descriptor nothing defines. \
              {} edits it in place without removing it; sending it back means redefining {} first.",
-            if groups.len() == 1 { "the composition" } else { "the compositions" },
+            if groups.len() == 1 {
+                "the composition"
+            } else {
+                "the compositions"
+            },
             groups.join(", "),
             crate::keys::chord(crate::keys::Action::EditTile),
-            if groups.len() == 1 { "that composition" } else { "those compositions" },
+            if groups.len() == 1 {
+                "that composition"
+            } else {
+                "those compositions"
+            },
         ));
     }
     let Some(at) = project.measured.descriptors.iter().position(|d| d.id == id) else {
@@ -3893,10 +5122,18 @@ pub(crate) fn demote_blockers(id: &str, project: &Project) -> Result<String, Str
             "`{id}` is a member of {}: {}. It cannot be sent back while they hold it — the project \
              would stop opening with `compositions.ron` naming a descriptor nothing defines. \
              {} edits it in place without removing it; sending it back means redefining {} first.",
-            if groups.len() == 1 { "the composition" } else { "the compositions" },
+            if groups.len() == 1 {
+                "the composition"
+            } else {
+                "the compositions"
+            },
             groups.join(", "),
             crate::keys::chord(crate::keys::Action::EditTile),
-            if groups.len() == 1 { "that composition" } else { "those compositions" },
+            if groups.len() == 1 {
+                "that composition"
+            } else {
+                "those compositions"
+            },
         ));
     }
     Ok(mesh)
@@ -3932,7 +5169,9 @@ fn demote_tile(
         return;
     }
     let Some(id) = state.selected_library_id.clone() else {
-        state.status.note("select a library tile to send it back".to_owned());
+        state
+            .status
+            .note("select a library tile to send it back".to_owned());
         return;
     };
     if arm.0.as_deref() != Some(id.as_str()) {
@@ -3963,13 +5202,19 @@ fn demote_tile(
             state.selected_library_id = None;
             // Proposed labels under either identity judged the piece as it was configured —
             // stale by definition now.
-            let dropped = suggestions.remove(&EditTarget::Library(id.clone())).is_some()
-                | suggestions.remove(&EditTarget::Candidate(mesh.clone())).is_some();
+            let dropped = suggestions
+                .remove(&EditTarget::Library(id.clone()))
+                .is_some()
+                | suggestions
+                    .remove(&EditTarget::Candidate(mesh.clone()))
+                    .is_some();
             if dropped {
                 generation.0 = generation.0.wrapping_add(1);
             }
             state.record(before);
-            state.status.note(format!("sent `{id}` back to the candidates — measured fresh, stripped"));
+            state.status.note(format!(
+                "sent `{id}` back to the candidates — measured fresh, stripped"
+            ));
             info!("demoted `{id}` out of {}", path.display());
         }
         Err(e) => state.status.problem(format!("not sent back: {e}")),
@@ -4003,28 +5248,38 @@ fn holds_a_mesh(
         .unwrap_or(false)
 }
 
-
 /// Toggle one token on one axis.
+/// **`Option<ResMut<Project>>`, because this is a GLOBAL observer** — see [`on_cell_verb`].
+///
+/// This is the sixth, and it was found by fixing the *scanner* rather than by reading the code: the
+/// rule that catches these was truncating `tiles.rs` at its first `#[cfg(test)]` module, about a
+/// third of the way in, so everything past line ~1900 was reporting green over nothing. This one
+/// panicked at runtime during FVS-S-34a and was side-stepped by keeping the menu off the `Activate`
+/// bus; it was never actually fixed, and it stayed a live crash for any other caller.
 fn on_tag_chip(
     activate: On<Activate>,
     chips: Query<&TagChip>,
-    mut project: ResMut<Project>,
+    project: Option<ResMut<Project>>,
     mut state: ResMut<ImportState>,
 ) {
     let Ok(chip) = chips.get(activate.entity) else {
         return;
     };
+    let Some(mut project) = project else { return };
     // **Both the token and the vocabulary order come out first, owned.** What follows needs a mutable
     // borrow of the same `Project`, and the sort key cannot be read from it while that is held.
-    let (token, order) = {
+    let (token, order, effects_order) = {
         let names: Vec<String> = chip
             .axis
             .tokens(&project.vocab)
             .names()
             .map(str::to_owned)
             .collect();
+        // The DOES axis in vocabulary order, for the settle below. Read here for the same reason
+        // everything else in this block is: the write needs `project` mutably.
+        let effects: Vec<String> = project.vocab.effects.names().map(str::to_owned).collect();
         match names.get(chip.token) {
-            Some(t) => (t.clone(), names),
+            Some(t) => (t.clone(), names, effects),
             None => return,
         }
     };
@@ -4050,6 +5305,12 @@ fn on_tag_chip(
             list.sort_by_key(|t| order.iter().position(|o| o == t).unwrap_or(usize::MAX));
         }
     }
+    // **A kind typed by hand implies the same effects a labelled one does.** The rule is about the
+    // word, not about who wrote it — so `uses-electricity` follows a chip click exactly as it
+    // follows a proposal, and stops following when the kind is clicked off again.
+    if chip.axis == Axis::Kind {
+        crate::labels::settle_implied_effects(d, &effects_order);
+    }
     let said = format!("{} tags updated", chip.axis.label().to_lowercase());
     state.record(history_before);
     state.status.say(persist(&mut project, where_to, said));
@@ -4066,6 +5327,8 @@ fn move_selection(
     // The arrows walk what is on screen, which is what the filter decides.
     filters: Res<crate::filter::Filters>,
     mut state: ResMut<ImportState>,
+    // A mesh whose judgement is still a proposal is not composable — see `composable`.
+    suggestions: Res<crate::labels::Suggestions>,
 ) {
     // **Read the keys before touching the focus.** Clearing `selected_library_id` unconditionally
     // would steal the focus back on the very next frame after a library row was clicked — the system
@@ -4099,11 +5362,21 @@ fn move_selection(
         state.status.note("candidates".to_owned());
     }
     if to_library {
-        match library_ids(project.as_ref(), &filters).first() {
+        match library_ids(
+            project.as_ref(),
+            &filters,
+            live.0 == crate::keys::Context::Tiles,
+            Some(&suggestions),
+        )
+        .first()
+        {
             Some(first) => {
                 if state.selected_library_id.is_none() {
                     state.selected_library_id = Some(first.clone());
                 }
+                // **The heading cursor goes when the library takes over.** Leaving it set meant two
+                // highlights on screen and two readers disagreeing about which was live.
+                state.focused_pack = None;
                 state.status.note("library".to_owned());
             }
             None => state.status.note("the library is empty".to_owned()),
@@ -4118,8 +5391,33 @@ fn move_selection(
     // legal source and walking it here would move a focus the tile author cannot spend. This is one
     // path rather than two — the tab does not *prefer* the library, it is the only list it has.
     if live.0 == crate::keys::Context::Tiles && state.selected_library_id.is_none() {
-        match library_ids(project.as_ref(), &filters).first() {
-            Some(first) => state.selected_library_id = Some(first.clone()),
+        match library_ids(
+            project.as_ref(),
+            &filters,
+            live.0 == crate::keys::Context::Tiles,
+            Some(&suggestions),
+        )
+        .first()
+        {
+            // **The press that establishes the selection lands ON the first row**, and stops there.
+            //
+            // It used to seed row 0 and then fall through into the walk below, which read `at = 0`
+            // and stepped to row 1 — so the first `down` an author pressed on this tab skipped the
+            // first piece entirely, and the only way to reach it was to press `up` afterwards. One
+            // key press did two things, which is the same shape as every other list defect this
+            // file has produced: a seed is not a step.
+            //
+            // Found on 2026-08-16 through `the_tile_feedback_script_can_actually_be_followed`,
+            // which had been passing for the wrong reason and started measuring this the moment a
+            // candidate's proposed id stopped colliding with a library one.
+            Some(first) => {
+                state.selected_library_id = Some(first.clone());
+                state.status.note(format!(
+                    "`{first}` selected — {} removes it",
+                    keys::binding(Action::RemoveTile).chord
+                ));
+                return;
+            }
             None => {
                 state.status.problem(
                     "the library is empty — import a mesh on the Meshes tab before building"
@@ -4137,38 +5435,80 @@ fn move_selection(
     // pair nobody would remember, on a tab already carrying ten rows of its twelve.
     match state.selected_library_id.clone() {
         Some(id) => {
-            let ids = library_ids(project.as_ref(), &filters);
+            let ids = library_ids(
+                project.as_ref(),
+                &filters,
+                live.0 == crate::keys::Context::Tiles,
+                Some(&suggestions),
+            );
             let Some(at) = ids.iter().position(|d| *d == id) else {
                 return;
             };
-            let want = if down { at + stride } else { at.saturating_sub(stride) };
+            let want = if down {
+                at + stride
+            } else {
+                at.saturating_sub(stride)
+            };
             if let Some(next) = ids.get(want.min(ids.len().saturating_sub(1))) {
                 state.selected_library_id = Some(next.clone());
-                state.status.note(format!("`{next}` selected — {} removes it", keys::binding(Action::RemoveTile).chord));
+                state.status.note(format!(
+                    "`{next}` selected — {} removes it",
+                    keys::binding(Action::RemoveTile).chord
+                ));
             }
         }
         None => {
-            // The visible rows, for the reason the library branch above walks `library_ids`. This
-            // branch was left stepping `state.selected` through the unfiltered list, which is the
-            // worse half of the same defect: the candidate list is where **Accept** acts, so with the
-            // list filtered to three rows, one Down moved the focus to an unrelated mesh that was not
-            // on screen — `autoscan_candidate` then scanned it, and Enter imported it.
-            let rows = candidate_rows(&state, &filters);
-            let at = match rows.iter().position(|&i| i == state.selected) {
+            // **Every row on screen, headings included**, so nothing visible is unreachable and a
+            // collapsed pack can be walked onto and opened without the mouse. The old walk stepped
+            // mesh rows only: at the top of the first open pack `Up` had nowhere to go while 33
+            // headings sat above it, which is the bug reported three times.
+            //
+            // It also walks the DRAWN order rather than candidate indices. Inside one pack those
+            // agree; at a group boundary they do not, and excluded packs are drawn last however
+            // early their meshes were scanned.
+            let rows = candidate_list_rows(&state, &filters, &project.policy);
+            if rows.is_empty() {
+                return;
+            }
+            let here = rows.iter().position(|r| match r {
+                ListRow::Header(p) => state.focused_pack.as_deref() == Some(p.as_str()),
+                ListRow::Mesh(i) => state.focused_pack.is_none() && *i == state.selected,
+            });
+            let at = match here {
                 Some(at) => at,
-                // Not on screen at all. An arrow then means "start from the top of what I can see",
-                // which is where the eye already is.
+                // Not on screen at all — a filter or a fold moved out from under the cursor. An
+                // arrow then means "start from the top of what I can see", which is where the eye
+                // already is.
                 None => {
-                    if let Some(&first) = rows.first() {
-                        state.selected = first;
+                    if let Some(row) = rows.first() {
+                        put_cursor(&mut state, row);
                     }
                     return;
                 }
             };
-            let want = if down { at + stride } else { at.saturating_sub(stride) };
-            if let Some(&next) = rows.get(want.min(rows.len().saturating_sub(1))) {
-                state.selected = next;
+            let want = if down {
+                (at + stride).min(rows.len() - 1)
+            } else {
+                at.saturating_sub(stride)
+            };
+            if let Some(row) = rows.get(want) {
+                put_cursor(&mut state, row);
             }
+        }
+    }
+}
+
+/// Put the cursor on a row, in whichever of its two states that row calls for.
+///
+/// One function because the two fields are one cursor: leaving `focused_pack` set while moving to a
+/// mesh would highlight a heading and a row at once, and every reader would then have to decide
+/// which it believed.
+fn put_cursor(state: &mut ImportState, row: &ListRow) {
+    match row {
+        ListRow::Header(pack) => state.focused_pack = Some(pack.clone()),
+        ListRow::Mesh(ix) => {
+            state.focused_pack = None;
+            state.selected = *ix;
         }
     }
 }
@@ -4178,15 +5518,140 @@ fn move_selection(
 /// The sibling of [`library_ids`], filtered with the same predicate `rebuild_candidates` renders
 /// with. Indices rather than mesh paths because `ImportState::selected` is an index and every other
 /// reader of the focus already goes through it.
-fn candidate_rows(state: &ImportState, filters: &crate::filter::Filters) -> Vec<usize> {
+/// One row of the candidate list as it appears on screen.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) enum ListRow {
+    /// A pack heading. Reachable whether the pack is open or closed — that is the point.
+    Header(String),
+    /// A mesh under an open heading, by index into `ImportState::candidates`.
+    Mesh(usize),
+}
+
+/// **Every row on screen, in the order it is drawn** — headings and meshes together.
+///
+/// The arrows walk this, so "the next row" means the same thing to the eye and to the keyboard, and
+/// nothing visible is unreachable. A collapsed pack contributes its heading and no meshes, which is
+/// exactly how `Up` steps onto a folder and then past it to the one above.
+pub(crate) fn candidate_list_rows(
+    state: &ImportState,
+    filters: &crate::filter::Filters,
+    policy: &emerge_core::policy::Policy,
+) -> Vec<ListRow> {
+    let (offered, excluded) = visible_packs(state, filters, policy);
+    let mut out: Vec<ListRow> = Vec::new();
+    let push = |pack: &String, members: &Vec<usize>, out: &mut Vec<ListRow>| {
+        out.push(ListRow::Header(pack.clone()));
+        if pack_is_open(state, policy, pack) {
+            out.extend(members.iter().copied().map(ListRow::Mesh));
+        }
+    };
+    for (pack, members) in &offered {
+        push(pack, members, &mut out);
+    }
+    if !excluded.is_empty() && state.excluded_open {
+        for (pack, members) in &excluded {
+            push(pack, members, &mut out);
+        }
+    }
+    out
+}
+
+fn candidate_rows(
+    state: &ImportState,
+    filters: &crate::filter::Filters,
+    policy: &emerge_core::policy::Policy,
+) -> Vec<usize> {
+    let (offered, excluded) = visible_packs(state, filters, policy);
+    let mut out: Vec<usize> = Vec::new();
+    // **A folded pack contributes nothing**, which is the whole of "the arrows jump over it": its
+    // neighbours end up adjacent in this list, so one press moves from the row above a collapsed
+    // group to the first row below it.
+    for (pack, members) in offered {
+        if pack_is_open(state, policy, &pack) {
+            out.extend(members);
+        }
+    }
+    if state.excluded_open {
+        for (pack, members) in excluded {
+            if pack_is_open(state, policy, &pack) {
+                out.extend(members);
+            }
+        }
+    }
+    out
+}
+
+/// **The rows this panel draws, in the order it draws them** — offered packs first, then the
+/// `EXCLUDED` group. Both the list and the arrows are built from this, so "the next row" means the
+/// same thing to the eye and to the keyboard.
+///
+/// # The ordering is the point, and it is why this exists
+///
+/// The walk used to step `state.selected` through candidates in **index** order while the list drew
+/// them **grouped by pack**. Inside one pack those agree, because a directory scan lands its meshes
+/// consecutively — so it looked right, and only came apart at a group boundary, where the next index
+/// belongs to a pack drawn somewhere else entirely. Excluded packs made it certain: they are drawn
+/// last however early their indices are.
+///
+/// Reported at the keyboard, 2026-08-16: *"as soon as it hits a collapsed group, you can't go
+/// anymore… I want it to jump over the collapsed groups up to the next uncollapsed selection."*
+/// Which is what walking the drawn order does by construction, with no skipping logic at all — a
+/// folded pack contributes no rows, so its neighbours are adjacent.
+fn visible_packs(
+    state: &ImportState,
+    filters: &crate::filter::Filters,
+    policy: &emerge_core::policy::Policy,
+) -> (Vec<(String, Vec<usize>)>, Vec<(String, Vec<usize>)>) {
     let pane = crate::filter::Pane::Candidates;
-    state
-        .candidates
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| filters.keeps(pane, &c.mesh))
-        .map(|(i, _)| i)
-        .collect()
+    let mut offered: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut excluded: Vec<(String, Vec<usize>)> = Vec::new();
+    for (pack, mut members) in packs(&state.candidates) {
+        // Narrowed, never reordered — the same rule the palette follows.
+        members.retain(|ix| {
+            state
+                .candidates
+                .get(*ix)
+                .is_some_and(|c| filters.keeps(pane, &c.mesh))
+        });
+        // A pack heading with nothing under it is a heading about nothing.
+        if members.is_empty() {
+            continue;
+        }
+        // **Members are kept whole, folded or not.** The heading says how many it is hiding
+        // (`draw_pack`), so clearing them here would make every folded pack report `0 hidden`. Who
+        // skips them is the reader's business: the list draws the heading and stops, the walk in
+        // `candidate_rows` takes no rows from it at all.
+        if policy.excludes(&pack) {
+            excluded.push((pack, members));
+        } else {
+            offered.push((pack, members));
+        }
+    }
+    (offered, excluded)
+}
+
+
+/// **Is this pack's contents on screen?** The one rule, read by the list that draws the rows and by
+/// the arrows that walk them.
+///
+/// It was two rules. The renderer decided folding inline while `candidate_rows` — *"the visible
+/// rows"* — knew only about the filter box, so the arrows walked straight into folded packs and the
+/// highlight landed on rows nobody could see. Reported at the keyboard, 2026-08-16: *"whenever I
+/// scroll up, it doesn't skip collapsed groups."* The collapsed `EXCLUDED` group, added the same
+/// day, made it loud — everything inside it is folded by construction.
+///
+/// That matters more than a cosmetic slip, and the same argument is already written one function
+/// down about the filter: **`Accept` acts on the selection**, so a walk that can land somewhere
+/// invisible is a walk that can import a mesh the author never saw.
+fn pack_is_open(
+    state: &ImportState,
+    policy: &emerge_core::policy::Policy,
+    pack: &str,
+) -> bool {
+    if policy.excludes(pack) && !state.excluded_open {
+        return false;
+    }
+    !state.folded_packs.contains(pack)
 }
 
 /// **Keep the candidate selection on a row that is showing.**
@@ -4216,6 +5681,7 @@ fn keep_selection_on_screen(
     rows: Query<(&CandidateRow, &ComputedNode, &UiGlobalTransform)>,
     library_rows: Query<(&LibraryRow, &ComputedNode, &UiGlobalTransform)>,
     kit_rows: Query<(&KitRow, &ComputedNode, &UiGlobalTransform)>,
+    headers: Query<(&PackHeader, &ComputedNode, &UiGlobalTransform)>,
     mut lists: Query<
         (&ComputedNode, &UiGlobalTransform, &mut ScrollPosition),
         (
@@ -4225,40 +5691,44 @@ fn keep_selection_on_screen(
             Without<KitRow>,
         ),
     >,
-    mut pending: Local<bool>,
+    mut follow: Local<crate::chrome::Follow<Selected>>,
 ) {
     // **One frame late, on purpose.** The rows are rebuilt when the selection moves —
     // `rebuild_candidates` watches the same change — and their `ComputedNode`/`UiGlobalTransform`
     // only describe the new list after that rebuild's commands have applied and layout has run at
     // the end of the frame. Reacting on the change frame reads the PREVIOUS frame's geometry and
-    // scrolls to where the row used to be, with no later frame to correct it (`is_changed` is false
-    // by then). So the change arms a flag and the correction runs next frame, against the layout the
-    // rebuild actually produced.
-    // `Build` too: the kit walk lives there (`Build::browsing`), and `rebuild_candidates` rebuilds
-    // this list on the same change.
-    if state.is_changed() || build.is_changed() {
-        *pending = true;
+    // scrolls to where the row used to be.
+    //
+    // **Keyed on which row is selected, not on `is_changed`.** This watched `ImportState` and
+    // `Build`, and both are written most frames — a status line, a preview watchdog — so the flag
+    // was re-armed every frame and the scroll never happened. See `chrome::Follow`.
+    if !follow.should_scroll(Some(Selected::now(&state, &build))) {
         return;
     }
-    if !*pending {
-        return;
-    }
-    *pending = false;
     // A UI node's transform is its CENTRE, so the edges are the half-size either side.
-    // The kit cursor outranks the library selection: while browsing, the kit rows are what is on
-    // screen, and the library selection still exists underneath them.
-    let selected = match (build.browsing, &state.selected_library_id) {
-        (Some(row), _) => kit_rows
+    //
+    // **Looked up through `Selected::now`, the same value this armed on.** It used to re-derive the
+    // precedence here — and got it wrong the moment headings became walkable: `focused_pack` was
+    // checked first while `Selected::now` ranks the library above it, so focusing the imported list
+    // while a heading was still remembered scrolled to the heading and left the library selection
+    // off screen. Reported at the keyboard, 2026-08-16. One decision, read twice, is the same defect
+    // this file has now produced three times.
+    let selected = match Selected::now(&state, &build) {
+        Selected::Header(pack) => headers
+            .iter()
+            .find(|(h, _, _)| h.0 == pack)
+            .map(|(_, n, t)| (t.translation.y, n.size.y * 0.5)),
+        Selected::Kit(row) => kit_rows
             .iter()
             .find(|(r, _, _)| r.0 == row)
             .map(|(_, n, t)| (t.translation.y, n.size.y * 0.5)),
-        (None, Some(id)) => library_rows
+        Selected::Library(id) => library_rows
             .iter()
-            .find(|(r, _, _)| &r.0 == id)
+            .find(|(r, _, _)| r.0 == id)
             .map(|(_, n, t)| (t.translation.y, n.size.y * 0.5)),
-        (None, None) => rows
+        Selected::Candidate(ix) => rows
             .iter()
-            .find(|(r, _, _)| r.0 == state.selected)
+            .find(|(r, _, _)| r.0 == ix)
             .map(|(_, n, t)| (t.translation.y, n.size.y * 0.5)),
     };
     let Some((row_mid, row_half)) = selected else {
@@ -4279,12 +5749,15 @@ fn keep_selection_on_screen(
 
 fn keep_candidate_selection_visible(
     filters: Res<crate::filter::Filters>,
+    project: Res<Project>,
     mut state: ResMut<ImportState>,
 ) {
-    if !filters.is_changed() {
+    // **Folding is a reason to move the selection too**, not just filtering: closing the pack the
+    // highlight is in leaves it on a row nobody can see, and `Accept` acts on the selection.
+    if !filters.is_changed() && !state.is_changed() {
         return;
     }
-    let visible = candidate_rows(&state, &filters);
+    let visible = candidate_rows(&state, &filters, &project.policy);
     if visible.iter().any(|&i| i == state.selected) {
         return;
     }
@@ -4301,15 +5774,69 @@ fn keep_candidate_selection_visible(
 /// library meant the arrows stepped through rows that were not on screen — and `Delete` acts on the
 /// selection, so the key removed a tile the author never saw. The list and the keys have to agree
 /// about what "next" means or one of them is lying.
-pub(crate) fn library_ids(project: &Project, filters: &crate::filter::Filters) -> Vec<String> {
+/// The palette filter, for the test suite — `library_ids` itself stays `pub(crate)` so the panel
+/// and the keys remain its only callers.
+pub fn library_ids_for_test(
+    project: &Project,
+    filters: &crate::filter::Filters,
+    labeled_only: bool,
+    pending: Option<&crate::labels::Suggestions>,
+) -> Vec<String> {
+    library_ids(project, filters, labeled_only, pending)
+}
+
+pub(crate) fn library_ids(
+    project: &Project,
+    filters: &crate::filter::Filters,
+    // Composing asks only for judged meshes; the definition bench asks for all of them.
+    labeled_only: bool,
+    // Proposals waiting on a human — a mesh with one is not settled yet. See `composable`.
+    pending: Option<&crate::labels::Suggestions>,
+) -> Vec<String> {
     let pane = crate::filter::Pane::Candidates;
     project
         .library
         .descriptors
         .iter()
         .filter(|d| filters.keeps(pane, &d.id))
+        // **A tile is composed only from JUDGED meshes.** The two tabs share one list and ask
+        // different questions of it: the Meshes tab is the definition bench and shows everything,
+        // because an unjudged piece is precisely what it is for — and because un-labelling a piece
+        // (`Shift+Delete`, "back to candidates, stripped") has to be reachable somewhere. The Tiles
+        // tab composes, and a piece with no mount, no kind and no description has nothing to
+        // compose *with*: its footprint is a guess and the solver cannot place what it yields.
+        //
+        // Asked for at the keyboard, 2026-08-15: *"unlabeled meshes shouldn't show on the tiles
+        // tab."* `labels::needs_labels` is the same predicate the VLM batch picks its targets with,
+        // so "what the labeler still owes you" and "what you cannot build with yet" cannot drift.
+        .filter(|d| !labeled_only || composable(d, pending))
         .map(|d| d.id.clone())
         .collect()
+}
+
+/// **Settled enough to build with: labelled AND confirmed.**
+///
+/// Two conditions, and the second was missing. `judged_enough_to_build_with` answers *does it have a
+/// name and a description*, which
+/// a machine can satisfy on its own — but a suggestion the VLM has proposed and nobody has looked
+/// at is a **question**, not an answer, and the whole reason the labeler stages proposals behind a
+/// commit door (`U` applies, `Y` discards) is that a human decides. A mesh whose judgement is still
+/// a pending proposal has no business in the palette a tile is composed from.
+///
+/// Asked for at the keyboard, 2026-08-15: *"before any mesh shows up there, make sure its labels
+/// are completed and confirmed."*
+///
+/// Note what this does NOT require: provenance. Labels applied from a suggestion ARE confirmed —
+/// somebody pressed `U` — and hand-authored labels were never in doubt. The only unsettled state is
+/// a proposal still waiting, which is exactly what is tested.
+pub(crate) fn composable(
+    d: &emerge_core::descriptor::Descriptor,
+    pending: Option<&crate::labels::Suggestions>,
+) -> bool {
+    if !crate::labels::judged_enough_to_build_with(d) {
+        return false;
+    }
+    pending.is_none_or(|s| s.get(&EditTarget::Library(d.id.clone())).is_none())
 }
 
 /// **Keep the library selection on a row that is showing.**
@@ -4321,8 +5848,11 @@ pub(crate) fn library_ids(project: &Project, filters: &crate::filter::Filters) -
 /// filter matches nothing.
 fn keep_library_selection_visible(
     filters: Res<crate::filter::Filters>,
+    suggestions: Res<crate::labels::Suggestions>,
     project: Res<Project>,
     mut state: ResMut<ImportState>,
+    // The Tiles palette hides unjudged meshes, so what counts as "still visible" differs by tab.
+    mode: Res<Mode>,
 ) {
     if !filters.is_changed() {
         return;
@@ -4330,7 +5860,7 @@ fn keep_library_selection_visible(
     let Some(id) = state.selected_library_id.clone() else {
         return;
     };
-    let visible = library_ids(&project, &filters);
+    let visible = library_ids(&project, &filters, *mode == Mode::Tiles, Some(&suggestions));
     if visible.iter().any(|v| *v == id) {
         return;
     }
@@ -4352,6 +5882,19 @@ fn on_pack_click(
     }
 }
 
+/// Clicking the `EXCLUDED` heading opens or closes the group — the same one-key-both-directions
+/// shape a pack heading has, on the row that says which state it is in.
+fn on_excluded_click(
+    activate: On<Activate>,
+    headers: Query<&ExcludedHeader>,
+    mut state: ResMut<ImportState>,
+) {
+    if headers.get(activate.entity).is_err() {
+        return;
+    }
+    state.excluded_open = !state.excluded_open;
+}
+
 fn on_library_click(
     activate: On<Activate>,
     rows: Query<&LibraryRow>,
@@ -4359,7 +5902,9 @@ fn on_library_click(
 ) {
     if let Ok(row) = rows.get(activate.entity) {
         state.selected_library_id = Some(row.0.clone());
-        state.status.note(format!("`{}` selected — Del removes it", row.0));
+        state
+            .status
+            .note(format!("`{}` selected — Del removes it", row.0));
     }
 }
 
@@ -4383,7 +5928,13 @@ fn apply_mode(
     // **One query with `Has`, not one per marker.** Three disjoint queries would each need `Without`
     // of both others, and a fourth tab would need three more — this asks each panel which tab it
     // belongs to instead.
-    mut panels: Query<(&mut Node, Has<MapRoot>, Has<TilesRoot>, Has<AnimRoot>, Has<ComposeRoot>)>,
+    mut panels: Query<(
+        &mut Node,
+        Has<MapRoot>,
+        Has<TilesRoot>,
+        Has<AnimRoot>,
+        Has<ComposeRoot>,
+    )>,
 ) {
     if !mode.is_changed() {
         return;
@@ -4411,13 +5962,16 @@ fn apply_mode(
     }
 }
 
-fn in_meshes_mode(mode: Res<Mode>) -> bool {
-    *mode == Mode::Meshes
+/// **`Option<Res<..>>`, because `Mode` belongs to a door.** See [`crate::editor::in_map_mode`]: every
+/// run condition is evaluated, so a bare `Res<Mode>` panics on the menu screen where the door — and
+/// its `Mode` — have been dropped.
+fn in_meshes_mode(mode: Option<Res<Mode>>) -> bool {
+    mode.is_some_and(|m| *m == Mode::Meshes)
 }
 
 /// Either tab served by the shared MESHES AND TILES panel — see [`TILES_PANEL_TABS`].
-fn in_tiles_panel(mode: Res<Mode>) -> bool {
-    TILES_PANEL_TABS.contains(&mode)
+fn in_tiles_panel(mode: Option<Res<Mode>>) -> bool {
+    mode.is_some_and(|m| TILES_PANEL_TABS.contains(&m))
 }
 
 /// Keep one preview alive, showing the selected candidate at the origin with its PROPOSED alignment
@@ -4482,18 +6036,29 @@ fn drive_preview(
             return;
         };
         let a = &d.align;
-        // The pivot shifts the model so its bounding-box centre lands on the placement point,
-        // which is what makes the symmetric footprint an accurate reservation rather than an
-        // approximation.
-        let pivot = a.pivot.unwrap_or((0.0, 0.0));
+        // **No pivot shift, because no shipped path applies one.**
+        //
+        // This used to stage at `STAGE.xz - align.pivot`, on the argument that centring the
+        // bounding box on the placement point *"is what makes the symmetric footprint an accurate
+        // reservation"*. Measured over BRP 2026-08-18: that put the same piece 0.42 m from where
+        // the Tiles tab stands it, and the Tiles tab is the one telling the truth —
+        // `emerge_bevy::spawn_descriptor` places the file's origin at the placement point and
+        // applies no pivot, and that is the spawner a map placement AND a tile member both go
+        // through. So the correction was compensating here for something the game never does, and
+        // the preview promised a position nothing would honour.
+        //
+        // `src/placement/furnish.rs:431` **does** apply `- rot * pivot`, and it is the one caller
+        // that does. Chosen at the keyboard: the mapper authors maps and tiles, so it previews the
+        // path maps and tiles take. The visible consequence is deliberate — a mesh whose origin is
+        // not its bounding-box centre now sits off its own footprint rectangle here, which is
+        // exactly what it will do in the game.
+        //
         // **The transform a real placement applies**, which is `(scale, scale * stretch_y, scale)`
         // — see `emerge_bevy::spawn_descriptor`.
         let want = Transform::from_xyz(
-            STAGE.x - pivot.0,
-            // **The mount's height, then the mesh's own correction on top** — the same order
-            // `stack::datum` applies them in, so the staged piece stands where a placed one will.
-            STAGE.y + stage_lift(d) + a.y_offset.unwrap_or(0.0),
-            STAGE.z - pivot.1,
+            STAGE.x,
+            STAGE.y + staged_lift(d),
+            STAGE.z,
         )
         .with_scale(Vec3::new(
             a.scale.unwrap_or(1.0),
@@ -4530,7 +6095,9 @@ fn drive_preview(
         Err(e) => {
             if said.as_ref() != Some(&(mesh.clone(), "failed")) {
                 *said = Some((mesh.clone(), "failed"));
-                state.status.problem(format!("NOT DRAWN — {}: {e}", leaf(&mesh)));
+                state
+                    .status
+                    .problem(format!("NOT DRAWN — {}: {e}", leaf(&mesh)));
                 error!("preview of {mesh}: {e}");
             }
         }
@@ -4558,7 +6125,10 @@ fn drive_preview(
     // loss stays on the record, and gives up loudly after three attempts rather than looping.
     const HEAL_GRACE_FRAMES: u32 = 30;
     const HEAL_ATTEMPTS: u8 = 3;
-    let existing = previews.iter().find(|(_, of, _)| of.0 == mesh).map(|(e, _, _)| e);
+    let existing = previews
+        .iter()
+        .find(|(_, of, _)| of.0 == mesh)
+        .map(|(e, _, _)| e);
     if heal.as_ref().is_none_or(|(m, _, _, _)| *m != mesh) {
         *heal = Some((mesh.clone(), 0, 0, false));
     }
@@ -4793,7 +6363,10 @@ fn draw_preview_footprint(state: Res<ImportState>, project: Res<Project>, mut gi
             STAGE + up + Vec3::new(0.0, 0.01, 0.0),
             Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
         ),
-        Vec2::new(cx as f32 * emerge_core::grid::SNAP, cz as f32 * emerge_core::grid::SNAP),
+        Vec2::new(
+            cx as f32 * emerge_core::grid::SNAP,
+            cz as f32 * emerge_core::grid::SNAP,
+        ),
         CELLS,
     );
     // And the volume, so height is visible rather than only stated.
@@ -4840,32 +6413,192 @@ fn refresh_lines(
 /// `left`/`right` switch them, which costs no key: they were unbound on this tab while nothing was in
 /// hand, and `docs/tiles_tab_contract.md` recorded exactly why — *"There is one list on this tab, so
 /// there is nothing to switch between."* There are two now.
-fn tab_strip(p: &mut ChildSpawnerCommands, on_kit: bool, kit: usize) {
+/// **Which shelf the list is showing.** Three, in the order work moves through them.
+///
+/// This is not new state: the editor has always had it, spread across two fields nobody drew.
+/// `selected_library_id.is_none()` is *"the arrows are walking the candidates"* and
+/// `Build::browsing.is_some()` is *"the kit list is up"* — and `left`/`right` have always moved
+/// between them. What was missing was any way to see which one you were on, or that a third existed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Shelf {
+    /// Measured, not imported. The `NOT YET IMPORTED` packs.
+    Candidates,
+    /// In `library.ron` — a mesh the editor can build with.
+    Library,
+    /// The tiles already composed from them.
+    Kit,
+}
+
+impl Shelf {
+    /// **The pipeline, and it is why `right` always means deeper.** A mesh is imported into the
+    /// library and the library is composed into the kit, so the strip reads left to right in the
+    /// direction work actually moves. Both tabs then agree about what `left` and `right` mean, which
+    /// they did not when the strip drew a fixed pair regardless of tab.
+    const ORDER: [Shelf; 3] = [Shelf::Candidates, Shelf::Library, Shelf::Kit];
+
+    fn label(self, library: usize, candidates: usize, kit: usize) -> String {
+        match self {
+            Shelf::Candidates => format!("NOT IMPORTED ({candidates})"),
+            Shelf::Library => format!("MESHES ({library})"),
+            Shelf::Kit => format!("KIT ({kit})"),
+        }
+    }
+}
+
+/// A chip in the shelf strip, and which shelf it opens.
+#[derive(Component, Clone, Copy)]
+pub struct ShelfChip(pub Shelf);
+
+/// **The shelves this tab has, as a strip you can read and click.**
+///
+/// # `NOT YET IMPORTED` was a heading at the bottom of the same list
+///
+/// The Meshes tab drew `IN LIBRARY (43)`, its rows, then `NOT YET IMPORTED (696)` and a dozen
+/// collapsed packs — one list doing two jobs, with the second reachable only by scrolling past the
+/// first. Reported at the keyboard, 2026-08-18: *"the not yet imported way at the bottom is not
+/// intuitive."* It is worse than unintuitive: the two halves already have **separate walks** and
+/// **separate cursors**, and `left`/`right` already switched between them. The editor knew they were
+/// two shelves and drew them as one list.
+///
+/// So the strip shows the two shelves *this tab* has — the Meshes tab imports, the Tiles tab
+/// composes — and the list below shows one of them. Every count is of what is shown, per the same
+/// rule the headings kept.
+fn shelf_strip(
+    p: &mut ChildSpawnerCommands,
+    at: Shelf,
+    on_tiles: bool,
+    library: usize,
+    candidates: usize,
+    kit: usize,
+) {
     p.spawn(Node {
         flex_direction: FlexDirection::Row,
         column_gap: Val::Px(10.0),
+        row_gap: Val::Px(crate::chrome::GAP_TIGHT),
+        align_items: AlignItems::Center,
+        // **Wraps, because two counted chips and a hint do not fit `LIST_W`.** Measured in a
+        // capture: `left / right` was clipped at the panel edge, which is the same class of defect
+        // as the kit row that wrapped into its own value column — a fixed width and content that
+        // outgrew it. The hint drops to a second line rather than being cut, and on a wider panel
+        // it stays where it was.
+        flex_wrap: FlexWrap::Wrap,
         ..default()
     })
     .with_children(|row| {
-        for (label, active) in [
-            ("MESHES".to_owned(), !on_kit),
-            (format!("KIT ({kit})"), on_kit),
-        ] {
+        // A tab shows the two shelves its own keys reach: `Meshes` imports (candidates <-> library),
+        // `Tiles` composes (library <-> kit). Drawing all three everywhere would offer a chip whose
+        // key does nothing on this tab, which is the dead-affordance defect the strip has had before.
+        // **Taken from `ORDER`, not written out again.** A second list of the same three shelves is
+        // a second place for the pipeline to be stated, and the whole point of the order is that
+        // both tabs agree about it. Meshes takes the first pair, Tiles the second.
+        let shown = if on_tiles {
+            &Shelf::ORDER[1..3]
+        } else {
+            &Shelf::ORDER[0..2]
+        };
+        for shelf in shown {
+            let active = *shelf == at;
             row.spawn((
-                Text::new(label),
-                TextColor(if active { ACCENT } else { DIM }),
-                TextFont::from_font_size(10.0),
-            ));
+                ShelfChip(*shelf),
+                Hovered::default(),
+                Node {
+                    padding: crate::chrome::CHIP_PAD,
+                    ..default()
+                },
+                BackgroundColor(if active {
+                    crate::chrome::ROW_SELECTED
+                } else {
+                    Color::NONE
+                }),
+                bevy::picking::Pickable::default(),
+            ))
+            .with_children(|chip| {
+                chip.spawn((
+                    Text::new(shelf.label(library, candidates, kit)),
+                    TextColor(if active { ACCENT } else { DIM }),
+                    TextFont::from_font_size(crate::chrome::text::LABEL),
+                    TextLayout::new(Justify::Left, LineBreak::NoWrap),
+                    bevy::picking::Pickable::IGNORE,
+                ));
+            })
+            .observe(on_shelf_click);
         }
+        // **The idiom, named once.** `left` and `right` walk the strip in the direction it is drawn,
+        // which is the direction work moves — see [`Shelf::ORDER`].
         row.spawn((
-            // `Esc`, not `left`: no `ArrowLeft` binding exists while browsing, and a hint naming a
-            // dead key is the exact lie the key census exists to prevent — this one slipped past it
-            // by being prose (found in the 2026-08-14 guided session prep).
-            Text::new(if on_kit { "  right reopens / Esc backs out" } else { "  right for the kit" }),
-            TextColor(DIM),
-            TextFont::from_font_size(9.0),
+            Text::new("left / right"),
+            TextColor(crate::chrome::LABEL),
+            TextFont::from_font_size(crate::chrome::text::HINT),
+            TextLayout::new(Justify::Left, LineBreak::NoWrap),
         ));
     });
+}
+
+/// **A chip goes where its key goes**, through the same two fields the keys write — so the pointer
+/// and the keyboard cannot come to disagree about which shelf is up.
+fn on_shelf_click(
+    click: On<Pointer<Click>>,
+    chips: Query<&ShelfChip>,
+    project: Option<Res<Project>>,
+    filters: Option<Res<crate::filter::Filters>>,
+    suggestions: Option<Res<crate::labels::Suggestions>>,
+    mode: Option<Res<Mode>>,
+    mut state: Option<ResMut<ImportState>>,
+    mut build: Option<ResMut<crate::build::Build>>,
+) {
+    let (Ok(chip), Some(project), Some(filters), Some(suggestions), Some(mode), Some(state), Some(build)) = (
+        chips.get(click.entity),
+        project,
+        filters,
+        suggestions,
+        mode,
+        state.as_mut(),
+        build.as_mut(),
+    ) else {
+        return;
+    };
+    // The census counts, never a panel — `census_is_the_one_counter` forbids reading
+    // `compositions.compositions.len()` here, and it is the number `Action::KitEnter` guards on.
+    let kit_len =
+        emerge_core::census::of_catalog(&project.library, &project.compositions.compositions)
+            .compositions;
+    match chip.0 {
+        Shelf::Candidates => {
+            build.browsing = None;
+            state.selected_library_id = None;
+            state.status.note("candidates".to_owned());
+        }
+        // **The shape `Action::FocusLibrary` already has**, arm for arm — including the refusal.
+        // A chip that answered an empty library with nothing at all was the same press saying two
+        // different things depending on how it was made.
+        Shelf::Library => {
+            build.browsing = None;
+            match library_ids(&project, &filters, *mode == Mode::Tiles, Some(&suggestions)).first()
+            {
+                Some(first) => {
+                    if state.selected_library_id.is_none() {
+                        state.selected_library_id = Some(first.clone());
+                    }
+                    state.focused_pack = None;
+                    state.status.note("library".to_owned());
+                }
+                None => state.status.note("the library is empty".to_owned()),
+            }
+        }
+        // Row 0, exactly as `Action::KitEnter` does — **including its refusal**, which this arm used
+        // to drop. `KitEnter` guards `kit == 0` so `browsing` is never set on an empty kit; without
+        // the guard a click on `KIT (0)` walked into `compositions.get(0)`'s `None` arm, the branch
+        // whose own comment calls itself "unreachable rather than unlikely".
+        Shelf::Kit => {
+            if kit_len == 0 {
+                state
+                    .status
+                    .note("no tiles in the kit yet - build one and press Cmd+S".to_owned());
+            } else {
+                build.browsing = Some(0);
+            }
+        }
+    }
 }
 
 /// The authored tiles, with the cursor and which one is open for editing.
@@ -4877,7 +6610,7 @@ fn kit_rows(p: &mut ChildSpawnerCommands, project: &Project, cursor: usize) {
         p.spawn((
             Text::new("nothing authored yet — build a tile and press Cmd+S"),
             TextColor(DIM),
-            TextFont::from_font_size(10.0),
+            TextFont::from_font_size(crate::chrome::text::LABEL),
         ));
         return;
     }
@@ -4894,8 +6627,82 @@ fn kit_rows(p: &mut ChildSpawnerCommands, project: &Project, cursor: usize) {
                 c.members.len()
             )),
             TextColor(if here { ACCENT } else { TEXT }),
-            TextFont::from_font_size(11.0),
+            TextFont::from_font_size(crate::chrome::text::BODY),
         ));
+    }
+}
+
+/// The batch readout's root, shown only while a walk exists.
+#[derive(Component)]
+struct LabelProgress;
+/// `LABELING 16/778`, or `HELD AT 16/778`.
+#[derive(Component)]
+struct LabelProgressText;
+/// The filled part of the bar; its width is the fraction done.
+#[derive(Component)]
+struct LabelProgressBar;
+/// The subject in hand right now.
+#[derive(Component)]
+struct LabelProgressNow;
+
+/// **What the batch is doing, where the work is landing.**
+///
+/// Asked for at the keyboard, 2026-08-15: *"I'd like some sort of progress bar to show how it's
+/// working through them... each one that's being defined has showed active."* The only readout was
+/// a status-line string that the next note overwrote, so a walk of several hundred meshes was
+/// indistinguishable from nothing happening — which is exactly how it was reported.
+fn paint_label_progress(
+    queue: Res<crate::labels::LabelQueue>,
+    mut roots: Query<&mut Node, (With<LabelProgress>, Without<LabelProgressBar>)>,
+    mut bars: Query<&mut Node, (With<LabelProgressBar>, Without<LabelProgress>)>,
+    mut heads: Query<&mut Text, (With<LabelProgressText>, Without<LabelProgressNow>)>,
+    mut nows: Query<&mut Text, (With<LabelProgressNow>, Without<LabelProgressText>)>,
+) {
+    if !queue.is_changed() {
+        return;
+    }
+    let running = queue.running();
+    let display = if running {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    for mut node in &mut roots {
+        if node.display != display {
+            node.display = display;
+        }
+    }
+    if !running {
+        return;
+    }
+    let (done, total) = queue.progress();
+    let fraction = if total == 0 {
+        0.0
+    } else {
+        done as f32 / total as f32 * 100.0
+    };
+    for mut bar in &mut bars {
+        let want = Val::Percent(fraction);
+        if bar.width != want {
+            bar.width = want;
+        }
+    }
+    for mut text in &mut heads {
+        let want = if queue.paused() {
+            format!("HELD AT {done}/{total}   Shift+L resumes")
+        } else {
+            format!("LABELING {done}/{total}   Shift+L holds")
+        };
+        if text.0 != want {
+            text.0 = want;
+        }
+    }
+    for mut text in &mut nows {
+        // The active subject, which is the half a bar cannot say.
+        let want = queue.current().unwrap_or("").to_owned();
+        if text.0 != want {
+            text.0 = want;
+        }
     }
 }
 
@@ -4911,6 +6718,108 @@ struct KitRow(usize);
 #[derive(Component)]
 struct ListHeader;
 
+/// **The un-imported shelf: what has been measured and not brought in.**
+///
+/// Lifted out of `rebuild_candidates` when it stopped being the bottom half of the library's list
+/// and became a shelf of its own — see [`shelf_strip`]. The body is unchanged; what moved is that
+/// nothing is drawn above it, so a pack no longer starts wherever the library happened to end.
+fn draw_candidates(
+    p: &mut ChildSpawnerCommands,
+    state: &ImportState,
+    filters: &crate::filter::Filters,
+    project: &Project,
+) {
+    if state.candidates.is_empty() {
+        // `Tab` is Feathers' now — `keys::Action::NextTab` was retired with it, so the old
+        // "press Tab to scan" named a key that does nothing: the dead affordance this editor keeps
+        // finding. Read from the census, so renaming the chord renames the sentence.
+        let say = if state.scanned {
+            "every mesh under assets/ is already in the library".to_owned()
+        } else {
+            format!("press {} to scan", crate::keys::chord(Action::Rescan))
+        };
+        p.spawn((
+            Text::new(say),
+            TextColor(DIM),
+            TextFont::from_font_size(crate::chrome::text::BODY),
+        ));
+        return;
+    }
+    // **Grouped by pack.** A flat list this long is one you scroll past; grouped by where they came
+    // from it is a dozen headings, and an author importing a kit wants that kit rather than
+    // an alphabet.
+    //
+    // The directory, not `kind` — a candidate has no `kind` yet, that being the thing import
+    // is FOR. The folder an artist put it in is the only categorisation that exists before
+    // anyone has looked at it, and it is usually the right one.
+    // **Excluded packs fall to the bottom, under one collapsed group.**
+    //
+    // They used to sit in place, each folded and muted. That is honest but it is still one
+    // row per excluded pack scattered down a list an author is scrolling to find work in —
+    // and a kit that has excluded six packs pays six rows for a fact it already knows.
+    // Chosen at the keyboard, 2026-08-16: one `EXCLUDED` group at the end.
+    //
+    // Still *listed*, never hidden: a mesh that silently disappeared looks identical to one
+    // the scan never found, and there would be no way back except editing `project.ron` by
+    // hand. The group opens, its packs open, and `Shift+R` on a mesh inside restores it —
+    // which is why the group has to reach all the way down to a row.
+    // **The same partition the arrows walk** (`visible_packs`), so the rows on screen and
+    // the rows the keyboard steps through are one list built once. They were two, and the
+    // walk stepped index order while the list drew pack order — which is why the arrows
+    // stopped dead at a collapsed group.
+    let (offered, excluded_packs) = visible_packs(&state, &filters, &project.policy);
+    for (pack, members) in &offered {
+        draw_pack(p, pack, members, &state, false, !pack_is_open(&state, &project.policy, pack));
+    }
+
+    if !excluded_packs.is_empty() {
+        let meshes: usize = excluded_packs.iter().map(|(_, m)| m.len()).sum();
+        let packs_n = excluded_packs.len();
+        p.spawn((
+            UiButton,
+            Hovered::default(),
+            ExcludedHeader,
+            Node {
+                width: Val::Percent(100.0),
+                padding: CHIP_PAD,
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(6.0),
+                margin: UiRect::top(Val::Px(8.0)),
+                ..default()
+            },
+            BackgroundColor(HEADER_BG),
+        ))
+        .with_children(|row| {
+            row.spawn((
+                Node { width: Val::Px(10.0), flex_shrink: 0.0, ..default() },
+                Text::new(if state.excluded_open { "v" } else { ">" }),
+                TextColor(MUTED),
+                TextFont::from_font_size(crate::chrome::text::LABEL),
+            ));
+            row.spawn((
+                Node { flex_grow: 1.0, ..default() },
+                Text::new("EXCLUDED"),
+                TextColor(MUTED),
+                TextFont::from_font_size(crate::chrome::text::LABEL),
+            ));
+            // Names the state and the way out of it, per `docs/ui.md` §1.4.
+            row.spawn((
+                Text::new(format!(
+                    "{packs_n} pack(s), {meshes} mesh(es) — {} restores one",
+                    keys::chord(Action::ExcludePack)
+                )),
+                TextColor(MUTED),
+                TextFont::from_font_size(crate::chrome::text::LABEL),
+            ));
+        });
+        if state.excluded_open {
+            for (pack, members) in &excluded_packs {
+                draw_pack(p, pack, members, &state, true, !pack_is_open(&state, &project.policy, pack));
+            }
+        }
+    }
+}
+
 /// Wholesale rather than diffed: it changes on a rescan and on nothing else, and a diffing rebuild of
 /// a list this long would be more code than the thing it saves.
 fn rebuild_candidates(
@@ -4921,6 +6830,10 @@ fn rebuild_candidates(
     build: Res<crate::build::Build>,
     lists: Query<Entity, With<CandidateList>>,
     headers: Query<Entity, With<ListHeader>>,
+    // The panel serves two tabs and they ask different questions of the same list.
+    mode: Res<Mode>,
+    // A proposal waiting on a human keeps its mesh out of the composing palette — see `composable`.
+    suggestions: Res<crate::labels::Suggestions>,
 ) {
     // **The counts are of what is SHOWN.** A heading reading 318 above a filtered list of four is a
     // heading lying about the thing directly under it — and the count is the one number that says
@@ -4943,19 +6856,29 @@ fn rebuild_candidates(
     // competing for one panel, and the wrong panel. One list showing one of two things is the shape
     // a palette already has.
     let browsing = build.browsing;
+    // Which question this panel is being asked: compose (judged only) or define (everything).
+    let on_tiles = *mode == Mode::Tiles;
     // The census counts, not this panel -- `census_is_the_one_counter` forbids a panel
     // rendering `compositions.compositions.len()` itself.
-    let kit = emerge_core::census::of_catalog(
-        &project.library,
-        &project.compositions.compositions,
-    )
-    .compositions;
+    let kit = emerge_core::census::of_catalog(&project.library, &project.compositions.compositions)
+        .compositions;
+
+    // **Which shelf is up.** Not new state — see [`Shelf`]. The Tiles tab has only the library and
+    // the kit, so a transient `selected_library_id: None` there means "nothing picked yet", not
+    // "show me the candidates"; the walk seeds it on the first `down`.
+    let at = if browsing.is_some() {
+        Shelf::Kit
+    } else if on_tiles || state.selected_library_id.is_some() {
+        Shelf::Library
+    } else {
+        Shelf::Candidates
+    };
 
     // The strip rides the header node, not the list — frozen above the scroll. See [`ListHeader`].
     for header in &headers {
         commands.entity(header).despawn_related::<Children>();
         commands.entity(header).with_children(|p| {
-            tab_strip(p, browsing.is_some(), kit);
+            shelf_strip(p, at, on_tiles, in_library, not_imported, kit);
         });
     }
     for list in &lists {
@@ -4965,111 +6888,157 @@ fn rebuild_candidates(
                 kit_rows(p, &project, row);
                 return;
             }
-            // **What is already a tile**, above what could become one. Both halves are "configuring
-            // the tiles", and an editor that can add but not remove makes a mistyped import permanent.
-            crate::chrome::section(p, &format!("IN LIBRARY  ({in_library})"));
+            // **One shelf, because the strip above says which.** These two were stacked — the
+            // library's rows, then a `NOT YET IMPORTED` heading, then a dozen collapsed packs — so
+            // the second shelf was reachable only by scrolling past the first, and the count that
+            // told you how much was down there was itself below the fold. The headings are gone with
+            // the stacking: the chip carries the count now, and saying it twice is what
+            // `chrome.rs` exists to stop.
+            if at == Shelf::Candidates {
+                draw_candidates(p, &state, &filters, &project);
+                return;
+            }
             for d in project
                 .library
                 .descriptors
                 .iter()
                 .filter(|d| filters.keeps(pane, &d.id))
+                // The Tiles palette composes, so it lists only judged meshes — see `library_ids`,
+                // which the arrows walk by. The two must agree or the keys step onto rows the eye
+                // cannot see.
+                .filter(|d| !on_tiles || composable(d, Some(&suggestions)))
             {
                 let selected = state.selected_library_id.as_deref() == Some(d.id.as_str());
+                // **Green when it has been judged, plain when it still owes an answer.** The one
+                // glance that says whether a mesh can build anything yet; on the Tiles tab every
+                // row is green by construction, which is the point of the split.
+                let judged = composable(d, Some(&suggestions));
                 crate::chrome::list_row(p, selected, LibraryRow(d.id.clone())).with_children(
                     |row| {
                         row.spawn((
                             Text::new(d.id.clone()),
-                            TextColor(TEXT),
-                            TextFont::from_font_size(10.0),
+                            TextColor(if judged { crate::chrome::LABELED } else { TEXT }),
+                            TextFont::from_font_size(crate::chrome::text::LABEL),
                         ));
                     },
                 );
             }
+        });
+    }
+}
 
-            crate::chrome::section(p, &format!("NOT YET IMPORTED  ({not_imported})"));
-            if state.candidates.is_empty() {
-                p.spawn((
-                    Text::new(if state.scanned {
-                        "every mesh under assets/ is already in the library"
+
+/// **Which row this panel's lists have highlighted**, as one comparable value.
+///
+/// Three lists share one scroll area — candidates, the kit's tiles, and the library — and which of
+/// them owns the highlight depends on what the author is doing. `chrome::Follow` needs a single key
+/// to compare frame to frame, and this is it: the same precedence the scroll system reads, stated
+/// once so the two cannot disagree about what "the selection moved" means.
+#[derive(PartialEq, Clone)]
+pub(crate) enum Selected {
+    /// Standing on a pack heading, which the arrows can do since 2026-08-16.
+    Header(String),
+    /// Walking the kit's own tiles (`Build::browsing`), which outranks the rest.
+    Kit(usize),
+    /// A library row, focused by click or by `Cmd`+remove on the Map.
+    Library(String),
+    /// A candidate from the scan, by index.
+    Candidate(usize),
+}
+
+impl Selected {
+    fn now(state: &ImportState, build: &crate::build::Build) -> Selected {
+        match (&build.browsing, &state.selected_library_id, &state.focused_pack) {
+            (Some(row), _, _) => Selected::Kit(*row),
+            (None, Some(id), _) => Selected::Library(id.clone()),
+            // A heading outranks the mesh cursor underneath it — it is what is highlighted.
+            (None, None, Some(pack)) => Selected::Header(pack.clone()),
+            (None, None, None) => Selected::Candidate(state.selected),
+        }
+    }
+}
+
+/// **One pack heading and, unless it is folded, the meshes under it.**
+///
+/// Extracted so the ordinary list and the collapsed `EXCLUDED` group below it draw a pack exactly
+/// the same way — two copies of this would be two ideas of what a pack row looks like, and the
+/// excluded one is the copy nobody would look at.
+#[allow(clippy::too_many_arguments)]
+fn draw_pack(
+    p: &mut ChildSpawnerCommands,
+    pack: &str,
+    members: &[usize],
+    state: &ImportState,
+    excluded: bool,
+    folded: bool,
+) {
+    let pack = pack.to_owned();
+    let members: Vec<usize> = members.to_vec();
+            p.spawn((
+                UiButton,
+                Hovered::default(),
+                PackHeader(pack.clone()),
+                Node {
+                    width: Val::Percent(100.0),
+                    padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(6.0),
+                    margin: UiRect::top(Val::Px(4.0)),
+                    ..default()
+                },
+                // **The heading shows the cursor**, because the arrows can stand on it now.
+                    BackgroundColor(if state.focused_pack.as_deref() == Some(pack.as_str()) {
+                        ROW_SELECTED
                     } else {
-                        "press Tab to scan"
+                        HEADER_BG
                     }),
-                    TextColor(DIM),
-                    TextFont::from_font_size(11.0),
-                ));
-                return;
-            }
-            // **Grouped by pack.** A flat list this long is one you scroll past; grouped by where they came
-            // from it is a dozen headings, and an author importing a kit wants that kit rather than
-            // an alphabet.
-            //
-            // The directory, not `kind` — a candidate has no `kind` yet, that being the thing import
-            // is FOR. The folder an artist put it in is the only categorisation that exists before
-            // anyone has looked at it, and it is usually the right one.
-            for (pack, mut members) in packs(&state.candidates) {
-                // Narrowed, never reordered — the same rule the palette follows.
-                members.retain(|ix| {
-                    state
-                        .candidates
-                        .get(*ix)
-                        .is_some_and(|c| filters.keeps(pane, &c.mesh))
-                });
-                // A pack heading with nothing under it is a heading about nothing.
-                if members.is_empty() {
-                    continue;
-                }
-                let folded = state.folded_packs.contains(&pack);
-                p.spawn((
-                    UiButton,
-                    Hovered::default(),
-                    PackHeader(pack.clone()),
+            ))
+            .with_children(|row| {
+                row.spawn((
                     Node {
-                        width: Val::Percent(100.0),
-                        padding: CHIP_PAD,
-                        flex_direction: FlexDirection::Row,
-                        column_gap: Val::Px(6.0),
-                        margin: UiRect::top(Val::Px(4.0)),
+                        width: Val::Px(10.0),
+                        flex_shrink: 0.0,
                         ..default()
                     },
-                    BackgroundColor(HEADER_BG),
-                ))
-                .with_children(|row| {
-                    row.spawn((
-                        Node {
-                            width: Val::Px(10.0),
-                            flex_shrink: 0.0,
-                            ..default()
-                        },
-                        Text::new(if folded { ">" } else { "v" }),
-                        TextColor(LABEL),
-                        TextFont::from_font_size(10.0),
-                    ));
-                    row.spawn((
-                        Node {
-                            flex_grow: 1.0,
-                            ..default()
-                        },
-                        Text::new(pack.clone()),
-                        TextColor(LABEL),
-                        TextFont::from_font_size(10.0),
-                    ));
-                    // A folded pack says what it is hiding. A bare count on a thin row reads as
-                    // absence when 145 rows just left the screen — the word is what makes "folded"
-                    // and "gone" impossible to confuse.
-                    row.spawn((
-                        Text::new(if folded {
-                            format!("{} hidden — click to open", members.len())
-                        } else {
-                            format!("{}", members.len())
-                        }),
-                        TextColor(LABEL),
-                        TextFont::from_font_size(10.0),
-                    ));
-                });
-                if folded {
-                    continue;
-                }
-                for ix in members {
+                    Text::new(if folded { ">" } else { "v" }),
+                    TextColor(LABEL),
+                    TextFont::from_font_size(crate::chrome::text::LABEL),
+                ));
+                row.spawn((
+                    Node {
+                        flex_grow: 1.0,
+                        ..default()
+                    },
+                    Text::new(pack.clone()),
+                    TextColor(if excluded { MUTED } else { LABEL }),
+                    TextFont::from_font_size(crate::chrome::text::LABEL),
+                ));
+                // **The count, and nothing else.** A folded pack used to say
+                // "{n} hidden — click to open", on the argument that a bare count reads as absence
+                // when 145 rows have just left the screen. Removed at the keyboard, 2026-08-18:
+                // that is a whole sentence on every folded row of a list an author is scrolling,
+                // and the chevron to the left of the name (`>` folded, `v` open) already carries
+                // both the state and the affordance. An excluded pack keeps its words because it
+                // names a state the chevron does NOT show, and the way out of it.
+                row.spawn((
+                    Text::new(if excluded {
+                        // Names the state and the way out of it, per `docs/ui.md` §1.4.
+                        format!(
+                            "excluded ({}) — {} restores",
+                            members.len(),
+                            keys::chord(Action::ExcludePack)
+                        )
+                    } else {
+                        format!("{}", members.len())
+                    }),
+                    TextColor(if excluded { MUTED } else { LABEL }),
+                    TextFont::from_font_size(crate::chrome::text::LABEL),
+                ));
+            });
+            if folded {
+                return;
+            }
+            for ix in members {
                 let Some(c) = state.candidates.get(ix) else {
                     continue;
                 };
@@ -5093,7 +7062,7 @@ fn rebuild_candidates(
                             Some(s) => crate::chrome::severity_style(s).0,
                             None => LABEL,
                         }),
-                        TextFont::from_font_size(11.0),
+                        TextFont::from_font_size(crate::chrome::text::BODY),
                     ));
                     row.spawn((
                         Node {
@@ -5104,13 +7073,10 @@ fn rebuild_candidates(
                         // where it came from, and repeating it on 145 rows is the same word 145 times.
                         Text::new(leaf(&c.mesh)),
                         TextColor(TEXT),
-                        TextFont::from_font_size(10.0),
+                        TextFont::from_font_size(crate::chrome::text::LABEL),
                     ));
                 });
-                }
             }
-        });
-    }
 }
 
 /// **The tile in hand** — what the Tiles tab shows where the mesh tab shows a mesh.
@@ -5120,13 +7086,13 @@ fn rebuild_candidates(
 /// feedback half of Compton's grokloop, which Lai et al.'s second pillar asks to keep short — *"the
 /// speed of learning depends on how short the loop is."* A tile you cannot see is a loop with the
 /// feedback removed.
-fn build_detail(
-    p: &mut ChildSpawnerCommands,
-    build: &crate::build::Build,
-    project: &Project,
-) {
+fn build_detail(p: &mut ChildSpawnerCommands, build: &crate::build::Build, project: &Project) {
     let line = |p: &mut ChildSpawnerCommands, text: String, colour: Color, size: f32| {
-        p.spawn((Text::new(text), TextColor(colour), TextFont::from_font_size(size)));
+        p.spawn((
+            Text::new(text),
+            TextColor(colour),
+            TextFont::from_font_size(size),
+        ));
     };
 
     let Some(comp) = build.open.as_ref() else {
@@ -5184,7 +7150,11 @@ fn build_detail(
     // in thirds by `J` — so what an author reads here is steps between centre and flush, not cells
     // of a lattice the piece can land beside.
     crate::chrome::section(p, "GRID");
-    let n = project.policy.snap_divisor.saturating_pow(build.depth).max(1);
+    let n = project
+        .lattice
+        .snap_divisor
+        .saturating_pow(build.depth)
+        .max(1);
     line(
         p,
         match build.depth {
@@ -5209,7 +7179,12 @@ fn build_detail(
             );
         }
         // The drop lands in the middle whatever the rung, so an empty tile can say exactly where.
-        None => line(p, "empty — the next drop lands centred".to_owned(), ACCENT, 10.0),
+        None => line(
+            p,
+            "empty — the next drop lands centred".to_owned(),
+            ACCENT,
+            10.0,
+        ),
     }
 
     crate::chrome::section(p, "MEMBERS");
@@ -5287,7 +7262,8 @@ fn rebuild_detail(
             // One guard for the pair. They are `Some` together or `None` together — the layered
             // library is derived from the measurements and `Policy::apply` patches entries without
             // renaming them — so a second `else` arm here would be a branch nothing can reach.
-            let (Some(d), Some(placed)) = (state.editing(&project.measured), state.placed(&project))
+            let (Some(d), Some(placed)) =
+                (state.editing(&project.measured), state.placed(&project))
             else {
                 return;
             };
@@ -5319,7 +7295,7 @@ fn rebuild_detail(
             p.spawn((
                 Text::new(id_text),
                 TextColor(id_tint),
-                TextFont::from_font_size(13.0),
+                TextFont::from_font_size(crate::chrome::text::TAB),
                 Node {
                     margin: UiRect::bottom(Val::Px(crate::chrome::GAP_ROW)),
                     ..default()
@@ -5365,14 +7341,14 @@ fn rebuild_detail(
                         p_.model, p_.date, s.confidence
                     )),
                     TextColor(crate::chrome::SUGGEST),
-                    TextFont::from_font_size(10.0),
+                    TextFont::from_font_size(crate::chrome::text::LABEL),
                 ));
                 // The model's identification — the reasoning its answers hang off, and the line a
                 // reviewer sanity-checks first.
                 p.spawn((
                     Text::new(s.what.clone()),
                     TextColor(TEXT),
-                    TextFont::from_font_size(10.0),
+                    TextFont::from_font_size(crate::chrome::text::LABEL),
                 ));
                 // The proposed note as a ghost line — never in the editable buffer.
                 if let Some(note) = &s.note {
@@ -5380,7 +7356,7 @@ fn rebuild_detail(
                         p.spawn((
                             Text::new(format!("proposed: {note}")),
                             TextColor(crate::chrome::SUGGEST),
-                            TextFont::from_font_size(9.0),
+                            TextFont::from_font_size(crate::chrome::text::HINT),
                         ));
                     }
                 }
@@ -5396,7 +7372,7 @@ fn rebuild_detail(
                                 }
                             )),
                             TextColor(crate::chrome::SUGGEST),
-                            TextFont::from_font_size(9.0),
+                            TextFont::from_font_size(crate::chrome::text::HINT),
                         ));
                     }
                 }
@@ -5413,7 +7389,7 @@ fn rebuild_detail(
                             turn.why
                         )),
                         TextColor(crate::chrome::SUGGEST),
-                        TextFont::from_font_size(9.0),
+                        TextFont::from_font_size(crate::chrome::text::HINT),
                     ));
                 }
                 // Vocabulary the model wanted and could not have — a human's decision, elsewhere.
@@ -5428,7 +7404,7 @@ fn rebuild_detail(
                             t.token, t.axis, t.why
                         )),
                         TextColor(crate::chrome::SUGGEST),
-                        TextFont::from_font_size(9.0),
+                        TextFont::from_font_size(crate::chrome::text::HINT),
                     ));
                 }
             }
@@ -5536,7 +7512,7 @@ fn rebuild_detail(
                 row.spawn((
                     Text::new(width_note),
                     TextColor(LABEL),
-                    TextFont::from_font_size(10.0),
+                    TextFont::from_font_size(crate::chrome::text::LABEL),
                 ));
             });
 
@@ -5565,7 +7541,7 @@ fn rebuild_detail(
                         row.spawn((
                             Text::new(format!("  -> proposed: {}", mount_label(Some(m)))),
                             TextColor(crate::chrome::SUGGEST),
-                            TextFont::from_font_size(10.0),
+                            TextFont::from_font_size(crate::chrome::text::LABEL),
                         ));
                     }
                 }
@@ -5600,7 +7576,7 @@ fn rebuild_detail(
                     row.spawn((
                         Text::new("  m up the wall, from the map floor"),
                         TextColor(LABEL),
-                        TextFont::from_font_size(10.0),
+                        TextFont::from_font_size(crate::chrome::text::LABEL),
                     ));
                 });
             }
@@ -5614,7 +7590,7 @@ fn rebuild_detail(
                     p.spawn((
                         Text::new(why),
                         TextColor(ACCENT),
-                        TextFont::from_font_size(9.0),
+                        TextFont::from_font_size(crate::chrome::text::HINT),
                     ));
                     return;
                 }
@@ -5630,22 +7606,25 @@ fn rebuild_detail(
             // size and the project's `divisions`, which is what lets an edge token on a 3 m wall
             // mean the same thing as one on a 0.5 m chair. The subunit's size in millimetres is
             // there because that is the number an author placing a token actually needs.
-            let subunit_mm = emerge_core::grid::SNAP / project.policy.face_bands as f32 * 1000.0;
+            let subunit_mm = emerge_core::grid::SNAP / project.lattice.face_bands as f32 * 1000.0;
             p.spawn((
                 Text::new(format!("{dx} x {dy} x {dz} cells of {subunit_mm:.0} mm")),
                 TextColor(TEXT),
-                TextFont::from_font_size(11.0),
+                TextFont::from_font_size(crate::chrome::text::BODY),
                 DivReadout,
             ));
             p.spawn((
                 Text::new(format!(
-                    "{marked} of {} marked — {} division(s) per {:.1} m tile, from project.ron",
+                    // **`from the map`, not `from project.ron`.** The setting moved on 2026-08-16,
+                    // and a row telling an author to go and edit a file that no longer holds the
+                    // number is worse than a row saying nothing.
+                    "{marked} of {} marked — {} division(s) per {:.1} m tile, from the map",
                     emerge_core::descriptor::Subgrid::volume(div),
-                    project.policy.face_bands,
+                    project.lattice.face_bands,
                     emerge_core::grid::SNAP,
                 )),
                 TextColor(DIM),
-                TextFont::from_font_size(9.0),
+                TextFont::from_font_size(crate::chrome::text::HINT),
                 Node {
                     margin: UiRect::top(Val::Px(crate::chrome::GAP_TIGHT)),
                     ..default()
@@ -5683,7 +7662,7 @@ fn rebuild_detail(
                             col.spawn((
                                 Text::new(layer_label(y, dy)),
                                 TextColor(LABEL),
-                                TextFont::from_font_size(9.0),
+                                TextFont::from_font_size(crate::chrome::text::HINT),
                             ));
 
                             // The column headers, with the layer header in the corner above the row
@@ -5695,11 +7674,21 @@ fn rebuild_detail(
                                 ..default()
                             })
                             .with_children(|row| {
-                                header_button(row, FillHeader { layer: y, span: Span::Layer }, "*");
+                                header_button(
+                                    row,
+                                    FillHeader {
+                                        layer: y,
+                                        span: Span::Layer,
+                                    },
+                                    "*",
+                                );
                                 for x in 0..dx {
                                     header_button(
                                         row,
-                                        FillHeader { layer: y, span: Span::Column(x) },
+                                        FillHeader {
+                                            layer: y,
+                                            span: Span::Column(x),
+                                        },
                                         "v",
                                     );
                                 }
@@ -5714,7 +7703,10 @@ fn rebuild_detail(
                                 .with_children(|row| {
                                     header_button(
                                         row,
-                                        FillHeader { layer: y, span: Span::Row(z) },
+                                        FillHeader {
+                                            layer: y,
+                                            span: Span::Row(z),
+                                        },
                                         ">",
                                     );
                                     for x in 0..dx {
@@ -5739,17 +7731,23 @@ fn rebuild_detail(
                                                 ROW_BG
                                             }),
                                         ))
-                                        .with_children(|b| {
-                                            b.spawn((
-                                                Text::new(cell_glyph(cell).to_owned()),
-                                                // A marked cell is brighter than an empty one —
-                                                // luminance, not hue, per `docs/ui.md` §1.3.
-                                                TextColor(if cell.is_some() { ACCENT } else { LABEL }),
-                                                TextFont::from_font_size(11.0),
-                                                CellGlyph(x, z),
-                                                CellLayer(y),
-                                            ));
-                                        });
+                                        .with_children(
+                                            |b| {
+                                                b.spawn((
+                                                    Text::new(cell_glyph(cell).to_owned()),
+                                                    // A marked cell is brighter than an empty one —
+                                                    // luminance, not hue, per `docs/ui.md` §1.3.
+                                                    TextColor(if cell.is_some() {
+                                                        ACCENT
+                                                    } else {
+                                                        LABEL
+                                                    }),
+                                                    TextFont::from_font_size(crate::chrome::text::BODY),
+                                                    CellGlyph(x, z),
+                                                    CellLayer(y),
+                                                ));
+                                            },
+                                        );
                                     }
                                 });
                             }
@@ -5767,15 +7765,21 @@ fn rebuild_detail(
                         at.0,
                         at.1,
                         at.2,
-                        grid.at(at).map(describe_cell).unwrap_or_else(|| "open".to_owned())
+                        grid.at(at)
+                            .map(describe_cell)
+                            .unwrap_or_else(|| "open".to_owned())
                     ),
                 },
                 None => "no cell picked".to_owned(),
             };
             p.spawn((
                 Text::new(detail),
-                TextColor(if cell_edit.active.is_some() { ACCENT } else { DIM }),
-                TextFont::from_font_size(9.0),
+                TextColor(if cell_edit.active.is_some() {
+                    ACCENT
+                } else {
+                    DIM
+                }),
+                TextFont::from_font_size(crate::chrome::text::HINT),
                 SelectedCellLine,
                 Node {
                     margin: UiRect::top(Val::Px(crate::chrome::GAP_ROW)),
@@ -5923,7 +7927,7 @@ fn rebuild_detail(
                             row.spawn((
                                 Text::new(format!("  -> proposed: {prop}")),
                                 TextColor(crate::chrome::SUGGEST),
-                                TextFont::from_font_size(10.0),
+                                TextFont::from_font_size(crate::chrome::text::LABEL),
                             ));
                         }
                     });
@@ -5960,7 +7964,7 @@ fn rebuild_detail(
                 p.spawn((
                     Text::new("what the importer noticed about this mesh"),
                     TextColor(DIM),
-                    TextFont::from_font_size(9.0),
+                    TextFont::from_font_size(crate::chrome::text::HINT),
                     Node {
                         margin: UiRect::bottom(Val::Px(crate::chrome::GAP_ROW)),
                         ..default()
@@ -5972,12 +7976,12 @@ fn rebuild_detail(
                         block.spawn((
                             Text::new(word),
                             TextColor(tint),
-                            TextFont::from_font_size(9.0),
+                            TextFont::from_font_size(crate::chrome::text::HINT),
                         ));
                         block.spawn((
                             Text::new(f.message.clone()),
                             TextColor(TEXT),
-                            TextFont::from_font_size(10.0),
+                            TextFont::from_font_size(crate::chrome::text::LABEL),
                             // Wrapped prose at 10 px needs the leading; the 1.2 default packs these
                             // into the block of text the screenshot showed.
                             bevy::text::LineHeight::RelativeToFont(1.35),
@@ -5988,7 +7992,7 @@ fn rebuild_detail(
                             block.spawn((
                                 Text::new(fix.clone()),
                                 TextColor(LABEL),
-                                TextFont::from_font_size(10.0),
+                                TextFont::from_font_size(crate::chrome::text::LABEL),
                                 bevy::text::LineHeight::RelativeToFont(1.35),
                                 Node {
                                     margin: UiRect::top(Val::Px(3.0)),
@@ -6013,7 +8017,7 @@ fn rebuild_detail(
 #[cfg(test)]
 mod mount_cycle_tests {
     use emerge_core::descriptor::{
-        mount_height, mount_options, with_mount_height, Mount, DecalHost,
+        DecalHost, Mount, mount_height, mount_options, with_mount_height,
     };
 
     /// The lookup `cycle_mount` performs, extracted so the rule can be tested without an `App`. It
@@ -6070,7 +8074,9 @@ mod mount_cycle_tests {
         for current in [
             Mount::OnFloor,
             Mount::OnCeiling,
-            Mount::OnSurface { class: "worktop".into() },
+            Mount::OnSurface {
+                class: "worktop".into(),
+            },
         ] {
             let at = position_of(&options, &current)
                 .unwrap_or_else(|| panic!("{current:?} is not in the offered list"));
@@ -6112,7 +8118,10 @@ mod scale_field_tests {
         // The field now shows 0.60. Committing that again must change nothing at all.
         let r = bake_width(&mut d, 0.6).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(r, 1.0);
-        assert_eq!(d, after, "committing the shown width must be a byte-level no-op");
+        assert_eq!(
+            d, after,
+            "committing the shown width must be a byte-level no-op"
+        );
     }
 
     /// **The resize is uniform and it is a bake**: every extent axis moves by the ratio, and the
@@ -6124,12 +8133,19 @@ mod scale_field_tests {
         d.align.y_offset = Some(0.06);
         bake_width(&mut d, 0.5).unwrap_or_else(|e| panic!("{e}"));
 
-        assert_eq!(d.extent.footprint, Some((0.5, 0.25)), "both axes, one ratio");
+        assert_eq!(
+            d.extent.footprint,
+            Some((0.5, 0.25)),
+            "both axes, one ratio"
+        );
         assert_eq!(d.extent.height, Some(1.0));
         // The mesh-geometry corrections are proportional to the mesh, so they resize with it.
         assert_eq!(d.align.pivot, Some((0.05, -0.1)));
         assert_eq!(d.align.y_offset, Some(0.03));
-        let s = d.align.scale.unwrap_or_else(|| panic!("a resized piece carries its render scale"));
+        let s = d
+            .align
+            .scale
+            .unwrap_or_else(|| panic!("a resized piece carries its render scale"));
         assert!((s - 0.5).abs() < 1e-6, "{s}");
     }
 
@@ -6157,7 +8173,10 @@ mod scale_field_tests {
         let mut d = piece(1.0, 0.5, 2.0, None);
         let before = d.clone();
         for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
-            assert!(bake_width(&mut d, bad).is_err(), "{bad} must be refused, not stored");
+            assert!(
+                bake_width(&mut d, bad).is_err(),
+                "{bad} must be refused, not stored"
+            );
             assert_eq!(d, before, "{bad} must not have touched the piece");
         }
         // And an unmeasurable mesh cannot be resized at all.
@@ -6181,10 +8200,52 @@ mod scale_field_tests {
 }
 
 #[cfg(test)]
+mod righting_tests {
+    use super::*;
+
+    /// **A turn count steps ninety degrees at a time, and two of them is upside down.**
+    ///
+    /// The count is what the labeler now sends (`vlm::NeedsTurn::turns`), and this is the whole of
+    /// what it means: `bumped` is the only place `align.rotate` moves, so a wrong step here is a
+    /// mesh stored at an orientation it does not have — the invariant `rotate_mesh` exists to hold.
+    #[test]
+    fn a_turn_count_steps_ninety_degrees_at_a_time() {
+        assert_eq!(RotateAxis::X.bumped((0, 0, 0), 1), (90, 0, 0));
+        assert_eq!(
+            RotateAxis::X.bumped((0, 0, 0), 2),
+            (180, 0, 0),
+            "two quarter turns is the answer for a piece standing on its head"
+        );
+        assert_eq!(RotateAxis::Z.bumped((0, 0, 0), 3), (0, 0, 270));
+
+        // It accumulates on what the descriptor already carries, and wraps at a full turn.
+        assert_eq!(RotateAxis::X.bumped((270, 0, 0), 2), (90, 0, 0));
+        assert_eq!(
+            RotateAxis::X.bumped((90, 0, 0), 3),
+            (0, 0, 0),
+            "four quarters is where it started, which is why the gate refuses 4"
+        );
+
+        // And it never touches an axis it was not asked about.
+        assert_eq!(RotateAxis::Y.bumped((90, 0, 270), 2), (90, 180, 270));
+    }
+
+    /// **The ceiling is two, and the second attempt is the one that has to be allowed.**
+    ///
+    /// An odd turn taken the wrong way round comes back as "still not upright" — the direction is
+    /// not asked for (`vlm::NeedsTurn::turns`) — so a ceiling of one would leave every 3-turn piece
+    /// unrighted and blame the model.
+    #[test]
+    fn the_righting_ceiling_leaves_room_for_the_correction() {
+        assert_eq!(MAX_RIGHTINGS, 2);
+    }
+}
+
+#[cfg(test)]
 mod write_library_tests {
     use super::*;
     use emerge_core::descriptor::{Align, Descriptor, Extent};
-    use emerge_core::library::{Library, LIBRARY_VERSION};
+    use emerge_core::library::{LIBRARY_VERSION, Library};
     use emerge_core::policy::{Match, Patch, Policy};
 
     /// The mesh is authored at 1.00 m; this facility builds its walls to 2.40 m.
@@ -6236,18 +8297,29 @@ mod write_library_tests {
             compositions: emerge_core::composition::Compositions::default(),
             root: dir.to_path_buf(),
             emerge_dir: dir.to_path_buf(),
+            project_dir: dir.to_path_buf(),
+            maps_dir: dir.join("maps"),
+            // **One kit, itself.** Not empty: `merged_with` rebuilds the palette from these layers,
+            // so a Project holding none would merge to nothing and the first import in a test would
+            // look like it had deleted the library.
+            kits: vec![emerge_core::kits::KitLayer {
+                dir: dir.to_path_buf(),
+                namespace: "test".to_owned(),
+                measured: measured.clone(),
+                library: library.clone(),
+                policy: policy.clone(),
+            }],
+            lattice: emerge_core::kits::Lattice::default(),
+            // `wall()`'s id carries no namespace, so the directory is what a tile is named after.
+            namespace: dir
+                .file_name()
+                .map_or_else(|| "emerge".to_owned(), |n| n.to_string_lossy().into_owned()),
             library_path: dir.join("library.ron"),
             vocab: emerge_core::vocab::Vocabularies::default(),
             measured,
             library,
             policy,
             masks: Vec::new(),
-            map: emerge_core::map::Map {
-                name: "t".into(),
-                ..emerge_core::map::Map::default()
-            },
-            map_path: dir.join("t.map.ron"),
-            dirty: false,
             touched: Vec::new(),
             triangles: vec![0],
         }
@@ -6274,15 +8346,14 @@ mod write_library_tests {
             "the policy must actually apply, or this test cannot fail"
         );
 
-        project
-            .measured
-            .descriptors[0]
+        project.measured.descriptors[0]
             .lattice_mut()
             .set_solid((0, 0, 0), (6, 2, 1))
             .unwrap_or_else(|| panic!("in range"));
         write_library(&mut project).unwrap_or_else(|e| panic!("{e}"));
 
-        let written = std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
+        let written =
+            std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
         let back = Library::parse(&written).unwrap_or_else(|e| panic!("{e}"));
         let wall = back.get("wall").unwrap_or_else(|| panic!("wall survives"));
         assert_eq!(
@@ -6340,7 +8411,10 @@ mod write_library_tests {
         );
         // And in both live layers, so the palette shows it without a reload.
         assert!(project.measured.get("crate_b").is_some(), "measured");
-        assert!(project.library.get("crate_b").is_some(), "the derived palette");
+        assert!(
+            project.library.get("crate_b").is_some(),
+            "the derived palette"
+        );
         // The piece it was added beside is untouched, and the policy still did not leak downward.
         assert_eq!(
             back.get("wall").and_then(|d| d.extent.height),
@@ -6398,7 +8472,8 @@ mod write_library_tests {
         let dir = temp_dir("refused");
         let mut project = project_in(&dir, stretching_policy());
         write_library(&mut project).unwrap_or_else(|e| panic!("{e}"));
-        let before = std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
+        let before =
+            std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
 
         // Removing `wall` strands the policy patch that names it.
         let mut trial = project.measured.clone();
@@ -6412,7 +8487,10 @@ mod write_library_tests {
             project.measured.get("wall").is_some(),
             "the refusal must not have taken the piece out of the live measurements"
         );
-        assert!(project.library.get("wall").is_some(), "nor out of the derived layer");
+        assert!(
+            project.library.get("wall").is_some(),
+            "nor out of the derived layer"
+        );
         assert_eq!(
             std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}")),
             before,
@@ -6438,9 +8516,13 @@ mod write_library_tests {
             "three writes must leave one stretch, not three"
         );
 
-        let written = std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
+        let written =
+            std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
         let back = Library::parse(&written).unwrap_or_else(|e| panic!("{e}"));
-        let reopened = project.policy.apply(&back).unwrap_or_else(|e| panic!("{e}"));
+        let reopened = project
+            .policy
+            .apply(&back)
+            .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
             reopened.get("wall").and_then(|d| d.align.stretch_y),
             Some(STRETCH),
@@ -6457,15 +8539,20 @@ mod write_library_tests {
         let dir = temp_dir("abort");
         let mut project = project_in(&dir, stretching_policy());
         write_library(&mut project).unwrap_or_else(|e| panic!("{e}"));
-        let before = std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
+        let before =
+            std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
 
         // The only `wall` is gone, so the rule about walls matches nothing.
         project.measured.descriptors.clear();
         let err = write_library(&mut project).err().unwrap_or_default();
         assert!(err.contains("matches no descriptor"), "{err}");
 
-        let after = std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(before, after, "a refused write must not have touched the file");
+        let after =
+            std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            before, after,
+            "a refused write must not have touched the file"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

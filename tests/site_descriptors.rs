@@ -21,6 +21,12 @@ use foundation_vs_slop::site::kit::{
 };
 use foundation_vs_slop::site::pieces::{target_height, SitePiece};
 
+/// **The face lattice a map would carry.** It moved off `project.ron` onto
+/// `Map::face_bands` on 2026-08-16 — a kit has no lattice, a map has exactly one — and
+/// these tests open a kit with no map, so they state the shipped default rather than
+/// reading it off a `Layered` that no longer answers the question.
+const FACE_BANDS: u32 = 1;
+
 fn ozea() -> SiteKit {
     load_site_kit(SITE_KIT_PATH, SITE_PROJECT_DIR).unwrap_or_else(|e| panic!("{e}"))
 }
@@ -150,7 +156,7 @@ fn the_site_kit_derives_the_lattices_its_architecture_implies() {
             .library
             .get(id)
             .unwrap_or_else(|| panic!("{id} is in the kit"));
-        emerge_core::descriptor::divisions(d, layered.policy.face_bands)
+        emerge_core::descriptor::divisions(d, FACE_BANDS)
             .unwrap_or_else(|e| panic!("{e}"))
     };
 
@@ -185,12 +191,18 @@ fn the_site_kit_derives_the_lattices_its_architecture_implies() {
 /// The default (furniture) project's lattices, and the guard that nothing derives an absurd one.
 #[test]
 fn the_furniture_library_derives_workable_lattices() {
-    let layered = emerge_core::policy::layered_library(std::path::Path::new("assets/emerge"))
+    // `assets/emerge/furniture`, not `assets/emerge`. The project root stopped being a kit on
+    // 2026-08-16 — it holds `vocab.ron`, `kits.ron`, `compositions.ron` and `maps/` — and the 75
+    // flat ids that used to sit there are the furniture kit, which is what they always were.
+    let layered = emerge_core::policy::layered_library(std::path::Path::new("assets/emerge/furniture"))
         .unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(layered.policy.face_bands, 1, "the shipped setting is a 0.5 m subunit");
-
+    // The line here used to read the shipped `face_bands` off the policy and assert it was 1. It
+    // cannot any more — the setting is `Map::face_bands` and this opens a kit, not a map — and
+    // asserting `FACE_BANDS == 1` would be a constant checking itself, which is an assertion that
+    // cannot fail and therefore reads as a guarantee while being none. The derivations below are
+    // what the test was always for.
     for d in &layered.library.descriptors {
-        let div = emerge_core::descriptor::divisions(d, layered.policy.face_bands)
+        let div = emerge_core::descriptor::divisions(d, FACE_BANDS)
             .unwrap_or_else(|e| panic!("{e}"));
         let volume = emerge_core::descriptor::Subgrid::volume(div);
         assert!(volume > 0, "{} derives an empty lattice", d.id);
@@ -213,7 +225,7 @@ fn the_furniture_library_derives_workable_lattices() {
 fn the_authored_run_faces_let_the_full_height_family_meet() {
     let layered = emerge_core::policy::layered_library(Path::new("assets/emerge/site"))
         .unwrap_or_else(|e| panic!("{e}"));
-    let div = layered.policy.face_bands;
+    let div = FACE_BANDS;
 
     // Every piece that carries tokens presents the same face size, or they cannot agree at all.
     let face_len = |id: &str| {
@@ -278,7 +290,7 @@ fn every_authored_architectural_piece_agrees_with_a_wall() {
     for kit in ["site", "site_greybox"] {
         let l = emerge_core::policy::layered_library(&Path::new("assets/emerge").join(kit))
             .unwrap_or_else(|e| panic!("{e}"));
-        let div = l.policy.face_bands;
+        let div = FACE_BANDS;
         let wall = l.library.get("site/wall").unwrap_or_else(|| panic!("no wall"));
         let (_, wall_d) = wall.extent.footprint.unwrap_or_else(|| panic!("no footprint"));
 
@@ -358,7 +370,7 @@ fn both_kits_derive_the_same_layers_for_every_piece_with_a_stated_height() {
 
     let layers = |l: &emerge_core::policy::Layered, id: &str| {
         let d = l.library.get(id).unwrap_or_else(|| panic!("{id}"));
-        emerge_core::descriptor::divisions(d, l.policy.face_bands)
+        emerge_core::descriptor::divisions(d, FACE_BANDS)
             .unwrap_or_else(|e| panic!("{e}"))
             .1
     };

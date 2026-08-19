@@ -1,0 +1,28 @@
+// **This game's policy over the shared library.**
+//
+// `library.ron` holds measurements: what the mesh is, how big it is, which way it faces. Those are
+// true in any game that loads the asset. This file holds the things that are true *here* — SCP-9191's
+// architecture, its ceiling height, the height it hangs a sign at. Baking those into the library is
+// how one game's wall height ends up in another game's rooms with the library file as the only
+// evidence.
+//
+// Each patch names either one descriptor id or one `kind` token, and says **why**. Rules apply in the
+// order written and the last word wins, so this reads top to bottom.
+//
+//   ( match: Kind("door"),   because: "...", patch: ( align: ( stretch_y: Some(1.2) ) ) )
+//   ( match: Id("wall_light"), because: "...", patch: ( mount: Some(OnWall(( height: 2.0 ))) ) )
+//
+// It is currently empty, and that is a statement rather than a placeholder: everything in the emerge
+// library today is used at its measured size. The Site kit is the set that carries real policy — its
+// walls are scaled to `WALL_HEIGHT` 2.4 m and its doorframes to `DOORWAY_HEIGHT` 2.0 m, both derived
+// numbers about this facility — and when those pieces migrate to descriptors, their scaling belongs
+// here rather than in the measurements.
+(
+    version: 2,
+    note: Some("SCP-9191 containment site. Nothing in the emerge library is re-proportioned for this facility yet; the Site kit's 2.4 m walls and 2.0 m doorways land here when those pieces migrate."),
+    // `face_bands` and `snap_divisor` left this file on 2026-08-16 for `Map::face_bands` and
+    // `Map::snap_divisor`. They describe a LATTICE, and a kit does not have one -- a map has exactly
+    // one. Two kits on one map disagreeing about how finely a face is read index their faces
+    // differently, so adjacency stops meaning anything, silently, with both values legal.
+    patches: [],
+)

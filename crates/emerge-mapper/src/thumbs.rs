@@ -124,13 +124,26 @@ pub struct ThumbsPlugin;
 
 impl Plugin for ThumbsPlugin {
     fn build(&self, app: &mut App) {
-        // `setup` is registered by the editor's Startup chain, not here: the palette binds these
-        // handles, so it must run after them, and one chain is easier to be sure of than two plugins
-        // agreeing about order.
+        // **On the Maps door `setup` is registered by the editor's own chain, not here**: the
+        // palette binds these handles, so it must run after them, and one chain is easier to be sure
+        // of than two plugins agreeing about order. Every other door has no palette and no chain, so
+        // it registers `setup` itself — `prune` below takes a bare `ResMut<Thumbnails>`, which
+        // panics its system in Bevy 0.19 when nobody built it.
+        //
+        // A run condition, not a build-time read: the door is chosen at runtime now.
+        app.add_systems(
+            OnEnter(crate::screen::Screen::Editor),
+            setup.run_if(|door: Option<Res<crate::tiles::Door>>| {
+                door.is_some_and(|d| *d != crate::tiles::Door::Map)
+            }),
+        );
         app.init_resource::<ThumbGeneration>()
             // Chained so an eviction is visible to the same frame's bake — a pruned id must not be
             // staged one more time off a stale `pending` answer.
-            .add_systems(Update, (prune, bake.run_if(unfinished)).chain());
+            .add_systems(Update,
+                ((prune, bake.run_if(unfinished)).chain())
+                    .run_if(in_state(crate::screen::Screen::Editor)),
+            );
     }
 }
 

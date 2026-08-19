@@ -1,0 +1,25 @@
+(
+    readme: "PROPOSALS ONLY - nothing loads this file. Adopting a token is a human edit: append a row to assets/emerge/vocab.ron (append-only; bits come from position), and for a `surfaces` token ALSO add the row to crates/emerge-core/src/placement/surfaces.rs SURFACE_CLASSES. See docs/llm_rule_authoring.md.",
+    proposals: [
+        (
+            axis: "kind",
+            token: "dorm",
+            why: "bunk beds are characteristic of dorm rooms, not in the existing room list",
+            first_seen: "2026-08-18",
+            model: "qwen3.8-27b",
+            assets: [
+                "low_poly_furniture/glb/Beds/Bunk Bed.glb",
+            ],
+        ),
+        (
+            axis: "kind",
+            token: "stool",
+            why: "backless single-seat seating distinct from a chair",
+            first_seen: "2026-08-18",
+            model: "qwen3.8-27b",
+            assets: [
+                "low_poly_furniture/glb/Chairs/Chair C.glb",
+            ],
+        ),
+    ],
+)

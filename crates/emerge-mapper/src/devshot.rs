@@ -27,7 +27,16 @@ pub struct DrivePlugin;
 
 impl Plugin for DrivePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, watch_drive);
+        // **The sentinel driver is the Maps door's**, because its verb list reaches the map —
+        // `watch_drive` takes `ResMut<OpenMap>`, which four of the five doors do not have, and a
+        // missing `Res<T>` panics its system in Bevy 0.19 rather than skipping it. A run condition
+        // rather than a build-time read: the door is chosen at runtime now.
+        app.add_systems(
+            Update,
+            watch_drive
+                .run_if(in_state(crate::screen::Screen::Editor))
+                .run_if(crate::tiles::Door::map_door_is_open),
+        );
     }
 }
 
@@ -36,6 +45,7 @@ fn watch_drive(
     mut mode: ResMut<crate::tiles::Mode>,
     mut state: ResMut<crate::tiles::ImportState>,
     mut project: ResMut<crate::project::Project>,
+    mut open: ResMut<crate::project::OpenMap>,
     previews: Query<Entity, With<crate::tiles::Preview>>,
     names: Query<&Name>,
     children: Query<&Children>,
@@ -75,6 +85,7 @@ fn watch_drive(
             "stamp" => {
                 crate::editor::stamp_here_for_test(
                     &mut project,
+                    &mut open,
                     &mut editor,
                     &mut compose,
                     (0.0, 0.0),

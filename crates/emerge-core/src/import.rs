@@ -168,41 +168,37 @@ fn collect_glb(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
-/// The id a fresh candidate proposes: the file's stem in the project's one spelling, **qualified
-/// by its set** — the first segment of the mesh's relative path, `site/wall`'s shape.
+/// The id a fresh candidate proposes: **the file's stem, in the project's one spelling, and nothing
+/// else.**
 ///
-/// Two sets may both ship a `chair.glb`, and a bare `chair` makes the second import a collision
-/// the author has to hand-fix. The FIRST segment rather than the immediate parent, because the
-/// parent is usually a format folder (`glb/`, `GLB format/`) that is the same in every set and so
-/// qualifies nothing. A mesh at the asset root has no set and proposes its stem alone.
-pub fn proposed_id(rel: &str, stem: &str) -> String {
-    let file = naming::to_snake_case(stem);
-    let set = rel
-        .rsplit_once('/')
-        .map(|(dir, _)| dir)
-        .and_then(|dir| dir.split('/').next())
-        .map(naming::to_snake_case)
-        .filter(|s| !s.is_empty());
-    match set {
-        Some(set) => format!("{set}/{file}"),
-        None => file,
-    }
+/// It used to qualify by the mesh's *set* — the first segment of its relative path — so that two
+/// packs both shipping `chair.glb` would not collide. That reasoning was sound and the mechanism was
+/// wrong, because a pack folder is not a namespace. A kit is bound in `kits.ron` (`namespace:
+/// "furniture"` → `dir: "furniture"`), and **the binding is what qualifies these ids**; a proposal
+/// carrying `low_poly_furniture/` claims a namespace no project binds, so the commit door refuses it
+/// — every single import, from every pack. Reported at the keyboard, 2026-08-16: the importer could
+/// not import.
+///
+/// The collision the qualifier was defending against is real and rare: across the 770 shipped
+/// meshes, exactly six stems appear in two packs (`wall`, `pipe`, `mug`, `ladder`, `crate`,
+/// `column`). Those now arrive at the commit door as an id that is already taken, named precisely,
+/// for the author to rename. That is a refusal at the keystroke rather than a namespace nobody can
+/// bind — and it keeps a kit's ids in **one** spelling, which is what makes them swappable at all.
+pub fn proposed_id(stem: &str) -> String {
+    naming::to_snake_case(stem)
 }
 
 /// Measure one mesh and propose a descriptor for it.
 pub fn measure(path: &Path, rel: &str, library: &Library) -> Candidate {
     let mut findings = Vec::new();
-    // An id is a starting point, not a decision: the file name in the project's one spelling —
-    // **qualified by its set**. Two sets may both ship a `chair.glb`, and a bare `chair` makes the
-    // second import a collision the author has to hand-fix; the FIRST path segment is the set, the
-    // same shape the site kit already uses (`site/wall`). The first segment rather than the
-    // immediate parent, because the parent is usually a format folder (`glb/`, `GLB format/`) that
-    // is the same in every set and so qualifies nothing.
+    // An id is a starting point, not a decision: the file name in the project's one spelling, and
+    // unqualified — the kit's binding in `kits.ron` is what supplies the namespace. See
+    // [`proposed_id`] for why the pack folder is not one.
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let id = proposed_id(rel, &stem);
+    let id = proposed_id(&stem);
     if naming::to_snake_case(&stem).is_empty() {
         findings.push(Finding::warn(
             format!("`{stem}` leaves nothing usable as an id"),
@@ -342,8 +338,15 @@ fn inspect(
                 "the origin is off-centre by ({:.2}, {:.2}) and {:.2} m off the base",
                 m.pivot.0, m.pivot.1, m.base_y
             ),
-            "the proposed pivot and y_offset correct this; re-export centred with its base at zero \
-             to make it true of the file",
+            // **Only half of this is corrected downstream, and saying otherwise sent an author the
+            // wrong way.** `y_offset` is applied wherever a piece is placed — `stack::datum` adds
+            // it to every resolved height. `pivot` is not: the furniture grammar recentres by it,
+            // and nothing else does, so the same descriptor placed into a map or a tile keeps its
+            // off-centre origin and sits beside its own footprint. Re-exporting is the only fix
+            // that holds for both.
+            "y_offset corrects the sink, but pivot is only honoured by furniture placement — in a \
+             map or a tile this piece will sit off its own footprint. Re-export centred with its \
+             base at zero to fix it for good",
         )),
     }
 
@@ -756,26 +759,24 @@ mod tests {
         f.iter().map(|f| f.message.clone()).collect::<Vec<_>>().join(" | ")
     }
 
-    /// **The set qualifies the name.** Two sets may both ship `chair.glb`; the proposed ids must
-    /// not collide, and the qualifier is the SET (first path segment), never the format folder
-    /// beside the file.
+    /// **A proposal is the stem alone** — the pack folder is not a namespace.
+    ///
+    /// Qualifying by the first path segment made every import from every pack propose an id in a
+    /// namespace no `kits.ron` binds, so the commit door refused all of them. The binding qualifies
+    /// these ids; the proposal must not pre-empt it.
     #[test]
-    fn a_proposed_id_carries_its_set() {
+    fn a_proposal_is_the_stem_and_not_its_pack() {
+        assert_eq!(proposed_id("Chair"), "chair");
         assert_eq!(
-            proposed_id("low_poly_furniture/glb/Chair.glb", "Chair"),
-            "low_poly_furniture/chair"
+            proposed_id("Wall Corner"),
+            "wall_corner",
+            "the project's one spelling, whatever the file was called"
         );
         assert_eq!(
-            proposed_id("ozea/glb/Chair.glb", "Chair"),
-            "ozea/chair",
-            "same file name, different set, different id"
+            proposed_id("Bed Single"),
+            "bed_single",
+            "the id the refusal message told the author to type, proposed for them instead"
         );
-        assert_eq!(
-            proposed_id("kenney_prototype-kit/Models/GLB format/Wall Corner.glb", "Wall Corner"),
-            "kenney_prototype_kit/wall_corner",
-            "the set is the FIRST segment, not the `GLB format` folder beside the file"
-        );
-        assert_eq!(proposed_id("chair.glb", "chair"), "chair", "no set at the asset root");
     }
 
     #[test]

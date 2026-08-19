@@ -1,0 +1,162 @@
+{
+  "steps": [
+    {
+      "label": "open the Tiles tab",
+      "goal": "the three tiles come first -- a room can only be assembled out of pieces the kit already has. The tab opens a blank tile for you",
+      "do": ["press 3"],
+      "checkpoint": "the Tiles tab is open",
+      "recovery": "if a text field has the keyboard the number types into it: press Escape first"
+    },
+    {
+      "label": "start the corner tile",
+      "goal": "a corner is where two solid sides meet. Without one a kit can only make corridors -- there is no way to close a room off",
+      "do": ["press N for a new tile", "type a name like corner", "press Enter"],
+      "checkpoint": "the open tile is unsaved",
+      "recovery": "Escape closes the name prompt without starting the tile"
+    },
+    {
+      "label": "floor it, then stand two walls at right angles",
+      "goal": "the floor is what gives the tile a size and edges, so it goes first. The second wall needs R to turn it a quarter before it can go flush against the NEXT side round -- that quarter turn is the whole difference between a corner and a doubled wall",
+      "do": [
+        "walk to site/floor and press Enter",
+        "press Escape, walk to site/wall, press Enter",
+        "shift-arrow it flush against one side",
+        "press Enter for a second wall, press R to turn it a quarter",
+        "shift-arrow that one flush against an ADJACENT side"
+      ],
+      "checkpoint": "the tile has turns",
+      "with": { "n": 2 },
+      "recovery": "if the second wall will not sit flush, it is probably not turned -- R again. If the arrows walk the list instead of the piece, press Escape then Enter"
+    },
+    {
+      "label": "does it read as a corner",
+      "goal": "before saving it: the two walls should meet, not overlap and not leave a gap at the join. This is the thing no checkpoint can answer and the reason the exercise is worth a person's time",
+      "do": ["orbit the camera and look at where the two walls meet"],
+      "checkpoint": null,
+      "recovery": "if they overlap or leave a gap, say which, and say what flush landed on -- that is the report"
+    },
+    {
+      "label": "save the corner",
+      "goal": "saving is what puts it in the kit, and only what is in the kit can be stamped onto a map",
+      "do": ["press Cmd+S"],
+      "checkpoint": "the tile is saved",
+      "recovery": "if it refuses, the message names what it objected to -- that message is the report"
+    },
+    {
+      "label": "start the wall tile",
+      "goal": "a plain run of wall -- one side solid, the other three open. Four of these and four corners is a room",
+      "do": ["press N", "type a name like wall_run", "press Enter"],
+      "checkpoint": "the open tile is unsaved",
+      "recovery": "if N did nothing, the previous tile may still be unsaved -- Cmd+S first"
+    },
+    {
+      "label": "floor it and flush ONE wall to one side",
+      "goal": "same shape as the corner minus the turned second wall. Flush is the last stop on the arrow ladder, so from centre it should be reachable without overshooting",
+      "do": [
+        "walk to site/floor and press Enter",
+        "press Escape, walk to site/wall, press Enter",
+        "shift-arrow it flush against one side"
+      ],
+      "checkpoint": "the tile contains",
+      "with": { "ids": ["site/wall"], "n": 1 },
+      "recovery": "press J to change the step size if flush is hard to land on, then arrow again"
+    },
+    {
+      "label": "save the wall tile",
+      "goal": "two of the three in the kit",
+      "do": ["press Cmd+S"],
+      "checkpoint": "the kit has tiles",
+      "with": { "n": 6 },
+      "recovery": "if the count looks wrong the kit already shipped some tiles -- that is expected, this asks for more than were there"
+    },
+    {
+      "label": "start the door tile",
+      "goal": "a room you cannot walk into is a box. site/wall_doorway is the wall with the hole already in it, so the door tile is the wall tile with one piece swapped",
+      "do": ["press N", "type a name like doorway", "press Enter"],
+      "checkpoint": "the open tile is unsaved",
+      "recovery": "Cmd+S the previous tile first if N does nothing"
+    },
+    {
+      "label": "floor it and flush the doorway to one side",
+      "goal": "flushed exactly the way the plain wall was -- if the two sit differently, a doorway swapped into a wall run will not line up, and that misalignment is the single most likely defect this whole exercise exists to find",
+      "do": [
+        "walk to site/floor and press Enter",
+        "press Escape, walk to site/wall_doorway, press Enter",
+        "shift-arrow it flush against one side -- the SAME side you used for the wall tile"
+      ],
+      "checkpoint": "the tile contains",
+      "with": { "ids": ["site/wall_doorway"], "n": 1 },
+      "recovery": "if you cannot find it in the list, press F and type doorway, then Enter to hand the keyboard back"
+    },
+    {
+      "label": "save the door tile",
+      "goal": "three tiles: corner, wall, door. That is enough vocabulary for a room",
+      "do": ["press Cmd+S"],
+      "checkpoint": "the kit has tiles",
+      "with": { "n": 7 },
+      "recovery": "if it refuses, the message names what it objected to"
+    },
+    {
+      "label": "go to the Compose tab and arm the wall tile",
+      "goal": "the Map stamps whatever is armed here. This is the step that connects the two halves of the exercise, and it is the one an author is least likely to guess",
+      "do": ["press 4", "walk the list with up and down to your wall tile", "press Enter to arm it"],
+      "checkpoint": "the Compose tab is open",
+      "recovery": "the status line says which tile is armed -- if it says nothing was armed, the list selection is on something else"
+    },
+    {
+      "label": "lay the four walls",
+      "goal": "now the room. Four wall tiles for the sides -- leave the corners for the next step and leave one gap in a side for the door",
+      "do": [
+        "press 1 for the Map tab",
+        "click to stamp the armed tile",
+        "press R or T to turn it so each side faces inward",
+        "lay four runs, leaving a gap at each corner and one gap for the door"
+      ],
+      "checkpoint": "the map has tiles on it",
+      "with": { "n": 4 },
+      "recovery": "if a click places nothing, nothing is armed -- go back to 4 and press Enter on the tile"
+    },
+    {
+      "label": "close the four corners",
+      "goal": "the corner tile is the piece the whole first half was for. Each one needs a different quarter turn",
+      "do": [
+        "press 4, walk to your corner tile, press Enter to arm it",
+        "press 1",
+        "stamp one into each corner, pressing R to turn it to face the right way"
+      ],
+      "checkpoint": "the map has tiles on it",
+      "with": { "n": 8 },
+      "recovery": "if a corner will not sit where you want, say what it did instead -- refusing to overlap is correct, landing somewhere unexpected is not"
+    },
+    {
+      "label": "put the door in",
+      "goal": "the last piece, into the gap you left",
+      "do": [
+        "press 4, walk to your door tile, press Enter to arm it",
+        "press 1",
+        "stamp it into the gap, turned to match the run it sits in"
+      ],
+      "checkpoint": "the map has tiles on it",
+      "with": { "n": 9 },
+      "recovery": "if it will not go in the gap, the gap is probably the wrong size -- say what it refused with"
+    },
+    {
+      "label": "walk round it and say whether it is a room",
+      "goal": "the question the whole exercise is for. Not 'did the checkpoints pass' -- whether what is on screen reads as a room somebody could stand in",
+      "do": [
+        "orbit the camera all the way round",
+        "look along each wall run for seams, gaps and doubled-up pieces",
+        "look at the doorway: is the hole where a person would walk through it"
+      ],
+      "checkpoint": null,
+      "recovery": "everything that looks wrong here is the report, however small -- a seam at one corner and not the others is more useful than a general impression"
+    },
+    {
+      "label": "save the map",
+      "goal": "what you built is on disk in a form the game reads, as nine tile references rather than a hundred loose pieces",
+      "do": ["press Cmd+S"],
+      "checkpoint": "the map is saved",
+      "recovery": "if it refuses, the message names what it objected to -- that message is the report"
+    }
+  ]
+}

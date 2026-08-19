@@ -93,26 +93,77 @@ impl Rig {
     }
 }
 
+/// **A world direction as it appears on screen**, in UI coordinates — and how far it points toward
+/// the viewer.
+///
+/// Returns `(on_screen, toward)`. `on_screen` is in **UI space, where y grows DOWN**, so it places a
+/// node without a second sign convention — and it is deliberately **not normalised**: its length is
+/// the foreshortening, so an axis leaning into the screen draws a shorter arm, which is most of what
+/// makes a compass readable at a glance. `toward` is positive when the axis points at the camera,
+/// which is what lets the arm going away be drawn dimmer instead of three arms all looking equally
+/// near.
+///
+/// Derived from [`Rig::offset`] rather than from [`ISO_OFFSET`], so it stays correct at the anim
+/// bench's non-default elevations instead of only at the isometric one.
+///
+/// # It is not the inverse of `pan_direction`, and the difference is the tilt
+///
+/// [`pan_direction`] answers *"which way does the world move when I press this key"* and works
+/// **in the ground plane** — it flattens the camera's forward before taking a basis, because a pan
+/// must not fly. This answers *"where does this axis appear to point"* and keeps the tilt, because
+/// that is what the eye sees. So the two agree exactly on the **horizontal** component and differ on
+/// the vertical, which is not a drift between two answers but two different questions —
+/// `a_world_axis_and_a_pan_key_agree_about_the_horizontal` pins the half that must match.
+pub fn axis_on_screen(axis: Vec3, rig: &Rig) -> (Vec2, f32) {
+    let tf = Transform::from_translation(rig.offset()).looking_at(Vec3::ZERO, Vec3::Y);
+    // `looking_at` makes -Z the forward, so `back` points from the target toward the camera.
+    let (right, up, back) = (*tf.right(), *tf.up(), *tf.back());
+    (Vec2::new(axis.dot(right), -axis.dot(up)), axis.dot(back))
+}
+
 pub struct ViewPlugin;
 
 impl Plugin for ViewPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Rig>()
             .init_resource::<Pointer>()
-            .add_systems(Startup, setup)
+            .add_systems(OnEnter(crate::screen::Screen::Editor), setup)
             // **Before anything acts on it.** `Phase::Sense` is where this editor decides who owns an
             // input for the frame — the keyboard already does — so the pointer is read once, there,
             // and every spatial system downstream sees one answer.
+            //
+            // **Ungated by screen, and that is a correction.** It ran only in the editor, which was
+            // true while `Pointer` served the map's spatial verbs and nothing else. It now feeds
+            // `surface::retarget_pointer` and `surface::inject_clicks` — the bridge that carries a
+            // pointer to `bevy_picking` at all — so leaving it off on the menu meant the menu's rows
+            // could be given a click observer and never receive one. Where the pointer is is true on
+            // both screens; it was the *readers* that were editor-only.
             .add_systems(Update, sense_pointer.in_set(keys::Phase::Sense))
-            .add_systems(Update, drive.in_set(keys::Phase::Act));
+            .add_systems(Update,
+                (drive.in_set(keys::Phase::Act))
+                    .run_if(in_state(crate::screen::Screen::Editor)),
+            );
     }
 }
 
-fn setup(mut commands: Commands, rig: Res<Rig>) {
+fn setup(mut commands: Commands, rig: Res<Rig>, surface: Res<crate::surface::Surface>) {
     commands.spawn((
         Name::new("editor camera"),
         MainCamera,
         Camera3d::default(),
+        // **The world goes into the surface, not into the window** — `crate::surface` owns why, and
+        // owns the pass order so the three cameras writing one image are one list rather than three
+        // numbers in three files. `ClearColorConfig::None`, because `SurfaceGround` already cleared
+        // this frame and a second clear here would be the only thing the interface ever saw.
+        Camera {
+            order: crate::surface::ORDER_WORLD,
+            clear_color: bevy::camera::ClearColorConfig::None,
+            ..default()
+        },
+        bevy::camera::RenderTarget::Image(bevy::camera::ImageRenderTarget {
+            handle: surface.image.clone(),
+            scale_factor: 1.0,
+        }),
         Projection::from(OrthographicProjection {
             scaling_mode: ScalingMode::FixedVertical {
                 viewport_height: rig.height,
@@ -138,7 +189,6 @@ fn setup(mut commands: Commands, rig: Res<Rig>) {
         },
         Transform::from_xyz(6.0, 12.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
-
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -247,6 +297,18 @@ pub fn sense_pointer(
         // against — `viewport_to_world` needs a camera with a viewport — so this is honestly `None`.
         None => None,
     };
+    // **Into the surface's space, which is physical pixels**, and this is the one place it happens.
+    //
+    // A window reports its cursor in logical pixels, and every camera in this application renders
+    // into an image sized in physical ones at `scale_factor: 1.0` — so the image's logical pixels
+    // *are* physical pixels (`crate::surface`, "the one conversion"). Converting here rather than at
+    // each reader is what keeps `cursor_ground`'s fourteen call sites and `over_ui`'s factor correct
+    // without touching either: against an image target `target_scaling_factor()` is 1.0, so a
+    // pointer already in surface space is multiplied by one.
+    let next = match (&window, next) {
+        (Some(w), Some(at)) => Some(at * w.scale_factor().max(1.0)),
+        _ => None,
+    };
     if pointer.0 != next {
         pointer.0 = next;
     }
@@ -272,8 +334,12 @@ pub fn sense_pointer(
 /// the node sizes by layout, so applying it here would count it twice.
 ///
 /// **Viewport offset is deliberately not subtracted.** The backend does it for cameras rendering to
-/// part of a target; the caller here is the window camera, and the editor's other camera renders to
-/// an offscreen image the pointer never enters.
+/// part of a target; every camera here fills its target.
+///
+/// **The factor is now 1.0, and the arithmetic is unchanged by that.** `MainCamera` renders into
+/// `crate::surface`'s image, whose `target_scaling_factor()` is 1.0, and [`sense_pointer`] already
+/// put the pointer in that image's space. Reading the factor from the camera rather than assuming a
+/// window is what let this survive the move without an edit — keep it that way.
 pub fn over_ui<'a>(
     cursor: Option<Vec2>,
     scale_factor: f32,
@@ -375,6 +441,109 @@ pub fn pan_direction(wish: Vec2, yaw: f32) -> Vec3 {
 mod tests {
     use super::*;
 
+    /// **The compass and the pan keys describe one camera** — on the half where they can.
+    ///
+    /// A compass drawn from its own arithmetic is a second answer to "which way is +X", and this
+    /// editor has paid for a second answer to a spatial question more than once (`brush_at`,
+    /// `cursor_ground`). So this drives both and holds them together.
+    ///
+    /// **The horizontal is where they must agree exactly**, and only the horizontal: `pan_direction`
+    /// flattens the camera's forward (a pan must not fly), while `axis_on_screen` keeps the tilt
+    /// (that is what the eye sees). Asserting the full projection round-trips through
+    /// `pan_direction` is what a first version of this test did, and it failed correctly — the two
+    /// functions answer different questions, and the ground plane is the answer they share.
+    #[test]
+    fn a_world_axis_and_a_pan_key_agree_about_the_horizontal() {
+        for detent in 0..8 {
+            let yaw = detent as f32 * std::f32::consts::FRAC_PI_4;
+            let rig = Rig {
+                yaw,
+                ..Rig::default()
+            };
+            // The world direction the "pan right" key moves along — horizontal by construction.
+            let pan_right = pan_direction(Vec2::X, yaw);
+
+            for axis in [Vec3::X, Vec3::Z, -Vec3::X, -Vec3::Z] {
+                let (on_screen, _) = axis_on_screen(axis, &rig);
+                assert!(
+                    (on_screen.x - axis.dot(pan_right)).abs() < 1e-4,
+                    "at {:.0}deg {axis:?} draws {on_screen:?}, whose sideways part must BE its \
+                     share of the pan-right direction {pan_right:?}",
+                    yaw.to_degrees()
+                );
+                assert!(
+                    on_screen.length() > 0.5,
+                    "a ground axis is never edge-on at an isometric elevation: {on_screen:?}"
+                );
+            }
+
+            // **Y is up the screen and never sideways**, at every yaw — the axis a turntable cannot
+            // move, and the one an author checks the compass for when a piece is lifted.
+            let (up, _) = axis_on_screen(Vec3::Y, &rig);
+            assert!(
+                up.y < -0.5,
+                "world up must read as up the screen (UI y is down): {up:?}"
+            );
+            assert!(up.x.abs() < 1e-3, "and never lean sideways: {up:?}");
+        }
+    }
+
+    /// **Foreshortening is kept, not normalised away** — the length carries information, and at the
+    /// editor's own elevation the information is that there is none to tell the axes apart by.
+    ///
+    /// *Isometric* means **equal measure**: at `ISO_ELEVATION` all three axes project to the same
+    /// screen length, which is exactly why the compass needs colour and labels rather than length
+    /// alone. A first version of this test asserted that world up drew longer than a ground axis;
+    /// it failed, and it was the assertion that was wrong, not the projection.
+    #[test]
+    fn the_isometric_view_foreshortens_all_three_axes_equally() {
+        let rig = Rig::default();
+        let [x, y, z] = [Vec3::X, Vec3::Y, Vec3::Z].map(|a| axis_on_screen(a, &rig).0.length());
+        assert!((x - z).abs() < 1e-4, "the two ground axes: {x} vs {z}");
+        assert!(
+            (x - y).abs() < 1e-4,
+            "equal measure is what isometric MEANS: {x} vs {y}"
+        );
+        assert!(x < 1.0, "and all of them foreshortened: {x}");
+
+        // Tip the camera toward straight-down and the ground axes keep their length while up
+        // collapses — the property that makes the length worth keeping at the bench's elevations.
+        let steep = Rig {
+            elevation: std::f32::consts::FRAC_PI_2 * 0.98,
+            ..Rig::default()
+        };
+        let (flat_x, _) = axis_on_screen(Vec3::X, &steep);
+        let (flat_y, _) = axis_on_screen(Vec3::Y, &steep);
+        assert!(
+            flat_y.length() < flat_x.length() * 0.2,
+            "looking almost straight down, up is nearly edge-on: {flat_y:?} vs {flat_x:?}"
+        );
+    }
+
+    /// **The arm pointing at the viewer is told apart from the one going away.** Without this a
+    /// compass draws three arms that all look equally near, which is the thing a compass is for.
+    #[test]
+    fn the_axis_facing_the_camera_reads_nearer_than_its_opposite() {
+        let rig = Rig::default();
+        for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+            let (_, toward) = axis_on_screen(axis, &rig);
+            let (_, away) = axis_on_screen(-axis, &rig);
+            assert!(
+                toward * away < 0.0,
+                "{axis:?} and its opposite must fall on opposite sides of the screen plane: \
+                 {toward} vs {away}"
+            );
+        }
+        // The isometric camera sits on +X +Y +Z looking at the origin, so all three positive axes
+        // lean toward it — that is what makes the default view show three faces of a box.
+        for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+            assert!(
+                axis_on_screen(axis, &rig).1 > 0.0,
+                "{axis:?} faces the default camera"
+            );
+        }
+    }
+
     /// The camera's own basis at a given yaw: screen right and screen up, as world vectors.
     fn screen_basis(yaw: f32) -> (Vec3, Vec3) {
         let iso = Quat::from_rotation_y(yaw) * ISO_OFFSET;
@@ -407,7 +576,11 @@ mod tests {
                 let at = format!("{name} at detent {detent}");
 
                 if want_x == 0.0 {
-                    assert!(on.x.abs() < 1e-4, "{at}: should not move sideways, moved {:.3}", on.x);
+                    assert!(
+                        on.x.abs() < 1e-4,
+                        "{at}: should not move sideways, moved {:.3}",
+                        on.x
+                    );
                 } else {
                     assert!(
                         on.x.signum() == want_x.signum() && on.x.abs() > 0.1,
@@ -416,7 +589,11 @@ mod tests {
                     );
                 }
                 if want_y == 0.0 {
-                    assert!(on.y.abs() < 1e-4, "{at}: should not move vertically, moved {:.3}", on.y);
+                    assert!(
+                        on.y.abs() < 1e-4,
+                        "{at}: should not move vertically, moved {:.3}",
+                        on.y
+                    );
                 } else {
                     assert!(
                         on.y.signum() == want_y.signum() && on.y.abs() > 0.1,
@@ -436,7 +613,10 @@ mod tests {
     fn the_default_elevation_reproduces_the_iso_offset_exactly() {
         for step in 0..4 {
             let yaw = step as f32 * std::f32::consts::FRAC_PI_2;
-            let rig = Rig { yaw, ..Rig::default() };
+            let rig = Rig {
+                yaw,
+                ..Rig::default()
+            };
             let old = Quat::from_rotation_y(yaw) * ISO_OFFSET;
             assert!(
                 rig.offset().distance(old) < 1.0e-3,
@@ -445,8 +625,14 @@ mod tests {
                 old
             );
         }
-        let grounded = Rig { elevation: 0.0, ..Rig::default() };
-        assert!(grounded.offset().y.abs() < 1.0e-4, "elevation 0 must lie in the ground plane");
+        let grounded = Rig {
+            elevation: 0.0,
+            ..Rig::default()
+        };
+        assert!(
+            grounded.offset().y.abs() < 1.0e-4,
+            "elevation 0 must lie in the ground plane"
+        );
         assert!(
             (grounded.offset().length() - ISO_DISTANCE).abs() < 1.0e-3,
             "the distance is constant across elevation"

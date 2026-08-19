@@ -32,6 +32,8 @@ use emerge_core::vocab::Vocabularies;
 
 /// Where the editor keeps a project's files, relative to the asset root.
 const EMERGE_DIR: &str = "assets/emerge";
+/// Where maps live under it — the same name the editor resolves, so the two cannot drift.
+const MAPS_DIR: &str = "maps";
 
 /// Install the loader when `FVS_EMERGE_MAP` names a map.
 ///
@@ -119,22 +121,52 @@ fn load(name: &str) -> Result<EmergeWorld, String> {
     };
 
     let vocab = Vocabularies::parse(&read("vocab.ron")?)?;
-    // The same call the editor makes: measurements, then this project's policy over them — and the
-    // compositions beside them, validated against the layered library by the same loader. One call,
-    // so the editor and the game cannot disagree about what a project contains.
-    let layered = emerge_core::policy::layered_library(std::path::Path::new(EMERGE_DIR))?;
-    let map = Map::parse(&read(&naming::map_file_name(name))?)?;
+    // **The same call the editor makes**, and now that is a binding rather than a directory: every
+    // kit `kits.ron` binds, each layered with its own policy, merged into the one library a map
+    // resolves against — plus the project's compositions, validated against that merge. One call, so
+    // the editor and the game cannot disagree about what a project contains, and a tile seating two
+    // kits' pieces loads here exactly as it previews there.
+    let project = std::path::Path::new(EMERGE_DIR);
+    let kits = emerge_core::kits::Kits::parse(&read(emerge_core::kits::KITS_FILE)?)?;
+    let bound = emerge_core::kits::bound_library(project, &kits)?;
+    // Maps live in the project's own `maps/`, not beside a kit — there is no kit to be beside once
+    // the library that draws them is the merge.
+    let map_path = project.join(MAPS_DIR).join(naming::map_file_name(name));
+    let text = std::fs::read_to_string(&map_path)
+        .map_err(|e| format!("{}: {e}", map_path.display()))?;
+    let map = Map::parse(&text)?;
     EmergeWorld::with_compositions(
-        layered.library,
+        bound.library,
         map,
         vocab,
-        &layered.compositions.compositions,
+        &bound.compositions.compositions,
+        // **The project's grid, off `kits.ron`.** It was read off the map until 2026-08-16; a map
+        // does have exactly one lattice, but so does the project, and `composition::interface` takes
+        // the band count as an argument — so two maps at different counts gave the same tile two
+        // adjacency contracts. One project, one grid, and the editor reads it from here too.
+        kits.lattice,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The shipped project's grid**, read from `kits.ron` rather than restated here.
+    ///
+    /// Every test below validates against the *shipped* `assets/emerge/furniture` library, and
+    /// `validate_lattices` is answered by the lattice — so a `Lattice::default()` written into these
+    /// tests would be a second statement of this project's grid, silently right until the day the
+    /// project changed it. `emerge_core::kits::Lattice` moved to `kits.ron` on 2026-08-16 precisely
+    /// so there is one place to ask.
+    fn shipped_lattice() -> emerge_core::kits::Lattice {
+        let path = std::path::Path::new(EMERGE_DIR).join(emerge_core::kits::KITS_FILE);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        emerge_core::kits::Kits::parse(&text)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+            .lattice
+    }
 
     /// The project's own files load and agree with each other. This is the loop closing: the editor
     /// writes these, and the game reads them with the same validation.
@@ -148,7 +180,7 @@ mod tests {
         )
         .unwrap_or_else(|e| panic!("{e}"));
         // Through the real load path, so the shipped `project.ron` is exercised rather than skipped.
-        let library = emerge_core::policy::layered_library(std::path::Path::new("assets/emerge"))
+        let library = emerge_core::policy::layered_library(std::path::Path::new("assets/emerge/furniture"))
             .unwrap_or_else(|e| panic!("{e}"))
             .library;
 
@@ -160,6 +192,7 @@ mod tests {
                 ..Map::default()
             },
             vocab,
+            shipped_lattice(),
         )
         .unwrap_or_else(|e| panic!("the shipped project does not load: {e}"));
 
@@ -187,7 +220,7 @@ mod tests {
             &std::fs::read_to_string("assets/emerge/vocab.ron").unwrap_or_else(|e| panic!("{e}")),
         )
         .unwrap_or_else(|e| panic!("{e}"));
-        let layered = emerge_core::policy::layered_library(std::path::Path::new("assets/emerge"))
+        let layered = emerge_core::policy::layered_library(std::path::Path::new("assets/emerge/furniture"))
             .unwrap_or_else(|e| panic!("{e}"));
 
         // **The group is carried here, not read off disk.** It used to come from
@@ -238,6 +271,7 @@ mod tests {
             map,
             vocab,
             &comps.compositions,
+            shipped_lattice(),
         )
         .unwrap_or_else(|e| panic!("the fixture group does not stamp: {e}"));
 
@@ -291,7 +325,13 @@ mod tests {
             &std::fs::read_to_string("assets/emerge/vocab.ron").unwrap_or_else(|e| panic!("{e}")),
         )
         .unwrap_or_else(|e| panic!("{e}"));
-        let layered = emerge_core::policy::layered_library(std::path::Path::new("assets/emerge"))
+        let project = std::path::Path::new("assets/emerge");
+        let kits = emerge_core::kits::Kits::parse(
+            &std::fs::read_to_string(project.join(emerge_core::kits::KITS_FILE))
+                .unwrap_or_else(|e| panic!("{e}")),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let bound = emerge_core::kits::bound_library(project, &kits)
             .unwrap_or_else(|e| panic!("{e}"));
         let map = Map {
             name: "broken".into(),
@@ -303,10 +343,11 @@ mod tests {
             ..Map::default()
         };
         let err = EmergeWorld::with_compositions(
-            layered.library,
+            bound.library,
             map,
             vocab,
-            &layered.compositions.compositions,
+            &bound.compositions.compositions,
+            shipped_lattice(),
         )
         .err()
         .unwrap_or_else(|| panic!("must refuse"));
@@ -320,7 +361,7 @@ mod tests {
             &std::fs::read_to_string("assets/emerge/vocab.ron").unwrap_or_else(|e| panic!("{e}")),
         )
         .unwrap_or_else(|e| panic!("{e}"));
-        let library = emerge_core::policy::layered_library(std::path::Path::new("assets/emerge"))
+        let library = emerge_core::policy::layered_library(std::path::Path::new("assets/emerge/furniture"))
             .unwrap_or_else(|e| panic!("{e}"))
             .library;
 
@@ -333,7 +374,7 @@ mod tests {
             descriptor: "a_piece_that_does_not_exist".into(),
             ..emerge_core::map::Placed::default()
         });
-        let err = EmergeWorld::new(library, map, vocab).err().unwrap_or_default();
+        let err = EmergeWorld::new(library, map, vocab, shipped_lattice()).err().unwrap_or_default();
         assert!(err.contains("does not define"), "{err}");
     }
 

@@ -96,6 +96,41 @@ impl Library {
         Ok(())
     }
 
+    /// **The one namespace this library provides**, or `None` when its ids carry none.
+    ///
+    /// A kit *implements* a namespace rather than owning one. `assets/emerge/site/` and
+    /// `assets/emerge/site_greybox/` define the **identical** 45 `site/*` ids — that is what makes
+    /// one a re-skin of the other, and what lets a project bind `site` to either. So the namespace
+    /// is read off the ids here and never taken from the directory name, which is the skin.
+    ///
+    /// **Every id, not the first one.** Reading only `descriptors.first()` made the answer depend on
+    /// which piece happened to sort first, and that is not a property anybody authored.
+    ///
+    /// `Ok(None)` is not a failure and must not be treated as one: the 75 pieces in the root library
+    /// carry no namespace at all. It is a state the caller answers for itself.
+    pub fn namespace(&self) -> Result<Option<&str>, String> {
+        let mut found: Option<&str> = None;
+        for d in &self.descriptors {
+            let Some((ns, _)) = d.id.split_once('/') else {
+                continue;
+            };
+            match found {
+                None => found = Some(ns),
+                Some(seen) if seen == ns => {}
+                Some(seen) => {
+                    return Err(format!(
+                        "library: `{}` is in namespace `{ns}`, but this library already provides \
+                         `{seen}`. One directory implements one namespace — that is what lets a \
+                         project bind `{seen}` to this kit or to another kit providing the same \
+                         pieces. Split them into two kits.",
+                        d.id
+                    ));
+                }
+            }
+        }
+        Ok(found)
+    }
+
     /// **Every lattice against the project's divisions.**
     ///
     /// Separate from [`Self::validate`] because it needs a number `library.ron` does not carry: a
@@ -186,6 +221,61 @@ mod tests {
             note: None,
             descriptors,
         }
+    }
+
+    /// **A kit's namespace is what all of its ids agree on, not what the first one says.**
+    ///
+    /// The bug this replaces read `descriptors.first()`, so the answer depended on sort order — and
+    /// on an empty or unnamespaced library it substituted the literal `"kit"`, which is a namespace
+    /// nobody chose and which collides across every kit that ever hit it. `assets/emerge/compositions.ron`
+    /// carries a `kit/tile_1` from exactly that.
+    #[test]
+    fn a_librarys_namespace_is_what_every_id_agrees_on() {
+        assert_eq!(
+            lib(vec![d("site/floor"), d("site/wall")])
+                .namespace()
+                .unwrap_or_else(|e| panic!("{e}")),
+            Some("site")
+        );
+
+        // **No namespace is a state, not a failure.** The root library's 75 pieces are all flat.
+        assert_eq!(
+            lib(vec![d("lamp_tall"), d("desk")])
+                .namespace()
+                .unwrap_or_else(|e| panic!("{e}")),
+            None
+        );
+        assert_eq!(
+            lib(Vec::new())
+                .namespace()
+                .unwrap_or_else(|e| panic!("{e}")),
+            None
+        );
+
+        // A namespaced piece among flat ones still answers: the flat ones simply say nothing.
+        assert_eq!(
+            lib(vec![d("lamp_tall"), d("site/floor")])
+                .namespace()
+                .unwrap_or_else(|e| panic!("{e}")),
+            Some("site")
+        );
+    }
+
+    /// **A library that disagrees with itself is refused, and the refusal names both.**
+    ///
+    /// One directory implements one namespace — that is what makes binding possible, and it is the
+    /// question the old `.first()` answered by accident.
+    #[test]
+    fn a_library_in_two_namespaces_is_refused() {
+        let e = lib(vec![d("site/floor"), d("lab/bench")])
+            .namespace()
+            .err()
+            .unwrap_or_else(|| panic!("two namespaces in one directory must be refused"));
+        assert!(e.contains("site") && e.contains("lab"), "{e}");
+        assert!(
+            e.contains("lab/bench"),
+            "and it names the piece that disagreed: {e}"
+        );
     }
 
     #[test]

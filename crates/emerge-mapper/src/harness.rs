@@ -44,9 +44,33 @@ use bevy::prelude::*;
 /// `KeysPlugin` is first because it owns `keys::Live`, which three of the others read as a `Res<_>`.
 pub fn add_editor_plugins(app: &mut App) -> &mut App {
     app.add_plugins((
+        // **First, because it is how this application draws.** Every camera below targets
+        // the surface it owns, and `view::setup` reads `Res<Surface>` on `OnEnter(Editor)`.
+        crate::surface::SurfacePlugin,
+        // **The widget layer's machinery, and the one key it costs.**
+        //
+        // `FeathersPlugins` brings `TabNavigationPlugin`, whose handler claims `Tab` for focus
+        // traversal — and `keys.rs` bound `Tab` to "next panel". Both would have fired: with nothing
+        // focused, `dispatch_focused_input` sends to the PRIMARY WINDOW
+        // (`bevy_input_focus-0.19.0/src/lib.rs:372`), which is where that observer lives, so it is
+        // not gated on the editor having a focus model. The collision test reads `BINDINGS` and
+        // cannot see an upstream observer, and the handler is window-scoped so every headless test
+        // stays green — it would have surfaced as an author's `Tab` key doing two things at once.
+        //
+        // Resolved at the keyboard by **retiring `NextTab`**: it only ever did anything on the Kit
+        // door, where `1`/`2`/`3` already jump to those same three panels, so what was given up is a
+        // duplicate and the census is one row shorter rather than one key more overloaded. `Tab`
+        // now means what it means everywhere else.
+        //
+        // Leaving the plugin out was the alternative and it is worse than it reads: `acquire_focus`
+        // is `pub(crate)` and `click_to_focus` is private, so they cannot be registered by hand —
+        // dropping the plugin drops all three permanently, and clicking a widget would never move
+        // focus.
+        crate::chrome::WidgetsPlugin,
         crate::keys::KeysPlugin,
         crate::chrome::ChromePlugin,
         crate::view::ViewPlugin,
+        crate::compass::CompassPlugin,
         crate::editor::EditorPlugin,
         crate::thumbs::ThumbsPlugin,
         crate::tiles::TilesPlugin,
@@ -55,9 +79,15 @@ pub fn add_editor_plugins(app: &mut App) -> &mut App {
         crate::label_booth::LabelBoothPlugin,
         crate::labels::LabelsPlugin,
         crate::notice::NoticePlugin,
-        // Two plugins, two jobs: the capture rig is the shared crate, the verbs are ours.
-        bevy_devshot::DevShotPlugin,
-        crate::devshot::DrivePlugin,
+        // **Nested, because `add_plugins` tuples cap at 15** (`bevy_app-0.19.0/src/plugin.rs:186`,
+        // `all_tuples!(impl_plugins_tuples, 0, 15, P, S)`) and `WidgetsPlugin` was the sixteenth.
+        // The error names a `Plugins<_>` bound rather than the cap, so this is worth the comment.
+        // Still one list, in one order — the nesting is punctuation, not a second code path.
+        (
+            // Two plugins, two jobs: the capture rig is the shared crate, the verbs are ours.
+            bevy_devshot::DevShotPlugin,
+            crate::devshot::DrivePlugin,
+        ),
     ));
     // **The guide vocabulary belongs in the shared list; the transport does not.**
     //
@@ -99,10 +129,12 @@ pub fn add_debugger_plugins(app: &mut App) -> &mut App {
     app.add_plugins((
         bevy_debugger_bevy::DebuggerPlugin,
         bevy::remote::http::RemoteHttpPlugin::default().with_port(port),
-        // Owns the offscreen camera and image the screenshot method captures. Without it that
-        // method reports a missing target rather than falling back to window capture — which would
-        // need the window raised, and is the whole thing this avoids.
-        crate::debug_capture::DebugCapturePlugin,
+        // **The capture target is `crate::surface`'s, and it is in the SHARED list, not this one.**
+        // There used to be a `DebugCapturePlugin` here owning a second `Camera3d` that mirrored the
+        // map into a square image — and it could never see a panel, because Bevy draws a UI tree to
+        // one camera. The editor now draws world and interface into one surface and shows it in the
+        // window, so the image an agent reads is the image the author is looking at. That belongs
+        // in the shared list because it is how the application draws, not a debugging addition.
     ))
 }
 
@@ -125,7 +157,25 @@ pub fn install_font(app: &mut App, root: &Path) -> Result<(), String> {
 /// `root` is the project directory — the same argument the binary takes, and the asset root, because
 /// a descriptor's `mesh` path is relative to the project.
 pub fn build_headless(root: &Path, map: &str, kit: Option<&str>) -> Result<App, String> {
-    let project = crate::project::Project::open(root, map, kit)?;
+    build_headless_at(root, map, kit, crate::tiles::Mode::default())
+}
+
+/// **The same editor, opened on a named panel.**
+///
+/// The caller names the **panel** it wants and the door follows (`Door::showing`), because every
+/// `Mode` belongs to exactly one door — asking for both would be two facts that can disagree. A test
+/// that wants the Tiles panel gets the Kit door with Tiles showing.
+pub fn build_headless_at(
+    root: &Path,
+    map: &str,
+    kit: Option<&str>,
+    mode: crate::tiles::Mode,
+) -> Result<App, String> {
+    let door = crate::tiles::Door::showing(mode);
+    let project = crate::project::Project::open(root, kit)?;
+    // **The map is its own resource**, because four of the five doors do not have one — see
+    // `project::OpenMap`. The headless harness stands up the Maps door, which does.
+    let open_map = crate::project::OpenMap::open(&project, map)?;
     let mut app = App::new();
 
     // **The injected-pointer resource, without the plugin that owns it.**
@@ -179,8 +229,20 @@ pub fn build_headless(root: &Path, map: &str, kit: Option<&str>) -> Result<App, 
             .disable::<bevy::audio::AudioPlugin>(),
     )
     .insert_resource(project)
+    .insert_resource(open_map)
+    // **Before the plugins**, so `TilesPlugin`'s `init_resource` leaves both alone. The panel is
+    // derived rather than passed: a door opens on its first tab (`Door::opens_on`), so there is no
+    // second place to state where the Kit door starts.
+    .insert_resource(door)
+    .insert_resource(mode)
+    // **Straight into the door.** This entry point IS a door — the menu is the other screen, and it
+    // is what `Screen::default()` gives. Inserting the state rather than initialising it runs
+    // `OnEnter(Editor)` on the first transition, which is where every former `Startup` spawn lives.
+    .insert_state(crate::screen::Screen::Editor)
     .insert_resource(ClearColor(crate::chrome::VOID))
-    .insert_resource(UiScale(1.2));
+    // The same knob the binary sets, by the same name — a literal here would be the second
+    // definition the constant exists to prevent, and headless is where a drift goes unseen.
+    .insert_resource(UiScale(crate::chrome::EDITOR_UI_SCALE));
 
     // **Despawning a light or a mesh must not panic in here.** `backends: None` registers every
     // render type but skips the render world — and with it `SyncWorldPlugin`, whose

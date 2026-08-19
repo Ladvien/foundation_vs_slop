@@ -46,6 +46,22 @@
             // Stated, it cannot be guessed wrong.
             ( name: "marking",    note: "paint, decal or sign applied to a surface — carries no volume" ),
             ( name: "food",       note: "a thing that can be eaten or drunk" ),
+
+            // **Appended 2026-08-18, from the two kits the labeller is being run over**, on the
+            // same rule the colours were appended under: add a token the first time you want to
+            // search by it, and append rather than slot in, because a token's bit is its POSITION.
+            //
+            // `machinery` is the one with measured evidence behind it. Labelling the ten
+            // `scifi_i_004` industrial parts twice, an hour apart at temperature 0.1, produced the
+            // same answer for eight of them — and `Industrial_Wheel` and `Tube_Bundle` flipped
+            // between `prop` and `decor` across the two runs. Neither word is wrong and neither is
+            // right: a motor is not hand-scale dressing and it is not there to be looked at. The
+            // flip was the gap in this axis showing up as noise in the model.
+            ( name: "machinery",  note: "an industrial mechanism or a part of one — motors, gears, pistons, valves, radiators" ),
+            ( name: "terminal",   note: "a console, screen or control panel a person operates" ),
+            ( name: "weapon",     note: "a turret, emplacement or firearm" ),
+            ( name: "barrier",    note: "blocks passage without being the building — railings, bollards, fences" ),
+            ( name: "resource",   note: "raw or refined material carried as an item — ore, ingots, bricks" ),
         ],
     ),
 
@@ -73,6 +89,20 @@
             // that. A second kit is why the game has two manifests, and it is why this pair lives.
             ( name: "pass",             note: "an opening something can be walked through; read by placement::solvers::constraint" ),
             ( name: "door",             note: "fills an opening and can be opened; read by placement::solvers::constraint" ),
+
+            // **Appended 2026-08-18, and NOTHING READS THESE YET.** That is stated rather than
+            // discovered, because being unread is the exact failure this file was written after:
+            // four of eight shipped affordance tokens turned out to have no consumer and nothing
+            // said so (`docs/2026-08-03-asset-schema-audit.md` §2). The difference between then and
+            // now is this paragraph — an author reading the table can see which tokens are wiring
+            // and which are vocabulary waiting for a system.
+            //
+            // Added at the keyboard's request, 2026-08-18, over the objection above.
+            ( name: "flammable",        note: "burns when lit. NO READER YET — authored ahead of the system that will read it" ),
+            ( name: "fragile",          note: "breaks when struck or dropped. NO READER YET" ),
+            ( name: "blocks-sight",     note: "you cannot see past it. NO READER YET — fog reads geometry, not this" ),
+            ( name: "conceals",         note: "something can hide behind or inside it. NO READER YET" ),
+            ( name: "hazardous",        note: "harms whoever touches or is near it. NO READER YET" ),
         ],
     ),
 
@@ -93,6 +123,35 @@
             ( name: "glass",   note: "" ),
             ( name: "worn",    note: "scuffed, chipped, used" ),
             ( name: "clean",   note: "clinical, unmarked" ),
+
+            // **Appended 2026-08-15, on the rule three lines up: add a token the first time you
+            // want to search by it.** A 778-mesh labelling pass is that moment, and it stopped on
+            // its tenth mesh — `plant_a` is blue, `blue` was not a token, and the reprompt could
+            // not rescue it because there was no right answer to reprompt towards. Five colours
+            // that describe a real kit rather than only this one's accent palette.
+            //
+            // Appended rather than slotted in beside the other colours, because a token's bit is
+            // its POSITION and reordering silently re-points every mask already computed.
+            ( name: "blue",    note: "" ),
+            ( name: "green",   note: "" ),
+            ( name: "red",     note: "" ),
+            ( name: "yellow",  note: "" ),
+            ( name: "beige",   note: "cream, tan, off-white — the colour most 'white' props actually are" ),
+
+            // **Appended 2026-08-18.** The colours went in first because a colour is what an author
+            // searches by; these are the MATERIALS, and their absence was the louder gap — a
+            // library with a bed, a sofa, four chairs and a bookcase in it had no word for `wood`
+            // and no word for `fabric`, so every soft furnishing in the kit was describable only by
+            // its colour.
+            //
+            // `emissive` is not `emit`. This axis says how a thing LOOKS; `emit` (effects) says it
+            // casts light into the world that `light::LightField` carries to the AI. An orange
+            // indicator strip is emissive and emits nothing.
+            ( name: "wood",    note: "worked timber" ),
+            ( name: "fabric",  note: "woven or upholstered — cushions, mattresses, curtains" ),
+            ( name: "concrete", note: "poured or precast stone" ),
+            ( name: "emissive", note: "lit from within — glowing panels, indicator strips. LOOKS lit; casting light is `emit`" ),
+            ( name: "striped", note: "hazard striping — the yellow-and-black caution pattern" ),
         ],
     ),
 
@@ -106,6 +165,16 @@
         tokens: [
             ( name: "support", note: "any support top — a drawer, table or desk. Never a bed" ),
             ( name: "worktop", note: "a desk or table worktop specifically" ),
+
+            // **Appended 2026-08-18.** A bookcase and a desk both offer somewhere to put something
+            // and they are not the same offer: a shelf is a narrow ledge inside a unit, and what
+            // sits on one is not what sits on a worktop. Its bit lives in
+            // `placement::surfaces::SURFACE_CLASSES`, which is the table this axis is checked
+            // against — a token here with no row there matches nothing.
+            //
+            // Rule 4 is two-sided, and this token is currently offered by nothing and needed by
+            // nothing, which is legal: the error is a class something NEEDS and nothing offers.
+            ( name: "shelf",   note: "a narrow ledge inside a unit — what a bookcase or rack offers, as against a desk top" ),
         ],
     ),
 

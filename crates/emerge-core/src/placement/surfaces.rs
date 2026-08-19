@@ -20,12 +20,20 @@ use super::manifest::ManifestItem;
 // Infinigen Indoors, Raistrick et al. 2024, arXiv 2406.11824).
 const SURFACE_SUPPORT: u32 = 1 << 0; // any support top (drawer/table/desk) — never a bed
 const SURFACE_WORKTOP: u32 = 1 << 1; // a desk/table worktop only
+// A narrow ledge inside a unit — a bookcase, a rack. Appended 2026-08-18 beside the `shelf` token in
+// this game's `vocab.ron`: a bookcase and a desk both offer somewhere to put something, and what
+// sits on one is not what sits on the other. Deliberately NOT implied by `support`: a piece that
+// offers both says both, the way a desk already says `["support", "worktop"]`.
+const SURFACE_SHELF: u32 = 1 << 2;
 
 /// The whole surface-class vocabulary, token → class bit — THE single source of truth. [`surface_bits`]
 /// resolves through this table and `manifest::validate_manifest` walks it to reject unknown tokens at
 /// load, so growing the vocabulary is one row here — never a second list that can drift.
-pub const SURFACE_CLASSES: &[(&str, u32)] =
-    &[("support", SURFACE_SUPPORT), ("worktop", SURFACE_WORKTOP)];
+pub const SURFACE_CLASSES: &[(&str, u32)] = &[
+    ("support", SURFACE_SUPPORT),
+    ("worktop", SURFACE_WORKTOP),
+    ("shelf", SURFACE_SHELF),
+];
 
 /// Map a support-surface token to its class bit. `support` = any support top; `worktop` = a desk/table.
 /// An unrecognised token is `0` (matches nothing) — and `manifest::validate_manifest` rejects it at load

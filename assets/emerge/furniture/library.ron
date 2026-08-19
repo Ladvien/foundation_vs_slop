@@ -1,0 +1,5288 @@
+(
+    version: 1,
+    note: Some("The editor\'s working library. Seeded once from library_from_manifests.ron and OWNED BY emerge-mapper thereafter — its import mode appends here. The converter\'s output stays pinned separately, so a manifest that moves still fails a test without fighting an author\'s imports."),
+    descriptors: [
+        (
+            id: "lamp_tall",
+            mesh: Some("low_poly_furniture/glb/Lights/Ceiling Light.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.61, 0.61)),
+                height: Some(0.5),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "light",
+            ],
+            effects: [
+                "emit",
+            ],
+            look: [
+                "plastic",
+                "clean",
+                "green",
+            ],
+            placement: (
+                rooms: [
+                    "living",
+                    "bedroom",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Mesh is rotationally symmetric (octagonal body, central pole, top disc) so it has no front. The designer named it a tall lamp but the measured height is only 0.50 m, so it reads as a low table-style lamp rather than a floor lamp."),
+        ),
+        (
+            id: "wall_light",
+            mesh: Some("low_poly_furniture/glb/Lights/Wall Light.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.38, 0.2)),
+                height: Some(0.0),
+            ),
+            mount: Some(OnWall(
+                height: 1.8,
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "fixture",
+                "light",
+            ],
+            effects: [
+                "emit",
+            ],
+            look: [
+                "white",
+                "plastic",
+                "beige",
+            ],
+            placement: (
+                rooms: [
+                    "hall",
+                    "bathroom",
+                    "bedroom",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("The asset is a wall-mounted light fixture with a rectangular, box-like shape. Its low poly design and plastic appearance suggest it is a decorative or functional lighting element."),
+        ),
+        (
+            id: "bin",
+            mesh: Some("low_poly_furniture/glb/Miscellaneous/Bin.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.4, 0.4)),
+                height: Some(0.0),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "bin",
+            ],
+            effects: [],
+            look: [
+                "grey",
+                "plastic",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "bathroom",
+                    "bedroom",
+                    "office",
+                    "kitchen",
+                    "living",
+                    "dining",
+                    "hall",
+                    "lab",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Symmetric tapered bin; the 0.00 m measured height is a data error and the mesh clearly has vertical extent."),
+        ),
+        (
+            id: "globe",
+            mesh: Some("low_poly_furniture/glb/Miscellaneous/Globe.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(East),
+            ),
+            extent: (
+                footprint: Some((0.33, 0.28)),
+                height: Some(0.3),
+            ),
+            mount: Some(OnSurface(
+                class: "support",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "decor",
+            ],
+            effects: [],
+            look: [
+                "brown",
+                "plastic",
+                "blue",
+                "green",
+            ],
+            placement: (
+                rooms: [
+                    "office",
+                    "living",
+                    "bedroom",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Hand-scale globe; place on a desk, shelf or side table, not the floor."),
+        ),
+        (
+            id: "plant_a",
+            mesh: Some("low_poly_furniture/glb/Miscellaneous/Plant A.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.52, 0.55)),
+                height: Some(0.5),
+            ),
+            mount: Some(OnSurface(
+                class: "support",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "decor",
+                "plant",
+            ],
+            effects: [],
+            look: [
+                "brown",
+                "plastic",
+                "blue",
+                "green",
+            ],
+            placement: (
+                rooms: [
+                    "living",
+                    "office",
+                    "bedroom",
+                    "decor",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Low-poly potted plant with a spherical canopy; radially symmetric so no front. Small footprint suits a shelf or table top."),
+        ),
+        (
+            id: "plant_b",
+            mesh: Some("low_poly_furniture/glb/Miscellaneous/Plant B.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.18, 0.18)),
+                height: Some(0.25),
+            ),
+            mount: Some(OnSurface(
+                class: "support",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "decor",
+                "plant",
+            ],
+            effects: [],
+            look: [
+                "brown",
+                "green",
+                "beige",
+            ],
+            placement: (
+                rooms: [
+                    "office",
+                    "living",
+                    "bedroom",
+                    "bathroom",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Low-poly cactus in a terracotta pot; small tabletop scale, place on a shelf or desk."),
+        ),
+        (
+            id: "lamp",
+            mesh: Some("low_poly_furniture/glb/Lights/Lamp C.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.32, 0.32)),
+                height: Some(0.4),
+            ),
+            mount: Some(OnSurface(
+                class: "worktop",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "light",
+            ],
+            effects: [
+                "emit",
+            ],
+            look: [
+                "grey",
+                "metal",
+                "blue",
+            ],
+            placement: (
+                rooms: [
+                    "office",
+                    "bedroom",
+                    "living",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Compact desk lamp; the shade is a faceted blue cylinder over a thin stem and round grey base. Sits on a worktop and emits light."),
+        ),
+        (
+            id: "bed_double",
+            mesh: Some("low_poly_furniture/glb/Beds/Bed Double.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.278)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((1.72, 2.22)),
+                height: Some(0.714),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "bed",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "brown",
+                "clean",
+                "blue",
+            ],
+            placement: (
+                rooms: [
+                    "bedroom",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Double bed with a light wooden frame, white pillows and a blue duvet; the headboard sits on the north side so the bed fronts south."),
+        ),
+        (
+            id: "sofa",
+            mesh: Some("low_poly_furniture/glb/Sofas/Sofa A.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.058)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((2.08, 0.88)),
+                height: Some(0.0),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "seating",
+            ],
+            effects: [],
+            look: [
+                "brown",
+                "clean",
+                "red",
+            ],
+            placement: (
+                rooms: [
+                    "living",
+                    "bedroom",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Two-seat sofa with red cushions and a light wooden base. The seat is for sitting, not a support surface for other props."),
+        ),
+        (
+            id: "table",
+            mesh: Some("low_poly_furniture/glb/Tables/Table A.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((1.66, 0.71)),
+                height: Some(0.796),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                    "worktop",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "table",
+            ],
+            effects: [],
+            look: [
+                "brown",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "dining",
+                    "kitchen",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Plain rectangular table with a symmetric top; no face is the visual front."),
+        ),
+        (
+            id: "chair",
+            mesh: Some("low_poly_furniture/glb/Chairs/Chair A.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.057)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.41, 0.51)),
+                height: Some(0.0),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "seating",
+            ],
+            effects: [],
+            look: [
+                "brown",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "dining",
+                    "living",
+                    "office",
+                    "bedroom",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Plain low-poly wooden chair; the seat top is a usable support surface for small props."),
+        ),
+        (
+            id: "drawer",
+            mesh: Some("low_poly_furniture/glb/Drawers/Drawer A.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, -0.141)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((1.55, 0.6)),
+                height: Some(0.756),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "storage",
+            ],
+            effects: [],
+            look: [
+                "brown",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "bedroom",
+                    "living",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Dresser/chest of drawers; the drawer fronts face the south face. Top is a flat support surface."),
+        ),
+        (
+            id: "shelf",
+            mesh: Some("low_poly_furniture/glb/Shelves/Shelf D.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((1.23, 0.38)),
+                height: Some(0.0),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "storage",
+            ],
+            effects: [],
+            look: [
+                "brown",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "living",
+                    "bedroom",
+                    "office",
+                    "hall",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Open-fronted shelving unit; the open face is the front. The measured height of 0.00 m is a data error — the renders clearly show a tall, upright shelf."),
+        ),
+        (
+            id: "fridge",
+            mesh: Some("low_poly_furniture/glb/Kitchen/Fridge A.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((-0.157, -0.136)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.88, 0.61)),
+                height: Some(0.0),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "appliance",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "kitchen",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Standard kitchen fridge; the flat top can hold small items. Measured height of 0.00 m is clearly a data error for an upright appliance."),
+        ),
+        (
+            id: "tv",
+            mesh: Some("low_poly_furniture/glb/Electronics/TV A.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.88, 0.8)),
+                height: Some(0.5),
+            ),
+            mount: Some(OnSurface(
+                class: "support",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "appliance",
+                "decor",
+            ],
+            effects: [
+                "screen",
+                "uses-electricity",
+            ],
+            look: [
+                "grey",
+                "plastic",
+                "blue",
+            ],
+            placement: (
+                rooms: [
+                    "living",
+                    "bedroom",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Boxy CRT-style TV; the blue face is a cosmetic screen, not a light emitter. Small footprint suggests it sits on a shelf or desk rather than the floor."),
+        ),
+        (
+            id: "crt_large",
+            mesh: Some("retro_tvs/retro_tv_large.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.88, 0.56)),
+                height: Some(0.66),
+            ),
+            mount: Some(OnSurface(
+                class: "support",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "appliance",
+                "decor",
+            ],
+            effects: [
+                "screen",
+            ],
+            look: [
+                "plastic",
+                "worn",
+                "blue",
+                "beige",
+            ],
+            placement: (
+                rooms: [
+                    "living",
+                    "bedroom",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Retro CRT TV with a glowing blue screen and worn cream casing; designed to sit on a shelf or table."),
+        ),
+        (
+            id: "crt_a",
+            mesh: Some("retro_tvs/retro_tv_a.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(East),
+            ),
+            extent: (
+                footprint: Some((0.89, 0.89)),
+                height: Some(0.66),
+            ),
+            mount: Some(OnSurface(
+                class: "support",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "appliance",
+                "decor",
+            ],
+            effects: [
+                "screen",
+                "uses-electricity",
+            ],
+            look: [
+                "plastic",
+                "worn",
+                "blue",
+                "beige",
+            ],
+            placement: (
+                rooms: [
+                    "living",
+                    "bedroom",
+                    "office",
+                    "lab",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Decorative retro TV with a worn, glossy plastic finish and a lit blue screen. Intended to sit on a shelf or desk rather than the floor."),
+        ),
+        (
+            id: "crt_b",
+            mesh: Some("retro_tvs/retro_tv_b.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.51, 0.47)),
+                height: Some(0.45),
+            ),
+            mount: Some(OnSurface(
+                class: "support",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "appliance",
+                "decor",
+            ],
+            effects: [
+                "screen",
+            ],
+            look: [
+                "plastic",
+                "worn",
+                "blue",
+                "beige",
+            ],
+            placement: (
+                rooms: [
+                    "living",
+                    "bedroom",
+                    "office",
+                    "lab",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Small tabletop CRT; the blue screen is a cosmetic display, not a light source. The flat top can hold small props."),
+        ),
+        (
+            id: "armchair",
+            mesh: Some("tinyliving/lovely_armchair.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.82, 0.74)),
+                height: Some(1.03),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "seating",
+            ],
+            effects: [],
+            look: [
+                "brown",
+                "orange",
+                "clean",
+                "blue",
+            ],
+            placement: (
+                rooms: [
+                    "living",
+                    "bedroom",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Single-seat armchair; the seat is for sitting, not a support surface for other props."),
+        ),
+        (
+            id: "loveseat",
+            mesh: Some("tinyliving/lovely_loveseat.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((1.83, 0.75)),
+                height: Some(0.91),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "seating",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "brown",
+                "orange",
+                "beige",
+            ],
+            placement: (
+                rooms: [
+                    "living",
+                    "bedroom",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Two-seater sofa; the seat is for sitting, not a support surface for other props."),
+        ),
+        (
+            id: "dining_chair",
+            mesh: Some("tinyliving/lovely_dining_chair.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.62, 0.66)),
+                height: Some(0.99),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "seating",
+            ],
+            effects: [],
+            look: [
+                "brown",
+                "clean",
+                "blue",
+                "yellow",
+            ],
+            placement: (
+                rooms: [
+                    "dining",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Mid-century dining armchair; the seat cushion is striped blue and yellow on a tan wood frame."),
+        ),
+        (
+            id: "pouffe",
+            mesh: Some("tinyliving/modern_pouffe.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.59, 0.6)),
+                height: Some(0.53),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "decor",
+                "seating",
+            ],
+            effects: [],
+            look: [
+                "orange",
+                "blue",
+                "beige",
+            ],
+            placement: (
+                rooms: [
+                    "living",
+                    "bedroom",
+                    "decor",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Symmetric cube pouffe; the chevron pattern wraps all four sides so no face is a distinct front. The flat top can hold small items."),
+        ),
+        (
+            id: "coffee_table",
+            mesh: Some("tinyliving/sir_cumference_coffee_table.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.73, 0.73)),
+                height: Some(0.5),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                    "worktop",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "table",
+            ],
+            effects: [],
+            look: [
+                "brown",
+                "plastic",
+                "clean",
+                "blue",
+            ],
+            placement: (
+                rooms: [
+                    "living",
+                    "dining",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Symmetric octagonal coffee table; the blue top reads as a smooth matte surface. No distinct front face."),
+        ),
+        (
+            id: "writing_desk",
+            mesh: Some("tinyliving/tiny_desk_for_tiny_living.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.81, 0.85)),
+                height: Some(1.0),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "worktop",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "table",
+            ],
+            effects: [],
+            look: [
+                "brown",
+                "clean",
+                "beige",
+            ],
+            placement: (
+                rooms: [
+                    "office",
+                    "bedroom",
+                    "living",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Sloped writing surface with a small drawer bank (purple, beige, orange fronts) on the front face; angled wooden legs."),
+        ),
+        (
+            id: "bookcase_tall",
+            mesh: Some("tinyliving/power_tower_bookcase.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.85, 0.59)),
+                height: Some(2.4),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "storage",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "brown",
+                "clean",
+                "blue",
+                "yellow",
+            ],
+            placement: (
+                rooms: [
+                    "living",
+                    "bedroom",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Tall storage unit with a mix of open shelving, a white cabinet door, and colored drawers. The front face is the side with the shelving and doors."),
+        ),
+        (
+            id: "dresser_tall",
+            mesh: Some("tinyliving/power_tower_dresser.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(West),
+            ),
+            extent: (
+                footprint: Some((0.52, 0.53)),
+                height: Some(1.51),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "storage",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "brown",
+                "clean",
+                "blue",
+                "yellow",
+            ],
+            placement: (
+                rooms: [
+                    "bedroom",
+                    "living",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Tall chest of drawers with a light wood body and teal, white, and yellow drawer fronts. The flat top can hold small items."),
+        ),
+        (
+            id: "dresser_stubby",
+            mesh: Some("tinyliving/stubby_cubby_dresser.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.68, 0.85)),
+                height: Some(1.36),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "storage",
+            ],
+            effects: [],
+            look: [
+                "brown",
+                "orange",
+                "clean",
+                "beige",
+            ],
+            placement: (
+                rooms: [
+                    "bedroom",
+                    "living",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Compact dresser with a flat top that can hold small items. The front face has a mix of drawers and cabinet doors in different colors."),
+        ),
+        (
+            id: "tiered_shelf",
+            mesh: Some("tinyliving/tiered_shelf.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.3, 0.78)),
+                height: Some(1.04),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "storage",
+            ],
+            effects: [],
+            look: [
+                "brown",
+                "metal",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "bathroom",
+                ],
+                group: Some("bath"),
+            ),
+            subgrid: None,
+            note: Some("Open-fronted two-tier shelf with a towel bar; the stocked side faces the room for viewing."),
+        ),
+        (
+            id: "vanity",
+            mesh: Some("tinyliving/the_sinkz_bathroom_vanity.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.65, 0.68)),
+                height: Some(1.37),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "container",
+                "table",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "brown",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "bathroom",
+                ],
+                group: Some("bath"),
+            ),
+            subgrid: None,
+            note: Some("Bathroom vanity with a sink basin and a single drawer. The top surface is occupied by the sink, so it offers general support rather than a clear worktop."),
+        ),
+        (
+            id: "lavatory",
+            mesh: Some("tinyliving/compact_lavatory.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.39, 0.74)),
+                height: Some(0.89),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "fixture",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "clean",
+                "beige",
+            ],
+            placement: (
+                rooms: [
+                    "bathroom",
+                ],
+                group: Some("bath"),
+            ),
+            subgrid: None,
+            note: Some("Compact one-piece lavatory with integrated tank; lid is open in the render. The bowl opening faces the south face."),
+        ),
+        (
+            id: "desk_lamp_modern",
+            mesh: Some("tinyliving/the_modern_desk_lamp.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(North),
+            ),
+            extent: (
+                footprint: Some((0.25, 0.24)),
+                height: Some(0.56),
+            ),
+            mount: Some(OnSurface(
+                class: "worktop",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "light",
+            ],
+            effects: [
+                "emit",
+            ],
+            look: [
+                "plastic",
+                "clean",
+                "blue",
+            ],
+            placement: (
+                rooms: [
+                    "office",
+                    "bedroom",
+                    "living",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Tripod-based task lamp sized for a desk or shelf; the saturated teal body reads as blue."),
+        ),
+        (
+            id: "barrel_acid",
+            mesh: Some("barrels/barrel_acid.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.56, 0.56)),
+                height: Some(0.86),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "container",
+            ],
+            effects: [],
+            look: [
+                "metal",
+                "worn",
+                "yellow",
+            ],
+            placement: (
+                rooms: [
+                    "lab",
+                    "hall",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Cylindrical and rotationally symmetric, so no front; the radiation symbol is a side decal. The flat top can hold small props."),
+        ),
+        (
+            id: "barrel_acid_b",
+            mesh: Some("barrels/barrel_acid_b.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.56, 0.56)),
+                height: Some(0.86),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "container",
+            ],
+            effects: [],
+            look: [
+                "plastic",
+                "worn",
+                "yellow",
+            ],
+            placement: (
+                rooms: [
+                    "lab",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Symmetric hazard drum; the radiation trefoil is a painted decal, not a light source. Flat top can hold small items."),
+        ),
+        (
+            id: "barrel_metal",
+            mesh: Some("barrels/barrel_metal.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.56, 0.56)),
+                height: Some(0.86),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "container",
+            ],
+            effects: [],
+            look: [
+                "brown",
+                "orange",
+                "metal",
+                "worn",
+            ],
+            placement: (
+                rooms: [
+                    "lab",
+                    "hall",
+                    "decor",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Cylindrical metal drum with rust and painted hazard triangles; symmetric so no front. The flat top can serve as a small support surface."),
+        ),
+        (
+            id: "barrel_rusty",
+            mesh: Some("barrels/barrel_rusty.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.56, 0.56)),
+                height: Some(0.86),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "container",
+            ],
+            effects: [],
+            look: [
+                "brown",
+                "metal",
+                "worn",
+                "red",
+            ],
+            placement: (
+                rooms: [
+                    "lab",
+                    "hall",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Symmetric cylinder with no functional front; the top lid is a flat support surface. The red markings are stencils, not a primary colour."),
+        ),
+        (
+            id: "floor_grate",
+            mesh: Some("ozea/floor_grate.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.03),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((1.0, 1.0)),
+                height: Some(0.06),
+            ),
+            mount: Some(Tiled),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "structure",
+            ],
+            effects: [],
+            look: [
+                "grey",
+                "metal",
+            ],
+            placement: (
+                rooms: [
+                    "bathroom",
+                    "kitchen",
+                    "lab",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("1 m square floor tile with a central grate; place as part of the floor grid, not as a freestanding prop."),
+        ),
+        (
+            id: "floor_light",
+            mesh: Some("ozea/floor_light.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.03),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((1.0, 1.0)),
+                height: Some(0.06),
+            ),
+            mount: Some(Tiled),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "fixture",
+                "light",
+            ],
+            effects: [
+                "emit",
+            ],
+            look: [
+                "black",
+                "metal",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "hall",
+                    "lab",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Symmetric 1x1 m floor tile with emissive cyan strips; embeds into the floor grid as a repeating surface piece."),
+        ),
+        (
+            id: "desk",
+            mesh: Some("low_poly_furniture/glb/Tables/Desk.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((-0.347, -0.126)),
+                rotate: None,
+                front: Some(West),
+            ),
+            extent: (
+                footprint: Some((1.897, 0.895)),
+                height: Some(0.854),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                    "worktop",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "storage",
+                "table",
+            ],
+            effects: [],
+            look: [
+                "brown",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "office",
+                    "bedroom",
+                    "living",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("Long rectangular top with a two-drawer pedestal on the west short end; the drawer side is the visual front."),
+        ),
+        (
+            id: "toilet",
+            mesh: Some("low_poly_furniture/glb/Bathroom/Toilet.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((-0.029, 0.124)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.592, 0.765)),
+                height: Some(0.0),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "fixture",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "brown",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "bathroom",
+                ],
+                group: Some("bath"),
+            ),
+            subgrid: None,
+            note: Some("Bathroom fixture; the bowl and open wooden seat face the room, tank at the back."),
+        ),
+        (
+            id: "sink",
+            mesh: Some("low_poly_furniture/glb/Bathroom/Sink.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((-0.006, 0.09)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.444, 0.29)),
+                height: Some(0.0),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "fixture",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "bathroom",
+                ],
+                group: Some("bath"),
+            ),
+            subgrid: None,
+            note: Some("Pedestal basin; the flat rim around the bowl can take small items. Measured height of 0.00 m is a placeholder — the mesh clearly stands on the floor."),
+        ),
+        (
+            id: "bath",
+            mesh: Some("low_poly_furniture/glb/Bathroom/Bath.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.545, 0.004)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((1.412, 0.781)),
+                height: Some(0.0),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "fixture",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "bathroom",
+                ],
+                group: Some("bath"),
+            ),
+            subgrid: None,
+            note: Some("Bathtub fixture; the long side with the two cross-handle taps is the front. The flat rim can hold small items."),
+        ),
+        (
+            id: "wall_low",
+            mesh: Some("ozea/wall_low.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.20000003, 0.99999845)),
+                height: Some(2.0),
+            ),
+            mount: Some(OnWall(
+                height: 1.0,
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "structure",
+            ],
+            effects: [],
+            look: [
+                "grey",
+                "orange",
+                "glass",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "hall",
+                    "lab",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Full-height (2.0 m) wall element, not a small sconce; the recessed glass face is the visual front. Mount height should be ~1.0 m (mid-height) so the panel spans the wall, not 1.8 m."),
+        ),
+        (
+            id: "wall_window",
+            mesh: Some("ozea/wall_window.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(East),
+            ),
+            extent: (
+                footprint: Some((0.20000003, 2.0000005)),
+                height: Some(2.4),
+            ),
+            mount: Some(InOpening(
+                clear: None,
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "structure",
+            ],
+            effects: [],
+            look: [
+                "grey",
+                "black",
+                "orange",
+                "metal",
+                "glass",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "bathroom",
+                    "bedroom",
+                    "dining",
+                    "hall",
+                    "kitchen",
+                    "lab",
+                    "living",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 4, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 4, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 4, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 4, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Fills a wall opening as a window; the dark panel is glass, not a passable door. Orange trim lines the frame with a small cyan accent strip near the bottom."),
+        ),
+        (
+            id: "water_dispenser",
+            mesh: Some("ozea/water_dispenser.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(East),
+            ),
+            extent: (
+                footprint: Some((0.45, 0.45000008)),
+                height: Some(1.2),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "appliance",
+                "container",
+            ],
+            effects: [
+                "uses-electricity",
+            ],
+            look: [
+                "white",
+                "grey",
+                "orange",
+                "plastic",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "kitchen",
+                    "office",
+                    "lab",
+                    "hall",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Floor-standing dispenser; the dispensing bay and control panel are on the east face, so that is the front to present to the room."),
+        ),
+        (
+            id: "wall_corner",
+            mesh: Some("ozea/wall_corner.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.22, 0.22000015)),
+                height: Some(2.4),
+            ),
+            mount: Some(OnWall(
+                height: 1.8,
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "light",
+                "structure",
+            ],
+            effects: [
+                "emit",
+            ],
+            look: [
+                "grey",
+                "metal",
+                "clean",
+                "blue",
+            ],
+            placement: (
+                rooms: [
+                    "hall",
+                    "lab",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 4, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Symmetric vertical corner element; the geometry has no distinct front face. Intended to be placed at a wall intersection."),
+        ),
+        (
+            id: "wall_header",
+            mesh: Some("ozea/wall_header.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.10000067, 1.0)),
+                height: Some(0.4000001),
+            ),
+            mount: Some(InOpening(
+                clear: None,
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "structure",
+            ],
+            effects: [],
+            look: [
+                "grey",
+                "metal",
+            ],
+            placement: (
+                rooms: [
+                    "hall",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Symmetric structural beam with a central slot; no distinct front face. Spans a wall opening rather than resting on the floor."),
+        ),
+        (
+            id: "wall",
+            mesh: Some("ozea/wall.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.10000067, 1.0000001)),
+                height: Some(2.3999999),
+            ),
+            mount: Some(Tiled),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "structure",
+            ],
+            effects: [],
+            look: [
+                "grey",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "decor",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 4, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 4, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Flat 0.10 x 1.00 x 2.40 m wall panel; symmetric, no front face. Tiled grid piece for building walls."),
+        ),
+        (
+            id: "tube_rack",
+            mesh: Some("ozea/tube_rack.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.051290706, 0.21575937)),
+                height: Some(0.12533914),
+            ),
+            mount: Some(OnSurface(
+                class: "worktop",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "prop",
+                "storage",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "plastic",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "lab",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Benchtop lab dressing; the open top holds tubes and is not a resting surface. Place on a lab counter or worktop, not the floor."),
+        ),
+        (
+            id: "mess_table",
+            mesh: Some("ozea/mess_table.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.6, 0.6)),
+                height: Some(1.2000029),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "worktop",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "table",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "orange",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "dining",
+                    "living",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Symmetric pedestal table; the 1.2 m height reads as a high/bar table rather than a standard dining height."),
+        ),
+        (
+            id: "pipe",
+            mesh: Some("ozea/pipe.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.30028182, 0.87794495)),
+                height: Some(0.30226162),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "fixture",
+            ],
+            effects: [
+                "emit",
+            ],
+            look: [
+                "grey",
+                "metal",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "lab",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Symmetric pipe segment with luminous cyan fluid visible at the ends and in a side slot; the glowing channel reads as a light emitter."),
+        ),
+        (
+            id: "pipe_corner",
+            mesh: Some("ozea/pipe_corner.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.58911353, 0.5891134)),
+                height: Some(0.3022616),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "fixture",
+            ],
+            effects: [
+                "emit",
+            ],
+            look: [
+                "grey",
+                "metal",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "lab",
+                    "hall",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Rotationally symmetric pipe-corner junction with emissive cyan strips on the top and side faces; no single face is the front."),
+        ),
+        (
+            id: "server_rack",
+            mesh: Some("ozea/server_rack.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(East),
+            ),
+            extent: (
+                footprint: Some((0.74377644, 1.3168555)),
+                height: Some(1.8),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "appliance",
+                "storage",
+            ],
+            effects: [
+                "uses-electricity",
+            ],
+            look: [
+                "grey",
+                "black",
+                "orange",
+                "metal",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "lab",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Front (east) face has the door handle, lit display and indicator-light column; south face is a vented side panel. Stands upright on the floor."),
+        ),
+        (
+            id: "medical_vial",
+            mesh: Some("ozea/medical_vial.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.07, 0.07000001)),
+                height: Some(0.15657106),
+            ),
+            mount: Some(OnSurface(
+                class: "support",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "prop",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "grey",
+                "plastic",
+                "clean",
+                "blue",
+            ],
+            placement: (
+                rooms: [
+                    "lab",
+                    "bathroom",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Tiny hand-scale medical dressing; the cross label is the visual front. Place on a counter, shelf or table, not the floor."),
+        ),
+        (
+            id: "map_table",
+            mesh: Some("ozea/map_table.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((1.4596505, 1.4617425)),
+                height: Some(1.0141555),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "worktop",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "table",
+            ],
+            effects: [
+                "emit",
+                "screen",
+            ],
+            look: [
+                "grey",
+                "orange",
+                "metal",
+                "clean",
+                "blue",
+            ],
+            placement: (
+                rooms: [
+                    "lab",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 1, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 1, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (2, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (2, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (2, 0, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (2, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (2, 1, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (2, 1, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Octagonal tech pedestal with a lit central hologram; the flat top is a usable worktop but the central display occupies the middle."),
+        ),
+        (
+            id: "data_folder",
+            mesh: Some("ozea/data_folder.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.2500955, 0.20234182)),
+                height: Some(0.05002685),
+            ),
+            mount: Some(OnSurface(
+                class: "support",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "prop",
+            ],
+            effects: [
+                "screen",
+            ],
+            look: [
+                "grey",
+                "orange",
+                "plastic",
+                "blue",
+            ],
+            placement: (
+                rooms: [
+                    "office",
+                    "lab",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("A small, flat data cartridge intended to be placed on a desk or shelf. The glowing cyan panel on the front face suggests a sci-fi data storage device."),
+        ),
+        (
+            id: "doorframe_double",
+            mesh: Some("ozea/doorframe_double.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.4033714, 2.0031145)),
+                height: Some(1.9799953),
+            ),
+            mount: Some(InOpening(
+                clear: None,
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "door",
+                "structure",
+            ],
+            effects: [
+                "pass",
+            ],
+            look: [
+                "grey",
+                "orange",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "hall",
+                    "office",
+                    "lab",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Hollow double doorframe with no leaves; the cyan strips are decorative trim, not a light source. Fills a wall opening and provides a walkable passage."),
+        ),
+        (
+            id: "floor",
+            mesh: Some("ozea/floor.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((1.0, 1.0)),
+                height: Some(0.05976976),
+            ),
+            mount: Some(Tiled),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "structure",
+            ],
+            effects: [],
+            look: [
+                "grey",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "bathroom",
+                    "bedroom",
+                    "decor",
+                    "dining",
+                    "hall",
+                    "kitchen",
+                    "lab",
+                    "living",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Repeating 1x1 m floor tile with a raised frame and corner caps; place in a grid to cover the ground."),
+        ),
+        (
+            id: "floor_line_cross",
+            mesh: Some("ozea/floor_line_cross.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((1.0, 1.0)),
+                height: Some(0.050000153),
+            ),
+            mount: Some(Decal(
+                on: Floor,
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "marking",
+            ],
+            effects: [],
+            look: [
+                "grey",
+                "clean",
+                "blue",
+            ],
+            placement: (
+                rooms: [
+                    "hall",
+                    "lab",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Symmetric 1m floor tile with a light-blue cross inlay; no front face."),
+        ),
+        (
+            id: "floor_line_straight",
+            mesh: Some("ozea/floor_line_straight.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((1.0, 1.0)),
+                height: Some(0.050000153),
+            ),
+            mount: Some(Decal(
+                on: Floor,
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "marking",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "hall",
+                    "lab",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("A flat, straight line decal used to mark the floor, likely for guidance or decoration."),
+        ),
+        (
+            id: "galley_counter",
+            mesh: Some("ozea/galley_counter.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.6, 1.4)),
+                height: Some(0.74886465),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "worktop",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "table",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "orange",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "kitchen",
+                    "lab",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Freestanding galley counter with a clean white top and orange edge trim. The mesh is symmetric, so it has no designated front face."),
+        ),
+        (
+            id: "locker",
+            mesh: Some("ozea/locker.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(West),
+            ),
+            extent: (
+                footprint: Some((0.45583838, 1.1000001)),
+                height: Some(1.9000001),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "storage",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "grey",
+                "orange",
+                "metal",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "bathroom",
+                    "lab",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Tall vertical locker with two doors, ventilation grilles top and bottom, and orange accent lines."),
+        ),
+        (
+            id: "bench",
+            mesh: Some("ozea/bench.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.54999995, 2.0)),
+                height: Some(0.4500001),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "seating",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "grey",
+                "orange",
+                "plastic",
+            ],
+            placement: (
+                rooms: [
+                    "living",
+                    "hall",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Symmetric bench; the top slats afford a support surface for small items. No distinct front face."),
+        ),
+        (
+            id: "bunk",
+            mesh: Some("ozea/bunk.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(East),
+            ),
+            extent: (
+                footprint: Some((2.2865834, 1.1837324)),
+                height: Some(0.5496147),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "bed",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "grey",
+                "orange",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "bedroom",
+                    "lab",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (2, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (2, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (3, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (3, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (4, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (4, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Single low bunk base; the 0.55m height suggests it is the lower unit of a stacked bunk set."),
+        ),
+        (
+            id: "coffee_machine",
+            mesh: Some("ozea/coffee_machine.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.39999998, 0.5022619)),
+                height: Some(0.67348593),
+            ),
+            mount: Some(OnSurface(
+                class: "worktop",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "worktop",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "appliance",
+            ],
+            effects: [
+                "uses-electricity",
+            ],
+            look: [
+                "white",
+                "grey",
+                "black",
+                "orange",
+                "plastic",
+            ],
+            placement: (
+                rooms: [
+                    "kitchen",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Compact drip coffee machine with a control panel and front drip tray; designed to sit on a kitchen worktop rather than the floor."),
+        ),
+        (
+            id: "doorframe_single",
+            mesh: Some("ozea/doorframe_single.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.45807338, 2.0580733)),
+                height: Some(2.0122507),
+            ),
+            mount: Some(InOpening(
+                clear: None,
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "door",
+                "structure",
+            ],
+            effects: [
+                "pass",
+                "door",
+            ],
+            look: [
+                "grey",
+                "orange",
+                "metal",
+                "glass",
+            ],
+            placement: (
+                rooms: [
+                    "hall",
+                    "office",
+                    "lab",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Doorframe with a glass door leaf; the orange trim and glass panel are on the south face. The frame is designed to be placed in a wall opening."),
+        ),
+        (
+            id: "pallet",
+            mesh: Some("ozea/pallet.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.81082094, 1.2108209)),
+                height: Some(0.12553447),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "container",
+                "prop",
+            ],
+            effects: [],
+            look: [
+                "grey",
+                "orange",
+                "plastic",
+                "worn",
+            ],
+            placement: (
+                rooms: [
+                    "lab",
+                    "office",
+                    "hall",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Flat slatted pallet with orange corner caps; reads as a stackable base for crates or goods in industrial/storage spaces."),
+        ),
+        (
+            id: "slab",
+            mesh: Some("ozea/slab.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((2.171285, 1.0736263)),
+                height: Some(1.7151144),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "appliance",
+                "bed",
+            ],
+            effects: [
+                "uses-electricity",
+            ],
+            look: [
+                "white",
+                "grey",
+                "black",
+                "metal",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "lab",
+                    "bathroom",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("The asset is a high-tech bed with a sleek, modern design, likely used for patient care or therapy. Its clean lines and integrated lighting suggest advanced functionality."),
+        ),
+        (
+            id: "cryo_pod",
+            mesh: Some("ozea/cryo_pod.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((1.0, 1.0231869)),
+                height: Some(2.4084597),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "appliance",
+            ],
+            effects: [
+                "emit",
+                "uses-electricity",
+            ],
+            look: [
+                "white",
+                "grey",
+                "orange",
+                "metal",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "lab",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 4, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 4, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 1, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 2, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 2, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 3, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 3, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 4, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 4, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Tall sci-fi stasis capsule with an illuminated base and a small display on the front face. The orange trim and cyan lights suggest an active, powered state."),
+        ),
+        (
+            id: "door_plaque",
+            mesh: Some("ozea/door_plaque.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.3360979, 0.120000005)),
+                height: Some(0.17999999),
+            ),
+            mount: Some(OnWall(
+                height: 1.8,
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "marking",
+            ],
+            effects: [
+                "emit",
+                "screen",
+            ],
+            look: [
+                "white",
+                "grey",
+                "orange",
+                "metal",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "hall",
+                    "office",
+                    "lab",
+                ],
+                group: None,
+            ),
+            subgrid: None,
+            note: Some("A functional sign with a lit display panel, used to label a room or door."),
+        ),
+        (
+            id: "utility_cart",
+            mesh: Some("ozea/utility_cart.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(East),
+            ),
+            extent: (
+                footprint: Some((1.0840936, 0.8130703)),
+                height: Some(0.9038393),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "container",
+                "prop",
+            ],
+            effects: [],
+            look: [
+                "grey",
+                "metal",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "kitchen",
+                    "lab",
+                    "office",
+                    "hall",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Low slatted platform on four wheels with two tall handle frames; the platform top is a usable support surface for stacked items."),
+        ),
+        (
+            id: "step_ladder",
+            mesh: Some("ozea/step_ladder.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.6716165, 0.56346023)),
+                height: Some(0.84496397),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "prop",
+            ],
+            effects: [],
+            look: [
+                "grey",
+                "orange",
+                "metal",
+            ],
+            placement: (
+                rooms: [
+                    "kitchen",
+                    "bathroom",
+                    "lab",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Compact step ladder that stands on the floor; the top platform and steps can be used as small support surfaces."),
+        ),
+        (
+            id: "control_desk",
+            mesh: Some("ozea/control_desk.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((1.4703499, 3.6820874)),
+                height: Some(1.1314399),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "worktop",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "table",
+            ],
+            effects: [
+                "screen",
+            ],
+            look: [
+                "grey",
+                "black",
+                "orange",
+                "glass",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "lab",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 4),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 5),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 6),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 4),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 5),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 6),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 4),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 5),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 6),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 1, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 1, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 1, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 1, 4),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 1, 5),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 1, 6),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (2, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (2, 0, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (2, 0, 6),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (2, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (2, 1, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (2, 1, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (2, 1, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (2, 1, 4),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (2, 1, 5),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (2, 1, 6),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Long monitoring desk with two lit angled screens and orange accent trim; the screens face the long side."),
+        ),
+        (
+            id: "command_chair",
+            mesh: Some("ozea/command_chair.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(East),
+            ),
+            extent: (
+                footprint: Some((0.59183437, 0.54699314)),
+                height: Some(1.0975693),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "seating",
+            ],
+            effects: [],
+            look: [
+                "grey",
+                "black",
+                "orange",
+                "plastic",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "office",
+                    "lab",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Modern angular command chair with a high back, armrests and a wide pedestal base; orange accents on the headrest and arm tops."),
+        ),
+        (
+            id: "bedside_table",
+            mesh: Some("ozea/bedside_table.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.4033082, 0.5)),
+                height: Some(0.5),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "storage",
+                "table",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "grey",
+                "orange",
+                "plastic",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "bedroom",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Compact bedside table with a top drawer and a lower open compartment; the front face (with the drawer handle) is the side to present to the room."),
+        ),
+        (
+            id: "crate",
+            mesh: Some("ozea/crate.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.0, 0.0)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((1.0, 1.0000001)),
+                height: Some(1.0),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "container",
+            ],
+            effects: [],
+            look: [
+                "grey",
+                "worn",
+            ],
+            placement: (
+                rooms: [
+                    "hall",
+                    "lab",
+                    "office",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 1, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Symmetric 1 m cube crate with reinforced corners; no distinct front face."),
+        ),
+        (
+            id: "shower",
+            mesh: Some("low_poly_furniture/glb/Bathroom/Shower.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.047096163, -0.030176818)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.6982294, 0.6982294)),
+                height: Some(1.8126979),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "door",
+                "structure",
+            ],
+            effects: [],
+            look: [
+                "grey",
+                "glass",
+            ],
+            placement: (
+                rooms: [
+                    "bathroom",
+                ],
+                group: Some("bath"),
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Corner shower unit with a hinged glass door on the front face; the door leaf is the passable opening."),
+        ),
+        (
+            id: "toilet_roll_holder",
+            mesh: Some("low_poly_furniture/glb/Bathroom/Toilet Roll Holder.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.00043097883, 0.0014442019)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.17700273, 0.13511372)),
+                height: Some(0.12959231),
+            ),
+            mount: Some(OnWall(
+                height: 1.0,
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "fixture",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "plastic",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "bathroom",
+                ],
+                group: Some("bath"),
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Bathroom fixture; the flat plate is the wall face and the spindle projects toward the room."),
+        ),
+        (
+            id: "toilet_rolls",
+            mesh: Some("low_poly_furniture/glb/Bathroom/Toilet Rolls.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((-0.0028229877, -0.0000000018626451)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.20887722, 0.10349277)),
+                height: Some(0.20446084),
+            ),
+            mount: Some(OnSurface(
+                class: "support",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "prop",
+            ],
+            effects: [],
+            look: [
+                "white",
+                "clean",
+            ],
+            placement: (
+                rooms: [
+                    "bathroom",
+                ],
+                group: Some("bath"),
+            ),
+            subgrid: None,
+            note: Some("Tiny bathroom dressing; place on a shelf, counter or holder rather than the floor."),
+        ),
+        (
+            id: "towel_holder",
+            mesh: Some("low_poly_furniture/glb/Bathroom/Towel Holder.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.025406629, 0.015581835)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.99029845, 0.17088532)),
+                height: Some(0.51730883),
+            ),
+            mount: Some(OnWall(
+                height: 1.2,
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "fixture",
+            ],
+            effects: [],
+            look: [
+                "metal",
+                "clean",
+                "blue",
+            ],
+            placement: (
+                rooms: [
+                    "bathroom",
+                ],
+                group: Some("bath"),
+            ),
+            subgrid: None,
+            note: Some("Towel bar with a draped towel; mounts flat to a bathroom wall at roughly waist height."),
+        ),
+        (
+            id: "bed_single",
+            mesh: Some("low_poly_furniture/glb/Beds/Bed Single.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((-0.0012978464, 0.17346516)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.9921278, 2.2195797)),
+                height: Some(0.7138453),
+            ),
+            mount: None,
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: None,
+        ),
+        (
+            id: "bunk_bed",
+            mesh: Some("low_poly_furniture/glb/Beds/Bunk Bed.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.046103776, 0.07024437)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((1.0371472, 2.2195797)),
+                height: Some(1.713827),
+            ),
+            mount: None,
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 1, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 1, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 1, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 2, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 2, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 2, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 2, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: None,
+        ),
+        (
+            id: "triple_bunk_bed",
+            mesh: Some("low_poly_furniture/glb/Beds/Triple Bunk Bed.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.049822807, 0.0681262)),
+                rotate: None,
+                front: None,
+            ),
+            extent: (
+                footprint: Some((1.0371472, 2.2195802)),
+                height: Some(2.847065),
+            ),
+            mount: None,
+            clearance: [],
+            offers: (
+                surfaces: [],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 0, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 1, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 2, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 3, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 4, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 4, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 4, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 4, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 5, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 5, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 5, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (0, 5, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 1, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 1, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 2, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 2, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 2, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 2, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 3, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 3, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 4, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 4, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 4, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 4, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 5, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 5, 1),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 5, 2),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 5, 3),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: None,
+        ),
+    ],
+)

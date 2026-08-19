@@ -12,7 +12,6 @@ members = [
     "crates/fvs",
     "crates/bevy_orca", "crates/map_elites", "crates/bevy_devshot",
     "crates/bevy_stigmergy", "crates/bevy_light_grid", "crates/bevy_speech_bubbles",
-    "crates/bevy_autogib",
     # The agent debugger, vendored whole so it can be USED and EVOLVED here rather than pinned to a
     # rev of someone else's history. Two members because the repo has two independent halves: the MCP
     # server binary (a separate process, speaks MCP to an agent and BRP to the game) and the companion
@@ -116,7 +115,30 @@ bevy_speech_bubbles = { path = "crates/bevy_speech_bubbles" }
 # Runtime mesh fracture: the slicer, the watertight caps, and the bake-once-per-source cache. It hands
 # out a centre and a half-extent per fragment and stops there — `gore::spawn_fragments` is the facade
 # that turns those into avian bodies, and `autogib.rs` is the one that knows VALKYRIE carries a rifle.
-bevy_autogib = { path = "crates/bevy_autogib" }
+#
+# **A git dependency, not a workspace member, and the direction of that arrow is the point.** This crate
+# used to live at `crates/bevy_autogib` with a read-only `subtree split` mirror published from it. That
+# was backwards in a way that cost real time: a `subtree split` carries only *commits*, so the crate's
+# own audit harness — which sat uncommitted in this working tree — could never reach the published
+# repository, and an agent reading the published manifest reported our dependency list wrong. It was
+# reading the truth about what we had published.
+#
+# `Ladvien/bevy_autogib` is now the source of truth and this is an ordinary consumer of it. Pinned to a
+# rev for the same reason autogib pins `isomesh`: an unpinned dependency whose slicer moved between
+# builds would move the game's gib geometry between builds.
+#
+# The `test-harness` feature above forwards `bevy_autogib/strict-order`; a git dependency forwards
+# features exactly as a path dependency does, and that forward is what keeps the vertex-soup tie check
+# alive in a release-built harness.
+#
+# **Bumped ba3b13b → 0cfee6e at the 2026-08-17 merge**, which is where the arrow's direction stops
+# being theoretical. `main` had meanwhile pulled the crate's AG-017..AG-023 line back INTO
+# `crates/bevy_autogib` and fixed it to pass this repo's gates; that vendored copy is gone again and
+# the same work arrives the way every other dependency's does — by moving the pin. What the bump
+# carries: the region-query hit model (AG-017), the fragment-adjacency match (AG-016), one bake
+# across granularities (AG-015), the halving and sub-pixel-face fixes (AG-018/19), and the demo,
+# recordings and on-screen controls (AG-020..023).
+bevy_autogib = { git = "https://github.com/Ladvien/bevy_autogib", rev = "0cfee6e" }
 # The agent debugger's companion Bevy plugin — custom BRP methods for screenshots and headless input
 # injection. **Optional, pulled in only by the `debugger` feature**, so it is absent from the resolved
 # dependency graph of every default, release and determinism build.

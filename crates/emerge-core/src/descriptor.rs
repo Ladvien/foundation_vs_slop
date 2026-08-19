@@ -31,7 +31,6 @@
 
 use serde::{Deserialize, Serialize};
 
-
 /// What an asset is. A patch — see the module docs.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -229,9 +228,39 @@ pub fn placed_height(d: &Descriptor) -> Option<f32> {
 pub fn tipped_extents(d: &Descriptor, tip: (u8, u8)) -> Option<(f32, f32, f32)> {
     let (w, depth) = placed_footprint(d)?;
     let h = placed_height(d)?;
-    let (w, h, depth) = if tip.0 % 2 == 1 { (w, depth, h) } else { (w, h, depth) };
-    let (w, h, depth) = if tip.1 % 2 == 1 { (h, w, depth) } else { (w, h, depth) };
+    let (w, h, depth) = if tip.0 % 2 == 1 {
+        (w, depth, h)
+    } else {
+        (w, h, depth)
+    };
+    let (w, h, depth) = if tip.1 % 2 == 1 {
+        (h, w, depth)
+    } else {
+        (w, h, depth)
+    };
     Some((w, h, depth))
+}
+
+/// **The floor a piece covers once tipped** — [`placed_footprint`] for a placement that has been
+/// turned onto its side.
+///
+/// The horizontal shadow of [`tipped_extents`], and the answer every lattice question wants: a
+/// 0.1 × 1.0 m wall tipped a quarter turn lies down and covers 0.1 × 2.4 m of floor, so a fill that
+/// stepped by the standing footprint would lay each row inside the last.
+///
+/// # Why an upright piece never consults its height
+///
+/// `tip == (0, 0)` short-circuits to [`placed_footprint`], and that is a statement about the
+/// question rather than a fallback: a piece standing up covers its footprint whatever its height,
+/// so a descriptor with a measured footprint and **no** height must still answer. Routing it
+/// through [`tipped_extents`] would make it `None` — an unmeasured piece — and silently drop every
+/// heightless floor tile onto the centre-snapping path. Once it is tipped the height *is* one of
+/// the floor dimensions, so `None` there is the honest answer and not a degraded one.
+pub fn tipped_footprint(d: &Descriptor, tip: (u8, u8)) -> Option<(f32, f32)> {
+    if tip == (0, 0) {
+        return placed_footprint(d);
+    }
+    tipped_extents(d, tip).map(|(w, _, depth)| (w, depth))
 }
 
 /// The divisions after `quarter` 90° turns about +Y — x and z swap on every odd turn.
@@ -289,8 +318,7 @@ impl Subgrid {
     /// must leave the file as it was, or every tile ever poked at accretes rows of `solid: false`
     /// that mean exactly what absence means.
     fn prune(&mut self) {
-        self.cells
-            .retain(|c| c.solid || c.edge.is_some());
+        self.cells.retain(|c| c.solid || c.edge.is_some());
     }
 
     /// Toggle a cell's occupancy. Returns what it became, or `None` if `at` is outside.
@@ -316,7 +344,12 @@ impl Subgrid {
 
     /// Set or clear a cell's edge label. An empty string clears it — the same keystroke that types a
     /// token has to be able to take it back.
-    pub fn set_edge(&mut self, at: (u32, u32, u32), div: (u32, u32, u32), token: &str) -> Option<()> {
+    pub fn set_edge(
+        &mut self,
+        at: (u32, u32, u32),
+        div: (u32, u32, u32),
+        token: &str,
+    ) -> Option<()> {
         let cell = self.entry(at, div)?;
         cell.edge = (!token.trim().is_empty()).then(|| token.trim().to_owned());
         self.prune();
@@ -360,7 +393,11 @@ impl Subgrid {
                     .cells
                     .iter()
                     .map(|c| SubCell {
-                        at: (c.at.2, c.at.1, dx.saturating_sub(1) - c.at.0.min(dx.saturating_sub(1))),
+                        at: (
+                            c.at.2,
+                            c.at.1,
+                            dx.saturating_sub(1) - c.at.0.min(dx.saturating_sub(1)),
+                        ),
                         ..c.clone()
                     })
                     .collect(),
@@ -482,7 +519,9 @@ pub fn mount_options(surfaces: &[String]) -> Vec<Mount> {
         Mount::OnWall { height: 1.8 },
         Mount::OnCeiling,
         Mount::Tiled,
-        Mount::Decal { on: DecalHost::Floor },
+        Mount::Decal {
+            on: DecalHost::Floor,
+        },
         // The same default `OnWall` offers, because it is the same question: eye level for a sign.
         Mount::Decal {
             on: DecalHost::Wall { height: 1.8 },
@@ -500,7 +539,12 @@ pub fn mount_options(surfaces: &[String]) -> Vec<Mount> {
     if let Some(at) = at {
         out.remove(at);
         for (i, class) in surfaces.iter().enumerate() {
-            out.insert(at + i, Mount::OnSurface { class: class.clone() });
+            out.insert(
+                at + i,
+                Mount::OnSurface {
+                    class: class.clone(),
+                },
+            );
         }
     }
     // And the same for the face placeholder. Done second so the surface expansion above has already
@@ -996,7 +1040,11 @@ impl Descriptor {
             subgrid: patch.subgrid.clone().or_else(|| self.subgrid.clone()),
             placement: Placement {
                 rooms: pick(&self.placement.rooms, &patch.placement.rooms),
-                group: patch.placement.group.clone().or_else(|| self.placement.group.clone()),
+                group: patch
+                    .placement
+                    .group
+                    .clone()
+                    .or_else(|| self.placement.group.clone()),
             },
             // A patch that says nothing about the note inherits it. Replacing a note with silence
             // needs `note: Some("")` — deliberate, because a note is somebody's reasoning and losing
@@ -1039,7 +1087,10 @@ impl Descriptor {
         }
         let need = |what: &str| format!("descriptor `{}`: missing `{what}`", self.id);
 
-        let footprint = self.extent.footprint.ok_or_else(|| need("extent.footprint"))?;
+        let footprint = self
+            .extent
+            .footprint
+            .ok_or_else(|| need("extent.footprint"))?;
         let mount = self.mount.clone().ok_or_else(|| need("mount"))?;
 
         // A decal has no meaningful height and never rests anything on itself, so it is the one shape
@@ -1129,7 +1180,11 @@ mod tests {
         d.extent.height = Some(0.178);
         d.align.scale = Some(0.6);
 
-        assert_eq!(placed_footprint(&d), Some((0.306, 0.106)), "extent IS the answer");
+        assert_eq!(
+            placed_footprint(&d),
+            Some((0.306, 0.106)),
+            "extent IS the answer"
+        );
         assert_eq!(placed_height(&d), Some(0.178));
 
         // The reservation covers the drawn mesh exactly: raw 0.5096 × scale 0.6 = 0.306 drawn, and
@@ -1153,7 +1208,11 @@ mod tests {
         for s in [None, Some(1.0), Some(0.6), Some(2.0)] {
             let mut v = d.clone();
             v.align.scale = s;
-            assert_eq!(placed_footprint(&v), Some((0.306, 0.106)), "scale {s:?} leaked into space");
+            assert_eq!(
+                placed_footprint(&v),
+                Some((0.306, 0.106)),
+                "scale {s:?} leaked into space"
+            );
             assert_eq!(divisions(&v, 3), divisions(&d, 3));
         }
     }
@@ -1167,7 +1226,11 @@ mod tests {
         d.extent.height = Some(2.0);
         d.align.scale = Some(0.5);
         d.align.stretch_y = Some(1.2);
-        assert_eq!(placed_height(&d), Some(2.4), "2.0 * 1.2 — the scale is already in the 2.0");
+        assert_eq!(
+            placed_height(&d),
+            Some(2.4),
+            "2.0 * 1.2 — the scale is already in the 2.0"
+        );
         assert_eq!(placed_footprint(&d), Some((1.0, 1.0)));
     }
 
@@ -1179,7 +1242,10 @@ mod tests {
         d.extent.footprint = None;
         d.align.scale = Some(0.6);
         assert_eq!(placed_footprint(&d), None);
-        assert!(divisions(&d, 1).is_err(), "and the lattice is refused by name");
+        assert!(
+            divisions(&d, 1).is_err(),
+            "and the lattice is refused by name"
+        );
     }
 
     /// **Both wall mounts carry a height, and nothing else does.** The floor and the ceiling are the
@@ -1198,9 +1264,15 @@ mod tests {
             Mount::OnCeiling,
             Mount::Tiled,
             Mount::InOpening { clear: None },
-            Mount::OnSurface { class: "worktop".into() },
-            Mount::Decal { on: DecalHost::Floor },
-            Mount::Decal { on: DecalHost::Ceiling },
+            Mount::OnSurface {
+                class: "worktop".into(),
+            },
+            Mount::Decal {
+                on: DecalHost::Floor,
+            },
+            Mount::Decal {
+                on: DecalHost::Ceiling,
+            },
         ] {
             assert_eq!(mount_height(&no_height), None, "{no_height:?}");
             assert_eq!(
@@ -1268,7 +1340,8 @@ mod tests {
             .collect();
         assert_eq!(classes, ["support", "worktop"]);
         assert!(
-            !two.iter().any(|m| matches!(m, Mount::OnSurface { class } if class.is_empty())),
+            !two.iter()
+                .any(|m| matches!(m, Mount::OnSurface { class } if class.is_empty())),
             "the placeholder must not survive into the offered list"
         );
     }
@@ -1302,6 +1375,49 @@ mod tests {
             kind: vec!["container".into()],
             ..Default::default()
         }
+    }
+
+    /// **A tipped piece covers the floor it is lying on, and an upright one never needs its height.**
+    ///
+    /// The second half is the one with teeth. Routing the untipped case through [`tipped_extents`]
+    /// would make every descriptor with a measured footprint and no recorded height come back
+    /// unmeasured — and unmeasured means centre-snapping, so a whole kit of flat floor tiles would
+    /// quietly move onto a different lattice from the one they were authored on. That is a
+    /// regression with no error message attached, which is why the short circuit is stated in the
+    /// code and pinned here rather than left as an optimisation somebody could "simplify" away.
+    #[test]
+    fn a_tipped_piece_reports_the_floor_it_lies_on() {
+        // 0.6 x 0.6 on the floor, 0.5 tall — a tip has to move the 0.5 into the footprint.
+        let d = crate_desc();
+        assert_eq!(tipped_footprint(&d, (0, 0)), Some((0.6, 0.6)));
+        // About X: depth and height trade, so it lies 0.5 deep.
+        assert_eq!(tipped_footprint(&d, (1, 0)), Some((0.6, 0.5)));
+        // About Z: width and height trade.
+        assert_eq!(tipped_footprint(&d, (0, 1)), Some((0.5, 0.6)));
+        // A half turn puts a different face down and leaves the box alone.
+        assert_eq!(tipped_footprint(&d, (2, 2)), Some((0.6, 0.6)));
+        // It agrees with `tipped_extents` by construction — the horizontal two of its three.
+        for tip in [(0, 0), (1, 0), (0, 1), (1, 1), (3, 2)] {
+            let (w, _h, depth) = tipped_extents(&d, tip).unwrap_or_else(|| panic!("{tip:?}"));
+            assert_eq!(tipped_footprint(&d, tip), Some((w, depth)), "tip {tip:?}");
+        }
+
+        // **Standing up, the height is not part of the question.**
+        let heightless = Descriptor {
+            extent: Extent {
+                footprint: Some((0.6, 0.6)),
+                height: None,
+            },
+            ..crate_desc()
+        };
+        assert_eq!(
+            tipped_footprint(&heightless, (0, 0)),
+            Some((0.6, 0.6)),
+            "an upright piece covers its footprint whatever its height"
+        );
+        // Tipped, the height IS one of the floor dimensions, so not knowing it is not knowing the
+        // box — `None`, propagated, never a guess.
+        assert_eq!(tipped_footprint(&heightless, (1, 0)), None);
     }
 
     #[test]
@@ -1379,7 +1495,11 @@ mod tests {
         assert_eq!(merged.id, "crate", "an empty id inherits");
         assert_eq!(merged.mesh.as_deref(), Some("ozea/crate.glb"));
         assert_eq!(merged.extent.footprint, Some((0.6, 0.6)));
-        assert_eq!(merged.align.front, Some(Face::East), "the patch wins where it speaks");
+        assert_eq!(
+            merged.align.front,
+            Some(Face::East),
+            "the patch wins where it speaks"
+        );
     }
 
     /// Replace, not append — so a patch can take a tag away. An append-only list needs a second
@@ -1431,8 +1551,8 @@ mod tests {
             effects: vec!["uses-electricity".into()],
             ..crate_desc()
         };
-        let text = ron::ser::to_string_pretty(&d, ron::ser::PrettyConfig::default())
-            .expect("serializes");
+        let text =
+            ron::ser::to_string_pretty(&d, ron::ser::PrettyConfig::default()).expect("serializes");
         let back: Descriptor = ron::from_str(&text).expect("parses");
         assert_eq!(d, back);
     }
@@ -1576,7 +1696,10 @@ mod subgrid_tests {
         assert!(g.validate("table", D3).is_ok());
         let got = g.at((2, 0, 1)).unwrap_or_else(|| panic!("no cell"));
         assert_eq!(got, &c);
-        assert!(g.at((0, 0, 0)).is_none(), "unwritten cells are absent, not default rows");
+        assert!(
+            g.at((0, 0, 0)).is_none(),
+            "unwritten cells are absent, not default rows"
+        );
     }
 
     #[test]
@@ -1669,7 +1792,10 @@ mod subgrid_tests {
     fn a_piece_with_no_height_still_has_one_layer() {
         let mut d = sized(1.0, 0.0, 1.0);
         d.extent.height = None;
-        assert_eq!(divisions(&d, 1).unwrap_or_else(|err| panic!("{err}")), (2, 1, 2));
+        assert_eq!(
+            divisions(&d, 1).unwrap_or_else(|err| panic!("{err}")),
+            (2, 1, 2)
+        );
     }
 
     /// No footprint is refused by id, not resolved to a zero lattice that every rule reads as fine.
@@ -1680,13 +1806,18 @@ mod subgrid_tests {
             ..Descriptor::default()
         };
         let err = divisions(&d, 1).err().unwrap_or_default();
-        assert!(err.contains("mystery") && err.contains("footprint"), "{err}");
+        assert!(
+            err.contains("mystery") && err.contains("footprint"),
+            "{err}"
+        );
     }
 
     /// Zero divisions-per-tile is refused here too, so no caller can build a lattice with no cells.
     #[test]
     fn a_project_that_divides_a_tile_zero_ways_is_refused() {
-        let err = divisions(&sized(1.0, 1.0, 1.0), 0).err().unwrap_or_default();
+        let err = divisions(&sized(1.0, 1.0, 1.0), 0)
+            .err()
+            .unwrap_or_default();
         assert!(err.contains("no cells"), "{err}");
     }
 
@@ -1715,17 +1846,25 @@ mod subgrid_edit_tests {
         assert_eq!(g.cells.len(), 1);
         assert_eq!(g.toggle_solid((1, 0, 1), D3), Some(false));
         // The sparse invariant: a cell that says nothing is absent, not a row of `solid: false`.
-        assert!(g.cells.is_empty(), "an unmarked cell must leave no row behind");
+        assert!(
+            g.cells.is_empty(),
+            "an unmarked cell must leave no row behind"
+        );
     }
 
     /// A mesh scan states a fact rather than flipping one, so running it twice is running it once.
     #[test]
     fn marking_solid_is_idempotent_where_toggling_is_not() {
         let mut g = Subgrid::default();
-        g.set_solid((1, 0, 1), D3).unwrap_or_else(|| panic!("in range"));
-        g.set_solid((1, 0, 1), D3).unwrap_or_else(|| panic!("in range"));
+        g.set_solid((1, 0, 1), D3)
+            .unwrap_or_else(|| panic!("in range"));
+        g.set_solid((1, 0, 1), D3)
+            .unwrap_or_else(|| panic!("in range"));
         assert_eq!(g.cells.len(), 1);
-        assert!(g.at((1, 0, 1)).is_some_and(|c| c.solid), "a second scan must not unmark it");
+        assert!(
+            g.at((1, 0, 1)).is_some_and(|c| c.solid),
+            "a second scan must not unmark it"
+        );
     }
 
     #[test]
@@ -1733,7 +1872,10 @@ mod subgrid_edit_tests {
         let mut g = Subgrid::default();
         assert_eq!(g.toggle_solid((3, 0, 0), D3), None);
         assert_eq!(g.set_edge((0, 9, 0), D3, "wall"), None);
-        assert!(g.cells.is_empty(), "an out-of-range write must not append anything");
+        assert!(
+            g.cells.is_empty(),
+            "an out-of-range write must not append anything"
+        );
     }
 
     /// A token set and then emptied takes its row with it — the sparse invariant, which is what stops
@@ -1741,12 +1883,14 @@ mod subgrid_edit_tests {
     #[test]
     fn a_token_set_and_cleared_leaves_no_row() {
         let mut g = Subgrid::default();
-        g.set_edge((0, 0, 2), D3, "wall").unwrap_or_else(|| panic!("in range"));
+        g.set_edge((0, 0, 2), D3, "wall")
+            .unwrap_or_else(|| panic!("in range"));
         let c = g.at((0, 0, 2)).unwrap_or_else(|| panic!("written"));
         assert_eq!(c.edge.as_deref(), Some("wall"));
 
         // Whitespace is empty: a token of spaces is not a token.
-        g.set_edge((0, 0, 2), D3, "  ").unwrap_or_else(|| panic!("in range"));
+        g.set_edge((0, 0, 2), D3, "  ")
+            .unwrap_or_else(|| panic!("in range"));
         assert!(g.cells.is_empty());
     }
 
@@ -1755,8 +1899,10 @@ mod subgrid_edit_tests {
     fn clearing_one_facet_keeps_the_rest() {
         let mut g = Subgrid::default();
         g.toggle_solid((1, 1, 1), D3);
-        g.set_edge((1, 1, 1), D3, "wall").unwrap_or_else(|| panic!("in range"));
-        g.set_edge((1, 1, 1), D3, "").unwrap_or_else(|| panic!("in range"));
+        g.set_edge((1, 1, 1), D3, "wall")
+            .unwrap_or_else(|| panic!("in range"));
+        g.set_edge((1, 1, 1), D3, "")
+            .unwrap_or_else(|| panic!("in range"));
         let c = g.at((1, 1, 1)).unwrap_or_else(|| panic!("still solid"));
         assert!(c.solid);
         assert!(c.edge.is_none());
@@ -1766,7 +1912,8 @@ mod subgrid_edit_tests {
     fn clear_forgets_the_whole_cell() {
         let mut g = Subgrid::default();
         g.toggle_solid((2, 2, 2), D3);
-        g.set_edge((2, 2, 2), D3, "wall").unwrap_or_else(|| panic!("in range"));
+        g.set_edge((2, 2, 2), D3, "wall")
+            .unwrap_or_else(|| panic!("in range"));
         g.clear((2, 2, 2));
         assert!(g.at((2, 2, 2)).is_none());
         assert!(g.validate("x", D3).is_ok());
@@ -1821,8 +1968,13 @@ mod rotate_tests {
     /// measurement beside it described another.
     #[test]
     fn a_rotation_that_is_not_a_quarter_turn_is_refused_by_name() {
-        let err = quarter_turns_xyz((0, 45, 0), "lamp").err().unwrap_or_default();
-        assert!(err.contains("lamp") && err.contains("45") && err.contains("about Y"), "{err}");
+        let err = quarter_turns_xyz((0, 45, 0), "lamp")
+            .err()
+            .unwrap_or_default();
+        assert!(
+            err.contains("lamp") && err.contains("45") && err.contains("about Y"),
+            "{err}"
+        );
     }
 
     /// A patch may state a rotation, and silence inherits — the rule every other `Align` field holds.

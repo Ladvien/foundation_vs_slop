@@ -74,12 +74,15 @@ tests/golden/*.actual.png
 # Blender/python leaves these beside the conversion scripts.
 scripts/__pycache__/
 
-# emerge-mapper writes maps next to the library it opens; test maps are not content.
+# **Maps moved to assets/emerge/maps/ on 2026-08-16 and are TRACKED there.** They used to be written
+# beside the kit that drew them; a map now resolves against every bound kit merged, so there is no
+# kit to be beside. This rule is one level deep and does not match `maps/`, which is why the
+# subdirectory was chosen: a stray scratch map dropped at the project root stays ignored, and an
+# authored map in `maps/` is content.
 assets/emerge/*.map.ron
-# ...with one deliberate exception. `break_room` is a REGRESSION FIXTURE rather than a scratch map:
-# it is the first map the editor produced, and `tests/site_descriptors.rs` loads it through the same
-# path the game does. Without a committed map, a schema change could break every authored map with
-# nothing failing. Scratch maps stay ignored; this one is checked in on purpose.
+# ...with one deliberate exception, kept for the same reason it was written. `break_room` is a
+# REGRESSION FIXTURE rather than a scratch map: without a committed map, a schema change could break
+# every authored map with nothing failing.
 !assets/emerge/break_room.map.ron
 
 # The VLM labeler's endpoint config — carries the API key, never committed.

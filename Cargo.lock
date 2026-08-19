@@ -868,6 +868,7 @@ dependencies = [
 [[package]]
 name = "bevy_autogib"
 version = "0.1.0"
+source = "git+https://github.com/Ladvien/bevy_autogib?rev=0cfee6e#0cfee6e06f5b5d3b3862bebe113331abeba6d5e0"
 dependencies = [
  "bevy",
  "isomesh",
@@ -3294,6 +3295,7 @@ dependencies = [
 name = "emerge-mapper"
 version = "0.1.0"
 dependencies = [
+ "accesskit",
  "arboard",
  "base64 0.22.1",
  "bevy",

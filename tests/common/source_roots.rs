@@ -10,6 +10,20 @@
 //! The list is shared rather than copied into each lint for the same reason: three copies drift, and
 //! the drift is silent.
 //!
+//! # A crate that leaves the repository leaves this list
+//!
+//! `crates/bevy_autogib/src` was here until `f6ddc0f` made `Ladvien/bevy_autogib` the source of
+//! truth and this repo an ordinary consumer of it, pinned to a rev. The assert below says to point
+//! a moved crate at its new home rather than drop it — and that is still the rule for a crate that
+//! moved *inside* this tree. It cannot apply here: the new home is a `~/.cargo/git/checkouts/`
+//! path with a content hash in it, which is neither stable nor ours to fix.
+//!
+//! So the entry is gone, and the lint it carried goes with it — to that repository's own CI, which
+//! is what "it is a dependency now" means. The one thing this must not become is a habit: dropping
+//! an entry is correct **only** when the code has genuinely left the workspace. A crate that merely
+//! moved directories gets its path corrected, because the code it covers did not stop needing the
+//! lint.
+//!
 //! # What is deliberately absent
 //!
 //! `crates/emerge-*` are **not** here, and that is a known gap rather than an oversight. Those four
@@ -28,7 +42,6 @@ pub const SCANNED_ROOTS: &[&str] = &[
     "crates/bevy_stigmergy/src",
     "crates/bevy_light_grid/src",
     "crates/bevy_speech_bubbles/src",
-    "crates/bevy_autogib/src",
     "crates/det_rng/src",
 ];
 

@@ -1501,6 +1501,12 @@ pub fn interface(
         name: "composition_envelope".to_owned(),
         origin: (0.0, 0.0, 0.0),
         bounds: size,
+        // **No lattice on the scratch map, because a map no longer carries one.** `per_tile` is the
+        // project's `face_bands`, passed in and used directly below; it stopped being a field here
+        // at `MAP_VERSION` 5, precisely so a tile's faces cannot be read on a different lattice from
+        // the map it will be stamped onto. This map exists only to give `stack::resolve_y` a floor
+        // and a ceiling to answer mounts against.
+        palette: Vec::new(),
         placements: Vec::new(),
         stamps: Vec::new(),
         locations: Vec::new(),
@@ -1932,6 +1938,7 @@ mod tests {
             name: "scratch".to_owned(),
             origin: (0.0, 0.0, 0.0),
             bounds: (32.0, 4.0, 32.0),
+            palette: Vec::new(),
             placements: Vec::new(),
             stamps: Vec::new(),
             locations: Vec::new(),

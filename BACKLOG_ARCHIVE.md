@@ -3099,6 +3099,235 @@ and changing the test changes what gets deleted. That is a design call, not a dr
 inconsistency is real though, and visible inside one function — `drive_removal`'s *single-piece*
 branch already outlines `cell_extents` while its drag branch outlines anchors.
 
+## FVS-R-35 · Deleting a kit did not ask who needs it — DONE 2026-08-16
+
+`Chooser::confirm_delete` is `remove_dir_all`, and the only thing it refused was the **root** kit —
+*"`assets/emerge` itself … `remove_dir_all` on it would take the whole library."* Correct as far as
+it went, and it did not go far enough: it had no idea that `src/site/kit.rs:38` names a
+**subdirectory** in a `&'static str`. So the verb took `assets/emerge/site/`, `site_greybox/` and
+`site_v2/`, the game's ability to boot, and 51 tests, and nothing said a word.
+
+**The general problem it exposed is worth more than the incident.** A content scan finds maps and
+compositions; it cannot read Rust source. So the editor could not see its own most important
+dependent, and no amount of scanning `assets/emerge` would ever have changed that.
+
+*Shipped:* `chooser::dependents` asks **not "is anything using this kit" but "is this kit the last
+provider"** — the distinction forced by `site/` and `site_greybox/` defining the *identical* 45 ids.
+Removing one of two directories that provide the same pieces strands nothing; removing the only one
+strands every reference. `chooser::strands` formats the refusal in the terse register the root-kit
+guard was cut down to: which kit, how many files, the first three named, the rest counted.
+
+**Two readers, because there are two formats and one belongs to another crate.** Maps and
+`compositions.ron` are *parsed*, so a `note:` mentioning `site/wall` stays prose rather than becoming
+a dependency. `assets/site/kit_*.ron` is read as text: `SiteKit`'s schema lives in the game,
+`emerge-mapper` does not depend on the game and must not start, and a quoted-id match over a file
+that is a list of quoted ids is worth more than the coupling.
+
+**The scan runs on a keypress and reads every map in the project**, which is the opposite of the
+trade `read_kit` makes when it parses only `library.ron` *"for a list nobody has chosen from yet"* —
+and it is the right way round. Listing is cheap because it happens constantly; deleting is thorough
+because it happens once and cannot be undone.
+
+Four tests, beside the existing lifecycle group: a kit a map elsewhere names is refused **and the
+refusal names the file**; a kit another directory re-skins still goes; the refusal names three and
+counts the rest; and `the_game_kit_file_is_a_dependent_no_content_scan_would_find`. 57 chooser tests
+and 276 lib tests green, no existing test moved.
+
+This is stage 3 of `docs/2026-08-16-collections.md` arriving as a bug rather than a feature, so it
+was built as stage 3 rather than patched. The rest of that staging is FVS-R-36 through -41.
+
+## FVS-R-37 · Nothing in the suite had ever had two kits — DONE 2026-08-16
+
+`tests/fixtures/mod.rs` made only `dir/assets/emerge`, and `build()` wrote the library, the
+compositions and the map into that one directory. So all 276 lib tests and every headless one
+exercised a **single-kit** world, and multi-kit behaviour was pinned by exactly one asset-contract
+test — `the_chooser_sees_the_shipped_kits`, which hardcodes four kit names and asserts *"exactly one
+kit has `flag.is_none()`"*. That is the shape of the current layout stated as a guarantee, which is
+fine as a guarantee and useless as a foundation.
+
+*Shipped:* `Fixture::kit(name, pack, ids)` writes a kit beside the root one — a `library.ron` and the
+`project.ron` `policy::layered_library` requires of every kit, and no `compositions.ron`, since its
+absence and an empty one mean the same thing. **Ids are written verbatim, which is the point:**
+calling it twice with the same ids and different names builds a **re-skin pair**, two directories
+providing one namespace, which is what `site/` and `site_greybox/` are on disk and the case every
+question about deleting, binding or resolving a kit turns on.
+
+`descriptor_row` came out of `sunk_descriptor` as a free function so both callers share one row
+shape, and it names the mesh after the id's **last segment** — `site/floor` writes `ozea/floor.glb`,
+never a `site/` subdirectory. The namespace lives in the id and never in the mesh path, which is the
+shipped kits' actual shape.
+
+Held by `two_kits_can_provide_one_namespace_and_both_open`, which also asserts the other half: a kit
+is **one directory, not a layer over the root** — the root kit's `lamp` must *not* resolve inside
+`site`, because `layered_library` reads exactly one directory and a test letting the root leak in
+would pin the opposite of the design.
+
+## FVS-R-36 · A kit's namespace was inferred from its first descriptor — DONE 2026-08-16
+
+`build::kit_namespace` read `project.library.descriptors.first()`, split on `/`, and substituted the
+literal `"kit"` when that found nothing. **Three faults in one expression.** The answer depended on
+which piece happened to sort first, which is not a property anybody authored. A library that
+disagreed with itself was never noticed. And `"kit"` is a namespace nobody chose that collides across
+every unnamespaced kit — `assets/emerge/compositions.ron` still carries a `kit/tile_1` from it.
+
+`next_tile_id` carried a **second copy** of the same expression, comment and all, so there were two
+definitions of one answer.
+
+**The old behaviour was right in spirit and that mattered to the fix.** `assets/emerge/site_v2/` held
+pieces named `site/*` and correctly minted `site/tile_n`, because a directory is a *skin* and the
+namespace is the *interface* it implements — `site/` and `site_greybox/` provide the identical 45
+ids. So the library must win when it has a namespace; the bug was how it was read, not that it was
+read.
+
+*Shipped:* `emerge_core::library::Library::namespace() -> Result<Option<&str>, String>` — engine-free
+schema logic, one definition, reading **every** id. `Ok(None)` is a state and not a failure: the root
+library's 75 pieces are all flat. A library in two namespaces is refused, naming the piece that
+disagreed and both namespaces.
+
+`Project::namespace` resolves it once at open, on the argument `emerge_dir` already makes — *"so
+nothing downstream carries an `Option` or rebuilds this path."* The library answers when its ids
+carry a namespace and the directory answers when they do not: one rule over a genuine dichotomy, not
+a fallback, and neither branch produces a name nobody chose. A mixed library is now refused **at
+load**, before anything can decide it by sort order.
+
+Four tests, two in each crate. The two headless ones use FVS-R-37's new fixture and would have been
+unwritable a day earlier: a kit directory named `greybox` whose pieces are `site/*` answers `site`,
+and a kit whose pieces are flat answers `emerge` — its own directory. The two shipped tile-naming
+tests moved from `kit/corner_north` to `emerge/corner_north`; they were pinning the stub.
+
+## FVS-R-38 · The lattice settings were per-kit and a kit has no lattice — DONE 2026-08-16
+
+`face_bands` and `snap_divisor` lived in `project.ron` because a kit *was* a project — one directory
+holding a library, a policy, its tiles and its maps. Both describe a **lattice**, and a map has
+exactly one. So the moment a map can draw on two kits, two kits disagreeing about either has no local
+answer: their faces are indexed on different lattices and cannot be compared, adjacency quietly stops
+meaning anything, and **both values are legal**, so nothing says a word.
+
+*Shipped:* both are `Map` fields. `MAP_VERSION` → 3, `POLICY_VERSION` → 2, `MAX_DIVISIONS` and the
+two range checks moved with them, and the docs moved verbatim rather than being rewritten from
+memory — including the `divisions`→`face_bands` rename argument, which is still the point.
+
+**The migration was one-shot with no shim, and the two schemas' own rules made it cheap in opposite
+directions.** `POLICY_VERSION` is an **equality**, so every `project.ron` had to be edited and was.
+`MAP_VERSION` is a **floor**, so a map written before the move reads as exactly what it already
+meant — `#[serde(default)]` and nothing else, which is the property the floor was adopted for when
+`Stamped` arrived.
+
+**The check that left with them is the part worth reading.** `layered_library` was *"the one loader,
+so there is no path on which the check is skipped"*, and that property is real and was worth
+preserving. `Library::validate_lattices` now belongs to each loader that **holds a map** —
+`Project::open` for the editor, `EmergeWorld::with_compositions` for the game — and deliberately not
+to `src/site/kit.rs`, which opens a kit for the hub's own layout and never reads an edge token. That
+is a consumer the check does not apply to, not a path that skips it, and it is written down at all
+three sites.
+
+Two follow-ons found by doing it. `composition::interface` builds a scratch map to resolve its
+members' heights, and that scratch map's `face_bands` **is** the caller's `per_tile` — reading a
+tile's faces on a different lattice from the map it will be stamped onto is "the ghost is the
+contract" broken at the schema, so it is now named rather than defaulted. And the Tiles tab told
+authors the number came *"from project.ron"*, which after the move is a row sending somebody to edit
+a file that no longer holds it.
+
+Measured after: **2,542 passed, 57 failed, and every one of the 57 names the missing site kit**
+(FVS-R-39). The move introduced none of them.
+
+## FVS-R-40 · The prototype budget was invisible until it refused — DONE 2026-08-16
+
+`MAX_PROTOTYPES` is 32 *"because `collapse_grid` packs a domain into a `u32`"*, and
+`constraints::AMO_PAIRWISE_MAX` makes the clause count quadratic in it. Every builder pushes four
+turns per tile and dedupes by face, so **the number an author spends is not the number of tiles they
+wrote** — and the only way to learn it was to ask for a solve and be refused.
+
+*Shipped:* a row on the Compose tab, under the position line: `3 of 32 solver prototypes, from 2
+bounded tile(s)`. Over the ceiling it shows the refusal verbatim, in `DANGER`, because that message
+already names the counts and what to do about them.
+
+**Two things had to change first.** `from_compositions` refused the moment the 33rd prototype
+appeared, so its message could say *"more than 32"* and nothing else — an author over budget was told
+they were over and not by how much, which leaves "narrow the set" without a target. It is now counted
+at the **end** of the build and names the totals, which is what `declared` already did and the reason
+it did it. And the row is a `Budget` resource behind its own `project.is_changed()` gate rather than
+derived in `rebuild`: `rebuild` runs on every arrow key, and building the grammar derives an
+`interface` per tile per quarter turn — work that stopped being bounded by the cap the moment the
+count moved to the end.
+
+**The sub-completeness half was deliberately not built, and the reason is a schema question.** Nie et
+al. (`10.48550/arXiv.2308.07307`) show what the budget really bounds: a *sub-complete* tileset needs
+`|T| >= max{|E|²}` per axis pair and is then **provably backtrack-free**, so 32 across four turns is
+about **two edge tokens per axis and not three** — stricter again in 3-D. But this codebase's faces
+are `Band` **sequences**, not single tokens, so mapping them onto the paper's edge types is a
+decision nobody has taken, and a wrong `sub-complete: yes` is worse than no answer at all. Written
+down at the field so the next person does not have to re-derive why it is missing.
+
+Held by `the_compose_tab_shows_what_the_tiles_cost_the_solver` (two symmetric tiles dedupe to one
+prototype apiece, plus `Empty`, which is 3) and `a_project_with_no_tiles_shows_no_budget` — **not**
+"0 of 32", because an `Anchored` group claims no tile and a zero would read as headroom in a category
+that does not apply.
+
+## FVS-R-41 · A composition could not be reused outside the kit it was authored in — DONE 2026-08-16
+
+The point of the whole thread. `Compositions::FILE` was written beside `library.ron` inside a kit
+directory and `Project::open` loaded exactly **one** kit — so a tile authored in `site` was invisible
+to every map opened on `furniture`, and a tile naming pieces from both could not be validated at all,
+because neither kit's library could answer for the other's.
+
+**It was stages 4, 5 and 6 at once, and they genuinely do not separate.** Pooling compositions needs
+merged libraries; merging needs deciding which directory provides a namespace when two do — `site/`
+and `site_greybox/` define the identical 45 ids, deliberately — and that decision is **binding**,
+which had no home. Giving it one changes what `--kit` means, at which point maps have to leave the
+kit directories too.
+
+*Shipped:*
+
+- **`emerge_core::kits`** — `kits.ron` at the project root binds namespace → directory, and
+  `bound_library` reads the bound set, layers each kit with **its own** policy (patches are local:
+  `Policy::apply` refuses a rule that matches nothing) and merges the results into the one library a
+  map resolves against. **Declared, then verified** against `Library::namespace` — declared-only
+  drifts, derived-only cannot express the skin pair, since both directories answer `site`.
+- **Compositions are the project's**, validated against the merge, which is the only library that can
+  answer for a tile seating two kits' pieces.
+- **Maps are the project's**, in `assets/emerge/maps/`. A subdirectory on purpose: `.gitignore`
+  carries `assets/emerge/*.map.ron` to keep stray scratch maps out, and that rule is one level deep.
+- **The project root stopped being a kit.** `assets/emerge/library.ron` and `project.ron` moved to
+  `assets/emerge/furniture/`, which is what that directory always held.
+
+**`--kit` changed meaning rather than disappearing**, and that is the move that made stage 6
+reachable. It used to select the *only* kit loaded — exactly what made cross-kit tiles impossible. It
+now names the **authoring** kit: where an imported mesh lands and what a new tile is called. Every
+bound kit loads either way, so it is not a filter on what can be placed, and the map list stopped
+being a property of the selected kit.
+
+**Nothing new guards the merge.** Two directories bound to one namespace is refused by
+`Kits::validate` naming both skins; a duplicate id is refused by `Library::validate`, which already
+said *"a map references descriptors by id, so a duplicate makes every reference to it ambiguous"*.
+The rule that was already there catches the exact mistake binding exists to prevent.
+
+**Three things fell out of doing it, each a real defect avoided.** `commit_measured` had to rebuild
+the *merge* rather than replace the library, or the first import in a session would look like it had
+deleted every other kit's pieces. `confirm_delete` had to unbind **before** removing the directory,
+so a refusal costs nothing and a project is never left naming a kit that is not there. And the
+chooser stopped resetting the map selection on a kit change — there is one list now, so there is no
+index to invalidate, and resetting would move the row an author is reading out from under them.
+
+Held by `a_tile_can_seat_two_kits_pieces_and_a_map_can_stamp_it` — the *Done when*, asserted directly:
+two kits, one tile naming a piece from each, expanded through the same `composition::expand` the
+game's loader uses. Plus `a_re_skin_pair_binds_one_at_a_time_and_either_resolves`, which pins that
+binding both at once is refused **by name**, and that swapping the skin is editing one line.
+
+**One-shot migration, no shim** — and it was cheap in a way that will not repeat: the per-kit
+`compositions.ron` files had already been deleted, so stage 5 had nothing to move.
+
+Measured after: **2,550 passed, 57 failed, and every one of the 57 names the missing site kit**
+(FVS-R-39). The split introduced none of them.
+
+> **A second ID collision, recorded at the 2026-08-17 merge and NOT yet resolved.** The block above
+> renumbered one session's items to **R-35..R-39**; the collections line on
+> `tiles-arrows-and-kit-tab` had independently minted **R-35..R-41** for the project/kit split. Both
+> sets are below, both landed, and the numbers overlap five ways: R-35 (delete guard / UI-audit
+> defects), R-36 (namespace / chrome vocabulary), R-37 (two-kit fixture / builders), R-38 (lattice /
+> Compose rows) and R-39 (missing site kit / census ratchet). Nothing is lost and nothing has been
+> renumbered here — picking which line moves is the author's call, the way the block above was.
+
 > **ID reconciliation, 2026-08-17.** Two sessions worked the backlog in parallel and both minted
 > FVS-R-19 through R-23 for different items. The origin line's assignments were already pushed, so
 > the UI-audit session's five items were renumbered **R-35..R-39** at merge. The day's commit
@@ -3139,3 +3368,175 @@ branch already outlines `cell_extents` while its drag branch outlines anchors.
 - **FVS-R-18 — An empty histogram wants to be its own outcome** · S · ✅ **LANDED 2026-08-17**
   §4.6 of `docs/research/2026-08-09-composition-grammar-decisions.md`, pre-registered before any second judged run, and encoded in `examples/expressive_range.rs` in the same change so rerunning the old harness cannot re-make the mistake. **No committed threshold moved** — the amendment defines *evaluability*, which §4 never addressed because every rule silently assumed a populated histogram. Rule 1: a block certifies stability only at or above `N_min = K = 36` in-histogram solves (the uniform one-per-bin expectation, derived from the fixed grid alone — the same committable-without-output property every §4.5 number was chosen for); TV against an under-populated block is not computed, and a sweep that caps out makes no stability claim. Rule 2: an empty final histogram is the terminal outcome **`empty histogram`** — never "converged" — and rows 4a/4b are conditional on the floor, which retires their vacuous-fire/vacuous-pass disagreement instead of adjudicating it.
   **The amended harness was run to verify the amendment and earned its keep immediately:** every block size correctly refused to certify (`0/0 … 3/3 in-histogram, need 36 each`), the cap reported as a budget — and at 2048 solves, **6 reached the histogram**. The grammar samples an enclosed region at roughly 0.3%, which FVS-R-9's 128 solves could never have seen: consistent with FVS-R-17's mechanism (the room is legal and vanishingly rare, not impossible), and the first non-empty data point for whenever that item's re-measure runs. *Verified:* 100 workspace suites green; the item's visual artifact is the terminal report, inspected — floor lines, budget line, and conditional rows all render as §4.6 states.
+
+---
+
+## `emerge-mapper` UI — the editor overhaul (FVS-S-*), 2026-08-18
+
+Its own heading, because `EDITOR_BACKLOG.md` is its own file: `emerge-mapper` is not a game
+dependency, so nothing here moved a determinism golden. The plan is
+`/Users/ladvien/.claude/plans/please-make-a-plan-inherited-newt.md`; the design it builds on is
+`docs/research/2026-08-18-reusable-scroll-and-tab-widgets.md` and
+`docs/2026-08-17-one-application.md`.
+
+**The report was "it's bad, rethink it from the ground up."** What that turned out to mean, measured
+rather than assumed: two unrelated fixed-pixel layout models, neither of which filled the window;
+nothing at window level that was navigation; no scrollbar anywhere; six font sizes with no rule; and
+an agent that could not see a panel without taking the author's screen.
+
+### Shipped
+
+- **FVS-S-38 — Measure the gate before touching anything.** `cargo test --workspace` is **red for a
+  reason nothing to do with the editor**: 31 `site::*` failures in the game and 5 in the editor, all
+  from the kit deleted 2026-08-16 (FVS-R-39). That floor is what every claim below is measured
+  against. One of the five stopped depending on the deleted kit during this work, so the editor's
+  own suite is 4.
+- **FVS-S-50 (new) — The agent's capture can see the panels** · `185cb8b`. Bevy draws a UI tree to
+  one camera, so the offscreen mirror never received the interface — measured the same day, same
+  screen: the BRP capture returned one chair on black while the whole-frame capture returned the
+  panel, the strip and the list. The whole application now draws into one image and the window shows
+  it. Three things bit, all silent: `bevy_state` runs its transition schedule **before** `Startup`
+  (`app.rs:336`), the "every root a screen owns" rule was written **twice** and the second copy swept
+  the rig away with nothing in the log, and `bevy_ui`'s picking backend matches a camera's target
+  against the *pointer's* — so this would have killed every panel's `Hovered`. It also buys something
+  the window path never could: an **injected** cursor now reaches `Hovered`.
+- **FVS-S-39/40 — The window has a frame** · `c2bc8e3`. `chrome::Frame` is the window: chrome bar,
+  door strip, left dock / viewport / right dock, status band. Flex rather than `Val::Percent`,
+  because `UiScale` multiplies `Px` and ignores `Percent` and a layout mixing them scales two ways on
+  a 2x display. The viewport is a real region — the map camera gets the frame's hole as
+  `Camera::viewport`. `chrome::PANEL_Z` is deleted: nothing stacks by z-index any more.
+- **FVS-S-41/42 — The way out is chrome, and the status has a band** · `6ad9db6`. The way out had
+  been reported missing **twice**; `docs/2026-08-17-one-application.md` §3 found that the encoding
+  was wrong rather than weak. Four `back_button` call sites became one, and
+  `every_panel_offers_the_way_back` **inverted** — it demanded four, and four copies was the defect.
+  The banner and hint line moved to a full-width band, which is what stopped the hint wrapping.
+- **FVS-S-35 — Size gets a name** · `ba6013d`. Section headings were 9, 10 **and** 11 in one editor;
+  the anim bench rendered declared-over-measured inverted. `chrome::text` is the role table, and the
+  fix for three heading dialects is the *smallest* of them because `section`'s own doc says a heading
+  here is deliberately quiet. The ratchet inverted with it: a bare number now fails.
+- **FVS-S-44/37 — The menu fills the window** · `f39dd75`. Fourteen constants and five functions of
+  layout arithmetic deleted. One cause produced three symptoms — the frame's viewport carries
+  `flex_grow: 1` and on the menu it competed for the same slack, taking a third of the window.
+- **FVS-S-48 — The strip answers a press** · `347da7c`. The note said it needed "a focus decision,
+  not just an observer"; it needed the chip to stop being a `Button`. And the click had to be
+  reachable to be believed: `bevy_picking` reads `WindowEvent` and takes a press's position from the
+  *real* cursor, so `surface::inject_clicks` closes that for an agent.
+- **FVS-S-43 — Every resource says what a door change does to it** · `afeffca`. `screen.rs` claims a
+  full teardown; four resources are named and **fifty-six are not touched**. All sixty classified,
+  with a ratchet that boots the editor and asks the World. No behaviour change.
+- **FVS-S-31/7/8/9 — The widget layer's foundation** · `a034f95`. The Tab-key collision was real and
+  maximally quiet: with nothing focused, `dispatch_focused_input` sends to the **primary window**,
+  which is where Feathers' handler lives. Resolved by retiring `NextTab` — it only ever worked on the
+  Kit door, where `1`/`2`/`3` already do the job. Leaving the plugin out was worse than it reads:
+  `acquire_focus` is `pub(crate)` and `click_to_focus` is private. The theme is **machinery, not
+  greys** — every entry references a `chrome` const, and `docs/ui.md` §5's rule is kept.
+- **FVS-S-10/11 — A list that scrolls says so** · `55ee9bd`. Every list scrolled by wheel and showed
+  no bar at all. Built into `chrome::scroll_list` rather than as a BSN widget — **a deliberate
+  deviation from the design**, recorded in the commit: that builder is already the single path, and
+  the editor rebuilds lists imperatively, which the design's own §8.1 says BSN does not help with.
+  It found something immediately: the Compose pane is **2417 px of content in an 833 px viewport**.
+- **FVS-S-29 — The no-writing-every-frame rule becomes a test** · `f856ce1`. Found
+  `compass::follow_the_camera` writing six layout values a frame. The scan needed two corrections of
+  its own, both about not crying wolf.
+- **FVS-S-18 (part) — The strip says what it is** · `a56cb2f`. The editor had **zero** accessibility;
+  the strip is now a `TabList` of labelled `Tab`s.
+
+### Closed by measurement, not by building
+
+The repo's own precedent for this is FVS-N-23, demoted when FVS-N-25 measured the premise away.
+
+- **FVS-S-24/25/26/27 — `VirtualList`.** Not warranted. The mesh lists **fold into collapsed packs**,
+  so only an open pack spawns rows, and the largest pack the shipped project has is **145** — under
+  the design's own ~200-row threshold. The 778 figure the design cites is a *labelling queue*, not a
+  list. Measured: 242 UI nodes for a 20-row pack. Re-open it if a pack over ~200 ever ships.
+- **FVS-S-36 — Compose as rows.** Substantially already true, verified in code and in a capture:
+  selection is a filled row, and `split_indent`/`spawn_line` convert leading spaces into a real
+  gutter so wrapped lines keep their column. What remains is `{:>5}` column alignment *within* one
+  line of a generated monospace report, which is legitimate. The pane's real problem is its height,
+  now visible for the first time because it has a scrollbar.
+- **FVS-S-3/49 — `Door` in `TabView` / doors switch directly.** Skipped at the keyboard. Entering the
+  MAP door needs a map name and from inside another door there is none — which
+  `docs/2026-08-17-one-application.md` §7 lists as undecided. The menu stays the way between doors.
+
+### Closed 2026-08-18, second pass
+
+- **FVS-S-22b — The inline strip answers a click.** Closed by the shelf work (`0b8d94c`): the
+  hand-rolled `MESHES | KIT` pair became `shelf_strip`, whose chips carry `Hovered`, an active fill
+  and a `Pointer<Click>` observer routing through the same two fields the keys write.
+- **FVS-S-32 — The focus model.** Settled and written into `keys.rs`'s header: **routing is by
+  `Context`, not by focus.** A second answer to "who gets this key" is what this crate's rules
+  forbid, and `Live` is decided once per frame in `Phase::Sense` precisely so ownership cannot move
+  mid-frame — a guarantee unavailable to a model where a click can move it. Focus is kept for the
+  a11y tree and a possible focus ring. **The design's keyboard paging is therefore not built, and
+  that is the better outcome**: every list is walked with the arrows and `chrome::Follow` scrolls the
+  selection into view, so `PageUp`/`PageDown`/`Home`/`End` would be four more rows against a hard
+  twelve-row ceiling, buying a second way to do what the arrows already do.
+- **FVS-S-28 — The sweep is finished, and it is a test.** `tests/the_sweep_is_finished.rs`: nobody
+  spawns their own scroll container, there are exactly two strips and both are named, and nobody
+  places their own panel. The last of those took the `CHROME-OK`/`SORT-OK` shape after its first cut
+  flagged three correct nodes — a world-projected slot label, a hover overlay on a plot, and the
+  compass's arms — because a lint that calls those defects is a lint somebody turns off. Absolute is
+  allowed; it costs one `// PLACES-ITSELF-OK: <why>` line.
+- **FVS-S-34 — The chooser audit.** Ran. Clean on colour (zero raw literals) and on type; **uses none
+  of the row builders**, which is the fifth dialect the audit warned about with the front door as the
+  dialect. `header()` rendering headings at `text::BODY` was fixed in the pass as a role error; the
+  port and the missing scrolling are minted as FVS-S-34a and FVS-S-34b.
+
+- **FVS-S-34a — The chooser ported onto the row vocabulary.** Its rows are `chrome::quiet_row` with
+  `row_label`/`row_value` in the inspectors and headings at `text::HEADING`, so the front door looks
+  like the rest of the editor and is repainted by the same `style_list_rows`. Rows answer a click,
+  through the same two fields the arrows write. Two departures are documented rather than silent: the
+  headings keep `KEY` ink because they carry the *relationship* (`MAPS IN emerge`) and were the
+  dimmest thing on screen, and the chevron survives the fill because `docs/ui.md` §1.3 wants a
+  second, non-colour channel.
+  **It found a crash on the way**, which is what adopting a shared builder is for — see FVS-S-34c.
+  It also found that `view::sense_pointer` was gated to the editor screen, so the menu had no pointer
+  at all: harmless while `Pointer` only served the map's spatial verbs, and load-bearing the moment
+  it started feeding `surface::inject_clicks`.
+
+- **FVS-S-34c — Global observers stop demanding a door's resource.** Five, not the twenty-two first
+  estimated: most of the twenty-four take `init_resource`'d state that exists app-wide, and only
+  `Project`/`OpenMap`/`Door`/`Mode` are inserted per-door and removed by `close_the_door`. All five
+  were in `tiles.rs` and all took `Project`. Each already had the real guard — a `Query` answering
+  "is this entity mine" — and could not reach it, because parameters are validated before a body
+  runs.
+  **The ratchet is the deliverable**, and it took two attempts to be worth having. The first parsed
+  signatures by looking for the literal `") {"` that ends one — and a function returning something
+  ends `") -> T {"`, so the scan ran on to the *next* signature and skipped every function between.
+  It saw eight observers in `tiles.rs` and missed the one the test exists for. Found by breaking the
+  code on purpose and watching the lint stay green, which is the only way that class of hole is ever
+  found; it matches parentheses now. Verified both directions, and by four clicks across both menu
+  columns with no panic.
+
+- **FVS-S-34b — The chooser's lists scroll, and follow their selection.** `chrome::scroll_list` for
+  `MapList` and `KitList`, plus `keep_the_chooser_selection_on_screen` keyed on `(pane, index)` —
+  never on `Res<Chooser>::is_changed`, which is written most frames and is the exact re-arming
+  `chrome::Follow` exists to prevent. `tests/every_list_follows_its_selection.rs` covers it (verified
+  by removing the follower and watching it name `MapList` by name).
+  **One bug in, one bug out.** `fill` used to `insert(Node { .. })` unconditionally, which over a
+  `scroll_list` would have silently replaced the `overflow`, the `ScrollArea` and the `min_height: 0`
+  that make a list scrollable. Dropping it wholesale was wrong the other way: the inspector
+  containers are plain nodes, so they fell back to `FlexDirection::Row` and `MAP INFO` drew its four
+  rows side by side, wrapping mid-value. It is now conditional on the panel kind. **The suite stayed
+  green through both states** — a capture is what caught it, which is the half of this a test could
+  not have told me.
+
+- **FVS-S-33 — Focus traversal stays off, and a test says so.** Routing is by `Context`
+  (`keys.rs` header), so `acquire_focus`/`click_to_focus` are inert because nothing carries a
+  `TabIndex`. `focus_traversal_stays_off_until_somebody_reopens_it` keeps that true, with a
+  `// FOCUS-DECISION-REOPENED: <why>` escape — because the first thing a `TabIndex` turns on is
+  click-to-focus, and FVS-R-25 measured that as broken for agents here (`bevy_picking` writes
+  `Hovered` from the *window's* cursor, which `view::sense_pointer` never moves). That finding is
+  three documents deep and would not be met by somebody adding a focus ring on a Tuesday.
+- **FVS-S-30 — Reference frames are not committed.** Decided: no. `debug_screenshots/` stays
+  gitignored. The captures are cheap to retake now that an agent can take them without asking for the
+  author's screen, which is the thing that made them expensive.
+
+**And the scanner that found the last bug was itself the last bug.** `the_sweep_is_finished.rs`'s
+`panels()` split each file at its first `#[cfg(test)]` and kept the head — and `tiles.rs`'s first
+test module sits about a third of the way in, so **two thirds of the largest file in the crate was
+never scanned by any rule in that file**. Fixing it immediately surfaced a *sixth* observer,
+`on_tag_chip`, which had panicked at runtime during FVS-S-34a, been side-stepped by keeping the menu
+off the `Activate` bus, and never actually fixed. `compose_is_read_only.rs` had been bitten by
+exactly this and says why it matters: *"a ratchet that cannot fail is worse than no ratchet, because
+it reads as a guarantee."* Its implementation is borrowed rather than re-derived.

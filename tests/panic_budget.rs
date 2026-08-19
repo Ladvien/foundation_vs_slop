@@ -66,7 +66,17 @@ const EXEMPT: &[&str] = &["src/sim_harness.rs", "src/bin/train.rs"];
 // (`load_game_config().unwrap_or_else(|e| panic!("config: {e}"))`). Same class of precondition: an
 // authored asset the game cannot start without, where the alternative — a silent default — renders a
 // Site with holes in it and no indication why. Loud at startup beats invisible at runtime.
-const BUDGET: usize = 28;
+//
+// 28 -> 25 on 2026-08-16: no panic site was removed. `f6ddc0f` made `Ladvien/bevy_autogib` the
+// source of truth and this repo a consumer pinned to a rev, so `crates/bevy_autogib/src` left
+// `common::source_roots` and its 3 shipped sites left this count with it. They still exist; they
+// are that repository's budget now.
+//
+// Re-pinned rather than left at 28, even though the `total >= BUDGET - 5` staleness check tolerates
+// the drift. That slack is for measurement noise between runs, not for a permanent shrink in what
+// the walk covers — three unclaimed slots is three panic sites a change could add without this
+// ratchet noticing, which is the one thing it exists to stop.
+const BUDGET: usize = 25;
 
 
 /// Is this a test-only file? The module splits put most test code in its own file, so this catches the

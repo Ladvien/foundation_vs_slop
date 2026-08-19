@@ -42,6 +42,7 @@ pub mod glb;
 pub mod grammar;
 pub mod grid;
 pub mod import;
+pub mod kits;
 pub mod library;
 pub mod map;
 pub mod naming;
