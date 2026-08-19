@@ -338,8 +338,15 @@ fn inspect(
                 "the origin is off-centre by ({:.2}, {:.2}) and {:.2} m off the base",
                 m.pivot.0, m.pivot.1, m.base_y
             ),
-            "the proposed pivot and y_offset correct this; re-export centred with its base at zero \
-             to make it true of the file",
+            // **Only half of this is corrected downstream, and saying otherwise sent an author the
+            // wrong way.** `y_offset` is applied wherever a piece is placed — `stack::datum` adds
+            // it to every resolved height. `pivot` is not: the furniture grammar recentres by it,
+            // and nothing else does, so the same descriptor placed into a map or a tile keeps its
+            // off-centre origin and sits beside its own footprint. Re-exporting is the only fix
+            // that holds for both.
+            "y_offset corrects the sink, but pivot is only honoured by furniture placement — in a \
+             map or a tile this piece will sit off its own footprint. Re-export centred with its \
+             base at zero to fix it for good",
         )),
     }
 

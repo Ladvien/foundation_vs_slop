@@ -201,8 +201,10 @@ fn harvest(
     status: &crate::chrome::Status,
     tab: Mode,
     panes: &Query<(Entity, &CopyPane)>,
+    roots: &[Entity],
     children: &Query<&Children>,
     texts: &Query<&Text>,
+    nodes: &Query<&Node>,
 ) -> Vec<String> {
     let mut lines = Vec::new();
     // **The whole log, not just the newest.** The banner shows one; a copy is what somebody pastes
@@ -218,27 +220,52 @@ fn harvest(
             crate::chrome::MAX_PROBLEMS
         ));
     }
-    for (entity, pane) in panes {
-        if pane.0.contains(&tab) {
-            collect_text(entity, children, texts, &mut lines);
-        }
+    // **Everything on the screen, not just this tab's detail pane.**
+    //
+    // Asked for at the keyboard, 2026-08-18, and the reason was visible in the request: the author
+    // was hand-transcribing the mesh list and the header into a message because the copy did not
+    // reach them. It carried the `CopyPane` panes and nothing else — so the id, the measurements
+    // and the findings came through, while the list they were chosen from, the kit the header
+    // names, and the tab you were on did not. A paste that needs a covering note to be legible is
+    // not a copy of the screen.
+    //
+    // Walked from the frame's root in child order, which IS reading order: `chrome::spawn_frame`
+    // builds a column of chrome bar, door strip, body — itself a row of left dock, viewport, right
+    // dock — and status bar. Overlays are roots of their own and follow.
+    for root in roots {
+        collect_visible(*root, children, texts, nodes, &mut lines);
     }
-    if !status.note_text().is_empty() {
-        lines.push(format!("status: {}", status.note_text()));
-    }
+    // The note is on screen and therefore already harvested; `CopyPane` is now only a marker of
+    // where the panes are, which nothing here needs to consult.
+    let _ = (panes, tab);
     lines
 }
 
-/// Depth-first text harvest under one UI node, in child order — which is the order the pane reads.
-fn collect_text(root: Entity, children: &Query<&Children>, texts: &Query<&Text>, out: &mut Vec<String>) {
-    if let Ok(t) = texts.get(root) {
-        if !t.0.trim().is_empty() {
-            out.push(t.0.clone());
-        }
+/// Depth-first text harvest under one UI node, in child order — which is the order it reads.
+///
+/// **`Display::None` prunes the whole subtree**, and that is what makes walking from the root safe
+/// rather than absurd: every tab's panel exists at once and the four that are not showing are
+/// hidden exactly that way (`chrome::panel_root`, which chose `Display::None` over `Visibility` so
+/// a hidden panel holds no layout and answers no hover). Without this check a copy of the Meshes
+/// tab would arrive carrying the Map, Anim and Compose panels underneath it.
+fn collect_visible(
+    root: Entity,
+    children: &Query<&Children>,
+    texts: &Query<&Text>,
+    nodes: &Query<&Node>,
+    out: &mut Vec<String>,
+) {
+    if nodes.get(root).is_ok_and(|n| n.display == Display::None) {
+        return;
+    }
+    if let Ok(t) = texts.get(root)
+        && !t.0.trim().is_empty()
+    {
+        out.push(t.0.clone());
     }
     if let Ok(kids) = children.get(root) {
         for kid in kids {
-            collect_text(*kid, children, texts, out);
+            collect_visible(*kid, children, texts, nodes, out);
         }
     }
 }
@@ -293,11 +320,31 @@ fn copy_out(
     panes: Query<(Entity, &CopyPane)>,
     children: Query<&Children>,
     texts: Query<&Text>,
+    nodes: Query<&Node>,
+    // **The frame first, then every other root.** `Frame::root` is the window's own column and
+    // therefore reads top-to-bottom; the overlays (the shortcut card, the name box, a guide step)
+    // are roots of their own and belong after it rather than interleaved. `Option` because
+    // `Screen::Editor` can run a pass before the door is built, and a missing `Res` panics in 0.19.
+    frame: Option<Res<crate::chrome::Frame>>,
+    other_roots: Query<Entity, (With<Node>, Without<ChildOf>)>,
 ) {
     if !keys::just_pressed(&keyboard, *live, Action::CopyInfo) {
         return;
     }
     let tab = *mode;
+    let mut roots: Vec<Entity> = Vec::new();
+    if let Some(frame) = frame.as_ref() {
+        roots.push(frame.root);
+    }
+    // Sorted, so two runs of this key on an unchanged screen produce the same text — entity
+    // iteration order is not stable across `App`s and a copy that reshuffled would be a poor thing
+    // to paste into a bug report twice.
+    let mut rest: Vec<Entity> = other_roots
+        .iter()
+        .filter(|e| Some(*e) != frame.as_ref().map(|f| f.root))
+        .collect();
+    rest.sort();
+    roots.extend(rest);
     // One borrow of the live tab's status, used to read and then to answer. `match` on the mode
     // rather than a helper returning `&mut Status`, because four `ResMut` params cannot be handed
     // to one function and returned from it without borrowing all four for the rest of the system.
@@ -307,7 +354,7 @@ fn copy_out(
         Mode::Anim => &mut bench.status,
         Mode::Compose => &mut compose.status,
     };
-    let lines = harvest(status, tab, &panes, &children, &texts);
+    let lines = harvest(status, tab, &panes, &roots, &children, &texts, &nodes);
     if lines.is_empty() {
         status.note("nothing on this tab to copy");
         return;
@@ -316,7 +363,7 @@ fn copy_out(
     match arboard::Clipboard::new().and_then(|mut c| c.set_text(lines.join("\n"))) {
         Ok(()) => {
             status.dismiss();
-            status.note(format!("copied {count} line(s) from the {} tab", tab.label()));
+            status.note(format!("copied {count} line(s) — the whole {} screen", tab.label()));
         }
         Err(e) => status.problem(format!("could not reach the clipboard: {e}")),
     }
