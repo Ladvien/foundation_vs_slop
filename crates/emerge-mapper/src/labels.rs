@@ -931,16 +931,14 @@ pub(crate) fn suggest_all(
     if judged > 0 {
         confirm.ask(
             crate::confirm::Asked::RelabelJudged,
-            "Re-label pieces that already have labels?",
-            format!(
-                "{judged} of the {} piece(s) in scope are already judged. Yes walks all {}; No \
-                 walks only the {} unjudged.",
-                everything.len(),
-                everything.len(),
-                targets.len()
-            ),
-            "Re-label all",
-            "Only unjudged",
+            "Re-label already-labelled pieces?",
+            // **The counts go on the buttons, not in the sentence.** The body used to spell out
+            // "Yes walks all 732; No walks only the 699 unjudged" — which is the buttons, read
+            // aloud, above the buttons. Each answer states its own number and the body states only
+            // the fact you are deciding about.
+            format!("{judged} of {} in scope are judged.", everything.len()),
+            format!("All {}", everything.len()),
+            format!("Only {}", targets.len()),
         );
         queue.ask = Some(Overwrite { unjudged: targets, all: everything });
         return;
