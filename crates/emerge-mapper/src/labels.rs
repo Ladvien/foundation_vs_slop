@@ -817,6 +817,7 @@ pub(crate) fn suggest_all(
     filters: Res<crate::filter::Filters>,
     // For `arm_batch`, which stamps the warm-up's start so the wait can count itself.
     time: Res<Time>,
+    mut confirm: ResMut<crate::confirm::Confirm>,
 ) {
     if !crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::SuggestAll) {
         return;
@@ -928,13 +929,19 @@ pub(crate) fn suggest_all(
     // set; empty means every piece in scope is unjudged and the question has one real answer.
     let judged = everything.len().saturating_sub(targets.len());
     if judged > 0 {
-        state.status.note(format!(
-            "{} piece(s) in scope already have labels. Enter re-labels all {} — Esc labels only \
-             the {} unjudged.",
-            judged,
-            everything.len(),
-            targets.len()
-        ));
+        confirm.ask(
+            crate::confirm::Asked::RelabelJudged,
+            "Re-label pieces that already have labels?",
+            format!(
+                "{judged} of the {} piece(s) in scope are already judged. Yes walks all {}; No \
+                 walks only the {} unjudged.",
+                everything.len(),
+                everything.len(),
+                targets.len()
+            ),
+            "Re-label all",
+            "Only unjudged",
+        );
         queue.ask = Some(Overwrite { unjudged: targets, all: everything });
         return;
     }
@@ -972,22 +979,29 @@ pub(crate) fn suggest_all(
 /// either way — a question that let its answer fall through to "add this candidate to the library"
 /// would be the `xseam` shape this crate has paid for twice (`keys.rs`).
 pub(crate) fn answer_overwrite(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    live: Res<crate::keys::Live>,
     mut state: ResMut<crate::tiles::ImportState>,
     mut queue: ResMut<LabelQueue>,
     // Both are for `arm_batch`: the root is where the endpoint config is read from, and the clock
     // is what makes the warm-up able to say how long it has been waiting.
     project: Option<Res<Project>>,
     time: Res<Time>,
+    mut confirm: ResMut<crate::confirm::Confirm>,
 ) {
     let Some(project) = project else { return };
     let Some(ask) = queue.ask.clone() else { return };
-    let yes = crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::Accept);
-    let no = crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::Cancel);
-    if !yes && !no {
+    // **`Y` re-labels everything in scope, `N` takes only the unjudged.**
+    //
+    // This answered to `Enter` and `Esc` — `Enter` meaning *yes* here while the editor's leaving
+    // prompt deliberately refused to answer to it at all, on the grounds that it is the
+    // most-pressed key in the editor and a question about losing work must not be answerable by
+    // reflex. Both were right on their own and together they were unlearnable. See `crate::confirm`.
+    //
+    // **`N` is not "cancel".** The question is which of two sets to walk, and both are real work;
+    // backing out entirely is not answering it, which is why the modal's `Esc` lands here as `N`
+    // and the empty-set branch below is what actually says nothing happened.
+    let Some(yes) = confirm.answer(crate::confirm::Asked::RelabelJudged) else {
         return;
-    }
+    };
     queue.ask = None;
     let targets = if yes { ask.all } else { ask.unjudged };
     if targets.is_empty() {

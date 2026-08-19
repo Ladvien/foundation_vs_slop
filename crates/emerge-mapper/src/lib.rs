@@ -50,6 +50,7 @@ pub mod anim_watch;
 pub mod build;
 pub mod chooser;
 pub mod chrome;
+pub mod confirm;
 pub mod compass;
 pub mod compose;
 pub mod devshot;

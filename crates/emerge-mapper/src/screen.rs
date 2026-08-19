@@ -260,6 +260,12 @@ pub const OWNERSHIP: &[(&str, Ownership)] = &[
     ("emerge_mapper::surface::Surface", Ownership::Session),
     ("emerge_mapper::keys::Live", Ownership::Session),
     ("emerge_mapper::keys::Repeat", Ownership::Session),
+    // **The one prompt outlives a door on purpose**, because it is asked on both sides of one:
+    // `chooser` raises delete and quit on the menu, `editor` raises the leaving question from
+    // inside a door, and the resource that carries them cannot belong to either. Its *panel* is
+    // per-screen (`ConfirmPlugin` spawns on both `OnEnter`s) because `scene_roots` sweeps roots on
+    // a screen change — the state is session-wide, the pixels are not.
+    ("emerge_mapper::confirm::Confirm", Ownership::Session),
     ("emerge_mapper::view::Pointer", Ownership::Session),
     // Persisted to disk under `target/`, so that STALE is truthful at startup rather than after the
     // bench's first audit.

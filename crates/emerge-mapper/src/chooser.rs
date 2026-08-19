@@ -1052,14 +1052,9 @@ mod tests {
         // Layer 3 — a second, separate press asks rather than quitting.
         c.ask = Some(Ask::Quit);
         assert!(
-            render(&c).contains("quit emerge-mapper?"),
-            "quitting is a question:\n{}",
-            render(&c)
-        );
-        assert!(
-            c.hint().contains("Y quit") && c.hint().contains("Esc stay"),
-            "and the hint offers both answers: {}",
-            c.hint()
+            matches!(c.ask, Some(Ask::Quit)),
+            "quitting is a question, and it is the ONE question — `crate::confirm` carries the \
+             wording and the two keys, so nothing is asserted about them here"
         );
     }
 
@@ -1093,21 +1088,14 @@ mod tests {
         let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
         c.section(1);
         c.ask_delete().unwrap_or_else(|e| panic!("{e}"));
-        let hint = c.hint();
-        assert!(hint.contains('Y'), "delete is answered with Y: {hint}");
-        assert!(hint.contains("Esc"), "and declined with Esc: {hint}");
-        assert!(
-            !hint.contains("Enter"),
-            "Enter must NOT answer a destructive question — it opens maps everywhere else: {hint}"
-        );
-
+        // **The hint stands down while a question is up, for both questions.** It used to spell
+        // the two answers here — and that was the whole point of this test, back when each prompt
+        // chose its own. `crate::confirm` states them beside its own buttons now, so what is left
+        // to hold is that the chooser stops offering its ordinary verbs: listing `Enter open KIT`
+        // beside a pending deletion is an invitation to press it.
+        assert_eq!(c.hint(), "", "delete: the hint stands down");
         c.ask = Some(Ask::Quit);
-        let hint = c.hint();
-        assert!(
-            hint.contains('Y') && hint.contains("Esc"),
-            "same two answers: {hint}"
-        );
-        assert!(!hint.contains("Enter"), "{hint}");
+        assert_eq!(c.hint(), "", "quit: the same, which is the uniformity this test now pins");
     }
 
     /// **Every list opens with a `+ new …` row, and it is a row you can be on.**
@@ -1535,9 +1523,8 @@ mod tests {
             "and the file is UNTOUCHED until it is answered"
         );
         assert!(
-            render(&c).contains("delete `hall`?"),
-            "the question names the map:\n{}",
-            render(&c)
+            c.screen().asking.is_none(),
+            "the chooser stopped drawing its own copy of the question when the modal took it"
         );
 
         let gone = c.confirm_delete().unwrap_or_else(|e| panic!("{e}"));
@@ -1656,18 +1643,14 @@ mod tests {
         c.focus = Focus::Kits;
         c.ask_delete().unwrap_or_else(|e| panic!("{e}"));
 
-        let asked = c
-            .screen()
-            .asking
-            .unwrap_or_else(|| panic!("a question is up"));
-        // **The question carries no counts at all**, deliberately: `KIT INFO` is beside it saying
-        // exactly that, and a question restating its neighbour is text to read rather than a
-        // decision to make.
-        assert!(asked.contains("delete kit `site`?"), "{asked}");
-        assert!(asked.contains('Y') && asked.contains("Esc"), "{asked}");
+        // **The wording moved to `crate::confirm`'s modal**, so the chooser renders no question of
+        // its own — see `Chooser::screen`'s `asking: None`. What this still owns is that the
+        // question is ARMED and that `Delete` did not delete; the two answers and their keys are
+        // the modal's, and `one_prompt_one_vocabulary.rs` is what holds them.
+        assert!(matches!(c.ask, Some(Ask::Delete(_))), "a question is up");
         assert!(
-            !asked.contains("piece") && !asked.contains("map "),
-            "no inventory in the question: {asked}"
+            c.screen().asking.is_none(),
+            "and the chooser does not draw it a second time under the modal"
         );
         assert_eq!(plural(0, "map"), "maps", "zero is plural");
         assert_eq!(plural(2, "piece"), "pieces");
@@ -3529,29 +3512,13 @@ impl Chooser {
             maps,
             settings_header,
             settings,
-            asking: self.ask.as_ref().map(|a| match a {
-                // **The question has to carry its own answer.** A capture of this prompt showed it
-                // saying what would be lost and never saying which key agreed — the fact lived only
-                // in a guide card's prose and in `drive_chooser`. `Y` rather than `Enter` is a
-                // deliberate choice (`Enter` opens maps and edits fields everywhere else on this
-                // screen, and a destructive prompt answered by the most-pressed key gets answered
-                // by accident), and a deliberate choice nobody can see is indistinguishable from
-                // no choice at all.
-                // **Only what is needed to decide.** It named the piece and map counts, and for a
-                // map the file name too — reported at the keyboard: *"I don't want how much stuff
-                // is in there, I can see that in the info area. Just give me the text that I need
-                // to decide."* `KIT INFO` sits on screen beside the question still showing those
-                // counts, so restating them is the same defect as the header that repeated the
-                // selected kit's name. What only the question can say is which thing, that it is
-                // final, and which key agrees.
-                Ask::Delete(c) if c.kit => {
-                    format!("delete kit `{}`? Y removes it all, Esc keeps it", c.name)
-                }
-                Ask::Delete(c) => {
-                    format!("delete `{}`? Y removes it for good, Esc keeps it", c.name)
-                }
-                Ask::Quit => "quit emerge-mapper? Y quits — Esc stays".to_owned(),
-            }),
+            // **The question lives in the modal now**, so this renders nothing. `crate::confirm`
+            // owns the wording, the two answers and the keys that give them; a second copy on the
+            // chooser's own band is what a capture on 2026-08-19 showed underneath the panel —
+            // `quit emerge-mapper? Y quits — Esc stays` in the corner while the modal said the
+            // same thing in the middle. Two copies of one question is worse than the one it
+            // replaced.
+            asking: None,
             problem: self.problem.clone(),
             hint: self.hint().to_owned(),
         }
@@ -3729,10 +3696,11 @@ impl Chooser {
     /// key not listed, because it teaches something untrue.
     pub fn hint(&self) -> &'static str {
         match self.ask {
-            // **The question owns the keyboard, and the hint says only its two answers.** Listing
-            // the ordinary verbs beside a pending question invites pressing one of them.
-            Some(Ask::Delete(_)) => "Y delete it    Esc keep it",
-            Some(Ask::Quit) => "Y quit    Esc stay",
+            // **The question owns the keyboard, and the hint stands down while it does.** It used
+            // to spell the two answers here as well; the modal states them beside its own buttons
+            // now, so this only has to stop offering the ordinary verbs — listing those beside a
+            // pending question invites pressing one of them.
+            Some(_) => "",
             None => self.hint_when_nothing_is_asked(),
         }
     }
@@ -4436,6 +4404,9 @@ fn on_row_click(
     click: On<Pointer<Click>>,
     rows: Query<&ChooserRow>,
     mut chooser: Option<ResMut<Chooser>>,
+    // For the double-click, which runs the same `open_the_selection` `Enter` does.
+    mut commands: Commands,
+    mut next: ResMut<NextState<crate::screen::Screen>>,
 ) {
     let (Ok(row), Some(chooser)) = (rows.get(click.entity), chooser.as_mut()) else {
         return;
@@ -4461,6 +4432,14 @@ fn on_row_click(
             chooser.map = row.index;
         }
         RowPane::Settings => chooser.focus = Focus::Settings,
+    }
+    // **The second click opens it**, through the identical door `Enter` walks — see
+    // [`open_the_selection`]. Bevy's `Pointer<Click>` carries `count`, so this needs no timer and
+    // no remembered entity: the first click arrives as 1 and has already moved the cursor above,
+    // the second arrives as 2 and acts on it. `>= 2` rather than `== 2` so a fast triple-click
+    // opens rather than falling through and doing nothing.
+    if click.count >= 2 {
+        open_the_selection(chooser, &mut commands, &mut next);
     }
 }
 
@@ -4825,6 +4804,8 @@ fn drive_chooser(
     // screen and a key held across the door does not resume repeating on the far side of it.
     time: Res<Time>,
     mut repeat: ResMut<crate::keys::Repeat>,
+    // The one prompt. This screen raises two of the four questions in `confirm::Asked`.
+    mut confirm: ResMut<crate::confirm::Confirm>,
 ) {
     // **A key the text handler already took is not read again.** One `Escape` is one press; see
     // `Chooser::swallowed` for the bug this closes.
@@ -4846,34 +4827,53 @@ fn drive_chooser(
     // rather than doing its usual job behind the question — an arrow that moved the selection while
     // "delete `hall`?" was on screen would leave the prompt naming one map and the highlight on
     // another, which is how a confirmation deletes the wrong thing.
-    if let Some(ask) = chooser.ask.clone() {
-        if keyboard.just_pressed(KeyCode::KeyY) {
-            match ask {
-                Ask::Delete(_) => {
-                    chooser.problem = match chooser.confirm_delete() {
-                        Ok(name) => Some(format!("`{name}` deleted")),
-                        Err(e) => Some(e),
-                    };
-                }
-                Ask::Quit => {
-                    exit.write(AppExit::Success);
-                }
-            }
+    // **The modal owns the keyboard while it is up.** `confirm` reads `Y`/`N`/`Esc` itself; every
+    // other key is ignored rather than doing its usual job behind the question — an arrow that
+    // moved the selection while "delete `hall`?" was on screen would leave the prompt naming one
+    // map and the highlight on another, which is how a confirmation deletes the wrong thing.
+    if let Some(agreed) = confirm.answer(crate::confirm::Asked::DeleteEntry) {
+        chooser.ask = None;
+        chooser.problem = None;
+        if agreed {
+            chooser.problem = match chooser.confirm_delete() {
+                Ok(name) => Some(format!("`{name}` deleted")),
+                Err(e) => Some(e),
+            };
         }
-        // **`else if`, so one frame cannot both answer and un-answer.** `Y` and `Escape` arriving
-        // together — a fast double-tap, or one `bevy_debugger/input` call — ran the deletion and then
-        // cleared `problem`, which is where `confirm_delete` puts *both* the confirmation and the
-        // reason it refused. The author saw the prompt vanish, no message, and the kit still there.
-        else if keyboard.just_pressed(KeyCode::Escape) || keyboard.just_pressed(KeyCode::KeyN) {
-            chooser.ask = None;
-            chooser.problem = None;
+        return;
+    }
+    if let Some(agreed) = confirm.answer(crate::confirm::Asked::QuitApp) {
+        chooser.ask = None;
+        if agreed {
+            exit.write(AppExit::Success);
         }
+        return;
+    }
+    if confirm.is_open() {
         return;
     }
     // **Ask; do not do.** `Delete` on a map raises the question and changes nothing — see
     // [`Pending`] for why this verb is split in two.
     if keyboard.just_pressed(KeyCode::Delete) || keyboard.just_pressed(KeyCode::Backspace) {
         chooser.problem = chooser.ask_delete().err();
+        // **`ask_delete` arms the state; the modal states the question.** Split that way because
+        // `ask_delete` is a `Chooser` method — it decides whether there IS anything to delete and
+        // refuses the root kit — while the wording belongs where every other question's wording
+        // lives. A refusal leaves `ask` empty, so nothing is raised.
+        if let Some(Ask::Delete(pending)) = chooser.ask.clone() {
+            let what = if pending.kit { "kit" } else { "map" };
+            confirm.ask(
+                crate::confirm::Asked::DeleteEntry,
+                format!("Delete the {what} `{}`?", pending.name),
+                if pending.kit {
+                    "The whole kit directory goes, with everything in it. This cannot be undone."
+                } else {
+                    "The map file is removed. This cannot be undone."
+                },
+                "Delete it",
+                "Keep it",
+            );
+        }
         return;
     }
     // **Arrows move inside a panel. `Tab` crosses between them.** One rule, no exceptions — the
@@ -4925,6 +4925,13 @@ fn drive_chooser(
             chooser.problem = None;
         } else {
             chooser.ask = Some(Ask::Quit);
+            confirm.ask(
+                crate::confirm::Asked::QuitApp,
+                "Quit emerge-mapper?",
+                "Anything already saved stays saved.",
+                "Quit",
+                "Stay",
+            );
         }
     }
     // **`Space` turns a kit on or off, standing on the kit itself.**
@@ -4950,6 +4957,26 @@ fn drive_chooser(
         return;
     }
     if keyboard.just_pressed(KeyCode::Enter) {
+        open_the_selection(&mut chooser, &mut commands, &mut next);
+    }
+}
+
+/// **What `Enter` means on the row the cursor is on — and therefore what a double-click means.**
+///
+/// Extracted so the pointer and the keyboard cannot come to disagree about what "open this" does.
+/// The chooser was keyboard-*only* rather than keyboard-first: a click moved the cursor and nothing
+/// else, so with a mouse you could select a kit and then had to reach for `Enter` to actually open
+/// it, and `+ new …` was unreachable by pointer entirely. Reported at the keyboard 2026-08-19 —
+/// *"we are keyboard first. We're not anti mouse."*
+///
+/// A single click still only selects. Acting on the first click would make a mis-click open a
+/// door, and the arrow keys' own contract is that moving the cursor is free.
+fn open_the_selection(
+    chooser: &mut Chooser,
+    commands: &mut Commands,
+    next: &mut NextState<crate::screen::Screen>,
+) {
+    {
         // **There is no `Ctrl+Enter` here any more.** Both a kit and a map are made by pressing
         // `Enter` on the name (see [`keep_field`]); a chord that made the same thing a second way
         // would be the way nobody found.

@@ -57,6 +57,15 @@ pub const DANGER: Color = Color::srgb(0.86, 0.36, 0.30);
 /// still asks to be read.
 ///
 /// For a row that exists on purpose and is deliberately not participating: a pack this kit excludes.
+/// **The scrim behind a modal** — the application, dimmed, so the question is the only lit thing.
+///
+/// Black at 55%: enough to push a full panel of text back without hiding what the question is
+/// about, which matters because every question here names a piece or a map the author can still
+/// see behind it. Named rather than written at the call site so a second modal cannot dim by a
+/// different amount, which is exactly the drift `panel_ink_comes_from_the_palette` exists to catch
+/// — and did, on this constant's first day.
+pub const SCRIM: Color = Color::srgba(0.0, 0.0, 0.0, 0.55);
+
 /// It has to stay visible, because a mesh that has silently vanished looks identical to one that was
 /// never scanned — but it must not compete with rows an author can actually act on.
 pub const MUTED: Color = Color::srgb(0.34, 0.32, 0.31);
@@ -1842,7 +1851,6 @@ impl Plugin for ChromePlugin {
                 (
                     style_list_rows,
                     hide_idle_scrollbars,
-                    paint_the_leaving_prompt,
                     repaint_where_you_are,
                 ),
             )
@@ -2350,36 +2358,6 @@ pub const ALL_TABS: &[crate::tiles::Mode] = &[
     crate::tiles::Mode::Compose,
 ];
 
-/// The band's leftmost slot: the question the way out asks, on every door.
-#[derive(Component)]
-pub struct LeavingPrompt;
-
-/// **Show the leaving question wherever the author is.**
-///
-/// `Option<Res<..>>` because `EditorState` belongs to the editor screen and this system is on the
-/// shared `Update`; a missing `Res<T>` panics its system in Bevy 0.19 rather than skipping it.
-///
-/// Compares before writing, per the standing rule — the text is rebuilt from the same `Status` the
-/// prompt writes, so it would otherwise be assigned every frame the question is up.
-pub fn paint_the_leaving_prompt(
-    editor: Option<Res<crate::editor::EditorState>>,
-    mut prompt: Query<(&mut Node, &mut Text), With<LeavingPrompt>>,
-) {
-    let Some(editor) = editor else { return };
-    // The status carries the words — the dirty branch names three keys, the clean one names `Esc` —
-    // so this shows what `leave_for_menu` already said rather than a second copy of it.
-    let want = editor.leaving.then(|| editor.status.line().to_owned());
-    for (mut node, mut text) in &mut prompt {
-        let display = if want.is_some() { Display::Flex } else { Display::None };
-        if node.display != display {
-            node.display = display;
-        }
-        let line = want.clone().unwrap_or_default();
-        if text.0 != line {
-            text.0 = line;
-        }
-    }
-}
 
 /// **One band at the foot of the window: what went wrong, and what the keys are.**
 ///
@@ -2401,29 +2379,6 @@ pub fn paint_the_leaving_prompt(
 /// landed.
 pub fn spawn_status_band(mut commands: Commands, frame: Res<Frame>) {
     commands.entity(frame.status).with_children(|band| {
-        // **The way out asks a question, and until now most doors could not show it.**
-        //
-        // `editor::leave_for_menu` arms `EditorState::leaving` and writes the question into
-        // `EditorState::status` — and `notice::paint_notices` picks the status by tab, so on the Kit
-        // and Rigs doors it went to a status nothing renders. Both `Cmd+O` and the `< kits & maps`
-        // button fired correctly and **nothing appeared**, which reads exactly like a dead key.
-        // Reported at the keyboard, 2026-08-18: *"the command o button doesn't work when I click on
-        // it or when I press the shortcut key."*
-        //
-        // It is a question about the *window* — "leave this door?" — so it belongs on the window's
-        // own band rather than in whichever panel happens to be showing. That is the same argument
-        // that moved the way out itself out of the panels.
-        band.spawn((
-            LeavingPrompt,
-            Text::new(String::new()),
-            TextFont::from_font_size(text::BODY),
-            TextColor(ACCENT),
-            Node {
-                display: Display::None,
-                margin: UiRect::right(Val::Px(GAP_GROUP)),
-                ..default()
-            },
-        ));
         problem_banner(band, ALL_TABS);
         band.spawn((
             Node {

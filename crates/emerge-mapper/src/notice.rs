@@ -166,7 +166,14 @@ fn paint_notices(
             continue;
         }
         commands.entity(entity).with_children(|p| {
-            crate::chrome::section(p, "PROBLEMS ON THIS TAB");
+            // **Marked, because the rebuild sweeps by marker.** The despawn above takes every
+            // `ProblemLogLine`; this heading carried no marker, so each rebuild appended another
+            // copy and none was ever removed. A batch that raised one problem per frame stacked
+            // ~190 headings down the panel before anybody could read the one message underneath
+            // them. The `Esc clears them` line below already had the marker, which is why it did
+            // not multiply and why the fault looked like a heading bug rather than a sweep bug.
+            crate::chrome::section(p, "PROBLEMS ON THIS TAB")
+                .insert(crate::chrome::ProblemLogLine);
             // **Say how to take them down.** These are sticky by design — a refusal that vanished
             // before it was read is the failure `Status` exists to prevent — but sticky with no
             // stated way out reads as an editor filling up with complaints. An author watching the

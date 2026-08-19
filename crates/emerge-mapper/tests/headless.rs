@@ -8883,19 +8883,42 @@ fn escape_peels_to_the_selection_then_asks_then_goes() {
     // Nothing left to peel, so the next one reaches the map itself — and asks rather than going.
     tap(&mut app, KeyCode::Escape);
     assert!(
-        app.world().resource::<EditorState>().leaving,
-        "the last layer is a question, not a departure"
+        app.world()
+            .resource::<emerge_mapper::confirm::Confirm>()
+            .asking(emerge_mapper::confirm::Asked::LeaveMap),
+        "the last layer is a question, not a departure — and it is the ONE question, not a line \
+         this door invented for itself"
     );
     assert!(
         !heading_back(&app),
         "asking is not going — leaving silently on a reflex key is what this question exists for"
     );
 
-    // And the third answers it.
+    // **And `Y` answers it, not a third `Esc`.**
+    //
+    // This used to be `Esc` three times, which is what the original report asked for — but `Esc`
+    // agreeing here while `Esc` refused the chooser's delete is exactly the spread `crate::confirm`
+    // was built to end. `Esc` still refuses, so the peel's own promise is intact: the key that
+    // backs out never commits anything.
     tap(&mut app, KeyCode::Escape);
     assert!(
+        !heading_back(&app),
+        "`Esc` at the modal is a synonym for `N` — the back-out key must never be the one that \
+         commits"
+    );
+    app.world_mut()
+        .resource_mut::<emerge_mapper::confirm::Confirm>()
+        .ask(
+            emerge_mapper::confirm::Asked::LeaveMap,
+            "Leave this map?",
+            "",
+            "Go",
+            "Stay",
+        );
+    tap(&mut app, KeyCode::KeyY);
+    assert!(
         heading_back(&app),
-        "`Esc` at the question is yes, on a clean map where it can lose nothing"
+        "`Y` proceeds, on a clean map where it can lose nothing"
     );
 }
 
@@ -9502,42 +9525,33 @@ fn the_leaving_question_is_visible_on_a_door_that_is_not_the_map() {
         .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
     app.update();
 
-    let quiet = |app: &mut App| -> Vec<(bevy::ui::Display, String)> {
-        app.world_mut()
-            .query_filtered::<(&bevy::ui::Node, &Text), With<emerge_mapper::chrome::LeavingPrompt>>()
-            .iter(app.world())
-            .map(|(n, t)| (n.display, t.0.clone()))
-            .collect()
-    };
-
-    let before = quiet(&mut app);
-    assert_eq!(before.len(), 1, "the band carries exactly one leaving prompt");
-    assert_eq!(
-        before[0].0,
-        bevy::ui::Display::None,
-        "nothing is being asked, so nothing should be on the band"
+    assert!(
+        !app.world()
+            .resource::<emerge_mapper::confirm::Confirm>()
+            .is_open(),
+        "nothing is being asked yet, so no prompt should be up"
     );
 
-    // What `Cmd+O` and the `< kits & maps` click both call.
-    {
-        let mut state = app
-            .world_mut()
-            .resource_mut::<emerge_mapper::editor::EditorState>();
-        emerge_mapper::editor::leave_for_menu(false, &mut state);
-    }
+    // What `Cmd+O` and the `< kits & maps` click both call. The question moved to
+    // `crate::confirm`'s modal, so this asserts on THAT rather than on the band — see below.
+    app.world_mut().resource_scope(
+        |world, mut confirm: Mut<emerge_mapper::confirm::Confirm>| {
+            let mut state = world.resource_mut::<emerge_mapper::editor::EditorState>();
+            emerge_mapper::editor::leave_for_menu(false, &mut state, &mut confirm);
+        },
+    );
     app.update();
 
-    let after = quiet(&mut app);
-    assert_eq!(
-        after[0].0,
-        bevy::ui::Display::Flex,
-        "the question is armed and the author can see nothing — which is the bug, and it reads as a \
-         dead key rather than as a missing prompt"
-    );
+    // **The band stays empty now, and the modal is what carries the question.** The old assertion
+    // here was that `chrome::LeavingPrompt` lit up; that band was the whole reason this prompt
+    // spoke a different language from the chooser's and the labeller's, so it went with them —
+    // see `crate::confirm`.
     assert!(
-        after[0].1.contains("Esc"),
-        "the prompt must name the key that answers it; `Esc` is the whole point of asking. Got: {:?}",
-        after[0].1
+        app.world()
+            .resource::<emerge_mapper::confirm::Confirm>()
+            .asking(emerge_mapper::confirm::Asked::LeaveMap),
+        "leaving a door must raise the one prompt; a door that arms `leaving` and shows nothing \
+         reads as a dead key rather than as a missing question"
     );
 }
 

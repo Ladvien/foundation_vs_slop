@@ -4735,18 +4735,49 @@ pub(crate) fn apply_suggestion(
     // axis in vocabulary order to do it, and that order cannot be read out of `project` while
     // `project.measured` is mutably borrowed below. Same shape as `on_tag_chip`.
     let effects_order: Vec<String> = project.vocab.effects.names().map(str::to_owned).collect();
+    // **A refusal here DROPS the proposal, and that is the whole fix.**
+    //
+    // Both of these are permanent: the piece is gone, or the mesh under it changed. Neither becomes
+    // true again by waiting. But `auto_apply_batch` runs on `Update` and re-tries every suggestion
+    // it can see, so a proposal left in the set after a refusal was retried **every frame** — the
+    // same refusal, forever, at frame rate. Seen 2026-08-19 on the first real run against `big`:
+    // `not applied - that piece is gone (x184)` inside a few seconds, with the walk still reading
+    // 1/777 because nothing had advanced. The `(xN)` counter was doing its job; it was counting a
+    // loop rather than a recurrence.
+    //
+    // Removing it also bumps the generation, so the panel and the cache stop showing a proposal
+    // that can never be applied.
+    let refuse = |state: &mut ImportState,
+                      suggestions: &mut crate::labels::Suggestions,
+                      generation: &mut crate::labels::LabelGeneration,
+                      why: &str| {
+        state.status.problem(format!("not applied — {why}"));
+        suggestions.remove(&target);
+        generation.0 = generation.0.wrapping_add(1);
+    };
+    let mesh_now = state
+        .at_target(&target, &mut project.measured)
+        .map(|(d, _)| d.mesh.clone());
+    match mesh_now {
+        None => {
+            refuse(state, suggestions, generation, "that piece is gone");
+            return;
+        }
+        Some(m) if m.as_deref() != Some(entry.mesh.as_str()) => {
+            refuse(
+                state,
+                suggestions,
+                generation,
+                "the mesh changed under the proposal",
+            );
+            return;
+        }
+        Some(_) => {}
+    }
     let Some((d, where_to)) = state.at_target(&target, &mut project.measured) else {
-        state
-            .status
-            .problem("not applied — that piece is gone".to_owned());
+        // Unreachable: the match above just resolved it, and nothing between can invalidate it.
         return;
     };
-    if d.mesh.as_deref() != Some(entry.mesh.as_str()) {
-        state
-            .status
-            .problem("not applied — the mesh changed under the proposal".to_owned());
-        return;
-    }
     crate::labels::apply_fields(d, &entry.suggestion, &effects_order);
     state.record(history_before);
     let said = persist(

@@ -1071,16 +1071,33 @@ fn spawn_cost_readout(mut commands: Commands, frame: Res<crate::chrome::Frame>) 
 /// `Door::map_door_is_open`. That left the Kit door with a `‹ kits & maps` button that lit on hover
 /// and did nothing, a `Cmd+O` the shortcut overlay advertised and no system handled, and no exit but
 /// closing the window. Nothing to lose is `false`, which is the clean-map question.
-pub fn leave_for_menu(dirty: bool, state: &mut EditorState) {
+pub fn leave_for_menu(dirty: bool, state: &mut EditorState, confirm: &mut crate::confirm::Confirm) {
     state.leaving = true;
+    // **One question, two keys, wherever it is asked** — see `crate::confirm`. This used to be a
+    // line in the status bar answered by `S` save, `D` discard or `Esc` stay, while the chooser's
+    // delete answered to `Y` and the labeller's overwrite answered to `Enter`. Three questions,
+    // three vocabularies.
+    //
+    // **`D` discard is gone with it, and that is a decision rather than an oversight.** `Cmd+O` and
+    // the back button already save and go (`save_and_leave`), chosen at the keyboard 2026-08-18 —
+    // so a discard offered on this one route meant the same gesture kept work on two paths out of
+    // three and threw it away on the third. Y here saves and goes, exactly as they do.
     if dirty {
-        state
-            .status
-            .problem("unsaved changes — S save and go, D discard and go, Esc stay".to_owned());
+        confirm.ask(
+            crate::confirm::Asked::LeaveMap,
+            "Leave this map?",
+            "It has unsaved edits. Leaving saves them first.",
+            "Save and go",
+            "Stay",
+        );
     } else {
-        state
-            .status
-            .note("leave this map? Esc again for kits & maps, any other key stays".to_owned());
+        confirm.ask(
+            crate::confirm::Asked::LeaveMap,
+            "Leave this map?",
+            "Nothing is unsaved.",
+            "Go",
+            "Stay",
+        );
     }
 }
 
@@ -1172,80 +1189,44 @@ fn back_to_the_menu(
 
 /// **Answer the leaving question, and nothing else.**
 ///
-/// Runs ahead of [`keys`], which stands down entirely while this is up — otherwise `S` and `D` would
-/// do their ordinary jobs on the map at the same moment they answer a question about discarding it.
-/// The three keys are the three real outcomes; there is no fourth, and no default.
+/// The keys are `crate::confirm`'s now — `Y` proceeds, `N` stops, `Esc` a synonym for `N` — so this
+/// only routes the answer. It used to own three of its own (`S` save, `D` discard, `Esc` stay) while
+/// the chooser answered `Y` and the labeller answered `Enter`; that spread is what
+/// `confirm`'s module note is about.
 ///
-/// **Two questions, not one**, because a clean map and a dirty one are not the same decision. The
-/// dirty prompt is unchanged: `S`, `D`, `Esc stay`. The clean one is a single yes — `Esc` goes,
-/// anything else stays — and it exists because leaving silently on a reflex key is what an author
-/// asked to be protected from. `Esc` means "the safe thing" in both, and on a clean map the safe
-/// thing is leaving.
+/// **`Y` saves and goes on a dirty map.** Discard went with the migration, deliberately: `Cmd+O` and
+/// the back button already save and go, so a discard offered on this one route meant the same
+/// gesture kept your work on two paths out of three.
 ///
 /// **Ordering makes the press that raises the question distinct from the press that answers it.**
 /// This runs `.before(keys::Phase::Act)`, and the peel that calls `leave_for_menu` runs *in* `Act` —
-/// so on the frame `Esc` raises the prompt, this has already run and seen `leaving == false`. The
-/// next press is the answer. Without that, one keystroke would ask and answer at once.
+/// so on the frame `Esc` raises the prompt, this has already run. The modal reads its own keys in
+/// the same phase, so the raising press cannot also answer it.
 fn answer_the_leaving_prompt(
-    keyboard: Res<ButtonInput<KeyCode>>,
     project: Option<Res<Project>>,
     open: Option<ResMut<OpenMap>>,
     mut state: ResMut<EditorState>,
     mut next: ResMut<NextState<crate::screen::Screen>>,
+    mut confirm: ResMut<crate::confirm::Confirm>,
 ) {
-    if !state.leaving {
+    let Some(agreed) = confirm.answer(crate::confirm::Asked::LeaveMap) else {
         return;
-    }
-    // **`Option`, and ungated by the door**, because this holds every `next.set(Screen::Menu)` there
-    // is — see `leave_for_menu` for what gating it cost the Kit and Rigs doors. A door with no map
-    // is never dirty, so it takes the clean branch below.
-    let mut open = open;
-    let dirty = open.as_ref().is_some_and(|o| o.dirty);
-    // **A clean map asks one question and `Esc` answers it yes.**
-    //
-    // Nothing can be lost here, which is the whole reason `Esc` is allowed to be the confirming key
-    // rather than the cancelling one — see `leave_for_menu`. **Any other key stays**, so the answer
-    // is never given by a keystroke aimed at the map: an author who meant to press `W` gets their
-    // map back, not the chooser.
-    if !dirty {
-        if keyboard.just_pressed(KeyCode::Escape) {
-            state.leaving = false;
-            next.set(crate::screen::Screen::Menu);
-        } else if keyboard.get_just_pressed().next().is_some() {
-            state.leaving = false;
-            state.status.note("staying on this map".to_owned());
-        }
-        return;
-    }
-    if keyboard.just_pressed(KeyCode::Escape) {
-        state.leaving = false;
+    };
+    state.leaving = false;
+    if !agreed {
         state.status.note("staying on this map".to_owned());
-    } else if keyboard.just_pressed(KeyCode::KeyD) {
-        // The one branch that loses work, on a key that means nothing else here.
-        state.leaving = false;
-        next.set(crate::screen::Screen::Menu);
-    } else if keyboard.just_pressed(KeyCode::KeyS) {
-        // **Through `Project::save`, the same door `Cmd+S` uses** — validate, then an atomic write.
-        // A save that refuses keeps you here with the reason rather than leaving on a map that was
-        // never written.
-        //
-        // Reachable only from the dirty branch, which needs a map — but both are read as `Option`
-        // because a run of this file is a run of every door.
-        let (Some(open), Some(project)) = (open.as_mut(), project.as_deref()) else {
-            state.leaving = false;
-            return;
-        };
-        match open.save(project) {
-            Ok(()) => {
-                state.leaving = false;
-                next.set(crate::screen::Screen::Menu);
-            }
-            Err(e) => {
-                state.leaving = false;
-                state.status.problem(format!("NOT SAVED: {e}"));
-            }
-        }
+        return;
     }
+    // **Saving is the going.** `save_and_leave` is the same door `Cmd+O` and the back button walk,
+    // so a refused save keeps you here with the reason rather than leaving on a map that was never
+    // written — the one path out of this that does not reach the menu.
+    let mut open = open;
+    save_and_leave(
+        open.as_deref_mut(),
+        project.as_deref(),
+        &mut state,
+        &mut next,
+    );
 }
 
 /// **Give every back button its click, wherever a panel put one.**
@@ -4616,6 +4597,12 @@ fn keys(
     mut tiles: (
         ResMut<crate::tiles::Mode>,
         ResMut<crate::tiles::ImportState>,
+        // **The prompt rides in this tuple for the reason the tuple exists**: the parameter list is
+        // at Bevy's sixteen and a seventeenth is a compile error, so a new `ResMut` has to join an
+        // existing one. It is not tiles state, and the name says `tiles`, which is the honest cost
+        // of a full signature — the alternative was splitting the `Esc` cascade into a second
+        // system, and that cascade only works because every layer of it is peeled in one place.
+        ResMut<crate::confirm::Confirm>,
     ),
 ) {
     // **Every other verb stands down while the leaving question is up.** `S` and `D` answer it and
@@ -4624,7 +4611,7 @@ fn keys(
     if state.leaving {
         return;
     }
-    let (mode, import) = &mut tiles;
+    let (mode, import, confirm) = &mut tiles;
     let (move_drag, clone_drag, target, proposal, compose) = &mut tools;
     // One clock for every key that repeats while held — see `keys::repeating`.
     let dt = time.delta_secs();
@@ -4818,7 +4805,7 @@ fn keys(
         // idea of "nothing in hand", decided by a different system in the same frame — so a shared
         // "did anything consume it" rule would be guessing at four answers. The hint line names the
         // key on every tab, which is what keeps the others from being dead ends.
-        leave_for_menu(open.dirty, &mut state);
+        leave_for_menu(open.dirty, &mut state, confirm);
         return;
     }
 

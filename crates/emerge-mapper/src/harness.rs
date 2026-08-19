@@ -70,7 +70,14 @@ pub fn add_editor_plugins(app: &mut App) -> &mut App {
         crate::keys::KeysPlugin,
         crate::chrome::ChromePlugin,
         crate::view::ViewPlugin,
-        crate::compass::CompassPlugin,
+        // **Nested, because `add_plugins` tuples cap at 15** (`all_tuples!(.., 0, 15, ..)`,
+        // `bevy_app-0.19.0/src/plugin.rs:186`). Grouped rather than renumbered so adding the next
+        // one is a nested pair again and not a re-flatten of the whole list.
+        (
+            crate::compass::CompassPlugin,
+            // The one prompt, shared by every feature that asks a question -- see `confirm`.
+            crate::confirm::ConfirmPlugin,
+        ),
         crate::editor::EditorPlugin,
         crate::thumbs::ThumbsPlugin,
         crate::tiles::TilesPlugin,
