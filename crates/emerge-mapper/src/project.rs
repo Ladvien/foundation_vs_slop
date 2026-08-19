@@ -198,9 +198,38 @@ impl Project {
         let bound = emerge_core::kits::bound_library(&project_dir, &kits)?;
         let emerge_core::kits::Bound {
             kits: layers,
-            library,
+            mut library,
             compositions,
         } = bound;
+
+        // **The derived half of `effects` is settled over the whole set, at open.**
+        //
+        // `labels::IMPLIED_BY_KIND` says these tokens follow the kind and are not hand-authorable —
+        // *"set the kind and the effect follows, which is what makes them trustworthy to read"*. That
+        // was true of every row written after the rule landed and false of every row written before
+        // it, because the only two places that settled were applying a suggestion and clicking a KIND
+        // chip. Neither reaches a row already on disk, so a library carried both kinds of answer at
+        // once: `lamp` had `["emit", "uses-electricity"]` and `desk_lamp_modern`, same kind, had
+        // `["emit"]`. Reported at the keyboard 2026-08-18 as beds arriving without
+        // `stamina-recharge`.
+        //
+        // Here rather than at the write, on the same argument `library.resolve` below makes: the
+        // moment to reconcile the whole set is when the whole set is in hand. In memory only — the
+        // merged library spans several kits and their files, so the correction reaches disk through
+        // the ordinary `write_library` path the next time a row is saved.
+        let effects_order: Vec<String> =
+            vocab.effects.tokens.iter().map(|t| t.name.clone()).collect();
+        let mut settled = 0usize;
+        for d in &mut library.descriptors {
+            let before = d.effects.clone();
+            crate::labels::settle_implied_effects(d, &effects_order);
+            if d.effects != before {
+                settled += 1;
+            }
+        }
+        if settled > 0 {
+            info!("{settled} library row(s) had derived effects out of step with their kind");
+        }
 
         // Present by construction: `Kits::validate` refuses an `authoring` that names no bind, and
         // the check above refuses a `--kit` that names none either.

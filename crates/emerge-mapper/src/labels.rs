@@ -1096,9 +1096,16 @@ pub(crate) fn drive_batch(
     let scale = d.align.scale.unwrap_or(1.0);
     let (done, total) = queue.progress();
     let name = name_of(&target);
-    state
-        .status
-        .note(format!("labeling {done}/{total} - `{name}`"));
+    // **The way out, on every line — not once at the start.** `docs/ui.md` §1.4: name the state and
+    // the way out of it. The keys existed (`Shift+L` holds, `Shift+Y` abandons) and were announced
+    // in the message that armed the walk, which is the one message guaranteed to be off screen by
+    // the time somebody wants them: every mesh overwrites the note. Reported at the keyboard as
+    // *"we need a way to interrupt the labeling"* — of a batch that had two, both invisible.
+    state.status.note(format!(
+        "labeling {done}/{total} - `{name}` — {} holds, {} abandons",
+        crate::keys::chord(crate::keys::Action::SuggestAll),
+        crate::keys::chord(crate::keys::Action::DiscardAllSuggestions),
+    ));
     queue.current = Some(name.to_string());
     // **The highlight goes where the walk goes** — `ImportState::focus_on` carries the reason.
     //
