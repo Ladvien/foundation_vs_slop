@@ -9630,3 +9630,88 @@ fn a_note_does_not_survive_a_tab_change_but_a_problem_does() {
          message an author most needs to still be there"
     );
 }
+
+/// **The Meshes stage stands a piece where the shipped spawner will, pivot and all.**
+///
+/// It used to stage at `STAGE.xz - align.pivot`, centring the bounding box on the placement point.
+/// Measured over BRP 2026-08-18 against the live editor, that put the same piece **0.42 m** from
+/// where the Tiles tab stands it — and the Tiles tab was right: `emerge_bevy::spawn_descriptor` puts
+/// the file's origin on the placement point and applies no pivot, and it is the spawner a map
+/// placement and a tile member both go through. `src/placement/furnish.rs:431` is the one caller
+/// that does apply `- rot * pivot`, and the mapper does not author for it.
+///
+/// Chosen at the keyboard: preview the path this editor's output actually takes. The visible
+/// consequence is deliberate — a mesh whose origin is not its bounding-box centre now sits off its
+/// own footprint rectangle here, which is what it will do in the game.
+///
+/// The `y_offset` half is asserted in the same breath because the two are one decision: the height
+/// **is** carried (`stack::datum` adds it to every placed piece), the XZ shift is not.
+#[test]
+fn the_mesh_stage_stands_a_piece_where_the_spawner_will() {
+    use emerge_mapper::tiles::STAGE;
+
+    const PIVOT: (f32, f32) = (0.31, 0.22);
+    const Y_OFFSET: f32 = 0.4;
+
+    let root = Fixture::new("stage_pivot")
+        .pack("alpha/scan", &["spare"])
+        .descriptor("alpha/floor", "alpha")
+        .build("m");
+    let mut app =
+        harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Meshes)
+            .unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..3 {
+        app.update();
+    }
+    {
+        app.world_mut()
+            .resource_mut::<emerge_mapper::tiles::ImportState>()
+            .selected_library_id = Some("alpha/floor".to_owned());
+        let mut project = app
+            .world_mut()
+            .resource_mut::<emerge_mapper::project::Project>();
+        // **Both lists.** `drive_preview` stages from `measured` (the tab describes what was
+        // measured); `library` is what the row selection names. Setting one only is how the first
+        // run of this test read back y = 0.0 and looked like the offset had stopped working.
+        let mut touched = 0;
+        let project = &mut *project;
+        for list in [
+            &mut project.measured.descriptors,
+            &mut project.library.descriptors,
+        ] {
+            for d in list.iter_mut().filter(|d| d.id == "alpha/floor") {
+                // A piece whose geometry is NOT centred on its file origin — the only case pivot
+                // changes anything.
+                d.align.pivot = Some(PIVOT);
+                d.align.y_offset = Some(Y_OFFSET);
+                touched += 1;
+            }
+        }
+        assert!(touched > 0, "the fixture descriptor must be in one of the two lists");
+    }
+    for _ in 0..8 {
+        app.update();
+    }
+
+    let mut q = app.world_mut().query::<&Transform>();
+    let staged: Vec<Vec3> = q
+        .iter(app.world())
+        .map(|t| t.translation)
+        // Only things standing on this stage; the stage camera sits twelve metres above and back.
+        .filter(|v| (v.x - STAGE.x).abs() < 2.0 && (v.z - STAGE.z).abs() < 2.0 && v.y < 2.0)
+        .collect();
+
+    let want = Vec3::new(STAGE.x, STAGE.y + Y_OFFSET, STAGE.z);
+    assert!(
+        staged.iter().any(|v| (*v - want).length() < 1e-3),
+        "no staged piece stands at {want:?} — the pivot is being applied again, or the y_offset \
+         stopped being. Found: {staged:?}"
+    );
+    assert!(
+        !staged
+            .iter()
+            .any(|v| (v.x - (STAGE.x - PIVOT.0)).abs() < 1e-3),
+        "a piece is staged at STAGE.x - pivot.0, which is the shift `spawn_descriptor` never \
+         applies — the preview is promising a position nothing will honour. Found: {staged:?}"
+    );
+}

@@ -1958,6 +1958,16 @@ pub struct LatticePick(pub Option<((u32, u32, u32), Option<emerge_core::descript
 ///
 /// `mount_height` is the only thing that decides which mounts have a height, so this cannot disagree
 /// with the field that edits it.
+/// **How high a staged piece stands above the stage floor**, for every tab that stages one.
+///
+/// The mount's own height, then the mesh's correction on top — the order [`emerge_core::stack::datum`]
+/// applies them in, which is what a placed piece's `y` is resolved from. Shared by the Meshes stage
+/// and the Tiles ghost because they were 0.31 m apart: the ghost used `build::BROUGHT_IN`'s flat
+/// lift, so the same piece stood at two heights depending on which tab you were looking at.
+pub(crate) fn staged_lift(d: &Descriptor) -> f32 {
+    stage_lift(d) + d.align.y_offset.unwrap_or(0.0)
+}
+
 fn stage_lift(d: &Descriptor) -> f32 {
     d.mount
         .as_ref()
@@ -6026,18 +6036,29 @@ fn drive_preview(
             return;
         };
         let a = &d.align;
-        // The pivot shifts the model so its bounding-box centre lands on the placement point,
-        // which is what makes the symmetric footprint an accurate reservation rather than an
-        // approximation.
-        let pivot = a.pivot.unwrap_or((0.0, 0.0));
+        // **No pivot shift, because no shipped path applies one.**
+        //
+        // This used to stage at `STAGE.xz - align.pivot`, on the argument that centring the
+        // bounding box on the placement point *"is what makes the symmetric footprint an accurate
+        // reservation"*. Measured over BRP 2026-08-18: that put the same piece 0.42 m from where
+        // the Tiles tab stands it, and the Tiles tab is the one telling the truth —
+        // `emerge_bevy::spawn_descriptor` places the file's origin at the placement point and
+        // applies no pivot, and that is the spawner a map placement AND a tile member both go
+        // through. So the correction was compensating here for something the game never does, and
+        // the preview promised a position nothing would honour.
+        //
+        // `src/placement/furnish.rs:431` **does** apply `- rot * pivot`, and it is the one caller
+        // that does. Chosen at the keyboard: the mapper authors maps and tiles, so it previews the
+        // path maps and tiles take. The visible consequence is deliberate — a mesh whose origin is
+        // not its bounding-box centre now sits off its own footprint rectangle here, which is
+        // exactly what it will do in the game.
+        //
         // **The transform a real placement applies**, which is `(scale, scale * stretch_y, scale)`
         // — see `emerge_bevy::spawn_descriptor`.
         let want = Transform::from_xyz(
-            STAGE.x - pivot.0,
-            // **The mount's height, then the mesh's own correction on top** — the same order
-            // `stack::datum` applies them in, so the staged piece stands where a placed one will.
-            STAGE.y + stage_lift(d) + a.y_offset.unwrap_or(0.0),
-            STAGE.z - pivot.1,
+            STAGE.x,
+            STAGE.y + staged_lift(d),
+            STAGE.z,
         )
         .with_scale(Vec3::new(
             a.scale.unwrap_or(1.0),

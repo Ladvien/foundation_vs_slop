@@ -2004,6 +2004,18 @@ pub fn drive_build_preview(
     {
         let (at, lift) = BROUGHT_IN;
         let stage = crate::stages::TILE;
+        // **The mount's height and the mesh's `y_offset`, on top of the brought-in lift.**
+        //
+        // `BROUGHT_IN` is the XZ and the layer `place` writes, and that half is still read straight
+        // from it — the ghost must stand where the drop lands. What it did not carry is the piece's
+        // own datum: `stack::resolve_y` adds `mount` height and `align.y_offset` to every *committed*
+        // member a few lines below, so a wall light ghosted on the tile floor and then jumped up its
+        // 1.4 m the instant `Enter` landed it. Measured over BRP 2026-08-18 as a 0.31 m disagreement
+        // with the Meshes stage on the same piece.
+        //
+        // Through `tiles::staged_lift`, which is where the Meshes stage reads it too, so the two
+        // cannot drift apart again.
+        let lift = lift + crate::tiles::staged_lift(&d);
         if let Some(e) = crate::editor::spawn_piece(
             &mut commands,
             &assets,
