@@ -1070,7 +1070,13 @@ pub fn request_labels(
                  EMERGE_VLM_TIMEOUT_SECS rather than restarting the tunnel.",
                 cfg.timeout_secs
             ),
-            other => format!("the VLM endpoint is unreachable: {other}"),
+            // **The remedy travels with the fault, on every path.** `probe` only guards the batch,
+            // so without this the single `L` and the sentinel reported a bare
+            // "io: Connection refused" for the exact condition `Shift+L` explains in full.
+            other => match remedy_for_url(&cfg.url) {
+                Some(remedy) => format!("the VLM endpoint is unreachable ({other}) — {remedy}"),
+                None => format!("the VLM endpoint is unreachable: {other}"),
+            },
         })?;
     let status = response.status();
     let text = response
@@ -1081,6 +1087,57 @@ pub fn request_labels(
         return Err(format!("the VLM endpoint answered {status}: {text}"));
     }
     Ok(text)
+}
+
+/// **What to do about a refused connection — written once, for every path that can meet one.**
+///
+/// This text used to live inside [`probe`] alone, and `probe` is run by the **batch** and nothing
+/// else. So `Shift+L` explained itself while the single `L`, the sentinel and any mid-run failure
+/// fell through to `request_labels`'s generic mapping and said *"the VLM endpoint is unreachable:
+/// io: Connection refused"* — the same fault, one message actionable and the other not. Reported at
+/// the keyboard 2026-08-18 as *"why isn't it showing the error message?"*, which is the right
+/// question to ask of an editor that had just shown it a minute earlier.
+///
+/// The two cases want opposite advice, which is why the remedy is a function of the address rather
+/// than one sentence:
+///
+/// - **Loopback** means the SSH forward. The service on bmb binds to `127.0.0.1`, so nothing on the
+///   LAN can reach it and the tunnel is the workaround — which is also why this is the failure a
+///   machine that has never been set up hits first. A refusal here is not always the port either:
+///   macOS declines key auth entirely while the host is locked ("This system is locked. To unlock
+///   it, use a local account name and password"), so the forward can be impossible to raise for a
+///   reason that has nothing to do with 9292.
+/// - **A LAN address** means the host answered and the service did not, so the network is fine and
+///   the advice is about the process.
+pub fn refusal_remedy(host: &str, port: u16, loopback: bool) -> String {
+    if loopback {
+        format!(
+            "nothing is listening on {host}:{port} — this URL is the SSH-forward setup, so bring \
+             it up with `ssh -fN -L {port}:127.0.0.1:{port} bmb` (if that is refused, bmb is \
+             locked — unlock it at its own keyboard first). To stop needing a tunnel at all, bind \
+             the model to the LAN on bmb and set EMERGE_VLM_URL to its address."
+        )
+    } else {
+        format!(
+            "{host} is up but nothing is serving {port} — the model host is reachable, so this is \
+             the service rather than the network. Start it on {host}, or check it is bound to the \
+             LAN and not to 127.0.0.1."
+        )
+    }
+}
+
+/// **The remedy for this URL, if a refusal against it would mean anything.**
+///
+/// `None` for an address [`is_near`] rejects — out there a refusal folds DNS, TLS and proxies
+/// together and the transport's own words are the better message.
+fn remedy_for_url(url: &str) -> Option<String> {
+    let (host, port) = host_port(url)?;
+    if url.starts_with("https://") {
+        return None;
+    }
+    use std::net::ToSocketAddrs;
+    let ip = (host.as_str(), port).to_socket_addrs().ok()?.next()?.ip();
+    is_near(ip).then(|| refusal_remedy(&host, port, ip.is_loopback()))
 }
 
 /// **Is this address one a refused connection tells the truth about?**
@@ -1140,7 +1197,10 @@ pub fn warm(cfg: &VlmConfig) -> Result<(), String> {
                  cold 31 GB load can outlast it on a busy GPU.",
                 cfg.timeout_secs
             ),
-            other => format!("the VLM endpoint is unreachable: {other}"),
+            other => match remedy_for_url(&cfg.url) {
+                Some(remedy) => format!("the VLM endpoint is unreachable ({other}) — {remedy}"),
+                None => format!("the VLM endpoint is unreachable: {other}"),
+            },
         })?;
     let status = response.status();
     let text = response
@@ -1234,19 +1294,9 @@ pub fn probe(cfg: &VlmConfig) -> Reach {
         // **And a refusal is not always the port.** macOS declines key auth entirely while the host
         // is locked ("This system is locked. To unlock it, use a local account name and password"),
         // so a forward can be impossible to raise for a reason that has nothing to do with 9292.
-        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused && ip.is_loopback() => {
-            Reach::Unreachable(format!(
-                "nothing is listening on {host}:{port} — this URL is the SSH-forward setup, so \
-                 bring it up with `ssh -fN -L {port}:127.0.0.1:{port} bmb` (if that is refused, \
-                 bmb is locked — unlock it at its own keyboard first). To stop needing a tunnel at \
-                 all, bind the model to the LAN on bmb and set EMERGE_VLM_URL to its address."
-            ))
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+            Reach::Unreachable(refusal_remedy(&host, port, ip.is_loopback()))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => Reach::Unreachable(format!(
-            "{host} is up but nothing is serving {port} — the model host is reachable, so this is \
-             the service rather than the network. Start it on {host}, or check it is bound to the \
-             LAN and not to 127.0.0.1."
-        )),
         // Reachable-but-not-answering. A host that is up with a model still loading times out here,
         // and that is a wait rather than a fault.
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Reach::Warming(format!(
@@ -1384,6 +1434,47 @@ mod reach_tests {
 
 #[cfg(test)]
 mod tests {
+    /// **Every path to the model explains a refusal the same way.**
+    ///
+    /// The remedy used to live inside `probe`, and `probe` guards the **batch** and nothing else. So
+    /// `Shift+L` said what to do while the single `L` and the sentinel — the same fault, the same
+    /// socket — reported "the VLM endpoint is unreachable: io: Connection refused" and stopped
+    /// there. Reported at the keyboard as *"why isn't it showing the error message?"*, asked of an
+    /// editor that had shown it a minute before on the other key.
+    ///
+    /// Pinned on the text rather than the call sites, because what matters is that an author reading
+    /// either one is told the same thing.
+    #[test]
+    fn a_refusal_names_its_remedy_wherever_it_is_met() {
+        let loopback = super::refusal_remedy("127.0.0.1", 9292, true);
+        assert!(
+            loopback.contains("ssh -fN -L 9292:127.0.0.1:9292 bmb") && loopback.contains("locked"),
+            "the loopback remedy must name the forward AND the locked-host case, which is the one \
+             that makes the forward impossible to raise: {loopback}"
+        );
+        assert!(
+            loopback.contains("EMERGE_VLM_URL"),
+            "and the way to stop needing a tunnel at all: {loopback}"
+        );
+
+        let lan = super::refusal_remedy("192.168.1.205", 9292, false);
+        assert!(
+            !lan.contains("ssh"),
+            "a LAN host that answered is not a tunnel problem — advising one sends the reader at \
+             the wrong layer: {lan}"
+        );
+        assert!(
+            lan.contains("192.168.1.205"),
+            "and it has to name the host, since the point is that THAT machine answered: {lan}"
+        );
+
+        // The far case: no remedy, because a refusal out there means too many things at once.
+        assert!(
+            super::remedy_for_url("https://ollama.com/v1/chat/completions").is_none(),
+            "a cloud endpoint must not be handed local advice"
+        );
+    }
+
     /// **The preflight reaches the LAN, which is what makes the tunnel optional.**
     ///
     /// `probe` used to connect only for loopback and answer `Ready` for everything else, so the
