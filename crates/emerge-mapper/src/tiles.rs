@@ -740,6 +740,7 @@ pub struct ScaleReadout;
 /// which is finer than anything the importer can measure.
 const SCALE_EPS: f32 = 1e-4;
 
+
 /// **Resize a piece to stand `want` metres wide**, uniformly — the SIZE field's whole arithmetic.
 ///
 /// Returns the ratio applied; `1.0` means the typed width is the width it already stands at, in which
@@ -2363,6 +2364,53 @@ fn on_fill_header(
     apply_verb_to(verb, &cells, &mut edit, &mut project, &mut state);
 }
 
+/// **The proposal that still describes this piece**, or none — one lookup, two readers.
+///
+/// A re-import under the same id must not wear another mesh's labels, which is what the mesh
+/// comparison is for. `rebuild_detail` and [`refresh_cells`] both need this and they must not
+/// disagree: one draws the pane, the other repaints inside it, and a proposal visible to only one of
+/// them is a value that flickers.
+fn pending_proposal(
+    state: &ImportState,
+    suggestions: Option<&crate::labels::Suggestions>,
+    d: &emerge_core::descriptor::Descriptor,
+) -> Option<crate::labels::Entry> {
+    let target = state.target()?;
+    let entry = suggestions?.get(&target)?;
+    (d.mesh.as_deref() == Some(entry.mesh.as_str())).then(|| entry.clone())
+}
+
+/// **What the description box says**, and the only place that decides.
+///
+/// # It was decided twice, and the second one won every frame
+///
+/// `rebuild_detail` put a pending proposal in the box, in `SUGGEST`, so the pane holds one value
+/// rather than an answer beside a question. [`refresh_cells`] then repainted the same node from
+/// `d.note` alone — it exists so a click does not respawn the pane — and since it runs after, **the
+/// proposal never reached the screen**. Measured on the running editor: a model that had answered
+/// with a note, a box showing `describe it…`, and source that looked correct.
+///
+/// So the rule lives here and both call it. The note comes off the **measurement** layer either way,
+/// which is the layer the field writes to — the width above was already forked that way and fixed
+/// for the same reason.
+fn note_field_text(
+    editing: Option<&str>,
+    note: Option<&str>,
+    proposed: Option<&str>,
+) -> (String, Color) {
+    // A proposal that agrees with what is already written is not news, and showing it in SUGGEST
+    // would ask the author to confirm their own words.
+    let proposed = proposed.filter(|n| Some(*n) != note);
+    crate::chrome::field_text(
+        editing,
+        match (proposed, note) {
+            (Some(p), _) => (p.to_owned(), crate::chrome::SUGGEST),
+            (None, Some(n)) if !n.is_empty() => (n.to_owned(), TEXT),
+            _ => ("describe it\u{2026}".to_owned(), LABEL),
+        },
+    )
+}
+
 /// **Repaint the lattice controls in place**, rather than rebuilding the pane around them.
 ///
 /// Picking a cell or a layer changes four things — which button is lit, which glyphs the slice shows,
@@ -2379,6 +2427,9 @@ fn refresh_cells(
     cell_edit: Res<CellEdit>,
     note_edit: Res<NoteEdit>,
     scale_edit: Res<ScaleEdit>,
+    // **The proposals, because the box this repaints shows them.** `Option`, since the labeler is a
+    // feature a project may never have used and a missing `Res<T>` panics its system in Bevy 0.19.
+    suggestions: Option<Res<crate::labels::Suggestions>>,
     mut cells: Query<(&CellButton, &CellLayer, &Hovered, &mut BackgroundColor)>,
     mut glyphs: Query<
         (&CellGlyph, &CellLayer, &mut Text, &mut TextColor),
@@ -2493,12 +2544,17 @@ fn refresh_cells(
         }
     }
 
-    let (note_text, note_tint) = crate::chrome::field_text(
+    // **The same rule the pane was built with** — see [`note_field_text`] for what it cost to have
+    // two. Off the measurement layer, which is what the field writes to and what `rebuild_detail`
+    // reads; `d` above is the layered `placed`, and using it here was the fork's other half.
+    let measured = state.editing(&project.measured);
+    let proposal = measured.and_then(|m| pending_proposal(&state, suggestions.as_deref(), m));
+    let (note_text, note_tint) = note_field_text(
         note_edit.active.as_ref().map(|(_, raw)| raw.as_str()),
-        match d.note.as_deref() {
-            Some(n) if !n.is_empty() => (n.to_owned(), TEXT),
-            _ => ("describe it\u{2026}".to_owned(), LABEL),
-        },
+        measured.and_then(|m| m.note.as_deref()),
+        proposal
+            .as_ref()
+            .and_then(|e| e.suggestion.description()),
     );
     for (mut text, mut colour) in &mut notes {
         if text.0 != note_text {
@@ -3275,7 +3331,8 @@ impl Plugin for TilesPlugin {
             .add_observer(on_library_click)
             .add_observer(on_pack_click)
             .add_observer(on_excluded_click)
-            .add_observer(on_tag_chip);
+            .add_observer(on_tag_chip)
+            .add_observer(on_mount_chip);
     }
 }
 
@@ -3321,6 +3378,11 @@ fn spawn_tab_strip(
             // Stated on the strip rather than derived, because nothing derives it — Bevy populates
             // roles for its own widgets and these are not its widgets.
             bevy::a11y::AccessibilityNode::from(accesskit::Node::new(accesskit::Role::TabList)),
+            // **The strip, not the three chips.** Each chip already prints its own chord beside
+            // itself, permanently, so a badge per chip would state the same fact twice — and the
+            // digits are one idea in the census (`panel: first / second / third of this door`), so
+            // they are one badge here.
+            crate::chrome::Control(crate::keys::ControlId::DoorStrip),
         ))
         .id();
     commands.entity(frame.door_strip).add_child(strip);
@@ -3543,7 +3605,14 @@ fn spawn_tiles_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
         // prose lines — there is no row here the arrows walk, so there is no selection to keep on
         // screen. The scroll exists for HEIGHT, and the pane above it (`CandidateList`) is the one
         // with a selection and has `keep_selection_on_screen`.
-        crate::chrome::scroll_list(p, (DetailPane, crate::notice::CopyPane(TILES_PANEL_TABS)))
+        crate::chrome::scroll_list(
+            p,
+            (
+                DetailPane,
+                crate::notice::CopyPane(TILES_PANEL_TABS),
+                crate::chrome::Control(crate::keys::ControlId::Detail),
+            ),
+        )
             .entry::<Node>()
             .and_modify(|mut n| n.margin.top = Val::Px(8.0));
 
@@ -3560,7 +3629,6 @@ fn spawn_tiles_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
         // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
         // the panel, and an auto margin in a column absorbs the free space above it — so
         // placed any earlier it pushes every sibling after it down with it.
-        crate::chrome::problem_log(p, TILES_PANEL_TABS);
     });
 
     // **The candidate list, in its own panel against the right edge** — the same shape, the same
@@ -3635,7 +3703,15 @@ fn spawn_tiles_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
             },
             ListHeader,
         ));
-        crate::chrome::scroll_list(p, CandidateList);
+        crate::chrome::scroll_list(
+            p,
+            (
+                CandidateList,
+                // One list, two tabs — the Meshes candidates and the Tiles kit walk the same node,
+                // so one id covers both and there is never a second visible claimant.
+                crate::chrome::Control(crate::keys::ControlId::Pieces),
+            ),
+        );
     });
 }
 
@@ -4474,10 +4550,43 @@ fn cycle_mount(
     if !keys::just_pressed(&keyboard, *live, Action::CycleMount) {
         return;
     }
+    step_mount(&mut project, &mut state);
+}
+
+/// The mount value, which is a button. Marked so one observer can hang on it wherever the pane put it.
+#[derive(Component)]
+pub struct MountChip;
+
+/// **The click, through the one step.** `Option<ResMut<..>>` and an entity check first: a global
+/// observer fires for any `Activate` anywhere, and in Bevy 0.19 a missing `Res<T>` panics rather than
+/// skipping — the trap `the_sweep_is_finished.rs` polices.
+fn on_mount_chip(
+    activate: On<Activate>,
+    chips: Query<&MountChip>,
+    project: Option<ResMut<Project>>,
+    state: Option<ResMut<ImportState>>,
+) {
+    if chips.get(activate.entity).is_err() {
+        return;
+    }
+    let (Some(mut project), Some(mut state)) = (project, state) else {
+        return;
+    };
+    step_mount(&mut project, &mut state);
+}
+
+/// **The step itself, so the key and the click cannot come to mean different things.**
+///
+/// It was a system and nothing else, which made the mount value a word you could not act on: reported
+/// from the keyboard as *"I try to click on the unset, and it doesn't do anything. This is not clear
+/// at all."* `docs/ui.md` §4.2's rule runs the other way — everything reachable by mouse is reachable
+/// by keyboard — and it is just as true inverted here, because the value *looked* like a control. The
+/// same shape `enter_tab` has, for the same reason.
+fn step_mount(project: &mut Project, state: &mut ImportState) {
     let surfaces: Vec<String> = project.vocab.surfaces.names().map(str::to_owned).collect();
     let options = mount_options(&surfaces);
     // Taken before the write — the only moment the old value still exists.
-    let history_before = state.snapshot(&project);
+    let history_before = state.snapshot(project);
     let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
         return;
     };
@@ -4517,7 +4626,7 @@ fn cycle_mount(
     d.mount = Some(want);
     let said = format!("mount: {}", mount_label(d.mount.as_ref()));
     state.record(history_before);
-    state.status.say(persist(&mut project, where_to, said));
+    state.status.say(persist(project, where_to, said));
 }
 
 /// **`U` applies / `Y` discards the VLM's pending proposal** — the review verbs, through the
@@ -4731,10 +4840,10 @@ pub(crate) fn apply_suggestion(
         return;
     }
     let history_before = state.snapshot(project);
-    // **Read before the borrow.** `apply_fields` settles the derived half of `effects` and needs the
-    // axis in vocabulary order to do it, and that order cannot be read out of `project` while
+    // **Read before the borrow.** `apply_fields` settles the derived half of `effects` against the
+    // vocabulary's `implies` rule, and that cannot be read out of `project` while
     // `project.measured` is mutably borrowed below. Same shape as `on_tag_chip`.
-    let effects_order: Vec<String> = project.vocab.effects.names().map(str::to_owned).collect();
+    let vocab = project.vocab.clone();
     // **A refusal here DROPS the proposal, and that is the whole fix.**
     //
     // Both of these are permanent: the piece is gone, or the mesh under it changed. Neither becomes
@@ -4778,7 +4887,7 @@ pub(crate) fn apply_suggestion(
         // Unreachable: the match above just resolved it, and nothing between can invalidate it.
         return;
     };
-    crate::labels::apply_fields(d, &entry.suggestion, &effects_order);
+    crate::labels::apply_fields(d, &entry.suggestion, &vocab);
     state.record(history_before);
     let said = persist(
         project,
@@ -5299,18 +5408,19 @@ fn on_tag_chip(
     let Some(mut project) = project else { return };
     // **Both the token and the vocabulary order come out first, owned.** What follows needs a mutable
     // borrow of the same `Project`, and the sort key cannot be read from it while that is held.
-    let (token, order, effects_order) = {
+    let (token, order, vocab) = {
         let names: Vec<String> = chip
             .axis
             .tokens(&project.vocab)
             .names()
             .map(str::to_owned)
             .collect();
-        // The DOES axis in vocabulary order, for the settle below. Read here for the same reason
-        // everything else in this block is: the write needs `project` mutably.
-        let effects: Vec<String> = project.vocab.effects.names().map(str::to_owned).collect();
+        // The whole vocabulary, for the settle below — it carries the `implies` rule now, not just
+        // the DOES ordering. Read here for the same reason everything else in this block is: the
+        // write needs `project` mutably.
+        let vocab = project.vocab.clone();
         match names.get(chip.token) {
-            Some(t) => (t.clone(), names, effects),
+            Some(t) => (t.clone(), names, vocab),
             None => return,
         }
     };
@@ -5340,7 +5450,7 @@ fn on_tag_chip(
     // word, not about who wrote it — so `uses-electricity` follows a chip click exactly as it
     // follows a proposal, and stops following when the kind is clicked off again.
     if chip.axis == Axis::Kind {
-        crate::labels::settle_implied_effects(d, &effects_order);
+        crate::labels::settle_implied_effects(d, &vocab);
     }
     let said = format!("{} tags updated", chip.axis.label().to_lowercase());
     state.record(history_before);
@@ -7286,7 +7396,7 @@ fn rebuild_detail(
             // candidate was selected, which is why an accepted tile's lattice could only be reached
             // by hand-editing `library.ron`.
             // **Both layers, because this pane shows both things.** `d` is the measurement — the
-            // MEASURED block below is about exactly that, and the id and note it displays are the
+            // size row below is about exactly that, and the id and note it displays are the
             // ones an edit would be written back to. `placed` is the same piece as it will stand,
             // which is the only honest source for the lattice's shape: see [`ImportState::placed`].
             //
@@ -7298,19 +7408,16 @@ fn rebuild_detail(
             else {
                 return;
             };
-            // The candidate behind the focus, when the focus IS a candidate. `measured` and the
-            // findings are import measurement — a library entry has no such thing, and showing an
-            // empty MEASURED block for one would be inventing a fact.
+            // The candidate behind the focus, when the focus IS a candidate. The findings and the
+            // triangle count are import measurement — a library entry has no such thing, and
+            // showing an empty finding for one would be inventing a fact.
             let cand = match state.selected_library_id {
                 Some(_) => None,
                 None => state.current(),
             };
             // The VLM's pending proposal for this piece, if one exists AND still describes this
             // mesh — a re-import under the same id must not wear another mesh's labels.
-            let proposal = state.target().and_then(|t| {
-                let entry = suggestions.as_ref()?.get(&t)?;
-                (d.mesh.as_deref() == Some(entry.mesh.as_str())).then(|| entry.clone())
-            });
+            let proposal = pending_proposal(&state, suggestions.as_deref(), d);
 
             // The id, showing what is being typed when it is being typed — with a caret, so an
             // empty field reads as "waiting for you" rather than as the id having been wiped.
@@ -7331,6 +7438,8 @@ fn rebuild_detail(
                     margin: UiRect::bottom(Val::Px(crate::chrome::GAP_ROW)),
                     ..default()
                 },
+                // The line `I` types into, so that is where its badge goes.
+                crate::chrome::Control(crate::keys::ControlId::IdField),
             ));
 
             // **The description.** `Descriptor::note` is free text and nothing could write it before,
@@ -7338,12 +7447,28 @@ fn rebuild_detail(
             // says what a piece *is* and the tags say what it *offers*; neither can carry "the one
             // with the cracked screen", which is the sort of thing a later reader — human or model —
             // needs to tell two crates apart.
-            let (note_text, note_tint) = crate::chrome::field_text(
+            // **One description in the box, never two.**
+            //
+            // It used to show the author's note here and the model's proposal as a second, differently
+            // coloured line further down, with the model's *identification* in a third colour between
+            // them. Reported from the keyboard: *"you have proposal in light blue, and then you have
+            // the old text description in white, and the more proposal below it… there's no intuition
+            // to be drawn."* Two answers to one question, stacked, is not a comparison — it is a
+            // puzzle about which one is live.
+            //
+            // So a pending proposal simply **is** what the box says, in `SUGGEST` so it reads as a
+            // question rather than an answer. `U` keeps it, `Y` puts the old words back. What is
+            // being typed always wins over both, because that is the author speaking now.
+            // `description()` rather than `note`: the model answers `what` and leaves `note` null
+            // often enough that reading `note` alone left this box empty with a full identification
+            // printed underneath it. `vlm::Suggestion::description` is where that choice is made,
+            // and `labels::apply_fields` writes whatever it returns.
+            let (note_text, note_tint) = note_field_text(
                 note_edit.active.as_ref().map(|(_, raw)| raw.as_str()),
-                match d.note.as_deref() {
-                    Some(n) if !n.is_empty() => (n.to_owned(), TEXT),
-                    _ => ("describe it\u{2026}".to_owned(), LABEL),
-                },
+                d.note.as_deref(),
+                proposal
+                    .as_ref()
+                    .and_then(|e| e.suggestion.description()),
             );
             crate::chrome::text_field(
                 p,
@@ -7367,46 +7492,30 @@ fn rebuild_detail(
                     String::new()
                 };
                 p.spawn((
+                    // **Provenance, and nothing else.** It carried `- U apply, Y discard` until the
+                    // badges started naming those two keys on this very block; a header that repeats
+                    // what the overlay already says is the second census one layer up.
+                    //
+                    // **And it no longer names the model.** Reported from the keyboard: *"I'm not
+                    // sure we really need to say what model the descriptions [are] proposed by."*
+                    // Which model is answering is a property of the **connection**, not of each
+                    // description — the same fact restated once per proposal — so it is stated once,
+                    // in the status band, by `labels::Labeler`. What stays here is what varies per
+                    // proposal: when it was made, how many attempts it took, and how sure it was.
                     Text::new(format!(
-                        "PROPOSED by {} ({}{attempts}, confidence {:?}) - U apply, Y discard",
-                        p_.model, p_.date, s.confidence
+                        "PROPOSED {}{attempts}, confidence {:?}",
+                        p_.date, s.confidence
                     )),
                     TextColor(crate::chrome::SUGGEST),
                     TextFont::from_font_size(crate::chrome::text::LABEL),
                 ));
-                // The model's identification — the reasoning its answers hang off, and the line a
-                // reviewer sanity-checks first.
-                p.spawn((
-                    Text::new(s.what.clone()),
-                    TextColor(TEXT),
-                    TextFont::from_font_size(crate::chrome::text::LABEL),
-                ));
+                // **The identification is not a second line here.** It used to be, in a third
+                // colour between the header and the proposed note — *"you have proposal in light
+                // blue, and then you have the old text description in white, and the more proposal
+                // below it… there's no intuition to be drawn."* `what` is now what the description
+                // box says when the model offered nothing better (`vlm::Suggestion::description`),
+                // so printing it again here would be the same sentence twice.
                 // The proposed note as a ghost line — never in the editable buffer.
-                if let Some(note) = &s.note {
-                    if d.note.as_deref() != Some(note.as_str()) {
-                        p.spawn((
-                            Text::new(format!("proposed: {note}")),
-                            TextColor(crate::chrome::SUGGEST),
-                            TextFont::from_font_size(crate::chrome::text::HINT),
-                        ));
-                    }
-                }
-                // The proposed front face, when it differs from what stands.
-                if let Some(front) = s.front {
-                    if d.align.front != Some(front) {
-                        p.spawn((
-                            Text::new(format!(
-                                "front {} -> proposed: {front:?}",
-                                match d.align.front {
-                                    Some(f) => format!("{f:?}"),
-                                    None => "unset".to_owned(),
-                                }
-                            )),
-                            TextColor(crate::chrome::SUGGEST),
-                            TextFont::from_font_size(crate::chrome::text::HINT),
-                        ));
-                    }
-                }
                 // A righting turn changes what U does: it turns the piece (the same re-measure
                 // the N/P keys run) and re-asks the model, because labels judged from a sideways
                 // render describe the wrong orientation.
@@ -7440,72 +7549,41 @@ fn rebuild_detail(
                 }
             }
 
-            if let Some((c, m)) = cand.and_then(|c| c.measured.map(|m| (c, m))) {
-                // Measured facts, not controls. Given their own heading so the eye can skip them
-                // when it is looking for something to click.
-                crate::chrome::section(p, "MEASURED");
-                // **As the piece will stand, not as the file happens to store it.**
-                //
-                // These come from `proposed.extent` rather than from the raw `Measured`, because a
-                // rotation is baked into the extent at import (`import::remeasure_rotated`) and the
-                // raw measurement is pre-rotation. Reading the file's own numbers here meant a
-                // barrel turned on its side still reported `cells 1 x 1` while it occupied 1 x 2 —
-                // and `size` and `cells` are the same fact twice, so rotating one without the other
-                // would leave the block contradicting itself.
-                //
-                // No re-derivation: the extent was already rotated and validated when it was
-                // written, so this reads it rather than computing a second answer that could differ.
-                let (fw, fd) = c.proposed.extent.footprint.unwrap_or(m.footprint);
-                let fh = c.proposed.extent.height.unwrap_or(m.height);
-                let (cells_x, _) = emerge_core::grid::cells(fw);
-                let (cells_z, _) = emerge_core::grid::cells(fd);
-                // Shown only when there is one, so the common case stays three plain rows and a
-                // turned piece explains why its numbers differ from the file's.
-                let turned = c
-                    .proposed
-                    .align
-                    .rotate
-                    .map(|(x, y, z)| format!("{x},{y},{z} deg"));
-                for (label, value) in [
-                    ("size", format!("{fw:.2} x {fh:.2} x {fd:.2} m")),
-                    ("cells", format!("{cells_x} x {cells_z}")),
-                    ("tris", format!("{}", c.triangles)),
-                    (
-                        "front",
-                        match c.proposed.align.front {
-                            Some(face) => format!("{} face", face.label()),
-                            None => "none".to_owned(),
-                        },
-                    ),
-                ]
-                .into_iter()
-                .chain(turned.map(|t| ("turned", t)))
-                {
-                    p.spawn(Node {
-                        flex_direction: FlexDirection::Row,
-                        margin: UiRect::bottom(Val::Px(1.0)),
-                        ..default()
-                    })
-                    .with_children(|row| {
-                        crate::chrome::row_label(row, 48.0, label);
-                        crate::chrome::row_value(row, value, TEXT, ());
-                    });
-                }
-            }
-
-            // **The width this piece stands at.**
+            // **How big it is, on one line.**
             //
-            // Outside the MEASURED block above on purpose: that block is candidates-only, because a
-            // measurement is an import fact and a library entry has none — but a *size* is editable
-            // for both, and the tiles an author most wants to re-proportion are the ones already in
-            // the library.
+            // This was two headed blocks — `MEASURED` (cells, tris) above `SIZE (m)` (an editable
+            // width beside a note restating the same width) — and it was reported twice from the
+            // keyboard: *"what's the difference between measured and size? Can't those be
+            // combined?"*, then *"size and measured still aren't combined in a real readable
+            // fashion."*
+            //
+            // The literature names both halves of the defect exactly:
+            //
+            // - **Wickens & Carswell 1995** (`10.1518/001872095779049408`), the proximity
+            //   compatibility principle: *"displays relevant to a common task or mental operation
+            //   (close task or mental proximity) should be rendered close together in perceptual
+            //   space."* "Is this the right size, and does it fit a tile?" is ONE integration task
+            //   answered from `w`, `d`, `h` and `cells` — so they are one object here, not two
+            //   blocks a reader has to join. Its other half is why the width keeps its own box: a
+            //   value you TYPE wants focused attention and must stay a distinct target.
+            // - **Kalyuga, Chandler & Sweller 2004** (`10.1518/hfes.46.3.567.50405`), the
+            //   redundancy effect: the same information in two forms does not merely waste space,
+            //   it *interferes*. `0.51` in the field and `0.51 w` in the note beside it was that,
+            //   on one line, on every piece.
+            // - **Vicente & Rasmussen 1992** (`10.1109/21.156574`, already `docs/ui.md` §1.2):
+            //   *"interfaces should be designed to allow people to effectively meet the demands of
+            //   the task by relying on lower levels of cognitive control."* Dividing metres by the
+            //   snap in your head to check the cell count is knowledge-based work for a fact the
+            //   display can simply state.
+            //
+            // **`tris` is what forced the second heading to exist** — the only member of `MEASURED`
+            // that is not about size — and it now sits on the rescan row at the foot of the pane,
+            // beside the mesh it counts.
             //
             // Read off `d`, the measurement layer, which is the same layer this field writes to and
             // the same call `on_note_click` makes. Reading the layered `placed` here would show a
             // width a project patch supplied and then write the author's answer one level below it.
-            crate::chrome::section(p, "SIZE (m)");
-            // Not `placed` — that name is already the layered *descriptor* in this scope, and
-            // shadowing it here would have handed the lattice code below a footprint tuple.
+            // Not `placed` as a name — that is already the layered *descriptor* in this scope.
             let placed_fp = emerge_core::descriptor::placed_footprint(d);
             let (width_text, width_tint) = crate::chrome::field_text(
                 scale_edit.active.as_ref().map(|(_, raw)| raw.as_str()),
@@ -7514,24 +7592,47 @@ fn rebuild_detail(
                     None => ("--".to_owned(), LABEL),
                 },
             );
-            // What the number means, spelled out. The multiplier shown is `align.scale` — the render
-            // factor mapping the authored mesh onto this extent — because a resize BAKES: the extent
-            // is rewritten and the scale composes (`bake_width`), so the extent itself is always the
-            // placed truth and the scale is the only derived fact worth surfacing.
-            let width_note = match placed_fp {
-                Some((w, dep)) => match d.align.scale {
-                    Some(s) => format!("  {w:.2} x {dep:.2} m — mesh scaled {s:.3}x"),
-                    None => format!("  {w:.2} x {dep:.2} m"),
-                },
+            // **The cells come off the same footprint the row shows**, so the two cannot disagree —
+            // which they could when this was derived from the candidate's raw measurement: a
+            // rotation is baked into the extent at import (`import::remeasure_rotated`) and the raw
+            // measurement is pre-rotation, so a barrel on its side reported `1 x 1` while occupying
+            // `1 x 2`. It is also no longer candidates-only: a library entry has a size too, and
+            // the block that was candidates-only is what split this in the first place.
+            let size_note = match placed_fp {
+                Some((w, dep)) => {
+                    let tall = emerge_core::descriptor::placed_height(d)
+                        .map(|h| format!(" x {h:.2}"))
+                        .unwrap_or_default();
+                    let (cells_x, _) = emerge_core::grid::cells(w);
+                    let (cells_z, _) = emerge_core::grid::cells(dep);
+                    // The two facts that are not the size and are not always there: what a resize
+                    // baked, and which way a turn left the piece. Suffixes rather than rows —
+                    // stating them costs a clause; giving each a row of its own is the block this
+                    // change deleted.
+                    let scaled = d
+                        .align
+                        .scale
+                        .map(|s| format!(" \u{b7} mesh scaled {s:.3}x"))
+                        .unwrap_or_default();
+                    let turned = d
+                        .align
+                        .rotate
+                        .map(|(x, y, z)| format!(" \u{b7} turned {x},{y},{z} deg"))
+                        .unwrap_or_default();
+                    format!(
+                        "  x {dep:.2}{tall} m \u{2014} fills {cells_x} x {cells_z} cells{scaled}{turned}"
+                    )
+                }
                 None => "  no measured footprint to size".to_owned(),
             };
             p.spawn(Node {
                 flex_direction: FlexDirection::Row,
                 align_items: AlignItems::Center,
-                margin: UiRect::bottom(Val::Px(crate::chrome::GAP_ROW)),
+                margin: UiRect::top(Val::Px(crate::chrome::GAP_GROUP)),
                 ..default()
             })
             .with_children(|row| {
+                crate::chrome::row_label(row, 48.0, "size");
                 crate::chrome::text_field(
                     row,
                     Val::Px(62.0),
@@ -7541,41 +7642,84 @@ fn rebuild_detail(
                     ScaleReadout,
                 );
                 row.spawn((
-                    Text::new(width_note),
+                    Text::new(size_note),
                     TextColor(LABEL),
                     TextFont::from_font_size(crate::chrome::text::LABEL),
                 ));
             });
 
-            // **The mount.** It is what replaced `Role`, `rests_on` and the height heuristic that
-            // once decided a 10.9 cm mug was a floor decal — so it is the one field worth putting on
-            // its own line rather than in a list of tags.
-            p.spawn(Node {
-                flex_direction: FlexDirection::Row,
-                margin: UiRect::top(Val::Px(crate::chrome::GAP_GROUP)),
-                ..default()
-            })
+            // **How this piece sits, on one line.** It is what replaced `Role`, `rests_on` and the
+            // height heuristic that once decided a 10.9 cm mug was a floor decal — so it is worth a
+            // line of its own rather than a place in a list of tags.
+            //
+            // **`mount` and `front` share that line**, asked for at the keyboard: *"I'd like mount
+            // and the front direction to be on the same line, not one over the other."* They are one
+            // fact in two parts — where the piece rests and which way it faces — and the same
+            // proximity argument the size row was collapsed under (Wickens & Carswell 1995,
+            // `10.1518/001872095779049408`) applies to a pair a reader takes together.
+            //
+            // The row still carries `ControlId::Mount` because that is where `M`'s badge belongs and
+            // the mount chip is on it. `front` has no key; it follows the mount that turns it.
+            let proposed_mount = proposal
+                .as_ref()
+                .and_then(|e| e.suggestion.mount.as_ref())
+                .filter(|m| d.mount.as_ref() != Some(*m));
+            // **One value, and it is a button.**
+            //
+            // It was a word with `-> proposed: on floor` appended — two answers on one line, the
+            // same puzzle the description had, and the word itself did nothing when clicked. A
+            // pending proposal simply *is* what the chip says, in `SUGGEST`; `U` keeps it and `Y`
+            // puts the old one back. Clicking steps the mount, which is what `M` does.
+            let (mount_text, mount_ink) = match (proposed_mount, d.mount.as_ref()) {
+                (Some(m), _) => (mount_label(Some(m)), crate::chrome::SUGGEST),
+                (None, Some(m)) => (mount_label(Some(m)), TEXT),
+                (None, None) => (mount_label(None), ACCENT),
+            };
+            // The front used to be a row inside the old `MEASURED` block *and* a proposal line
+            // above it in a different colour, saying `front unset -> proposed: South`. One value,
+            // the proposal shown in its place when there is one.
+            let proposed_front = proposal
+                .as_ref()
+                .and_then(|e| e.suggestion.front)
+                .filter(|f| d.align.front != Some(*f));
+            let (front_text, front_ink) = match (proposed_front, d.align.front) {
+                (Some(f), _) => (format!("{} face", f.label()), crate::chrome::SUGGEST),
+                (None, Some(f)) => (format!("{} face", f.label()), TEXT),
+                (None, None) => ("none".to_owned(), LABEL),
+            };
+            p.spawn((
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    margin: UiRect::top(Val::Px(crate::chrome::GAP_GROUP)),
+                    ..default()
+                },
+                // The row `M` cycles.
+                crate::chrome::Control(crate::keys::ControlId::Mount),
+            ))
             .with_children(|row| {
                 // **"mount", not "layer".** The subgrid below has its own `layer y` picker, and
                 // one panel saying "layer" twice about two different things is the confusion the
                 // key census already fixed on its side (`Action::CycleMount`).
                 crate::chrome::row_label(row, 48.0, "mount");
-                crate::chrome::row_value(
+                crate::chrome::chip(
                     row,
-                    mount_label(d.mount.as_ref()),
-                    if d.mount.is_some() { TEXT } else { ACCENT },
-                    (),
+                    MountChip,
+                    &mount_text,
+                    10.0,
+                    mount_ink,
+                    ROW_BG,
+                    Color::NONE,
                 );
-                // The proposed mount rides the same row, when it differs — one line, one fact.
-                if let Some(m) = proposal.as_ref().and_then(|e| e.suggestion.mount.as_ref()) {
-                    if d.mount.as_ref() != Some(m) {
-                        row.spawn((
-                            Text::new(format!("  -> proposed: {}", mount_label(Some(m)))),
-                            TextColor(crate::chrome::SUGGEST),
-                            TextFont::from_font_size(crate::chrome::text::LABEL),
-                        ));
-                    }
-                }
+                // The second pair, spaced off the first by a group gap so the line reads as two
+                // label/value pairs rather than four words.
+                row.spawn(Node {
+                    width: Val::Px(crate::chrome::GAP_GROUP),
+                    flex_shrink: 0.0,
+                    ..default()
+                });
+                crate::chrome::row_label(row, 40.0, "front");
+                crate::chrome::row_value(row, front_text, front_ink, ());
             });
 
             // **How far up, for the two mounts that have an up.**
@@ -7612,6 +7756,227 @@ fn rebuild_detail(
                 });
             }
 
+            // Tag chips, one row per axis. Every token the project has, lit when this piece carries
+            // it — so an author sees the whole vocabulary rather than having to remember it, which is
+            // the difference between a closed vocabulary being a help and being an obstacle.
+            // **One block, so the label verbs have somewhere to be.** The four axes are four
+            // sections and four chip rows; a badge needs a single node to sit on, and the
+            // alternative was leaving `L Shift+L U Y Shift+Y` piled against the pane with
+            // nothing under them saying what they do. A plain column changes no spacing — every
+            // margin below is still its own.
+            // **One scrolling area, the axes as headings inside it.**
+            //
+            // Four axes and their whole vocabulary is a wall — `KIND` alone is eighteen chips over
+            // three rows — and it pushed everything below it off the pane. So the block is bounded
+            // and scrolls within itself, and the pane around it stops growing with the kit's
+            // vocabulary, which is what made this panel worse the bigger a kit got.
+            //
+            // `chrome::scroll_list`, not a hand-rolled one: it carries the `ScrollArea` the wheel
+            // handler needs and the scrollbar, which `nobody_spawns_their_own_scroll_container`
+            // exists to enforce. The explicit `max_height` is the difference from every other caller
+            // — this one nests inside the detail pane's own scroll, where `flex_grow` has nothing to
+            // bound it against.
+            // **One scrollbar in this pane, not two.**
+            //
+            // This was a `chrome::scroll_box` — a bounded, scrolling block of its own — because four
+            // axes and their whole vocabulary is a wall that pushed everything below it off the
+            // pane. The log at the foot of this panel went behind `Cmd+E` on 2026-08-19 and took its
+            // height with it: *"I think that should provide enough room on the left pane to not have
+            // one of the scroll bars."* A scroll inside a scroll is two bars a hand has to choose
+            // between, and the pane already scrolls.
+            //
+            // So the block is an ordinary column again and the pane's own scroll carries it.
+            let mut tags = p.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    ..default()
+                },
+                crate::chrome::Control(crate::keys::ControlId::Tags),
+            ));
+            tags.with_children(|p| {
+                for axis in [Axis::Kind, Axis::Effects, Axis::Look, Axis::Surfaces] {
+                    let vocab = axis.tokens(&project.vocab);
+                    if vocab.tokens.is_empty() {
+                        continue;
+                    }
+                    let held: Vec<String> = match axis {
+                        Axis::Kind => d.kind.clone(),
+                        Axis::Effects => d.effects.clone(),
+                        Axis::Look => d.look.clone(),
+                        Axis::Surfaces => d.offers.surfaces.clone(),
+                    };
+                    // **What applying would actually write** — the chips' third state.
+                    //
+                    // For every axis but `effects` that is the model's answer verbatim. `effects` has a
+                    // derived half the model is deliberately never asked for (`labels::IMPLIED_BY_KIND`
+                    // — a bed recharges stamina because this game says beds do, and no render can show
+                    // it), so ghosting the raw answer meant a bed's proposal read `effects: []` while
+                    // applying it wrote `stamina-recharge`. Reported as the model refusing to
+                    // acknowledge a bed; it was the preview refusing to admit what the editor would do.
+                    let proposed: Vec<String> = proposal
+                        .as_ref()
+                        .map(|e| match axis {
+                            Axis::Kind => e.suggestion.kind.clone(),
+                            Axis::Effects => crate::labels::settled_effects(
+                                &e.suggestion.kind,
+                                &e.suggestion.effects,
+                                &project.vocab,
+                            ),
+                            Axis::Look => e.suggestion.look.clone(),
+                            Axis::Surfaces => e.suggestion.offers_surfaces.clone(),
+                        })
+                        .unwrap_or_default();
+                    crate::chrome::section(p, axis.label());
+                    p.spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        flex_wrap: FlexWrap::Wrap,
+                        column_gap: Val::Px(crate::chrome::GAP_TIGHT),
+                        row_gap: Val::Px(crate::chrome::GAP_TIGHT),
+                        ..default()
+                    })
+                    .with_children(|chips| {
+                        for (ix, name) in vocab.names().enumerate() {
+                            let on = held.iter().any(|h| h == name);
+                            // Proposed-but-not-held: ghost-lit in SUGGEST with a hairline border —
+                            // visibly a question, not a selection. A token both held and proposed is
+                            // simply held; agreement is not news.
+                            let ghost = !on && proposed.iter().any(|t| t == name);
+                            crate::chrome::chip(
+                                chips,
+                                TagChip { axis, token: ix },
+                                name,
+                                10.0,
+                                if on {
+                                    TEXT
+                                } else if ghost {
+                                    crate::chrome::SUGGEST
+                                } else {
+                                    LABEL
+                                },
+                                if on { ROW_SELECTED } else { ROW_BG },
+                                if ghost { crate::chrome::SUGGEST } else { Color::NONE },
+                            );
+                        }
+                    });
+                }
+            });
+
+            // **Rooms and group** — the first UI these placement fields have ever had. Read-only:
+            // apply writes them, and hand-editing free text stays a `library.ron` edit, as today.
+            {
+                let p_rooms = proposal
+                    .as_ref()
+                    .map(|e| e.suggestion.rooms.clone())
+                    .unwrap_or_default();
+                let p_group = proposal.as_ref().and_then(|e| e.suggestion.group.clone());
+                let show_rooms = !d.placement.rooms.is_empty() || !p_rooms.is_empty();
+                let show_group = d.placement.group.is_some() || p_group.is_some();
+                if show_rooms || show_group {
+                    crate::chrome::section(p, "PLACEMENT");
+                }
+                let mut line = |label: &str, now: String, prop: Option<String>| {
+                    p.spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        crate::chrome::row_label(row, 48.0, label);
+                        // 11 px like every other value beside a label — this pane rendered 10/10
+                        // until the 2026-08-17 type-role decision unified the pair at 10/11.
+                        // **One value.** It read `rooms  -  -> proposed: bedroom, office`, which
+                        // asks a reader to hold two answers and a punctuation mark at once —
+                        // reported as *"how is a human supposed to read that?"*. A pending proposal
+                        // is simply what the row says, in `SUGGEST` so it reads as a question; `U`
+                        // keeps it, `Y` puts the old value back. The same rule the description and
+                        // the mount now follow, so the block has one grammar instead of three.
+                        let (value, ink) = match (prop, now.is_empty()) {
+                            (Some(p), _) => (p, crate::chrome::SUGGEST),
+                            (None, false) => (now, TEXT),
+                            (None, true) => ("-".to_owned(), LABEL),
+                        };
+                        crate::chrome::row_value(row, value, ink, ());
+                    });
+                };
+                if show_rooms {
+                    let now = d.placement.rooms.join(", ");
+                    let prop = (!p_rooms.is_empty() && p_rooms != d.placement.rooms)
+                        .then(|| p_rooms.join(", "));
+                    line("rooms", now, prop);
+                }
+                if show_group {
+                    let now = d.placement.group.clone().unwrap_or_default();
+                    let prop = p_group.filter(|g| Some(g) != d.placement.group.as_ref());
+                    line("group", now, prop);
+                }
+            }
+
+            // **What the importer noticed**, one block per finding.
+            //
+            // This was a bare run of `Text` nodes: every message in its severity's colour, and the
+            // remedy prefixed with three literal spaces. Three spaces indent the *first* line only,
+            // so the moment a remedy wrapped — which at this width is always — its continuation went
+            // flush left and ran into the next finding. Nothing said where one finding ended and the
+            // next began, and a whole paragraph in DANGER red is a paragraph nobody reads twice.
+            //
+            // So: a coloured rail down the left groups a message with its own remedy, the severity is
+            // a *word* rather than only a hue, and the prose is plain `TEXT` — colour locates the
+            // thing, it does not shout it. `docs/ui.md` §1.2 (Vicente & Rasmussen): the test is "does
+            // this force interpretation?", and the fix for a crowded panel is grouping and spacing
+            // rather than deleting readouts.
+            let findings: Vec<_> = cand.iter().flat_map(|c| c.findings.iter()).collect();
+            if !findings.is_empty() {
+                crate::chrome::section(p, "FINDINGS");
+                p.spawn((
+                    Text::new("what the importer noticed about this mesh"),
+                    TextColor(DIM),
+                    TextFont::from_font_size(crate::chrome::text::HINT),
+                    Node {
+                        margin: UiRect::bottom(Val::Px(crate::chrome::GAP_ROW)),
+                        ..default()
+                    },
+                ));
+                for f in findings {
+                    let (tint, word) = crate::chrome::severity_style(f.severity);
+                    crate::chrome::severity_rail(p, tint, ()).with_children(|block| {
+                        block.spawn((
+                            Text::new(word),
+                            TextColor(tint),
+                            TextFont::from_font_size(crate::chrome::text::HINT),
+                        ));
+                        block.spawn((
+                            Text::new(f.message.clone()),
+                            TextColor(TEXT),
+                            TextFont::from_font_size(crate::chrome::text::LABEL),
+                            // Wrapped prose at 10 px needs the leading; the 1.2 default packs these
+                            // into the block of text the screenshot showed.
+                            bevy::text::LineHeight::RelativeToFont(1.35),
+                        ));
+                        // The remedy, under what it fixes. A warning with no answer is a warning read
+                        // once.
+                        if let Some(fix) = &f.fix {
+                            block.spawn((
+                                Text::new(fix.clone()),
+                                TextColor(LABEL),
+                                TextFont::from_font_size(crate::chrome::text::LABEL),
+                                bevy::text::LineHeight::RelativeToFont(1.35),
+                                Node {
+                                    margin: UiRect::top(Val::Px(3.0)),
+                                    ..default()
+                                },
+                            ));
+                        }
+                    });
+                }
+            }
+
+            // **The lattice, last.** It sits at the foot of the pane because it is derived and
+            // rarely touched — the divisions come from the piece's own size and the project's
+            // `face_bands`, so an author reads it far more often than they edit it. Reported from
+            // the keyboard: *"the subgrid doesn't feel very important since that's auto taken care
+            // of. Drop this to the very bottom of the left pane UI."*
+            //
+            // Its early `return` on an underivable lattice is now the last statement in the pane
+            // rather than a jump over half of it, which is strictly safer than it was.
             // A piece whose size is not measured yet has no derivable lattice, and the honest thing
             // is to say which piece and why rather than draw an empty grid that looks authored.
             let div = match project.divisions_of(placed) {
@@ -7670,17 +8035,22 @@ fn rebuild_detail(
             // Side by side rather than stacked because three 3x3 grids in a column is a tall thin
             // strip the eye has to scan, while three in a row is one picture. Bottom on the left, and
             // the labels say so rather than leaving `y = 0` to be inferred.
-            p.spawn(Node {
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::FlexStart,
-                column_gap: Val::Px(crate::chrome::GAP_GROUP),
-                // Wraps rather than overflowing: a finer lattice, or a narrower panel, puts the last
-                // layer on a second line instead of off the edge.
-                flex_wrap: FlexWrap::Wrap,
-                row_gap: Val::Px(crate::chrome::GAP_ROW),
-                margin: UiRect::top(Val::Px(crate::chrome::GAP_ROW)),
-                ..default()
-            })
+            p.spawn((
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::FlexStart,
+                    column_gap: Val::Px(crate::chrome::GAP_GROUP),
+                    // Wraps rather than overflowing: a finer lattice, or a narrower panel, puts the
+                    // last layer on a second line instead of off the edge.
+                    flex_wrap: FlexWrap::Wrap,
+                    row_gap: Val::Px(crate::chrome::GAP_ROW),
+                    margin: UiRect::top(Val::Px(crate::chrome::GAP_ROW)),
+                    ..default()
+                },
+                // What the cell cursor walks and what solid/edge/clear paints — all eleven of those
+                // chords belong here rather than against the pane's edge.
+                crate::chrome::Control(crate::keys::ControlId::CellGrid),
+            ))
             .with_children(|layers| {
                 for y in 0..dy {
                     layers
@@ -7825,6 +8195,11 @@ fn rebuild_detail(
                 margin: UiRect::top(Val::Px(crate::chrome::GAP_TIGHT)),
                 ..default()
             })
+            .insert(
+                // Where turning and rescanning the mesh live, so `B N O P` land on the chips a
+                // pointer would click rather than against the pane's edge.
+                crate::chrome::Control(crate::keys::ControlId::Mesh),
+            )
             .with_children(|chips| {
                 for verb in [CellVerb::Solid, CellVerb::Edge, CellVerb::Clear] {
                     let on = matches!(
@@ -7866,190 +8241,26 @@ fn rebuild_detail(
                 )
                 .entry::<Node>()
                 .and_modify(|mut n| n.margin.left = Val::Px(crate::chrome::GAP_ROW));
-            });
 
-            // Tag chips, one row per axis. Every token the project has, lit when this piece carries
-            // it — so an author sees the whole vocabulary rather than having to remember it, which is
-            // the difference between a closed vocabulary being a help and being an obstacle.
-            // Vocabulary order for the effects axis, so a settled preview lists its tokens in the
-            // same order the applied descriptor will — `on_tag_chip`'s rule, so a diff of the
-            // library shows real changes only.
-            let effects_order: Vec<String> =
-                project.vocab.effects.names().map(str::to_owned).collect();
-            for axis in [Axis::Kind, Axis::Effects, Axis::Look, Axis::Surfaces] {
-                let vocab = axis.tokens(&project.vocab);
-                if vocab.tokens.is_empty() {
-                    continue;
-                }
-                let held: Vec<String> = match axis {
-                    Axis::Kind => d.kind.clone(),
-                    Axis::Effects => d.effects.clone(),
-                    Axis::Look => d.look.clone(),
-                    Axis::Surfaces => d.offers.surfaces.clone(),
-                };
-                // **What applying would actually write** — the chips' third state.
+                // **The triangle count, beside the mesh it counts.**
                 //
-                // For every axis but `effects` that is the model's answer verbatim. `effects` has a
-                // derived half the model is deliberately never asked for (`labels::IMPLIED_BY_KIND`
-                // — a bed recharges stamina because this game says beds do, and no render can show
-                // it), so ghosting the raw answer meant a bed's proposal read `effects: []` while
-                // applying it wrote `stamina-recharge`. Reported as the model refusing to
-                // acknowledge a bed; it was the preview refusing to admit what the editor would do.
-                let proposed: Vec<String> = proposal
-                    .as_ref()
-                    .map(|e| match axis {
-                        Axis::Kind => e.suggestion.kind.clone(),
-                        Axis::Effects => crate::labels::settled_effects(
-                            &e.suggestion.kind,
-                            &e.suggestion.effects,
-                            &effects_order,
-                        ),
-                        Axis::Look => e.suggestion.look.clone(),
-                        Axis::Surfaces => e.suggestion.offers_surfaces.clone(),
-                    })
-                    .unwrap_or_default();
-                crate::chrome::section(p, axis.label());
-                p.spawn(Node {
-                    flex_direction: FlexDirection::Row,
-                    flex_wrap: FlexWrap::Wrap,
-                    column_gap: Val::Px(crate::chrome::GAP_TIGHT),
-                    row_gap: Val::Px(crate::chrome::GAP_TIGHT),
-                    ..default()
-                })
-                .with_children(|chips| {
-                    for (ix, name) in vocab.names().enumerate() {
-                        let on = held.iter().any(|h| h == name);
-                        // Proposed-but-not-held: ghost-lit in SUGGEST with a hairline border —
-                        // visibly a question, not a selection. A token both held and proposed is
-                        // simply held; agreement is not news.
-                        let ghost = !on && proposed.iter().any(|t| t == name);
-                        crate::chrome::chip(
-                            chips,
-                            TagChip { axis, token: ix },
-                            name,
-                            10.0,
-                            if on {
-                                TEXT
-                            } else if ghost {
-                                crate::chrome::SUGGEST
-                            } else {
-                                LABEL
-                            },
-                            if on { ROW_SELECTED } else { ROW_BG },
-                            if ghost { crate::chrome::SUGGEST } else { Color::NONE },
-                        );
-                    }
-                });
-            }
-
-            // **Rooms and group** — the first UI these placement fields have ever had. Read-only:
-            // apply writes them, and hand-editing free text stays a `library.ron` edit, as today.
-            {
-                let p_rooms = proposal
-                    .as_ref()
-                    .map(|e| e.suggestion.rooms.clone())
-                    .unwrap_or_default();
-                let p_group = proposal.as_ref().and_then(|e| e.suggestion.group.clone());
-                let show_rooms = !d.placement.rooms.is_empty() || !p_rooms.is_empty();
-                let show_group = d.placement.group.is_some() || p_group.is_some();
-                if show_rooms || show_group {
-                    crate::chrome::section(p, "PLACEMENT");
+                // It used to head a `MEASURED` block above the size row, and it was the only member
+                // of that block that was not about size — so it was what kept a second heading
+                // alive over a question the size row already answers. It is a fact about the mesh
+                // as imported, and this row is what acts on the mesh as imported: rescan, and the
+                // three turns. Candidates only, because a library entry carries no measurement.
+                if let Some(c) = cand {
+                    chips.spawn((
+                        Text::new(format!("{} tris", c.triangles)),
+                        TextColor(DIM),
+                        TextFont::from_font_size(crate::chrome::text::HINT),
+                        Node {
+                            margin: UiRect::left(Val::Px(crate::chrome::GAP_GROUP)),
+                            ..default()
+                        },
+                    ));
                 }
-                let mut line = |label: &str, now: String, prop: Option<String>| {
-                    p.spawn(Node {
-                        flex_direction: FlexDirection::Row,
-                        ..default()
-                    })
-                    .with_children(|row| {
-                        crate::chrome::row_label(row, 48.0, label);
-                        // 11 px like every other value beside a label — this pane rendered 10/10
-                        // until the 2026-08-17 type-role decision unified the pair at 10/11.
-                        crate::chrome::row_value(
-                            row,
-                            if now.is_empty() { "-".to_owned() } else { now },
-                            TEXT,
-                            (),
-                        );
-                        if let Some(prop) = prop {
-                            row.spawn((
-                                Text::new(format!("  -> proposed: {prop}")),
-                                TextColor(crate::chrome::SUGGEST),
-                                TextFont::from_font_size(crate::chrome::text::LABEL),
-                            ));
-                        }
-                    });
-                };
-                if show_rooms {
-                    let now = d.placement.rooms.join(", ");
-                    let prop = (!p_rooms.is_empty() && p_rooms != d.placement.rooms)
-                        .then(|| p_rooms.join(", "));
-                    line("rooms", now, prop);
-                }
-                if show_group {
-                    let now = d.placement.group.clone().unwrap_or_default();
-                    let prop = p_group.filter(|g| Some(g) != d.placement.group.as_ref());
-                    line("group", now, prop);
-                }
-            }
-
-            // **What the importer noticed**, one block per finding.
-            //
-            // This was a bare run of `Text` nodes: every message in its severity's colour, and the
-            // remedy prefixed with three literal spaces. Three spaces indent the *first* line only,
-            // so the moment a remedy wrapped — which at this width is always — its continuation went
-            // flush left and ran into the next finding. Nothing said where one finding ended and the
-            // next began, and a whole paragraph in DANGER red is a paragraph nobody reads twice.
-            //
-            // So: a coloured rail down the left groups a message with its own remedy, the severity is
-            // a *word* rather than only a hue, and the prose is plain `TEXT` — colour locates the
-            // thing, it does not shout it. `docs/ui.md` §1.2 (Vicente & Rasmussen): the test is "does
-            // this force interpretation?", and the fix for a crowded panel is grouping and spacing
-            // rather than deleting readouts.
-            let findings: Vec<_> = cand.iter().flat_map(|c| c.findings.iter()).collect();
-            if !findings.is_empty() {
-                crate::chrome::section(p, "FINDINGS");
-                p.spawn((
-                    Text::new("what the importer noticed about this mesh"),
-                    TextColor(DIM),
-                    TextFont::from_font_size(crate::chrome::text::HINT),
-                    Node {
-                        margin: UiRect::bottom(Val::Px(crate::chrome::GAP_ROW)),
-                        ..default()
-                    },
-                ));
-                for f in findings {
-                    let (tint, word) = crate::chrome::severity_style(f.severity);
-                    crate::chrome::severity_rail(p, tint, ()).with_children(|block| {
-                        block.spawn((
-                            Text::new(word),
-                            TextColor(tint),
-                            TextFont::from_font_size(crate::chrome::text::HINT),
-                        ));
-                        block.spawn((
-                            Text::new(f.message.clone()),
-                            TextColor(TEXT),
-                            TextFont::from_font_size(crate::chrome::text::LABEL),
-                            // Wrapped prose at 10 px needs the leading; the 1.2 default packs these
-                            // into the block of text the screenshot showed.
-                            bevy::text::LineHeight::RelativeToFont(1.35),
-                        ));
-                        // The remedy, under what it fixes. A warning with no answer is a warning read
-                        // once.
-                        if let Some(fix) = &f.fix {
-                            block.spawn((
-                                Text::new(fix.clone()),
-                                TextColor(LABEL),
-                                TextFont::from_font_size(crate::chrome::text::LABEL),
-                                bevy::text::LineHeight::RelativeToFont(1.35),
-                                Node {
-                                    margin: UiRect::top(Val::Px(3.0)),
-                                    ..default()
-                                },
-                            ));
-                        }
-                    });
-                }
-            }
+            });
         });
     }
 }
@@ -8132,7 +8343,7 @@ mod mount_cycle_tests {
     }
 }
 
-/// **The `SIZE (m)` field's arithmetic.** See [`bake_width`].
+/// **The size field's arithmetic.** See [`bake_width`].
 #[cfg(test)]
 mod scale_field_tests {
     use super::*;

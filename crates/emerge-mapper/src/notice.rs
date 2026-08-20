@@ -40,27 +40,67 @@ pub struct CopyPane(pub &'static [Mode]);
 
 /// What the notice panels currently show, so they are rebuilt on a change and not on a frame.
 ///
-/// `chrome::ShowingFor` does the same for the shortcuts overlay, for the same reason: *"the rows are
-/// static text and respawning them sixty times a second would be sixty times the work for one
-/// picture."* It matters more here — `EditorState` is written at drag rate, so a system gated on
-/// `is_changed()` would rebuild the log while the cursor moves.
+/// `badges::ShowingFor` does the same for the key badges, for the same reason: *"static text
+/// respawned sixty times a second would be sixty times the work for one picture."* It matters more
+/// here — `EditorState` is written at drag rate, so a system gated on `is_changed()` would rebuild
+/// the log while the cursor moves.
 #[derive(Resource, Default, PartialEq, Eq)]
 struct Showing {
     tab: Option<Mode>,
-    lines: Vec<String>,
+}
+
+/// **How long the toast stays up, and how long it takes to go.**
+///
+/// Seven seconds is a reading budget rather than a round number: a refusal here is a sentence naming
+/// a descriptor or a composition — *"cannot remove: `lab/bench` still places it"* — and the messages
+/// run to about twenty words, which is four or five seconds of reading before the eye has to find it
+/// on screen at all.
+///
+/// Nothing is lost when it goes: [`crate::chrome::problem_log`] holds the whole run at the foot of
+/// the tab's own panel. See [`crate::chrome::problem_toast`] for why fading is what makes the toast
+/// honest rather than what makes it lossy.
+const TOAST_SECS: f32 = 7.0;
+/// The last stretch, spent going out. Long enough to read as leaving rather than as a glitch.
+const TOAST_FADE: f32 = 0.6;
+
+/// **What the toast is showing and how much of its life is left.**
+///
+/// `shown` is the line, so the same problem does not re-toast every frame — and a *repeated* one
+/// does, because `chrome::Problem::line` folds consecutive repeats into `(x2)` and that is a
+/// different string. Pressing a refused key again therefore says so again, which is the whole point
+/// of feedback on a gesture.
+#[derive(Resource, Default)]
+struct Toast {
+    shown: Option<String>,
+    left: f32,
 }
 
 pub struct NoticePlugin;
 
 impl Plugin for NoticePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Showing>().add_systems(
-            Update,
+        app.init_resource::<Showing>()
+            .init_resource::<Toast>()
+            .init_resource::<crate::chrome::Journal>()
+            .add_systems(
+                OnEnter(crate::screen::Screen::Editor),
+                crate::chrome::journal_panel.after(crate::chrome::FrameSystems),
+            )
+            .add_systems(
+                Update,
                 ((
-                (dismiss, copy_out).in_set(keys::Phase::Act),
-                // After the verbs, so a problem raised this frame is on screen this frame.
-                paint_notices.after(keys::Phase::Act),
-            ),)
+                    (dismiss, copy_out, toggle_journal).in_set(keys::Phase::Act),
+                    // **Before the paint**, so a refusal raised this frame is in the journal before
+                    // anything reads it — and outside `Phase::Act`, because it watches state rather
+                    // than keys.
+                    record_problems.after(keys::Phase::Act),
+                    paint_journal.after(record_problems),
+                    // After the verbs, so a problem raised this frame is on screen this frame.
+                    paint_notices.after(keys::Phase::Act),
+                    // And after the paint, so a toast raised this frame is up for its whole life
+                    // rather than one frame short of it.
+                    (tick_toast, paint_toast).chain().after(paint_notices),
+                ),)
                     .run_if(in_state(crate::screen::Screen::Editor)),
             );
     }
@@ -75,17 +115,16 @@ impl Plugin for NoticePlugin {
 /// Only the live tab is painted, and that is enough: `chrome::panel_root` hides an inactive tab with
 /// `Display::None`, so the other three panels are not on screen to be wrong.
 fn paint_notices(
-    mut commands: Commands,
     mode: Res<Mode>,
     editor: Res<crate::editor::EditorState>,
     import: Res<crate::tiles::ImportState>,
     bench: Res<crate::anim_tab::BenchState>,
     compose: Res<crate::compose::ComposeState>,
     mut showing: ResMut<Showing>,
-    mut banners: Query<(&mut Node, &mut Text, &crate::chrome::ProblemBanner)>,
-    logs: Query<(Entity, &crate::chrome::ProblemLog)>,
-    lines: Query<Entity, With<crate::chrome::ProblemLogLine>>,
-    mut nodes: Query<&mut Node, (With<crate::chrome::ProblemLog>, Without<crate::chrome::ProblemBanner>)>,
+    mut toast: ResMut<Toast>,
+    // **No `Node` here any more.** Whether the toast is on screen is its clock's answer, not this
+    // system's — see [`fade_toast`]. This writes what it says.
+    mut banners: Query<(&mut Text, &crate::chrome::ProblemBanner)>,
 ) {
     let tab = *mode;
     let status = match tab {
@@ -97,106 +136,36 @@ fn paint_notices(
         Mode::Compose => &compose.status,
     };
 
-    // The banner is a `Text` write guarded on its own content, so it is cheap every frame.
-    for (mut node, mut text, banner) in banners.iter_mut() {
-        // **A banner that is not the live tab's is hidden, not skipped.** Skipping was safe only
-        // while every banner sat in a panel `apply_mode` hid for it — the Meshes and Tiles tabs now
-        // share one panel, so a refusal raised on one would go on showing after switching to the
-        // other. Hiding costs a `Display` compare and stops the panel's own visibility being
-        // load-bearing for whether a stale line is on screen.
-        let mine = banner.0.contains(&tab);
-        let want_display =
-            if mine && status.has_problem() { Display::Flex } else { Display::None };
-        if !mine {
-            if node.display != want_display {
-                node.display = want_display;
-            }
+    // **The newest problem is what the toast says**, and a change to it is what starts its clock.
+    // A tab change starts it too: arriving on a tab that already has a refusal should say so, and
+    // `showing.tab` is still the tab we are leaving at this point in the frame.
+    let newest = status.problems().last().map(|p| p.line());
+    if toast.shown != newest || showing.tab != Some(tab) {
+        toast.left = if newest.is_some() { TOAST_SECS } else { 0.0 };
+        toast.shown = newest.clone();
+    }
+    // **Remembered here, and this is load-bearing.** The re-arm above compares against it, so a
+    // `Showing` nothing ever wrote would make every frame look like a tab change and the toast would
+    // never go down. It was the log's dedupe key before the log moved behind `Cmd+E`; it is the
+    // toast's now, which is why the resource survives with one field.
+    if showing.tab != Some(tab) {
+        showing.tab = Some(tab);
+    }
+    // The card is a `Text` write guarded on its own content, so it is cheap every frame.
+    for (mut text, banner) in banners.iter_mut() {
+        if !banner.0.contains(&tab) {
             continue;
         }
-        if node.display != want_display {
-            node.display = want_display;
-        }
-        if let Some(newest) = status.problems().last() {
+        if let Some(newest) = newest.as_deref() {
             // The glyph is `▲` and not `⚠`: `FiraMono-Regular.ttf` has no U+26A0 (measured), and a
             // missing codepoint draws as a tofu box.
-            let want = format!("▲  {}", newest.line());
+            let want = format!("▲  {newest}");
             if text.0 != want {
                 text.0 = want;
             }
         }
     }
 
-    // The log is a rebuild, so it is guarded on what it would produce.
-    let want: Vec<String> = status
-        .problems()
-        .iter()
-        .rev()
-        .map(|p| p.line())
-        .chain(match status.dropped() {
-            // Named rather than silently forgotten — this crate's caps refuse and name, and a log
-            // that quietly dropped its oldest entries would read complete and not be.
-            0 => None,
-            n => Some(format!("+{n} earlier, dropped at {}", crate::chrome::MAX_PROBLEMS)),
-        })
-        .collect();
-    if showing.tab == Some(tab) && showing.lines == want {
-        return;
-    }
-    showing.tab = Some(tab);
-    showing.lines = want.clone();
-
-    for e in &lines {
-        commands.entity(e).despawn();
-    }
-    for (entity, log) in &logs {
-        // **A log that is not the live tab's is hidden, not skipped** — the banner's rule above, for
-        // the same reason and with the same cost. The despawn just above takes every log line in the
-        // editor, so a log left `Display::Flex` by an earlier tab is an empty bordered box where the
-        // problem list used to be. Skipping made that unreachable only while each log sat in a panel
-        // of its own.
-        let mine = log.0.contains(&tab);
-        if let Ok(mut node) = nodes.get_mut(entity) {
-            let display =
-                if mine && !want.is_empty() { Display::Flex } else { Display::None };
-            if node.display != display {
-                node.display = display;
-            }
-        }
-        if !mine || want.is_empty() {
-            continue;
-        }
-        commands.entity(entity).with_children(|p| {
-            // **Marked, because the rebuild sweeps by marker.** The despawn above takes every
-            // `ProblemLogLine`; this heading carried no marker, so each rebuild appended another
-            // copy and none was ever removed. A batch that raised one problem per frame stacked
-            // ~190 headings down the panel before anybody could read the one message underneath
-            // them. The `Esc clears them` line below already had the marker, which is why it did
-            // not multiply and why the fault looked like a heading bug rather than a sweep bug.
-            crate::chrome::section(p, "PROBLEMS ON THIS TAB")
-                .insert(crate::chrome::ProblemLogLine);
-            // **Say how to take them down.** These are sticky by design — a refusal that vanished
-            // before it was read is the failure `Status` exists to prevent — but sticky with no
-            // stated way out reads as an editor filling up with complaints. An author watching the
-            // same refusal collect an `(x14)` has no reason to know `Esc` is the answer, which is
-            // Cockburn et al.'s intermodal-transition point that the shortcuts overlay already cites:
-            // a fast path offered beside no slow one is not offered.
-            p.spawn((
-                bevy::prelude::Text::new(format!(
-                    "{} clears them",
-                    crate::keys::chord(crate::keys::Action::Cancel)
-                )),
-                bevy::prelude::TextColor(crate::chrome::DIM),
-                bevy::prelude::TextFont::from_font_size(crate::chrome::text::LABEL),
-                crate::chrome::ProblemLogLine,
-            ));
-            for (i, line) in want.iter().enumerate() {
-                // Newest first, and it is the one the banner is also showing — so the top of the
-                // log and the block above it agree, and the older ones recede.
-                let colour = if i == 0 { crate::chrome::DANGER } else { crate::chrome::DIM };
-                crate::chrome::problem_log_line(p, line, colour);
-            }
-        });
-    }
 }
 
 /// Everything a tab has to say, in the order an agent wants to read it.
@@ -291,8 +260,22 @@ fn dismiss(
     mut import: ResMut<crate::tiles::ImportState>,
     mut bench: ResMut<crate::anim_tab::BenchState>,
     mut compose: ResMut<crate::compose::ComposeState>,
+    mut journal: Query<&mut Node, With<crate::chrome::JournalPanel>>,
 ) {
     if !keys::just_pressed(&keyboard, *live, Action::Cancel) {
+        return;
+    }
+    // **The innermost thing first.** `Esc` with the journal open puts the journal away and leaves
+    // the tab's problems alone — clearing them under a panel the author is reading would empty the
+    // list in front of them.
+    let mut closed = false;
+    for mut node in &mut journal {
+        if node.display != Display::None {
+            node.display = Display::None;
+            closed = true;
+        }
+    }
+    if closed {
         return;
     }
     match *mode {
@@ -397,5 +380,189 @@ mod tests {
             failed.has_problem(),
             "a failed copy is the one moment the text must stay on screen"
         );
+    }
+}
+
+/// **The toast's clock.** One line, and nothing that lays out.
+///
+/// Separate from [`paint_toast`] on purpose: a system that both ticks a timer and writes `Node` is
+/// one whose layout writes cannot be read as guarded — `a_drawing_system_writes_only_when_something_changed`
+/// counts writes against comparisons and cannot tell a resource field from a UI one. Adding a
+/// no-op compare to satisfy it would be the Goodhart move that test's own siblings warn about; two
+/// systems, each with one job, is the true shape.
+fn tick_toast(time: Res<Time>, mut toast: ResMut<Toast>) {
+    if toast.left > 0.0 {
+        toast.left = (toast.left - time.delta_secs()).max(0.0);
+    }
+}
+
+/// **What the toast looks like**: up for [`TOAST_SECS`], out over [`TOAST_FADE`], then gone.
+///
+/// The `Display` lives on the strip rather than the card, so hiding costs one compare and the card's
+/// own colours are only touched while it is actually going out.
+fn paint_toast(
+    toast: Res<Toast>,
+    mut layers: Query<&mut Node, With<crate::chrome::ToastLayer>>,
+    mut cards: Query<
+        (&mut BackgroundColor, &mut TextColor),
+        With<crate::chrome::ProblemBanner>,
+    >,
+) {
+    let up = toast.left > 0.0;
+    for mut node in &mut layers {
+        let want = if up { Display::Flex } else { Display::None };
+        if node.display != want {
+            node.display = want;
+        }
+    }
+    if !up {
+        return;
+    }
+    // Full opacity until the last stretch, then out.
+    let alpha = (toast.left / TOAST_FADE).clamp(0.0, 1.0);
+    for (mut bg, mut ink) in &mut cards {
+        let want_bg = crate::chrome::PROBLEM_BG.with_alpha(alpha);
+        if bg.0 != want_bg {
+            bg.0 = want_bg;
+        }
+        let want_ink = crate::chrome::PROBLEM_TEXT.with_alpha(alpha);
+        if ink.0 != want_ink {
+            ink.0 = want_ink;
+        }
+    }
+}
+
+/// **Everything that has gone wrong, kept where `Esc` cannot reach it.**
+///
+/// Watches [`crate::chrome::Status::raised`] — a counter that only goes up — so the journal learns
+/// about a refusal without either side holding the other's list. See [`crate::chrome::Journal`] for
+/// why a status cannot simply hand it over.
+///
+/// All four tabs, because a session log that only recorded the tab you happened to be on would be a
+/// log with holes exactly where a batch left them.
+fn record_problems(
+    editor: Res<crate::editor::EditorState>,
+    import: Res<crate::tiles::ImportState>,
+    bench: Res<crate::anim_tab::BenchState>,
+    compose: Res<crate::compose::ComposeState>,
+    mut journal: ResMut<crate::chrome::Journal>,
+    // One watermark per tab, in the order below. A `Local` rather than a field on the journal: it is
+    // this system's bookkeeping about what it has read, not a fact about the log.
+    mut seen: Local<[u64; 4]>,
+) {
+    let statuses = [
+        &editor.status,
+        &import.status,
+        &bench.status,
+        &compose.status,
+    ];
+    for (i, status) in statuses.into_iter().enumerate() {
+        let now = status.raised();
+        if now <= seen[i] {
+            continue;
+        }
+        // The text of the newest is what those raises were about. A burst inside one frame folds
+        // into a count rather than inventing lines for messages nobody kept.
+        let times = (now - seen[i]) as usize;
+        seen[i] = now;
+        let text = status.problem_text();
+        if !text.is_empty() {
+            journal.record(text, times);
+        }
+    }
+}
+
+/// **`Cmd+E` opens the journal, and pressing it again puts it away.**
+///
+/// A toggle rather than a modal: it is a reference panel, not a question, so it takes no scrim and
+/// blocks nothing. `Esc` closes it too — see [`dismiss`], which now backs out of the innermost thing
+/// rather than always clearing the tab.
+fn toggle_journal(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<keys::Live>,
+    mut toast: ResMut<Toast>,
+    mut panels: Query<&mut Node, With<crate::chrome::JournalPanel>>,
+) {
+    // WRITES-EVERY-FRAME-OK: it does not. This is behind a key EDGE — `just_pressed` returns on
+    // every frame but the one where `Cmd+E` went down, so the writes below happen once per press
+    // and the change flag they raise is exactly the news the layout wants. The alternative the lint
+    // would accept is a comparison against a value derived from the thing being compared, which
+    // guards nothing and reads as though it does — the Goodhart shape its own siblings warn about.
+    // First use of this marker in the crate; a later one that cannot say "behind an edge" should be
+    // looked at rather than copied from here.
+    if !keys::just_pressed(&keyboard, *live, Action::ShowErrors) {
+        return;
+    }
+    for mut node in &mut panels {
+        let opening = node.display == Display::None;
+        node.display = if opening { Display::Flex } else { Display::None };
+        // **The toast stands down when the journal comes up.** Measured in a frame: both are
+        // centred at the top of the viewport, so the toast sat squarely over the panel's own title.
+        // It is also the same sentence twice — the journal's first line IS what the toast is
+        // showing — which is the duplication this whole area was rebuilt to end. `shown` is left
+        // alone, so putting the journal away does not raise it again.
+        if opening {
+            toast.left = 0.0;
+        }
+    }
+}
+
+/// **Rebuild the list when the journal changes or the panel opens**, and not on a frame.
+///
+/// `chrome::Follow`'s argument: static text respawned sixty times a second is sixty times the work
+/// for one picture. The guard is what it would produce, exactly as the old per-panel log's was.
+fn paint_journal(
+    mut commands: Commands,
+    journal: Res<crate::chrome::Journal>,
+    panels: Query<&Node, With<crate::chrome::JournalPanel>>,
+    lists: Query<Entity, With<crate::chrome::JournalList>>,
+    lines: Query<Entity, With<crate::chrome::ProblemLogLine>>,
+    mut showing: Local<Option<usize>>,
+) {
+    let open = panels.iter().any(|n| n.display != Display::None);
+    if !open {
+        // Nothing to draw and nothing to keep: the next open rebuilds from the journal, which is the
+        // only copy that matters.
+        *showing = None;
+        return;
+    }
+    let want: Vec<String> = journal
+        .entries()
+        .iter()
+        .rev()
+        .map(|p| p.line())
+        .chain(match journal.dropped() {
+            0 => None,
+            n => Some(format!(
+                "+{n} earlier, dropped at {}",
+                crate::chrome::JOURNAL_CAP
+            )),
+        })
+        .collect();
+    if *showing == Some(want.len()) {
+        return;
+    }
+    *showing = Some(want.len());
+    for e in &lines {
+        commands.entity(e).despawn();
+    }
+    for list in &lists {
+        commands.entity(list).with_children(|p| {
+            if want.is_empty() {
+                p.spawn((
+                    bevy::prelude::Text::new("nothing has gone wrong yet".to_owned()),
+                    bevy::prelude::TextColor(crate::chrome::DIM),
+                    bevy::prelude::TextFont::from_font_size(crate::chrome::text::LABEL),
+                    crate::chrome::ProblemLogLine,
+                ));
+                return;
+            }
+            for (i, line) in want.iter().enumerate() {
+                // Newest first, and the newest is the one the toast just showed — so the top of this
+                // list and the thing that interrupted you agree.
+                let colour = if i == 0 { crate::chrome::DANGER } else { crate::chrome::DIM };
+                crate::chrome::problem_log_line(p, line, colour);
+            }
+        });
     }
 }

@@ -316,3 +316,16 @@ fn members(build: &Build) -> usize {
 /// two would drift the first time one of them was edited. Keeping it on disk means the test below can
 /// read exactly what an agent would send.
 pub const GUIDES_DIR: &str = "guides";
+
+/// **Exercises waiting on a kit that is not bound yet** — `guides/pending/`.
+///
+/// A card names the pieces it sends an author to select, so a guide is only walkable while its kit
+/// ships. Six of them name `site/*`, and `assets/emerge/kits.ron` says in its own note that that kit
+/// *"was cleared … and is being re-authored"* — so they strand at the step that names a piece.
+///
+/// Parking is a **move, not a branch**: nothing here reads this directory, and the two tests that
+/// scan [`GUIDES_DIR`] take only files whose extension is `json`, which a directory has none of. So
+/// a parked guide simply stops being a shipped exercise. The drive tests still walk these by name
+/// against fixtures, which is what stops them rotting while they wait — and moving one back is a
+/// `git mv` once `site` is bound again.
+pub const PENDING_GUIDES_DIR: &str = "guides/pending";

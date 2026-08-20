@@ -331,14 +331,17 @@ fn spawn_panels(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
         // hence the `CopyPane`.
         crate::chrome::scroll_list(
             p,
-            (SlotPane, crate::notice::CopyPane(&[crate::tiles::Mode::Anim])),
+            (
+                SlotPane,
+                crate::notice::CopyPane(&[crate::tiles::Mode::Anim]),
+                crate::chrome::Control(crate::keys::ControlId::Detail),
+            ),
         )
         .entry::<Node>()
         .and_modify(|mut n| n.margin.top = Val::Px(8.0));
         // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
         // the panel, and an auto margin in a column absorbs the free space above it — so
         // placed any earlier it pushes every sibling after it down with it.
-        crate::chrome::problem_log(p, &[crate::tiles::Mode::Anim]);
     });
 
     crate::chrome::panel_root(
@@ -353,7 +356,7 @@ fn spawn_panels(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
     .with_children(|p| {
         crate::chrome::list_heading(p, "RIGS");
         crate::filter::spawn(p, crate::filter::Pane::Rigs);
-        crate::chrome::scroll_list(p, RigList);
+        crate::chrome::scroll_list(p, (RigList, crate::chrome::Control(crate::keys::ControlId::Rigs)));
     });
 }
 

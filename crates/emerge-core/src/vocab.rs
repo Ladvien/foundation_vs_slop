@@ -81,6 +81,23 @@ pub struct Token {
     /// `sleep`/`store`/`decor`/`hygiene` shipped with no reader.
     #[serde(default)]
     pub note: String,
+    /// **Other tokens this one brings with it**, on the axis the implication targets.
+    ///
+    /// Declared here because it is a fact about the WORD, not about any one asset: a bed restores
+    /// stamina because this game says beds do, and a light draws power because it is a light. No
+    /// render can show either, so no labeller can be asked for them and no author should have to
+    /// remember them.
+    ///
+    /// It lived as a hardcoded five-row table in `emerge-mapper`'s labeller until 2026-08-19, which
+    /// put game-design semantics inside the editor and left every other consumer — the game
+    /// included — unaware of it. A descriptor written by hand, or by any tool that is not this
+    /// editor, simply did not get the effect. Moving it here makes it one fact, read by
+    /// [`Vocabularies::masks`], which is the pass both the game and the editor already go through.
+    ///
+    /// Only `kind` uses this today. It is on [`Token`] rather than on a `kind`-specific type
+    /// because the relation is "token implies token" and nothing about it is special to that axis.
+    #[serde(default)]
+    pub implies: Vec<String>,
 }
 
 impl Vocabulary {
@@ -92,6 +109,9 @@ impl Vocabulary {
                 .map(|(n, d)| Token {
                     name: (*n).to_owned(),
                     note: (*d).to_owned(),
+                    // Rust-side tables state no implications; those are authored in `vocab.ron`,
+                    // which is where a fact about the game's words belongs.
+                    implies: Vec::new(),
                 })
                 .collect(),
         }
@@ -278,6 +298,36 @@ impl Vocabularies {
     ///
     /// Errors name the descriptor, the axis, the token, and — because the overwhelmingly common cause
     /// is a typo rather than a missing feature — the nearest token that *is* in the table.
+    /// **Every effect token the given kinds bring with them**, in vocabulary order.
+    ///
+    /// Refused rather than ignored when an implication names a token the effects axis does not
+    /// hold: a vocabulary that promises an effect nobody defines is a promise every consumer would
+    /// silently drop, and this crate's rule is that an invented token is refused at the door.
+    pub fn implied_effects(&self, kinds: &[String]) -> Result<Vec<String>, String> {
+        let mut out: Vec<String> = Vec::new();
+        for token in &self.kind.tokens {
+            if !kinds.iter().any(|k| k == &token.name) {
+                continue;
+            }
+            for implied in &token.implies {
+                if !self.effects.contains(implied) {
+                    return Err(format!(
+                        "vocabulary: `kind` token `{}` implies `{implied}`, which is not an \
+                         `effects` token. The axis holds: {}.",
+                        token.name,
+                        self.effects.names().collect::<Vec<_>>().join(", ")
+                    ));
+                }
+                if !out.contains(implied) {
+                    out.push(implied.clone());
+                }
+            }
+        }
+        // Vocabulary order, so a resolved set is the same list however the kinds were written.
+        out.sort_by_key(|t| self.effects.names().position(|n| n == t).unwrap_or(usize::MAX));
+        Ok(out)
+    }
+
     pub fn masks(&self, d: &Descriptor) -> Result<Masks, String> {
         let axis = |v: &Vocabulary, name: &str, tokens: &[String]| -> Result<u64, String> {
             v.mask(tokens).map_err(|_| {
@@ -341,9 +391,25 @@ impl Vocabularies {
             }
         }
 
+        // **The effects a kind implies are resolved here, with the authored ones.**
+        //
+        // One place, so every consumer agrees without remembering to. This was a table in
+        // `emerge-mapper`'s labeller that only its apply path consulted — so a bed labelled by the
+        // editor gained `stamina-recharge` and the identical bed written by hand did not, and the
+        // game, which reads these masks, could not tell the two apart. Deriving it at resolve time
+        // means the stored list is an author's *statement* and the mask is the *truth*, which is
+        // the only arrangement in which the two cannot drift.
+        let implied = self.implied_effects(&d.kind)?;
+        let mut effects = d.effects.clone();
+        for token in implied {
+            if !effects.contains(&token) {
+                effects.push(token);
+            }
+        }
+
         Ok(Masks {
             kind: axis(&self.kind, "kind", &d.kind)?,
-            effects: axis(&self.effects, "effects", &d.effects)?,
+            effects: axis(&self.effects, "effects", &effects)?,
             look: axis(&self.look, "look", &d.look)?,
             provides: axis(&self.surfaces, "surfaces", &d.offers.surfaces)?,
             // Faces share the axis for the reason `requires` gives above.
@@ -655,6 +721,7 @@ mod tests {
                 .map(|n| Token {
                     name: n.clone(),
                     note: String::new(),
+                    implies: Vec::new(),
                 })
                 .collect(),
         };

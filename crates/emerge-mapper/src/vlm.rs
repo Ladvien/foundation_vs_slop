@@ -283,6 +283,34 @@ pub struct Suggestion {
     pub token_proposals: Vec<TokenProposal>,
 }
 
+impl Suggestion {
+    /// **The words this proposal offers as the piece's description**, and the only place that
+    /// decides which they are.
+    ///
+    /// The schema asks for two things that are nearly one question — [`Suggestion::what`], *"one
+    /// sentence: what real-world thing this is"*, and [`Suggestion::note`], *"one or two sentences a
+    /// human author would keep"* — and models answer the first and skip the second. Measured on the
+    /// running editor: `what` read *"A low-poly three-drawer dresser with a wooden finish"* while
+    /// `note` was `null`, so the detail pane showed its `describe it…` placeholder with a full
+    /// identification sitting underneath it in another colour. Reported from the keyboard: *"there's
+    /// no intuition to be drawn from the description. And do we even need all of that?"*
+    ///
+    /// `what` is **not** dropped from the schema, because it is first on purpose — reasoning-first
+    /// ordering is measured (Tam et al. 2024), and deleting it would be trading answer quality for a
+    /// tidier panel. It simply also serves as the description when nothing better was offered.
+    ///
+    /// Stated once so [`crate::labels::apply_fields`] writes exactly the words the panel showed. Two
+    /// readers, one fact: a panel proposing one sentence and an apply that wrote another is the
+    /// class of defect the whole "one value, never two" pass exists to end.
+    pub fn description(&self) -> Option<&str> {
+        [self.note.as_deref(), Some(self.what.as_str())]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .find(|s| !s.is_empty())
+    }
+}
+
 /// Who said so, when, in how many attempts — the review header's facts. Never the key, never the
 /// endpoint host.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

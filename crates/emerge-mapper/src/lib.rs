@@ -43,6 +43,7 @@
 
 pub mod anim_cache;
 pub mod args;
+pub mod badges;
 pub mod anim_plots;
 pub mod anim_stage;
 pub mod anim_tab;

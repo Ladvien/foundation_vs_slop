@@ -205,8 +205,18 @@ pub const OWNERSHIP: &[(&str, Ownership)] = &[
     ("emerge_mapper::thumbs::Thumbnails", Ownership::Project),
     ("emerge_mapper::thumbs::ThumbGeneration", Ownership::Project),
     ("emerge_mapper::labels::Suggestions", Ownership::Project),
+    // **`Project`, because the model is read off the project's own `.env`.** A different project may
+    // configure a different endpoint, and the resource latches that it has read one — so carrying it
+    // across would leave the band naming a model this project never asked for. The link state goes
+    // with it, which is right: it is evidence about a round trip that was made for that project.
+    ("emerge_mapper::labels::Labeler", Ownership::Project),
     ("emerge_mapper::anim_watch::BenchReports", Ownership::Project),
     ("emerge_mapper::anim_watch::RigWatch", Ownership::Project),
+
+    // **`Session`, and that is the whole point of it.** Every other problem list in this editor is a
+    // tab's working state, capped and cleared by `Esc`; this one answers *"what has gone wrong since
+    // the application started"*, which a value thrown away with the door cannot.
+    ("emerge_mapper::chrome::Journal", Ownership::Session),
 
     // ── The door's own working state ────────────────────────────────────────────────────────────
     // The undo stack is the one this list was written for: `docs/2026-08-17-one-application.md` §1
@@ -248,10 +258,16 @@ pub const OWNERSHIP: &[(&str, Ownership)] = &[
     ("emerge_mapper::labels::LabelQueue", Ownership::Door),
     ("emerge_mapper::filter::Filters", Ownership::Door),
     ("emerge_mapper::notice::Showing", Ownership::Door),
+    // **`Door`, because it is what is on screen right now.** A toast is an event's tail — carrying
+    // one into the next kit would announce a refusal about a door the author has already left.
+    ("emerge_mapper::notice::Toast", Ownership::Door),
     // Holds entity ids from the frame this screen spawned, so it is meaningless the moment those
     // are despawned — and `chrome::spawn_frame` replaces it on every entry.
     ("emerge_mapper::chrome::Frame", Ownership::Door),
-    ("emerge_mapper::chrome::ShowingFor", Ownership::Door),
+    // The badge layer's entities go with the door, so the key that says which tab they were
+    // built for has to go with them — a stale key would suppress the first rebuild on the next
+    // kit and the badges would simply never appear.
+    ("emerge_mapper::badges::ShowingFor", Ownership::Door),
     ("emerge_mapper::view::Rig", Ownership::Door),
 
     // ── True for as long as the application runs ────────────────────────────────────────────────

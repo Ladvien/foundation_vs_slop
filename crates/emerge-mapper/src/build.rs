@@ -1111,12 +1111,30 @@ pub fn tile_history(
 /// from each verb's branch — one verb, one act — so "after the verbs" is a scheduling fact rather
 /// than a place in a function body. Gated on the change flag, so a keystroke that moved nothing
 /// costs nothing.
+///
+/// # It used to be gated on the TAB as well, and that was the bug
+///
+/// The guard read `*mode != Mode::Tiles`, so a tile's envelope could only follow its contents while
+/// that one panel was open. Reported from the keyboard: *"the sizing of the tile around the mesh
+/// doesn't take place until you enter the mesh or the tile editing… we want this to happen whenever
+/// a mesh gets loaded."*
+///
+/// The envelope is **read off the contents** ([`fit_envelope`]) rather than authored, so which panel
+/// an author happens to be looking at cannot be part of the answer — that is a second source of
+/// truth about the same fact, wearing a tab for a name. It matters most for exactly the case
+/// reported: [`fit_envelope`] measures a member through `library.get(id)`, so a piece whose
+/// descriptor is not in the library **yet** spans nothing and the tile fits to one cell. When the
+/// measurement lands, `Project` changes — and with the tab gate in place that change was only
+/// noticed if you were standing on Tiles at that moment. Now it is noticed wherever you are, which
+/// is what makes the tile size itself when the mesh arrives rather than when you next nudge it.
+///
+/// Still gated on the change flags, so this is free on a frame where nothing moved, and `Build`
+/// exists wherever this is registered — the same tuple carries `build_keys`, which takes it too.
 pub fn refit_tile(
     mut build: ResMut<Build>,
     project: Res<crate::project::Project>,
-    mode: Res<crate::tiles::Mode>,
 ) {
-    if *mode != crate::tiles::Mode::Tiles || !(build.is_changed() || project.is_changed()) {
+    if !(build.is_changed() || project.is_changed()) {
         return;
     }
     // **Refit, and say nothing.**

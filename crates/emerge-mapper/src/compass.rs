@@ -280,15 +280,26 @@ fn follow_the_camera(
 /// Compose and Anim are deliberately absent for now: Anim drives its own camera presets and has its
 /// own reading of "which way is the figure facing", and putting a second orientation cue beside that
 /// is a question rather than an answer. Both are one arm of this match away if they want it.
-fn show_by_tab(mode: Res<crate::tiles::Mode>, mut compass: Query<&mut Node, With<Compass>>) {
-    if !mode.is_changed() {
-        return;
-    }
+fn show_by_tab(
+    mode: Res<crate::tiles::Mode>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<crate::keys::Live>,
+    mut compass: Query<&mut Node, With<Compass>>,
+) {
+    // **It stands down while the key badges are up.**
+    //
+    // The gizmo owns the viewport's bottom-left, and so does any badge for a row low in the left
+    // dock — the lattice cursor's cross landed straight on it. Neither can move: a badge goes where
+    // its row is, and the compass corner is the one `spawn` argues for at length. But they are not
+    // wanted at the same moment. A badge overlay is a question about the keyboard; which way north
+    // is can wait the length of a keypress.
+    let asking = crate::keys::pressed(&keyboard, *live, crate::keys::Action::Shortcuts);
     use crate::tiles::Mode;
-    let show = match *mode {
-        Mode::Map | Mode::Tiles | Mode::Meshes => true,
-        Mode::Compose | Mode::Anim => false,
-    };
+    let show = !asking
+        && match *mode {
+            Mode::Map | Mode::Tiles | Mode::Meshes => true,
+            Mode::Compose | Mode::Anim => false,
+        };
     let display = if show { Display::Flex } else { Display::None };
     for mut node in &mut compass {
         // Compare through `Deref`, write through `DerefMut`, and only then — `Mut::deref_mut` calls

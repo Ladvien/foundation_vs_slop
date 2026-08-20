@@ -129,6 +129,9 @@ pub fn spawn(parent: &mut ChildSpawnerCommands, pane: Pane) {
             UiButton,
             Hovered::default(),
             FilterBox(pane),
+            // One line covers all three panes: they live in different tabs' panels, so exactly one
+            // is ever laid out and the badge lands on whichever list is on screen.
+            crate::chrome::Control(crate::keys::ControlId::Filter),
             Node {
                 width: Val::Percent(100.0),
                 padding: CHIP_PAD,

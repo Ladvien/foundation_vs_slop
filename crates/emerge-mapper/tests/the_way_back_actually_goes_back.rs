@@ -44,20 +44,35 @@ fn the_editor_hands_its_exit_code_back() {
     );
 }
 
-/// **Leaving a door sets the state back to the menu.**
+/// **Every way out of a door goes through one door, and that door lands on the menu.**
 ///
-/// The successor to the exit-code check. Three keys reach `leave_for_menu`'s answer — `Esc` on a
-/// clean map, `D` on a dirty one, and `S` after a save — and each has to end on the menu. All three
-/// name the same state, and nothing else in `editor.rs` does, so this counts them.
+/// Three gestures leave: `Cmd+O`, the chrome bar's back button, and `Y` to the unsaved-work
+/// question. This used to count `next.set(Screen::Menu)` in `editor.rs` and demand at least three of
+/// them, one per gesture — which was true when each gesture set the state itself.
+///
+/// **They were then consolidated onto `save_and_leave`**, deliberately: a refused save has to keep
+/// you on the map with the reason rather than drop you on the menu with unwritten work, and three
+/// copies of that decision is three places for it to differ. So there is exactly *one*
+/// `next.set(Screen::Menu)` now, and the old count made the right shape look like a regression.
+///
+/// What is actually worth guarding survives the change: three routes, one exit.
 #[test]
 fn every_way_out_of_a_door_lands_on_the_menu() {
     let src = read("src/editor.rs");
-    let ways = src.matches("next.set(crate::screen::Screen::Menu)").count();
+    // The definition plus one call per gesture.
+    let routes = src.matches("save_and_leave(").count();
     assert!(
-        ways >= 3,
-        "every way out of a door must set `Screen::Menu`; found {ways}. The three are `Esc` on a \
-         clean map, `D` on a dirty one, and `S` when the save succeeds — and a way out that forgets \
-         it leaves the author in a door with no way back."
+        routes >= 4,
+        "every way out of a door must walk `save_and_leave`; found {routes} mention(s), and there \
+         are three gestures plus the function itself. The three are `Cmd+O`, the back button, and \
+         `Y` to the leaving prompt — a way out that sets the state itself is a way out that can \
+         forget the save."
+    );
+    let ways = src.matches("next.set(crate::screen::Screen::Menu)").count();
+    assert_eq!(
+        ways, 1,
+        "the menu is reached from exactly one place — `save_and_leave`. {ways} means a gesture has \
+         gone around it, and around the refused-save branch with it."
     );
     assert!(
         !src.contains("BACK_TO_MENU"),

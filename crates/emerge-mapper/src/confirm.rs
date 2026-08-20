@@ -224,6 +224,9 @@ fn spawn(mut commands: Commands) {
         .spawn((
             ConfirmRoot,
             Node {
+                // It covers the whole window, over every dock and band, which is what makes the
+                // question the only thing on screen to answer — see [`SCRIM`] just below.
+                // PLACES-ITSELF-OK: a modal is not a panel; `chrome::Frame` owns where panels go.
                 position_type: PositionType::Absolute,
                 left: Val::Px(0.0),
                 top: Val::Px(0.0),

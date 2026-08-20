@@ -41,6 +41,11 @@ const WATCHED: &[&str] = &[
     // count to each write is the next version of this file, and until it exists that limit is
     // stated here rather than assumed away.
     "tiles.rs",
+    // Added with the key badges. `place_badges` writes `.left`/`.top` on every cluster while the
+    // shortcut key is held — which is correct, because the subject moves under the cursor and the
+    // camera eases between detents — so both writes are compared in place, and this is what says the
+    // next one has to be too.
+    "badges.rs",
 ];
 
 /// A write to one of these is a write the layout or render world reads.
@@ -213,19 +218,29 @@ fn a_drawing_system_writes_only_when_something_changed() {
 /// **The scan can see the systems it claims to check.**
 ///
 /// The companion assertion, and the one that matters most: a parser that quietly matched nothing
-/// would pass forever. `chrome.rs` alone carries several of these.
+/// would pass forever.
+///
+/// **Two files, and that is the record of a move.** It read `chrome.rs` alone, on the note that
+/// *"`chrome.rs` alone carries several of these"* — and then the held-key overlay left for
+/// `badges.rs`, taking two of them with it, and this failed. That is the guard working: the right
+/// answer was to follow them rather than to lower the number, because the number is the whole point.
 #[test]
 fn the_scan_actually_finds_drawing_systems() {
-    let src = std::fs::read_to_string(src_dir().join("chrome.rs")).expect("chrome.rs");
-    let found: Vec<String> = functions(&src)
-        .into_iter()
-        .filter(|(_, b)| b.contains("&mut Node") || b.contains("&mut BackgroundColor"))
-        .map(|(n, _)| n)
-        .collect();
+    let mut found: Vec<String> = Vec::new();
+    for file in ["chrome.rs", "badges.rs"] {
+        let src = std::fs::read_to_string(src_dir().join(file))
+            .unwrap_or_else(|e| panic!("{file}: {e}"));
+        found.extend(
+            functions(&src)
+                .into_iter()
+                .filter(|(_, b)| b.contains("&mut Node") || b.contains("&mut BackgroundColor"))
+                .map(|(n, _)| format!("{file}::{n}")),
+        );
+    }
     assert!(
         found.len() >= 6,
-        "the scan found only {} drawing systems in chrome.rs — if the parser has stopped seeing \
-         them, the rule above is being enforced against nothing: {found:?}",
+        "the scan found only {} drawing systems in the window's own chrome — if the parser has \
+         stopped seeing them, the rule above is being enforced against nothing: {found:?}",
         found.len()
     );
 }

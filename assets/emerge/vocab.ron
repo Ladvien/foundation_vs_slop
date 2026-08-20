@@ -25,15 +25,22 @@
     // consumer and carries `#[allow(dead_code)]`) — so this axis is not new vocabulary, it is the
     // existing vocabulary finally being enforced.
     kind: (
+        // **`implies` is a fact about the word, resolved by `Vocabularies::masks`.**
+        //
+        // A bed restores stamina because this game says beds do; a light draws power because it is
+        // a light. Neither is visible in a render, so neither is ever asked of the labelling model
+        // — and neither should have to be remembered by an author. Stating it here means the game,
+        // the editor and anything else reading a library all derive the same answer from the same
+        // row, which is what it could not do while it was a Rust table inside the editor.
         tokens: [
-            ( name: "appliance",  note: "a machine that does something when powered" ),
-            ( name: "bed",        note: "a thing to lie on" ),
+            ( name: "appliance",  note: "a machine that does something when powered", implies: ["uses-electricity"] ),
+            ( name: "bed",        note: "a thing to lie on", implies: ["stamina-recharge"] ),
             ( name: "bin",        note: "a thing to put refuse in" ),
             ( name: "container",  note: "a thing that holds other things — crates, boxes" ),
             ( name: "decor",      note: "present to be looked at; no other function" ),
             ( name: "door",       note: "fills an opening and can be passed through" ),
             ( name: "fixture",    note: "fixed to the building — pipes, buttons, vents" ),
-            ( name: "light",      note: "a lamp, sconce or luminous panel" ),
+            ( name: "light",      note: "a lamp, sconce or luminous panel", implies: ["uses-electricity"] ),
             ( name: "plant",      note: "a growing thing" ),
             ( name: "prop",       note: "small hand-scale dressing with no stronger classification" ),
             ( name: "seating",    note: "a thing to sit on — chairs, stools, benches" ),
@@ -57,8 +64,8 @@
             // between `prop` and `decor` across the two runs. Neither word is wrong and neither is
             // right: a motor is not hand-scale dressing and it is not there to be looked at. The
             // flip was the gap in this axis showing up as noise in the model.
-            ( name: "machinery",  note: "an industrial mechanism or a part of one — motors, gears, pistons, valves, radiators" ),
-            ( name: "terminal",   note: "a console, screen or control panel a person operates" ),
+            ( name: "machinery",  note: "an industrial mechanism or a part of one — motors, gears, pistons, valves, radiators", implies: ["uses-electricity"] ),
+            ( name: "terminal",   note: "a console, screen or control panel a person operates", implies: ["uses-electricity"] ),
             ( name: "weapon",     note: "a turret, emplacement or firearm" ),
             ( name: "barrier",    note: "blocks passage without being the building — railings, bollards, fences" ),
             ( name: "resource",   note: "raw or refined material carried as an item — ore, ingots, bricks" ),

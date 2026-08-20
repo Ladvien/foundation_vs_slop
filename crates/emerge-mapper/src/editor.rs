@@ -120,6 +120,14 @@ const THUMB_SLOT: f32 = 30.0;
 const BUSY_SCENE: usize = 1_000_000;
 const HEAVY_SCENE: usize = 5_000_000;
 
+/// **The column the triangle count holds**, so the map's name beside it does not move.
+///
+/// Derived rather than picked: the longest string `refresh_cost` can render is [`HEAVY_SCENE`]'s
+/// order of magnitude through `with_thousands` — `9,999,999 tris drawn`, twenty characters — and the
+/// shipped face is monospace at [`crate::chrome::text::BODY`], which advances about 6.6 px. Twenty
+/// characters plus the node's own 8 px padding each side is what this reserves.
+const COST_COL: f32 = 148.0;
+
 #[derive(Resource)]
 pub struct EditorState {
     /// Index into the library — what a click would place, or `None` for **nothing armed**.
@@ -468,8 +476,11 @@ pub struct TargetLock(Option<(String, (f32, f32))>);
 
 /// The locked target's highlight — a third marker quad beside removal's red and clone's blue,
 /// because three tools making three different promises must not share a colour.
+///
+/// `pub(crate)` because `badges::sense_subject` reads it: the piece-verbs' badges go on the thing the
+/// verbs would act on, and this quad is already the editor's own answer to which piece that is.
 #[derive(Component)]
-struct TargetTile;
+pub(crate) struct TargetTile;
 
 impl CloneDrag {
     /// Whether a set is in hand — the one question `keys` asks (for `Esc`'s layering).
@@ -747,9 +758,11 @@ struct Ghosted;
 #[derive(Component)]
 struct StatusBlock;
 
-/// The live cost readout, bottom right.
+/// The live cost readout. In the chrome bar, in a reserved column — see [`COST_COL`], and
+/// `the_triangle_count_does_not_shove_the_maps_name` for what happens without one. `pub` so that
+/// test can drive it.
 #[derive(Component)]
-struct TriangleTotal;
+pub struct TriangleTotal;
 
 /// One labelled row of the readout. A field per line, rather than one string with separators in it,
 /// because a separator is a thing the reader has to parse and a column is not.
@@ -1024,6 +1037,21 @@ fn spawn_cost_readout(mut commands: Commands, frame: Res<crate::chrome::Frame>) 
             crate::tiles::MapRoot,
             Node {
                 padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                // **A reserved column, and the number grows leftwards into it.**
+                //
+                // This is the last child of a row whose spacer pushes everything to the right end, so
+                // every digit the count gained shoved `MAP · untitled_map` further left — reported
+                // from the keyboard as the label "bouncing around a whole lot as those triangle
+                // numbers change". A readout that moves its neighbour is a readout that makes the
+                // neighbour unreadable, and the neighbour is the one thing on the bar that says which
+                // map you are in.
+                //
+                // `min_width` rather than `width`, so a count past what [`COST_COL`] reserves pushes
+                // out rather than clipping — the same choice, for the same reason, the key list's
+                // chord column makes. `FlexEnd` is what makes the phrase hold still: the digits
+                // extend into the slack instead of dragging `tris drawn` with them.
+                min_width: Val::Px(COST_COL),
+                justify_content: JustifyContent::FlexEnd,
                 ..default()
             },
             // Nothing here is clickable, and a readout that eats clicks is a readout that steals
@@ -1291,6 +1319,8 @@ fn spawn_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
             },
             StatusBlock,
             crate::notice::CopyPane(&[crate::tiles::Mode::Map]),
+            // The Map's own text pane — where `Cmd+C` copies from, and so where its badge goes.
+            crate::chrome::Control(crate::keys::ControlId::Detail),
         ))
         .with_children(|s| {
             for field in [
@@ -1353,7 +1383,6 @@ fn spawn_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
         // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
         // the panel, and an auto margin in a column absorbs the free space above it — so
         // placed any earlier it pushes every sibling after it down with it.
-        crate::chrome::problem_log(p, &[crate::tiles::Mode::Map]);
     });
 }
 
@@ -1389,7 +1418,7 @@ fn spawn_palette_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>)
     .with_children(|p| {
         crate::chrome::list_heading(p, "PLACE");
         crate::filter::spawn(p, crate::filter::Pane::Palette);
-        crate::chrome::scroll_list(p, PaletteList);
+        crate::chrome::scroll_list(p, (PaletteList, crate::chrome::Control(crate::keys::ControlId::Palette)));
     });
 }
 

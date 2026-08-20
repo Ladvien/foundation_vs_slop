@@ -358,11 +358,17 @@ fn spawn_compose_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>)
         // `scroll_list` except `ScrollArea` — and `bevy_ui_widgets` only scrolls `With<ScrollArea>`,
         // so the longest generated pane in the editor clipped its overflow and the wheel did
         // nothing. `tests/headless.rs::every_pane_that_clips_can_scroll` pins the class.
-        crate::chrome::scroll_list(p, (ComposeBody, crate::notice::CopyPane(&[Mode::Compose])));
+        crate::chrome::scroll_list(
+            p,
+            (
+                ComposeBody,
+                crate::notice::CopyPane(&[Mode::Compose]),
+                crate::chrome::Control(crate::keys::ControlId::Detail),
+            ),
+        );
         // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
         // the panel, and an auto margin in a column absorbs the free space above it — so
         // placed any earlier it pushes every sibling after it down with it.
-        crate::chrome::problem_log(p, &[Mode::Compose]);
     });
 }
 

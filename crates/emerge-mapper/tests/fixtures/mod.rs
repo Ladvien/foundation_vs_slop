@@ -270,6 +270,39 @@ impl Fixture {
         self
     }
 
+    /// **A piece with a HAND-AUTHORED lattice**, one edge token per cell down its run face.
+    ///
+    /// Every other descriptor this fixture writes carries `subgrid: None`, which is right for the
+    /// ordinary case and is why *"an authored lattice survives the disk round-trip"* had no fixture
+    /// to be tested against — it read the shipped `site/wall` instead, and went red the day that kit
+    /// stopped shipping.
+    ///
+    /// The round-trip is real here despite the fixture writing the file: this emits RON text, and
+    /// what is under test is `policy::layered_library` + `Project::open` reading it back. The two
+    /// are not the same code.
+    ///
+    /// `run` cells wide, so the piece is sized to exactly that many divisions — `grid::cells` is
+    /// what decides, and a lattice with a cell outside its own divisions is refused at load.
+    pub fn authored_lattice(mut self, id: &str, pack: &str, token: &str, run: u32) -> Fixture {
+        self = self.sized_descriptor(id, pack, run as f32 * emerge_core::grid::SNAP, 1.0);
+        if let Some(last) = self.descriptors.last_mut() {
+            let was = "subgrid: None";
+            assert!(
+                last.contains(was),
+                "the fixture's descriptor shape changed under this helper"
+            );
+            let cells: Vec<String> = (0..run)
+                .map(|x| {
+                    format!(
+                        "( at: ({x}, 0, 0), solid: true, edge: Some(\"{token}\") )"
+                    )
+                })
+                .collect();
+            *last = last.replace(was, &format!("subgrid: Some(( cells: [{}] ))", cells.join(", ")));
+        }
+        self
+    }
+
     /// **A piece that must sit on something** — `mount: OnSurface(class)`.
     ///
     /// The shape every fixture, lamp and screen in a real kit has, and the one a tile refuses when

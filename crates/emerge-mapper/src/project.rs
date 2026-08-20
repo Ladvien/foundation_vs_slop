@@ -217,12 +217,10 @@ impl Project {
         // moment to reconcile the whole set is when the whole set is in hand. In memory only — the
         // merged library spans several kits and their files, so the correction reaches disk through
         // the ordinary `write_library` path the next time a row is saved.
-        let effects_order: Vec<String> =
-            vocab.effects.tokens.iter().map(|t| t.name.clone()).collect();
         let mut settled = 0usize;
         for d in &mut library.descriptors {
             let before = d.effects.clone();
-            crate::labels::settle_implied_effects(d, &effects_order);
+            crate::labels::settle_implied_effects(d, &vocab);
             if d.effects != before {
                 settled += 1;
             }

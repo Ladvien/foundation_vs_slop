@@ -170,9 +170,112 @@ impl LabelTasks {
 
 pub struct LabelsPlugin;
 
+/// **Which model is answering, and whether anything has actually reached it.**
+///
+/// Asked for at the keyboard, after the model's name came out of every proposal header: *"maybe add
+/// a note on the status bar, `Connected: <MODEL_NAME>`."* Which model is answering is a property of
+/// the **connection** — one fact for the session — and printing it once per description was that
+/// fact restated on every piece.
+///
+/// # The word "connected" is only written when something connected
+///
+/// [`crate::vlm::probe`] is a TCP dial for a loopback or LAN endpoint and a **deliberate no-op for a
+/// remote one** (Ollama Cloud: "DNS and TLS make a refusal mean several different things"), so its
+/// `Ready` cannot be read as *"the endpoint is there"* — for the remote setup it means *"not asked"*.
+/// A status line that said `connected` off the back of it would be inventing a fact for exactly the
+/// configuration that can least afford one.
+///
+/// So the link is written from **round trips that really happened**, in [`poll_tasks`]: an answer
+/// makes it [`Link::Live`] and carries the model name off the answer's own provenance, which is the
+/// authoritative one; an unreachable-endpoint failure makes it [`Link::Down`]. A gate rejection is
+/// about the mesh, not the link, and moves nothing. Until something has been asked, the line names
+/// the configured model and claims nothing.
+#[derive(Resource, Default)]
+pub struct Labeler {
+    /// Whether the config has been read yet — so a project with no `.env` costs one read, not one
+    /// per frame.
+    read: bool,
+    /// The model named by the config, then by the last answer. `None` means unconfigured.
+    pub model: Option<String>,
+    pub link: Link,
+}
+
+/// What is known about the endpoint, and nothing is assumed.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Link {
+    /// Nothing has been asked yet. The line names the model and claims nothing about it.
+    #[default]
+    Untried,
+    /// A request came back. This is the only state that prints `connected`.
+    Live,
+    /// A request failed to reach the endpoint at all.
+    Down,
+}
+
+impl Labeler {
+    /// An answer arrived — from this model, whatever the config said.
+    pub fn answered(&mut self, model: &str) {
+        self.link = Link::Live;
+        if self.model.as_deref() != Some(model) {
+            self.model = Some(model.to_owned());
+        }
+    }
+
+    /// The endpoint could not be reached.
+    pub fn unreachable(&mut self) {
+        self.link = Link::Down;
+    }
+
+    /// **What the status band says.** Empty until the config has been read, so the band does not
+    /// flicker a claim on its first frame.
+    pub fn line(&self) -> String {
+        match (self.read, self.model.as_deref(), self.link) {
+            (false, ..) => String::new(),
+            (true, None, _) => "labeler: not configured".to_owned(),
+            (true, Some(m), Link::Untried) => format!("labeler: {m}"),
+            (true, Some(m), Link::Live) => format!("connected: {m}"),
+            (true, Some(m), Link::Down) => format!("unreachable: {m}"),
+        }
+    }
+}
+
+/// **Read the configured model once**, and keep the band's line painted.
+///
+/// The read is lazy rather than an `OnEnter` system because it needs the project's root to find the
+/// `.env` beside it, and the project is not there on every frame this could be registered for. One
+/// read per session: `read` latches whether or not a config was found.
+fn paint_labeler(
+    mut labeler: ResMut<Labeler>,
+    project: Option<Res<Project>>,
+    mut lines: Query<(&mut Text, &mut TextColor), With<crate::chrome::LabelerLine>>,
+) {
+    if !labeler.read
+        && let Some(project) = project.as_ref()
+    {
+        labeler.read = true;
+        labeler.model = crate::vlm::VlmConfig::load(&project.root)
+            .ok()
+            .map(|cfg| cfg.model);
+    }
+    let want = labeler.line();
+    let tint = match labeler.link {
+        Link::Down => crate::chrome::DANGER,
+        _ => crate::chrome::DIM,
+    };
+    for (mut text, mut colour) in &mut lines {
+        if text.0 != want {
+            text.0 = want.clone();
+        }
+        if colour.0 != tint {
+            colour.0 = tint;
+        }
+    }
+}
+
 impl Plugin for LabelsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Suggestions>()
+            .init_resource::<Labeler>()
             .init_resource::<LabelGeneration>()
             .init_resource::<LabelTasks>()
             .init_resource::<LabelQueue>()
@@ -196,6 +299,7 @@ impl Plugin for LabelsPlugin {
                     watch_sentinel,
                     save_cache.run_if(resource_changed::<LabelGeneration>),
                     paint_labels_badge.run_if(resource_changed::<LabelGeneration>),
+                    paint_labeler,
                 ),)
                     .run_if(in_state(crate::screen::Screen::Editor)),
             );
@@ -398,6 +502,9 @@ pub(crate) fn poll_tasks(
     // A walk that has lost its endpoint is stopped rather than burned through — see the `Err` arm.
     mut queue: ResMut<LabelQueue>,
     mut rig: ResMut<crate::label_booth::ShotRig>,
+    // **The only place the link is written**, because it is the only place a round trip is known to
+    // have happened. See [`Labeler`].
+    mut labeler: ResMut<Labeler>,
 ) {
     let Some(project) = project else { return };
     let mut finished = Vec::new();
@@ -409,6 +516,10 @@ pub(crate) fn poll_tasks(
         let name = name_of(&inflight.target).to_owned();
         match result {
             Ok((suggestion, provenance, fingerprint)) => {
+                // The endpoint answered, and the answer names the model that answered — which beats
+                // the config, since a `.env` edited mid-session would otherwise leave the band
+                // naming a model nothing has spoken to.
+                labeler.answered(&provenance.model);
                 // Second stale guard: the target must STILL resolve to the same mesh.
                 let still = state
                     .placed_at_target(&inflight.target, &project)
@@ -443,6 +554,11 @@ pub(crate) fn poll_tasks(
                 //
                 // Only the transport aborts. A rejection from the gate is about THIS mesh and the
                 // walk carries on to the next, which is the whole point of a batch.
+                // Same string the abort below turns on, asked as its own question: this one is
+                // about the LINK, and it is true whether or not a batch is running.
+                if e.contains("endpoint is unreachable") {
+                    labeler.unreachable();
+                }
                 if e.contains("endpoint is unreachable") && queue.running() {
                     let (done, total) = queue.progress();
                     queue.queue.clear();
@@ -1176,88 +1292,84 @@ pub(crate) fn paint_labels_badge(
 /// puzzle. The lists arrive already deduplicated and in vocabulary order ([`vlm::validate`]'s
 /// contract, the `on_tag_chip` sort rule), so diffs show real changes only. Fields the suggestion
 /// does not carry stay untouched; undo covers regret like any other edit.
-/// **The effects a KIND implies, which no render can show.**
+/// **Recompute the derived half of `effects` from `kind`, using the vocabulary's own rule.**
 ///
-/// Reported from the keyboard, 2026-08-18: *"I just saw a lamp go by without `uses electricity` and
-/// a bed go by without `stamina-recharge`."* Measured against the run behind that: every light came
-/// back `["emit"]` and every bed, sofa, table, chair, drawer, bin and plant came back `[]`. Neither
-/// tag has ever been proposed by the model.
+/// The rule itself is `implies` on a `kind` token in `vocab.ron`, resolved by
+/// [`emerge_core::vocab::Vocabularies::implied_effects`]. It was a five-row `IMPLIED_BY_KIND` table
+/// in this file until 2026-08-19, which put game-design semantics — *a bed restores stamina* —
+/// inside the editor's labeller. Two consequences, and the second is the one that mattered:
 ///
-/// **That is the 2026-08-15 fix working exactly as written, and it should stay written.** A barrel
-/// came back tagged `uses-electricity`, so `vlm::axis_lines` now tells the model, for this axis
-/// only, *"do not infer it from what the object is made of, what it might contain, or where it
-/// might be plugged in"*. A lamp being plugged in is that inference. Loosening it would reopen the
-/// door that fix closed, and cost a 778-mesh run to find out.
+/// * Only this editor's apply path knew it. A descriptor written by hand, or by any other tool,
+///   simply did not get the effect.
+/// * **The game did not know it either.** `Vocabularies::masks` is the pass the runtime resolves a
+///   library through, and it had never heard of the table — so a bed the editor had labelled and a
+///   bed somebody typed resolved to different masks, and nothing downstream could tell which it had.
 ///
-/// So these two are not asked for. **A bed restores stamina because this game says beds do** — it
-/// is a property of the word, not of the picture, and the right oracle for it is a table. Same
-/// argument `PromptCtx::front_measured` already makes about symmetry: two renders cannot settle
-/// what a vertex buffer knows, and here two renders cannot settle what the design knows.
+/// Now the rule lives in the data, `masks` folds it in for every consumer, and this exists only to
+/// keep the *stored* list in step with what will be resolved from it — so an author reading
+/// `library.ron` sees what the game will see.
 ///
-/// `emit` and `screen` are deliberately absent from this table. Those ARE visible — a luminous panel
-/// looks luminous — and they are the half the model is good at.
-const IMPLIED_BY_KIND: &[(&str, &str)] = &[
-    ("light", "uses-electricity"),
-    ("appliance", "uses-electricity"),
-    ("terminal", "uses-electricity"),
-    ("machinery", "uses-electricity"),
-    ("bed", "stamina-recharge"),
-];
-
-/// **Recompute the derived half of `effects` from `kind`** — the whole of it, so this is idempotent
-/// and there is one path rather than a merge.
-///
-/// It REMOVES as well as adds, and only ever touches the tokens [`IMPLIED_BY_KIND`] owns: a piece
-/// retyped from `light` to `decor` must stop claiming to use electricity, or the tag becomes a thing
-/// that can only ever be turned on. The consequence is that these two tokens are not hand-authorable
-/// — set the kind and the effect follows — which is what makes them trustworthy to read.
-///
-/// `order` is the effects axis in vocabulary order, so a settled list serializes identically to a
-/// hand-tagged one and a diff of the library shows real changes only (`tiles::on_tag_chip`'s rule).
+/// It REMOVES as well as adds, and only ever touches tokens some kind implies: a piece retyped from
+/// `light` to `decor` must stop claiming to use electricity, or the tag becomes a thing that can
+/// only ever be turned on.
 pub(crate) fn settle_implied_effects(
     d: &mut emerge_core::descriptor::Descriptor,
-    order: &[String],
+    vocab: &emerge_core::vocab::Vocabularies,
 ) {
-    d.effects = settled_effects(&d.kind, &d.effects, order);
+    d.effects = settled_effects(&d.kind, &d.effects, vocab);
 }
 
 /// **The effects a kind implies, folded into a set — as a value, not a mutation.**
 ///
 /// Extracted so the *preview* can answer the same question the apply does. The DOES chips ghost-lit
 /// `suggestion.effects`, which is the model's raw answer — and the model is deliberately never
-/// asked for these two tokens (see [`IMPLIED_BY_KIND`]). So a bed's proposal showed
-/// `effects: []` while applying it wrote `stamina-recharge`, and an author watching proposals go
-/// by concluded the model would not acknowledge a bed. Reported at the keyboard 2026-08-19:
-/// *"for the life of me, I can't get the VLM to acknowledge a bed is a place to recharge
-/// stamina."* It never will. The editor does — and the preview now says so.
+/// asked for these tokens, because no render can show them. So a bed's proposal showed
+/// `effects: []` while applying it wrote `stamina-recharge`, and an author watching proposals go by
+/// concluded the model would not acknowledge a bed. Reported at the keyboard 2026-08-19: *"for the
+/// life of me, I can't get the VLM to acknowledge a bed is a place to recharge stamina."* It never
+/// will. The editor does — and the preview now says so.
 ///
 /// "A preview is a promise" is `build.rs`'s line about the ghost, and it is the same rule.
-pub(crate) fn settled_effects(kind: &[String], effects: &[String], order: &[String]) -> Vec<String> {
-    let owned = |e: &str| IMPLIED_BY_KIND.iter().any(|(_, eff)| *eff == e);
-    let mut want: Vec<&str> = Vec::new();
-    for (k, eff) in IMPLIED_BY_KIND {
-        if kind.iter().any(|held| held == k) && !want.contains(eff) {
-            want.push(eff);
-        }
-    }
+pub(crate) fn settled_effects(
+    kind: &[String],
+    effects: &[String],
+    vocab: &emerge_core::vocab::Vocabularies,
+) -> Vec<String> {
+    // **A vocabulary that cannot answer leaves the authored list alone.** `implied_effects` refuses
+    // only when a `kind` token implies an `effects` token that does not exist, which
+    // `Project::open` has already rejected the file for — so reaching this arm means the editor is
+    // running against a vocabulary it declined to load, and inventing a derived tag on top of that
+    // would be the second wrong answer.
+    let Ok(want) = vocab.implied_effects(kind) else {
+        return effects.to_vec();
+    };
+    let derived = |e: &str| {
+        vocab
+            .kind
+            .tokens
+            .iter()
+            .any(|t| t.implies.iter().any(|i| i == e))
+    };
     let mut out: Vec<String> = effects
         .iter()
-        .filter(|e| !owned(e) || want.contains(&e.as_str()))
+        .filter(|e| !derived(e) || want.contains(e))
         .cloned()
         .collect();
     for eff in want {
-        if !out.iter().any(|e| e == eff) {
-            out.push(eff.to_owned());
+        if !out.contains(&eff) {
+            out.push(eff);
         }
     }
-    out.sort_by_key(|t| order.iter().position(|o| o == t).unwrap_or(usize::MAX));
+    // Vocabulary order, so a settled list serialises identically to a hand-tagged one and a diff of
+    // the library shows real changes only (`tiles::on_tag_chip`'s rule).
+    out.sort_by_key(|t| vocab.effects.names().position(|n| n == t).unwrap_or(usize::MAX));
     out
 }
 
 pub fn apply_fields(
     d: &mut emerge_core::descriptor::Descriptor,
     s: &Suggestion,
-    effects_order: &[String],
+    vocab: &emerge_core::vocab::Vocabularies,
 ) {
     d.kind = s.kind.clone();
     d.effects = s.effects.clone();
@@ -1271,8 +1383,11 @@ pub fn apply_fields(
     if let Some(front) = s.front {
         d.align.front = Some(front);
     }
-    if let Some(note) = &s.note {
-        d.note = Some(note.clone());
+    // **The same words the pane showed**, which is why this asks `description()` rather than reading
+    // `note` directly: the model answers `what` and skips `note` often enough that the panel had to
+    // fall back to one, and an apply that wrote the other would keep a sentence nobody read.
+    if let Some(note) = s.description() {
+        d.note = Some(note.to_owned());
     }
     if !s.rooms.is_empty() {
         d.placement.rooms = s.rooms.clone();
@@ -1282,7 +1397,7 @@ pub fn apply_fields(
     }
     // **Inside, not beside.** The derived half of `effects` has to follow every kind that lands, and
     // a caller that has to remember to call it is a caller that eventually does not.
-    settle_implied_effects(d, effects_order);
+    settle_implied_effects(d, vocab);
 }
 
 // ── the persistent cache ─────────────────────────────────────────────────────────────────────────
@@ -1413,6 +1528,39 @@ pub(crate) fn save_cache(project: Option<Res<Project>>, suggestions: Res<Suggest
 
 #[cfg(test)]
 mod tests {
+    /// **The band never says `connected` about something nothing has connected to.**
+    ///
+    /// `vlm::probe` is a no-op for a remote endpoint by design, so "configured" and "reachable" are
+    /// different questions and only a completed round trip answers the second. This pins the four
+    /// states apart, because the tempting simplification — print `connected` as soon as a model is
+    /// configured — is a readout that is wrong exactly when the tunnel is down, which is the one
+    /// time an author is reading it.
+    #[test]
+    fn the_labeler_line_claims_only_what_has_happened() {
+        use super::{Labeler, Link};
+
+        let mut l = Labeler::default();
+        assert_eq!(l.line(), "", "nothing is claimed before the config is read");
+
+        l.read = true;
+        assert_eq!(l.line(), "labeler: not configured");
+
+        l.model = Some("qwen3-vl".to_owned());
+        assert_eq!(
+            l.line(),
+            "labeler: qwen3-vl",
+            "configured is not connected, and the line must not say it is"
+        );
+
+        l.unreachable();
+        assert_eq!(l.line(), "unreachable: qwen3-vl");
+        assert_eq!(l.link, Link::Down);
+
+        // An answer names the model that actually answered, which beats the config.
+        l.answered("qwen3.6-27b");
+        assert_eq!(l.line(), "connected: qwen3.6-27b");
+    }
+
 
     /// **The preview promises what applying will do, including the half the model never proposes.**
     ///
@@ -1427,14 +1575,11 @@ mod tests {
     /// either could drift and the bug returns.
     #[test]
     fn the_preview_settles_effects_exactly_as_applying_does() {
-        let order: Vec<String> = ["emit", "screen", "uses-electricity", "stamina-recharge"]
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect();
+        let v = vocab();
         let bed = vec!["bed".to_owned()];
 
         // What the model actually returns for a bed: nothing on this axis.
-        let previewed = settled_effects(&bed, &[], &order);
+        let previewed = settled_effects(&bed, &[], &v);
         assert!(
             previewed.iter().any(|e| e == "stamina-recharge"),
             "a bed's PREVIEW must show the effect applying will add, or the chips promise \
@@ -1446,7 +1591,7 @@ mod tests {
             kind: bed,
             ..Default::default()
         };
-        settle_implied_effects(&mut d, &order);
+        settle_implied_effects(&mut d, &v);
         assert_eq!(
             d.effects, previewed,
             "the preview and the apply are one answer; when they were two, the preview was the \
@@ -1456,7 +1601,7 @@ mod tests {
         // A kind that implies nothing still previews nothing — the guard that keeps this from
         // becoming "every piece recharges stamina".
         assert!(
-            settled_effects(&["seating".to_owned()], &[], &order).is_empty(),
+            settled_effects(&["seating".to_owned()], &[], &v).is_empty(),
             "a chair implies no effect at all"
         );
     }
@@ -1495,20 +1640,20 @@ mod tests {
     #[test]
     fn a_kind_implies_the_effects_no_render_can_show() {
         use emerge_core::descriptor::Descriptor;
-        let order = effects_order();
+        let v = vocab();
         let effects = |d: &Descriptor| d.effects.clone();
 
         let mut d = Descriptor {
             kind: vec!["light".to_owned()],
             ..Default::default()
         };
-        settle_implied_effects(&mut d, &order);
+        settle_implied_effects(&mut d, &v);
         assert_eq!(effects(&d), vec!["uses-electricity".to_owned()]);
 
         // **Derived means recomputed, not merged.** A piece retyped away from `light` must stop
         // claiming to use electricity, or the tag is one that can only ever be turned on.
-        d.kind = vec!["decor".to_owned()];
-        settle_implied_effects(&mut d, &order);
+        d.kind = vec!["seating".to_owned()];
+        settle_implied_effects(&mut d, &v);
         assert!(
             effects(&d).is_empty(),
             "a kind that no longer implies it takes it away: {:?}",
@@ -1518,20 +1663,20 @@ mod tests {
         // It never touches the half the model IS good at — `emit` is visible, and stays.
         d.kind = vec!["light".to_owned()];
         d.effects = vec!["emit".to_owned()];
-        settle_implied_effects(&mut d, &order);
+        settle_implied_effects(&mut d, &v);
         assert!(effects(&d).contains(&"emit".to_owned()));
         assert!(effects(&d).contains(&"uses-electricity".to_owned()));
 
         // Idempotent, because it is a recomputation rather than an append.
         let once = effects(&d);
-        settle_implied_effects(&mut d, &order);
+        settle_implied_effects(&mut d, &v);
         assert_eq!(effects(&d), once);
 
         let mut bed = Descriptor {
             kind: vec!["bed".to_owned()],
             ..Default::default()
         };
-        settle_implied_effects(&mut bed, &order);
+        settle_implied_effects(&mut bed, &v);
         assert_eq!(effects(&bed), vec!["stamina-recharge".to_owned()]);
 
         // And it rides `apply_fields`, so the batch and `U` get it without asking.
@@ -1539,7 +1684,7 @@ mod tests {
         let mut s = suggestion();
         s.kind = vec!["light".to_owned()];
         s.effects = vec![];
-        apply_fields(&mut applied, &s, &order);
+        apply_fields(&mut applied, &s, &vocab());
         assert!(
             applied.effects.iter().any(|e| e == "uses-electricity"),
             "a proposal that says nothing about effects still lands with the implied one"
@@ -1559,27 +1704,45 @@ mod tests {
             .unwrap_or_else(|e| panic!("the shipped vocabulary must be readable: {e}"));
         let v: emerge_core::vocab::Vocabularies =
             ron::from_str(&text).unwrap_or_else(|e| panic!("{e}"));
-        for (kind, effect) in IMPLIED_BY_KIND {
-            assert!(
-                v.kind.contains(kind),
-                "`{kind}` is not a kind in the shipped vocabulary"
-            );
-            assert!(
-                v.effects.contains(effect),
-                "`{effect}` is not an effect in the shipped vocabulary"
-            );
-        }
-    }
-
-    /// The DOES axis in vocabulary order, which `apply_fields` settles the derived half against.
-    fn effects_order() -> Vec<String> {
-        vocab().effects.names().map(str::to_owned).collect()
+        // **The rule is data now**, so this reads it out of the file rather than out of a table in
+        // this crate — and `implied_effects` is what refuses an implication naming a token the
+        // effects axis does not hold, so asking it about every kind at once IS the audit.
+        let every_kind: Vec<String> = v.kind.names().map(str::to_owned).collect();
+        v.implied_effects(&every_kind)
+            .unwrap_or_else(|e| panic!("the shipped vocabulary implies something it does not define: {e}"));
+        assert!(
+            v.kind.tokens.iter().any(|t| !t.implies.is_empty()),
+            "no kind implies anything — the rule moved to `vocab.ron` and would be silently gone"
+        );
     }
 
     fn vocab() -> emerge_core::vocab::Vocabularies {
         emerge_core::vocab::Vocabularies {
-            kind: emerge_core::vocab::Vocabulary::of(&[("light", "casts light")]),
-            effects: emerge_core::vocab::Vocabulary::of(&[("emit", "lights the room")]),
+            kind: emerge_core::vocab::Vocabulary {
+                tokens: vec![
+                    emerge_core::vocab::Token {
+                        name: "light".to_owned(),
+                        note: "casts light".to_owned(),
+                        // The rule under test, stated where the shipped file states it.
+                        implies: vec!["uses-electricity".to_owned()],
+                    },
+                    emerge_core::vocab::Token {
+                        name: "bed".to_owned(),
+                        note: "a thing to lie on".to_owned(),
+                        implies: vec!["stamina-recharge".to_owned()],
+                    },
+                    emerge_core::vocab::Token {
+                        name: "seating".to_owned(),
+                        note: "a thing to sit on".to_owned(),
+                        implies: Vec::new(),
+                    },
+                ],
+            },
+            effects: emerge_core::vocab::Vocabulary::of(&[
+                ("emit", "lights the room"),
+                ("uses-electricity", "stops working when the power does"),
+                ("stamina-recharge", "restores stamina to whoever uses it"),
+            ]),
             look: emerge_core::vocab::Vocabulary::of(&[("metal", "bare metal")]),
             surfaces: emerge_core::vocab::Vocabulary::of(&[("support", "a top")]),
             capabilities: emerge_core::vocab::Vocabulary::of(&[]),
@@ -2007,7 +2170,7 @@ mod tests {
         let mut s = suggestion(); // kind: [light], effects: [emit], look: [], mount: OnWall, note: Some
         s.rooms = vec![];
         s.group = None;
-        apply_fields(&mut d, &s, &effects_order());
+        apply_fields(&mut d, &s, &vocab());
 
         assert_eq!(d.kind, vec!["light".to_owned()], "kind replaced");
         // **Replacement, and then the settle** — the proposal carried `["emit"]` and the `light`
@@ -2040,7 +2203,7 @@ mod tests {
         let mut s = suggestion();
         s.rooms = vec!["kitchen".to_owned()];
         s.group = Some("cook_set".to_owned());
-        apply_fields(&mut d, &s, &effects_order());
+        apply_fields(&mut d, &s, &vocab());
         assert_eq!(d.placement.rooms, vec!["kitchen".to_owned()]);
         assert_eq!(d.placement.group.as_deref(), Some("cook_set"));
 
@@ -2056,7 +2219,7 @@ mod tests {
         });
         let before_align_rotate = d.align.rotate;
         let before_extent = d.extent.clone();
-        apply_fields(&mut d, &s, &effects_order());
+        apply_fields(&mut d, &s, &vocab());
         assert_eq!(d.align.front, Some(emerge_core::descriptor::Face::South));
         assert_eq!(d.align.rotate, before_align_rotate, "no rotation applied");
         assert_eq!(d.extent, before_extent, "no re-measure smuggled in");

@@ -1,4 +1,4 @@
-//! **The editor's shared furniture** — one palette, one panel, one key list.
+//! **The editor's shared furniture** — one palette, one panel, one row shape.
 //!
 //! Every tab is the same two shapes: a controls panel down one side, and a list down the other. They
 //! were written twice and were already drifting. The census key-row block appeared in `editor.rs` and
@@ -21,7 +21,7 @@ use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui_widgets::ScrollArea;
 
-use crate::keys::{self, Context};
+use crate::keys::{self};
 
 // ── the palette ──────────────────────────────────────────────────────────────────────────────────
 
@@ -65,6 +65,22 @@ pub const DANGER: Color = Color::srgb(0.86, 0.36, 0.30);
 /// different amount, which is exactly the drift `panel_ink_comes_from_the_palette` exists to catch
 /// — and did, on this constant's first day.
 pub const SCRIM: Color = Color::srgba(0.0, 0.0, 0.0, 0.55);
+
+/// **The interface, stood back, while the key badges are up.**
+///
+/// Lighter than [`SCRIM`], and the difference is what each is for: a scrim dims for a modal you have
+/// to answer, so hiding what is behind it is the point. This dims for a layer you read *through* —
+/// the badge is only useful next to the control it names, and a veil that hid the control would hide
+/// the thing being taught.
+///
+/// It is not a courtesy. Healey & Enns 2012 (`10.1109/TVCG.2011.127`) measured the feature hierarchy
+/// and the interference is **asymmetric**: background variation in colour masks patterns of form,
+/// while variation in form does not mask colour. Flattening the ground is therefore what makes a
+/// badge a *pop-out* — detectable "regardless of the number of distractors" — rather than a
+/// conjunction search at 25–40 ms an item. Named here rather than written at the call site so a
+/// second overlay cannot dim by a different amount, which is what `panel_ink_comes_from_the_palette`
+/// exists to catch.
+pub const VEIL: Color = Color::srgba(0.0, 0.0, 0.0, 0.35);
 
 /// It has to stay visible, because a mesh that has silently vanished looks identical to one that was
 /// never scanned — but it must not compete with rows an author can actually act on.
@@ -507,6 +523,21 @@ pub struct ViewportSlot;
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FrameSystems;
 
+/// **The census's name for this control** — what makes a key badge land on the thing it acts through.
+///
+/// Attached by the panel that spawns the node, and joined by id in `crate::badges`. Symbolic on
+/// purpose: `keys.rs` declares a [`keys::ControlId`] for a verb's home and never learns what a
+/// palette *is*, and a badge system querying fourteen domain markers (`PaletteRow`, `TagChip`,
+/// `CellButton`, …) would be the second census `keys.rs` exists to delete.
+///
+/// **One per node, and one visible node per id.** `crate::badges::anchor` resolves an id to the
+/// unique node carrying it with a non-zero [`bevy::ui::ComputedNode`] — which is also the visibility
+/// test, since [`panel_root`]'s hidden form is `Display::None` and lays out to nothing. Two visible
+/// at once is a bug rather than a tie to break, and
+/// `every_home_a_live_binding_names_is_on_screen` is what says so.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Control(pub keys::ControlId);
+
 /// Height of the two bars. Fixed, because a bar that changed height as its content changed would
 /// move the viewport under the author's hands.
 const BAR_H: f32 = 26.0;
@@ -706,6 +737,15 @@ pub fn title(parent: &mut ChildSpawnerCommands, text: &str) {
 pub struct Status {
     note: String,
     problems: Vec<Problem>,
+    /// **Everything this status has ever been handed, repeats included** — and never reset, not
+    /// even by [`Status::dismiss`].
+    ///
+    /// It is the [`Journal`]'s clock. The journal is session-wide and a `Status` is a tab's working
+    /// list capped at [`MAX_PROBLEMS`] and cleared by `Esc`, so the journal cannot be derived by
+    /// looking at what a status currently holds — by the time it looks, the evidence may be gone.
+    /// A number that only goes up says *"there have been three more since you last looked"* without
+    /// either side keeping a copy of the other's list.
+    raised: u64,
     /// How many fell off the front of [`Self::problems`] at [`MAX_PROBLEMS`].
     ///
     /// Counted rather than forgotten. This crate's caps *"refuse and name rather than truncate"*,
@@ -764,6 +804,8 @@ impl Status {
     /// minute later.
     pub fn problem(&mut self, text: impl Into<String>) {
         let text = text.into();
+        // Counted before the fold, because a repeat is a thing that happened — see [`Self::raised`].
+        self.raised += 1;
         if let Some(last) = self.problems.last_mut() {
             if last.text == text {
                 last.count += 1;
@@ -814,6 +856,11 @@ impl Status {
         self.dropped = 0;
     }
 
+    /// See [`Self::raised`] — the journal's clock, not a count of what is currently held.
+    pub fn raised(&self) -> u64 {
+        self.raised
+    }
+
     pub fn note_text(&self) -> &str {
         &self.note
     }
@@ -857,6 +904,68 @@ impl Status {
     }
 }
 
+/// **Every refusal since the application started**, across tabs and doors.
+///
+/// # Why this is not four `Status`es
+///
+/// A [`Status`] is a tab's working list: capped at [`MAX_PROBLEMS`], cleared by `Esc`, and thrown
+/// away with the door that owned it. That is right for *"what has gone wrong here"* and useless for
+/// *"what has gone wrong at all"* — asked for at the keyboard: *"a hidden log that pops up if you
+/// press the key… and that log shows every error message that's happened since the beginning of the
+/// application."*
+///
+/// So this outlives both: `Ownership::Session`, which is the only class in `screen::OWNERSHIP` that
+/// survives a door change, and exactly what a session log means.
+///
+/// # Written by watching, not by being told
+///
+/// `Status::problem` is a method on a plain struct four tabs own — it has no `Commands` and no way
+/// to reach a resource, and giving it one would mean routing every refusal in the editor through an
+/// event just so a log could exist. `notice::record_problems` watches [`Status::raised`] instead: a
+/// counter that only goes up, so the journal can tell *"three more since I looked"* without either
+/// side holding a copy of the other's list — which is what makes `Esc` clearing a tab harmless here.
+#[derive(Resource, Default)]
+pub struct Journal {
+    entries: Vec<Problem>,
+    dropped: usize,
+}
+
+/// How many the journal keeps. Ten times a panel's [`MAX_PROBLEMS`], because this one is read by
+/// scrolling rather than at a glance — and capped at all for the reason that cap exists: a batch
+/// that raises one refusal per frame is a real thing this editor does.
+pub const JOURNAL_CAP: usize = 200;
+
+impl Journal {
+    /// **Record `times` occurrences of one refusal.** Consecutive repeats fold, exactly as they do
+    /// in a [`Status`] — the same rule, so the journal reads like the toast that raised it.
+    pub fn record(&mut self, text: &str, times: usize) {
+        if times == 0 {
+            return;
+        }
+        if let Some(last) = self.entries.last_mut()
+            && last.text == text
+        {
+            last.count += times;
+            return;
+        }
+        self.entries.push(Problem { text: text.to_owned(), count: times });
+        if self.entries.len() > JOURNAL_CAP {
+            self.entries.remove(0);
+            self.dropped += 1;
+        }
+    }
+
+    /// Oldest first, the order they happened in.
+    pub fn entries(&self) -> &[Problem] {
+        &self.entries
+    }
+
+    /// Named rather than silently forgotten — [`Status::dropped`]'s argument, one scope up.
+    pub fn dropped(&self) -> usize {
+        self.dropped
+    }
+}
+
 /// The banner a panel shows its newest problem in. Carries **which tabs it speaks for**, so a shared
 /// painter cannot write another tab's block.
 ///
@@ -873,40 +982,86 @@ impl Status {
 #[derive(Component, Clone, Copy)]
 pub struct ProblemBanner(pub &'static [crate::tiles::Mode]);
 
-/// **The problem block: filled, not tinted, and the loudest thing in the status band.**
+/// **The problem, as a toast over the viewport.**
 ///
-/// Spawned **once**, by [`spawn_status_band`], and hidden until there is something to say —
-/// `Display::None` rather than a zero-height node, so a quiet band has no gap where the banner
-/// would be. It used to be spawned per panel, which put the longest text this editor renders in the
-/// narrowest place on screen; the vertical margins that separated it from a panel's title went with
-/// that move, because a band centres it instead.
+/// # It was a block in the status band, and that is what went wrong
+///
+/// The band is twenty-six pixels of chrome. A padded, wrapping block of the longest text this editor
+/// renders was a flow child of it, so it stood proud of the band it was supposed to be inside.
+/// Reported from the keyboard: *"when there's an error, it appears over the status bar at the bottom
+/// and isn't quite in alignment, but it's pretty close. So it looks really bad."* Close-but-not is
+/// worse than either — a block that plainly floats reads as deliberate, and a block a few pixels out
+/// reads as broken.
+///
+/// # Why a toast is not a loss of information
+///
+/// A problem in this editor is **sticky by design** — it is a state, not an event — and a toast that
+/// fades would normally throw that away. It does not here, because the sticky half already exists
+/// somewhere better: [`problem_log`] sits at the foot of every tab's own panel and lists the whole
+/// run. The two were always meant to answer different questions, and the banner's own note said so —
+/// *the banner answers "what just happened", the log answers "what has gone wrong here"*. Fading is
+/// what makes the first of those honest: an event that never leaves is not an event.
+///
+/// So the toast shows the newest problem for a few seconds and stands down, and nothing is lost:
+/// `notice::paint_notices` writes both, and the log keeps every line until the tab is left.
+///
+/// # Where it goes
+///
+/// Centred at the top of the **viewport**, which is the one region that belongs to nothing else:
+/// the docks own both sides, `compass` owns the bottom-left, and `badges` puts its legend in the
+/// bottom-right. Asked for as *"a place that isn't going to occlude much"*.
 ///
 /// The glyph is `▲` and not `⚠`: the shipped face is `FiraMono-Regular.ttf`, which **has no U+26A0**
-/// (measured), and a missing codepoint draws as a tofu box — the same class of trap `CLAUDE.md`
-/// records for Bevy's own 95-codepoint default font, one font along.
-pub fn problem_banner(parent: &mut ChildSpawnerCommands, tabs: &'static [crate::tiles::Mode]) {
-    parent.spawn((
-        Node {
-            display: Display::None,
-            padding: UiRect::axes(Val::Px(GAP_ROW + 1.0), Val::Px(GAP_TIGHT)),
-            max_width: Val::Percent(100.0),
-            ..default()
-        },
-        BackgroundColor(PROBLEM_BG),
-        Text::new(String::new()),
-        TextColor(PROBLEM_TEXT),
-        TextFont::from_font_size(text::BODY),
-        // **Stated, not inherited.** This carries the newest refusal in full, and those name
-        // descriptors and compositions — the longest text this editor renders. `max_width` is what
-        // stops a long word pushing the node wider than the panel it sits in.
-        TextLayout::new(Justify::Left, LineBreak::WordOrCharacter),
-        ProblemBanner(tabs),
-    ));
+/// (measured), and a missing codepoint draws as a tofu box.
+pub fn problem_toast(mut commands: Commands, frame: Res<Frame>) {
+    // The strip is full-width so the card can centre in it; the card is what is seen.
+    let card = commands
+        .spawn((
+            Node {
+                padding: UiRect::axes(Val::Px(GAP_GROUP), Val::Px(GAP_ROW + 1.0)),
+                // Wraps rather than spanning the viewport: a refusal here names descriptors and
+                // compositions, which is the longest text this editor renders.
+                max_width: Val::Percent(72.0),
+                // **A field of `Node` in 0.19, not a component** (`bevy_ui-0.19.0/src/ui_node.rs:738`)
+                // — as a sibling in the bundle it is simply not a `Bundle` and the error says so
+                // without naming which member is wrong.
+                border_radius: BorderRadius::all(Val::Px(3.0)),
+                ..default()
+            },
+            BackgroundColor(PROBLEM_BG),
+            Text::new(String::new()),
+            TextColor(PROBLEM_TEXT),
+            TextFont::from_font_size(text::BODY),
+            TextLayout::new(Justify::Left, LineBreak::WordOrCharacter),
+            bevy::picking::Pickable::IGNORE,
+            ProblemBanner(ALL_TABS),
+        ))
+        .id();
+    commands
+        .spawn((
+            Node {
+                // PLACES-ITSELF-OK: a toast is not a panel. It is over the viewport rather than in
+                // the layout, which is the whole point — `Frame` owns where panels go and this is
+                // deliberately not one of them.
+                position_type: PositionType::Absolute,
+                top: Val::Px(GAP_GROUP),
+                left: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                display: Display::None,
+                ..default()
+            },
+            ToastLayer,
+            bevy::picking::Pickable::IGNORE,
+        ))
+        .add_child(card)
+        .insert(ChildOf(frame.viewport));
 }
 
-/// A panel's error log, and which tabs it speaks for. See [`ProblemBanner`] for why that is a list.
-#[derive(Component, Clone, Copy)]
-pub struct ProblemLog(pub &'static [crate::tiles::Mode]);
+/// **The strip the toast centres in.** Its `Display` is what shows and hides the toast; the card
+/// inside carries the words. See [`problem_toast`].
+#[derive(Component)]
+pub struct ToastLayer;
 
 /// One line of it. Rebuilt wholesale, so it carries nothing — `compose::ComposeLine`'s argument.
 #[derive(Component)]
@@ -921,19 +1076,69 @@ pub struct ProblemLogLine;
 /// `margin-top: auto` pushes it to the bottom of whatever panel holds it, which is the bottom-left
 /// of the screen for the panels pinned `full_height` and the end of the panel for the one that is
 /// not — without this needing to know which is which.
-pub fn problem_log(parent: &mut ChildSpawnerCommands, tabs: &'static [crate::tiles::Mode]) {
-    parent.spawn((
-        Node {
-            flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(GAP_TIGHT),
-            margin: UiRect::top(Val::Auto),
-            padding: UiRect::top(Val::Px(GAP_ROW)),
-            display: Display::None,
-            ..default()
-        },
-        ProblemLog(tabs),
-    ));
+pub fn journal_panel(mut commands: Commands, frame: Res<Frame>) {
+    let panel = commands
+        .spawn((
+            Node {
+                // PLACES-ITSELF-OK: an overlay, not a panel in the frame's flow. It is asked for,
+                // read, and dismissed — `Frame` owns the docks and this is deliberately not one.
+                position_type: PositionType::Absolute,
+                top: Val::Percent(8.0),
+                left: Val::Percent(10.0),
+                width: Val::Percent(80.0),
+                max_height: Val::Percent(76.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(GAP_ROW),
+                padding: UiRect::all(Val::Px(PAD)),
+                border: UiRect::all(Val::Px(1.0)),
+                display: Display::None,
+                ..default()
+            },
+            BackgroundColor(PANEL_BG),
+            BorderColor::all(KEY),
+            JournalPanel,
+            // So `Cmd+C` carries it: `notice::copy_out` harvests the TEXT of whatever pane is on
+            // screen, which is why the journal needs no copy verb of its own.
+            crate::notice::CopyPane(ALL_TABS),
+            bevy::picking::Pickable::IGNORE,
+        ))
+        .id();
+    commands.entity(panel).with_children(|p| {
+        title(p, "EVERY ERROR THIS SESSION");
+        p.spawn((
+            Text::new(format!(
+                "{} closes  ·  {} copies this list",
+                keys::chord(keys::Action::Cancel),
+                keys::chord(keys::Action::CopyInfo)
+            )),
+            TextColor(DIM),
+            TextFont::from_font_size(text::LABEL),
+        ));
+        // A list to scroll: a session's worth of refusals is longer than a screen by design.
+        //
+        // FOLLOW-OK: prose, not a selection. Nothing walks this — there is no highlight for the
+        // arrows to move and no row to keep on screen, so the scroll exists for HEIGHT alone. The
+        // detail pane makes the same declaration for the same reason.
+        scroll_list(p, JournalList)
+            .entry::<Node>()
+            // **Room for the bar, because here the bar lands on words.** `scroll_list` overlays its
+            // scrollbar rather than reserving a gutter — right for a list of short rows, and wrong
+            // for wrapped prose, which runs under it. Measured in a frame: `…choose a piece in the
+            // list|` with the thumb through the last word. Stated at this call site rather than in
+            // the builder, because it is a fact about what THIS list holds.
+            .and_modify(|mut n| n.padding.right = Val::Px(BAR_W + BAR_INSET * 2.0));
+    });
+    commands.entity(panel).insert(ChildOf(frame.viewport));
 }
+
+/// **The session journal's panel**, hidden until `Cmd+E`. See [`Journal`] for why it is not four
+/// panels, and [`journal_panel`] for where it sits.
+#[derive(Component)]
+pub struct JournalPanel;
+
+/// The scrolling list inside it, rebuilt from [`Journal`] by `notice::paint_journal`.
+#[derive(Component)]
+pub struct JournalList;
 
 /// One bullet. `•` and not `-`: the shipped face has U+2022 (checked, as U+26A0 was not), and a
 /// bullet reads as a list where a hyphen reads as a range.
@@ -987,65 +1192,6 @@ pub fn problem_log_line(parent: &mut ChildSpawnerCommands, text: &str, colour: C
         });
 }
 
-/// **The key list, read from the census and never retyped.**
-///
-/// `docs/ui.md` §3.5 records what happens otherwise: key allocation lived in five prose censuses and
-/// all five drifted to the same wrong answer. A panel that types its own key list is a sixth. This
-/// renders `keys::rows`, so a binding that changes changes here — in every tab at once.
-///
-/// Two aligned columns rather than a run-on line: a run-on wraps unpredictably at any width, and the
-/// eye finds a row in a table without reading the others.
-pub fn key_census(parent: &mut ChildSpawnerCommands, contexts: &[Context], stance: keys::Stance) {
-    parent
-        .spawn(Node {
-            flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(1.0),
-            margin: UiRect::top(Val::Px(2.0)),
-            ..default()
-        })
-        .with_children(|list| {
-            for row_def in contexts.iter().flat_map(|c| keys::rows(*c, stance)) {
-                list.spawn((
-                    Node {
-                        flex_direction: FlexDirection::Row,
-                        align_items: AlignItems::Center,
-                        // A guaranteed gutter, so the widest chord still has air before its label.
-                        column_gap: Val::Px(10.0),
-                        // Room for the highlight to sit in without the rows moving when it appears.
-                        padding: UiRect::axes(Val::Px(4.0), Val::Px(1.0)),
-                        ..default()
-                    },
-                    CensusRow(row_def.actions.clone()),
-                    BackgroundColor(Color::NONE),
-                ))
-                .with_children(|row| {
-                    row.spawn((
-                        Node {
-                            // **`min_width`, not `width`.** A fixed width does not clip or shrink its
-                            // text — an over-long chord simply draws past the column and lands on top
-                            // of the label beside it, which is exactly what "W, A, S, D" did to
-                            // "pan". `min_width` keeps the column aligned for every row that fits and
-                            // lets the one that does not push its label right instead of through it.
-                            min_width: Val::Px(78.0),
-                            flex_shrink: 0.0,
-                            ..default()
-                        },
-                        Text::new(row_def.chord.clone()),
-                        TextColor(KEY),
-                        TextFont::from_font_size(text::BODY),
-                        // No wrap: a chord with a space in it is one token to a reader and two to a
-                        // line-breaker.
-                        TextLayout::new(Justify::Left, LineBreak::NoWrap),
-                    ));
-                    row.spawn((
-                        Text::new(row_def.does),
-                        TextColor(DIM),
-                        TextFont::from_font_size(text::BODY),
-                    ));
-                });
-            }
-        });
-}
 
 /// **A scrolling list that fills what is left of its panel.**
 ///
@@ -1176,9 +1322,25 @@ const MIN_THUMB: f32 = 18.0;
 /// from `size()` while the scrollbar's own code subtracts `scrollbar_size`
 /// (`scrollarea.rs:27` vs `scrollbar.rs:173`), so the two disagree by exactly the gutter width.
 /// Overlaying sidesteps it.
+///
+/// # It bounds itself with `flex_grow`, so it needs a bounded parent
+///
+/// Right for a pane that owns the rest of its dock, and useless **nested inside another scroll**:
+/// there the parent is content-sized, `flex_grow` resolves to nothing, and the whole thing collapses
+/// to zero — measured, when the tag block vanished outright. A `scroll_box` taking a stated height
+/// was written for that case and then deleted with its one caller: the answer was that a scroll
+/// inside a scroll is two bars a hand has to choose between, and the pane already scrolled.
 pub fn scroll_list<'a>(
     parent: &'a mut ChildSpawnerCommands,
     marker: impl Bundle,
+) -> EntityCommands<'a> {
+    scroll_inner(parent, marker, None)
+}
+
+fn scroll_inner<'a>(
+    parent: &'a mut ChildSpawnerCommands,
+    marker: impl Bundle,
+    height: Option<f32>,
 ) -> EntityCommands<'a> {
     let viewport = parent
         .commands_mut()
@@ -1236,8 +1398,13 @@ pub fn scroll_list<'a>(
     let wrapper = parent
         .spawn(Node {
             flex_direction: FlexDirection::Column,
-            flex_grow: 1.0,
+            flex_grow: if height.is_some() { 0.0 } else { 1.0 },
             min_height: Val::Px(0.0),
+            max_height: height.map_or(Val::Auto, Val::Px),
+            // A stated height has to be a *height*, not a maximum: the wrapper's own content is the
+            // absolutely-positioned track, which measures nothing, so `max_height` alone leaves it at
+            // zero and clips the viewport out of existence.
+            height: height.map_or(Val::Auto, Val::Px),
             ..default()
         })
         .id();
@@ -1566,8 +1733,9 @@ fn spawn_name_box(mut commands: Commands) {
             // click. It also means a click while naming falls through to the stage, which is right:
             // the box is a prompt, not a modal that has to be dismissed before anything else works.
             bevy::picking::Pickable::IGNORE,
-            // Above the panels and the tab strip (101), below nothing else — the same tier the
-            // shortcuts overlay uses, because both are "the screen is asking you something".
+            // Above the panels and the tab strip (101), and below the key badges (500) and the
+            // confirm prompt (900) — the tier for "the screen is asking you something", which
+            // outranks a panel and is outranked by a question you have to answer.
             GlobalZIndex(400),
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.72)),
         ))
@@ -1735,84 +1903,27 @@ fn paint_name_box(
     }
 }
 
-/// **One rendered census row, and the actions it stands for.**
-///
-/// Carried so [`flash_live_rows`] can light the row whose key is down. The actions rather than the
-/// chord text, because a chord is a *rendering* and asking "is `Shift+Cmd+Z` held" from a string
-/// would be a second parser for something [`keys::just_pressed`] already answers.
-#[derive(Component)]
-pub struct CensusRow(pub Vec<keys::Action>);
 
-/// **The novice path and the expert path are the same motion — this is what says so.**
+/// **The window's own furniture** — the frame, the chrome bar, the status band, the name box, and
+/// the hover every list row shares.
 ///
-/// Holding `K` and pressing `G` already *worked*: `editor::sense_context` never suppressed actions
-/// while the overlay was up, so every key on screen was live the whole time. What was missing is that
-/// nothing said it had happened, and an unremarked coincidence is not a bridge.
+/// The key list used to live here too, as a centred two-column table behind a scrim. It is
+/// `crate::badges` now, and the argument for moving it is worth keeping where the deletion happened:
+/// a table asks you to map a phrase back onto something on screen, and two verbs that had been bound
+/// all along (`R`, `Shift+Delete`) stayed invisible for two sessions because their phrase was
+/// collapsed onto one row. Drawing the chord *on the thing it acts on* removes that step.
 ///
-/// Cockburn, Gutwin, Scarr & Malacria 2014 (`10.1145/2659796`) is the reason this matters: offering a
-/// fast path beside a slow one **does not work on its own** — users plateau on the slow one, because
-/// no single moment hurts enough to justify switching. The fix they name is a *bridge* where the
-/// novice route rehearses the expert route, Kurtenbach & Buxton's marking menus being the canonical
-/// one. `docs/ui.md` §3.5 states the practical form: *"a control group that binds invisibly is a
-/// control group nobody binds twice — the readout has to show it happened."*
-///
-/// So the overlay is not a card you read and then put down. It is a surface you can act through, and
-/// the row lights under the key you press.
-///
-/// **Held rather than flashed.** A one-frame highlight on `just_pressed` is invisible at 60 Hz for
-/// exactly the key you were looking at. This uses [`keys::pressed`], so the row stays lit as long as
-/// the key is down — which for a repeating key is also its cadence, drawn.
-fn flash_live_rows(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    live: Res<keys::Live>,
-    mut rows: Query<(&CensusRow, &mut BackgroundColor)>,
-) {
-    for (row, mut bg) in &mut rows {
-        let lit = row.0.iter().any(|a| keys::pressed(&keyboard, *live, *a));
-        let want = if lit { ROW_SELECTED } else { Color::NONE };
-        // Written through a compare: `BackgroundColor` is change-detected, and touching every row
-        // every frame would mark the whole overlay dirty sixty times a second for one lit line.
-        if bg.0 != want {
-            bg.0 = want;
-        }
-    }
-}
-
-/// The held-key overlay's root. `Display::None` when it is not being asked for.
-#[derive(Component)]
-pub struct ShortcutsOverlay;
-
-/// Where the rows are rebuilt, so the frame around them is spawned once.
-#[derive(Component)]
-struct ShortcutsBody;
-
-/// Which tab's list the overlay is currently showing **and in which [`keys::Stance`]**, so it is
-/// rebuilt on a tab change or when something is picked up — and not on every frame the key is held.
-///
-/// **The stance belongs in this key, not only in the render.** Without it the overlay would render
-/// the stance it was opened in and then keep it: pick a piece up with the list already on screen and
-/// the arrows change job while their row does not, which is the exact failure this whole change is
-/// about, reintroduced one layer up.
-#[derive(Resource, Default, PartialEq, Eq)]
-struct ShowingFor(Option<(crate::tiles::Mode, keys::Stance)>);
-
-/// **The key list, on demand.**
-///
-/// It used to be printed down the side of every panel: eighteen rows in the Tiles tab, above the
-/// controls, which is what pushed the subgrid's own cell grid below the fold (`FVS-Q-11`). A key
-/// list is *reference*, consulted rarely and never while acting — and `docs/ui.md` §1.2's test is
-/// "does this force interpretation?", which a permanent eighteen-row table beside the thing you are
-/// trying to use does.
-///
-/// So it is held rather than printed, and the panels carry one line saying so. That line is not
-/// optional: Cockburn, Gutwin, Scarr & Malacria 2014 (`10.1145/2659796`, already cited by
-/// `crate::keys`) document the intermodal-transition failure — a fast path offered *beside* a slow
-/// one does not get adopted on its own. A hidden list nobody is told about is that failure exactly.
+/// What survives the move is the line that says the key exists. That line is not optional: Cockburn,
+/// Gutwin, Scarr & Malacria 2014 (`10.1145/2659796`, already cited by `crate::keys`) document the
+/// intermodal-transition failure — a fast path offered *beside* a slow one does not get adopted on
+/// its own — and ExposeHK names its own weakness as exactly this, that an overlay behind a modifier
+/// *"has no visual representation to aid discovery until the user … presses its trigger."* See
+/// [`shortcut_hint`].
 pub struct ChromePlugin;
 
 impl Plugin for ChromePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ShowingFor>()
+        app
             // **The frame first, and everything that puts a panel in it after.** `Res<Frame>` is
             // how `panel_root` finds its dock, and in Bevy 0.19 a missing `Res<T>` panics its
             // system rather than skipping it — so this is an ordering the build must state, not one
@@ -1833,10 +1944,10 @@ impl Plugin for ChromePlugin {
             .add_systems(
                 OnEnter(crate::screen::Screen::Editor),
                 (
-                    spawn_shortcuts_overlay,
                     spawn_name_box,
                     spawn_chrome_bar,
                     spawn_status_band,
+                    problem_toast,
                 )
                     .after(FrameSystems),
             )
@@ -1854,16 +1965,6 @@ impl Plugin for ChromePlugin {
                     repaint_where_you_are,
                 ),
             )
-            // `flash_live_rows` after the rebuild, so a row spawned this frame is lit this frame
-            // rather than one frame late — which for a tap is the difference between a readout and
-            // a flicker.
-            .add_systems(
-                Update,
-                ((drive_shortcuts_overlay, flash_live_rows)
-                    .chain()
-                    .in_set(keys::Phase::Act),)
-                    .run_if(in_state(crate::screen::Screen::Editor)),
-            )
             // **After `Phase::Text`, not in it.** The field consumes the keystroke there; painting
             // before it would show the box one character behind what has been typed.
             .add_systems(Update,
@@ -1871,101 +1972,13 @@ impl Plugin for ChromePlugin {
                     .run_if(in_state(crate::screen::Screen::Editor)),
             )
             .add_systems(Update,
-                (light_the_back_button)
+                (light_the_back_button, stand_down_the_back_chord)
                     .run_if(in_state(crate::screen::Screen::Editor)),
             );
     }
 }
 
-fn spawn_shortcuts_overlay(mut commands: Commands) {
-    commands
-        .spawn((
-            ShortcutsOverlay,
-            Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(0.0),
-                top: Val::Px(0.0),
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                display: Display::None,
-                ..default()
-            },
-            // **Per `docs/ui.md` §5 trap 7.** A full-screen container without this eats every world
-            // click; its children keep their own hit targets, which this one does not need anyway.
-            bevy::picking::Pickable::IGNORE,
-            // Above the panels and the tab strip (101), which is the whole point of an overlay.
-            GlobalZIndex(400),
-            // A scrim, so the list reads against whatever is behind it without hiding the map.
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.72)),
-        ))
-        .with_children(|p| {
-            p.spawn((
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    padding: UiRect::all(Val::Px(PAD * 1.5)),
-                    row_gap: Val::Px(GAP_ROW),
-                    ..default()
-                },
-                BackgroundColor(PANEL_BG),
-                ShortcutsBody,
-            ));
-        });
-}
 
-/// Show the list while the key is down, and rebuild it when the tab under it changes.
-fn drive_shortcuts_overlay(
-    mut commands: Commands,
-    keyboard: Res<ButtonInput<KeyCode>>,
-    live: Res<keys::Live>,
-    mode: Res<crate::tiles::Mode>,
-    mut showing: ResMut<ShowingFor>,
-    mut roots: Query<&mut Node, With<ShortcutsOverlay>>,
-    bodies: Query<Entity, With<ShortcutsBody>>,
-) {
-    let want = keys::pressed(&keyboard, *live, keys::Action::Shortcuts);
-    for mut node in &mut roots {
-        let display = if want { Display::Flex } else { Display::None };
-        if node.display != display {
-            node.display = display;
-        }
-    }
-    // Rebuilt on the transition and on a tab change, never per frame: the rows are static text and
-    // respawning them sixty times a second would be sixty times the work for one picture.
-    let key = want.then_some((*mode, live.1));
-    if showing.0 == key {
-        return;
-    }
-    showing.0 = key;
-    let Some((tab, stance)) = key else { return };
-    for body in &bodies {
-        commands.entity(body).despawn_related::<Children>();
-        commands.entity(body).with_children(|p| {
-            title(p, &format!("{} KEYS", tab.label()));
-            // **The heading says what is in hand**, because the list below it is only true of one
-            // stance and a reader has no other way to tell which they are looking at. It is the same
-            // argument `docs/ui.md` §3.2 makes for showing the delta rather than only the state.
-            if stance == keys::Stance::Holding {
-                // [`ACCENT`], not [`LABEL`] — the palette's own rule is that amber is a live edit,
-                // and a piece in hand is exactly that. `section` would render it as a quiet heading,
-                // which is what a *category* looks like, not a state.
-                p.spawn((
-                    Text::new("holding a piece — Esc puts it back".to_owned()),
-                    TextColor(ACCENT),
-                    TextFont::from_font_size(text::LABEL),
-                    Node {
-                        margin: UiRect::bottom(Val::Px(GAP_ROW)),
-                        ..default()
-                    },
-                ));
-            }
-            // This tab first, then the frame around it — the same order the panels used, so anyone
-            // who learned the old list finds the rows where they were.
-            key_census(p, &[tab.context(), Context::Global], stance);
-        });
-    }
-}
 
 #[cfg(test)]
 mod scroll_tests {
@@ -2265,6 +2278,7 @@ pub fn spawn_chrome_bar(
     commands.entity(frame.chrome_bar).with_children(|bar| {
         bar.spawn((
             BackButton,
+            Control(keys::ControlId::Back),
             Node {
                 flex_direction: FlexDirection::Row,
                 align_items: AlignItems::Center,
@@ -2286,6 +2300,7 @@ pub fn spawn_chrome_bar(
                 bevy::picking::Pickable::IGNORE,
             ));
             b.spawn((
+                BackChord,
                 Text::new(keys::chord(keys::Action::MainMenu)),
                 TextColor(LABEL),
                 TextFont::from_font_size(text::BODY),
@@ -2306,6 +2321,8 @@ pub fn spawn_chrome_bar(
         if let Some(here) = here {
             bar.spawn((
                 WhereYouAre,
+                // Where you are is what `N` renames, so its badge goes on the words it changes.
+                Control(keys::ControlId::Title),
                 Text::new(here),
                 TextColor(DIM),
                 TextFont::from_font_size(text::BODY),
@@ -2379,7 +2396,22 @@ pub const ALL_TABS: &[crate::tiles::Mode] = &[
 /// landed.
 pub fn spawn_status_band(mut commands: Commands, frame: Res<Frame>) {
     commands.entity(frame.status).with_children(|band| {
-        problem_banner(band, ALL_TABS);
+        // **The problem is not here any more.** It used to be a flow child of this band — a padded,
+        // wrapping block inside twenty-six pixels of chrome, so it stood proud of the band it was
+        // supposed to be in. Reported from the keyboard: *"it appears over the status bar at the
+        // bottom and isn't quite in alignment… so it looks really bad."* It is a toast over the
+        // viewport now; see [`problem_toast`].
+        // **Which model is answering, once for the session.** It used to be printed on every
+        // proposal, which is the same fact restated per piece — see `labels::Labeler`, which owns
+        // both the text and the rule about when the word `connected` may be used. Empty until the
+        // config has been read, so an unconfigured project shows nothing rather than a placeholder.
+        band.spawn((
+            LabelerLine,
+            Text::new(String::new()),
+            TextColor(DIM),
+            TextFont::from_font_size(text::LABEL),
+            bevy::picking::Pickable::IGNORE,
+        ));
         band.spawn((
             Node {
                 flex_grow: 1.0,
@@ -2391,9 +2423,48 @@ pub fn spawn_status_band(mut commands: Commands, frame: Res<Frame>) {
     });
 }
 
+/// **The status band's labeler readout.** The node is here because the band is; what it says is
+/// `labels::Labeler`'s, so this module does not learn what a model is.
+#[derive(Component)]
+pub struct LabelerLine;
+
 /// The clickable way back. Marked so `editor` can hang one observer on it wherever a panel put it.
 #[derive(Component)]
 pub struct BackButton;
+
+/// **The chord printed on the button**, so it can stand down while the badges are up.
+#[derive(Component)]
+pub struct BackChord;
+
+/// **One `Cmd+O` on the button, never two.**
+///
+/// The chord is printed beside `‹ kits & maps` for the reason [`spawn_chrome_bar`] argues at
+/// length — ExposeHK's rehearsal path, and an author who pressed `Esc` three times looking for the
+/// exit. Holding the shortcuts key then draws that same chord *again*, as the button's badge, one
+/// gap away from itself. Reported from the keyboard: the back button prints `Cmd+O` twice.
+///
+/// So while the overlay is up, the inline copy stands down and the badge is the one that speaks.
+/// This is the move `compass::show_by_tab` already makes for the gizmo, and for the same reason: two
+/// things that are each right on their own are not both wanted in the same instant.
+///
+/// Compares before writing — `Node` is change-detected by the layout system, and `Mut::deref_mut`
+/// marks it changed whether or not the value moved.
+fn stand_down_the_back_chord(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<keys::Live>,
+    mut chords: Query<&mut Node, With<BackChord>>,
+) {
+    let want = if keys::pressed(&keyboard, *live, keys::Action::Shortcuts) {
+        Display::None
+    } else {
+        Display::Flex
+    };
+    for mut node in &mut chords {
+        if node.display != want {
+            node.display = want;
+        }
+    }
+}
 
 /// Lift the button while the pointer is on it, so it reads as pressable before it is pressed.
 pub fn light_the_back_button(
@@ -2413,12 +2484,22 @@ pub fn shortcut_hint(parent: &mut ChildSpawnerCommands) {
         // which is the one key deliberately wired to mean "not that" rather than "out". Naming the
         // chord where the eye already goes for keys is ExposeHK's rehearsal argument: the novice
         // path and the expert path are the same path.
+        //
+        // **It says what the key does now, not what it opens.** `K` used to raise a table you read;
+        // it labels the interface in place. "For shortcuts" described a document, and the whole
+        // reason the document was replaced is that a reader had to carry a phrase from it back to
+        // something on screen.
         Text::new(format!(
-            "Hold {} for shortcuts   ·   {} back to kits & maps",
+            "Hold {} — every key lands on what it does   ·   {} back to kits & maps",
             keys::chord(keys::Action::Shortcuts),
             keys::chord(keys::Action::MainMenu),
         )),
         TextColor(LABEL),
         TextFont::from_font_size(text::LABEL),
+        // **And holding it puts that key's own badge on this line.** The one control whose verb is
+        // "show me the verbs" — ExposeHK's admitted weakness is that a modifier-triggered overlay
+        // *"has no visual representation to aid discovery until the user … presses its trigger"*, and
+        // this is the loop closing: the line that tells you about `K` is where `K` labels itself.
+        Control(keys::ControlId::Hint),
     ));
 }
