@@ -38,7 +38,7 @@
 //! 2011 measured the chunking failure underneath that. A two-stage reveal here would buy a smaller
 //! picture and pay for it in the one currency this editor cannot spend.
 //!
-//! # Three anchors, and no fourth
+//! # Two anchors, and no third
 //!
 //! [`keys::Home`] is the census's answer to *where*, and it is a field of every binding because a
 //! verb with nowhere to be drawn is a verb that vanishes from the only surface announcing it:
@@ -151,11 +151,10 @@ pub struct BadgeRest(pub Color, pub Color);
 /// **Which tab's badges are up, in which [`keys::Stance`], and against which controls** — so the
 /// layer is rebuilt when the answer changes and not on every frame the key is held.
 ///
-/// **The controls and the subject belong in the key** for the reason the stance does. A verb is drawn
-/// on the thing it acts through, and a thing that is not on screen sends its verb to the legend
-/// instead — so a selection appearing in the detail pane changes where five badges live, and picking
-/// a piece up moves the piece-verbs onto it. Keyed on tab and stance alone, they would keep the
-/// places they had at the moment the key went down.
+/// **The controls belong in the key** for the reason the stance does. A verb is drawn on the thing
+/// it acts through, and a thing that is not on screen sends its verb to the legend instead — so a
+/// selection appearing in the detail pane changes where five badges live. Keyed on tab and stance
+/// alone, they would keep the places they had at the moment the key went down.
 ///
 /// **The stance belongs in this key, not only in the render.** Without it the layer would draw the
 /// stance it opened in and then keep it: pick a piece up with the badges on screen and the arrows
@@ -356,8 +355,8 @@ fn rebuild_badges(
         })
         .collect();
 
-    // One cluster per distinct home, sorted so the legend spawns first, then the controls, then the
-    // subject. Bevy paints siblings in spawn order, so where two anchors genuinely overlap — a list's
+    // One cluster per distinct home, sorted so the legend spawns first, then the controls. Bevy
+    // paints siblings in spawn order, so where two anchors genuinely overlap — a list's
     // badge against the legend beside it — the more specific one draws on top.
     let mut homes: Vec<Home> = Vec::new();
     for badge in &live_badges {
@@ -443,11 +442,10 @@ fn rebuild_badges(
 
 /// **The rect a [`Home`] is drawn against**, in surface pixels.
 ///
-/// One space for all three anchors, and that is what makes this one mechanism rather than two
-/// wearing one name: [`ComputedNode`] + [`UiGlobalTransform`] are in physical surface pixels, and so
-/// is `Camera::world_to_viewport` here — `MainCamera` renders into `surface::Surface`'s image, whose
-/// `target_scaling_factor()` is 1.0, and the projection already carries the viewport's offset inside
-/// the target. So there is exactly one conversion, at the write, and it is by [`UiScale`].
+/// One space for both anchors, and that is what makes this one mechanism rather than two wearing
+/// one name: [`ComputedNode`] + [`UiGlobalTransform`] are in physical surface pixels. So there is
+/// exactly one conversion, at the write, and it is by [`UiScale`]. (`Camera::world_to_viewport`
+/// answered here too while a world-anchored `Subject` existed; the projection left with it.)
 ///
 /// `None` is *"there is no honest answer"* and the cluster stays hidden. It is never repositioned to
 /// somewhere else — a home that quietly moved is precisely what would hide a control that has
@@ -537,16 +535,16 @@ fn anchor(
 /// **Where a cluster's top-left corner goes**, given its anchor, its own measured size, and the rect
 /// it has to stay inside.
 ///
-/// Three placements, one per kind of anchor, each chosen so a cluster does not land on the thing it
+/// Two placements, one per kind of anchor, each chosen so a cluster does not land on the thing it
 /// is pointing at:
 ///
-/// - **A control** is named from its leading edge, level with it in a band and level with its row in
-///   a dock. **The window is not inset for this**, and that was tried: `I` and `M` sit in the panel's
+/// - **A control** is named from its leading edge — the gutter beside it, where the panel's own
+///   `MARGIN` usually leaves room — level with it in a band and level with its row in a dock.
+///   **The window is not inset for this**, and that was tried: `I` and `M` sit in the panel's
 ///   own `MARGIN + PAD`, which fits them with about a pixel to spare, so insetting the bound by a
 ///   margin made them stop fitting and flip out of the panel entirely. A badge one pixel from the
-///   window edge reads tight; a badge on the wrong side of its panel reads wrong. — the gutter beside
-///   it, where the panel's own
-///   `MARGIN` usually leaves room. **Where it does not, it goes to the trailing edge instead**, and
+///   window edge reads tight; a badge on the wrong side of its panel reads wrong.
+///   **Where the gutter has no room, the badge goes to the trailing edge instead**, and
 ///   that is a correction: clamping it onto the leading edge was tried first and it covered exactly
 ///   the words that identify the control — `Cmd+O` over `‹ ki`, `1, 2, 3` over `M`, `Cmd+C` over
 ///   `TILE`. A badge that hides the label it is attached to has undone its own job. Every anchor in
@@ -558,8 +556,6 @@ fn anchor(
 ///   the viewport, so there is no horizontal strip to move it into; the free ground is vertical, and
 ///   the far corner is the only one no control cluster and no gizmo reaches. The same corner every
 ///   time is what makes it learnable as a position rather than read as a list.
-/// - **A subject** is named off its trailing edge, level with it — the piece stays uncovered and the
-///   chords read left-to-right away from it.
 ///
 /// An anchor as wide as the window — the door strip, the chrome bar — has room on neither side, and
 /// there the clamp still puts the cluster on an edge. That is the honest last answer: a badge pinned

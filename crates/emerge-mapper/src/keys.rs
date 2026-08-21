@@ -198,7 +198,7 @@ impl Stance {
 ///
 /// So it is a field, and [`Draft::at`] is the only way to make a [`Binding`] — the compiler refuses a
 /// row that has not said where it lives. That is stronger than a test, and it is the reason this cost
-/// a suffix on all 120 rows rather than a defaulted argument: `needs_shift: None` is an honest answer
+/// a suffix on every row of the census rather than a defaulted argument: `needs_shift: None` is an honest answer
 /// ("this axis does not apply to me"), and `home: None` is not.
 ///
 /// Malacria, Bailly, Harrison, Cockburn & Gutwin 2013, *Promoting Hotkey Use through Rehearsal with
@@ -233,7 +233,7 @@ pub enum Home {
 /// module exists to delete. A panel attaches `crate::chrome::Control(id)` to the node it spawns, and
 /// the join is by id.
 ///
-/// **Nine, and the rule that keeps it nine:** a `ControlId` may only name a node that is on screen for
+/// **The rule that keeps this list honest:** a `ControlId` may only name a node that is on screen for
 /// the *whole* of every `(Context, Stance)` in which some binding homes to it. A pane that renders
 /// nothing until something is selected is not a home — its badge would vanish exactly when a new
 /// author needs it. `every_home_a_live_binding_names_is_on_screen` in `tests/headless.rs` is what
@@ -254,11 +254,12 @@ pub enum ControlId {
     /// bench's slots, the Compose body. Exactly one is ever laid out, because the others' panels are
     /// `Display::None`.
     ///
-    /// **Only for a verb that acts on the pane itself**, which is `Cmd+C` and the commit door on a
-    /// derivation. It was briefly the home of seven other groups — `I`, `M`, `T F G H [ ]`, `Z X V`,
-    /// `B N O P`, `L …` — and that was the mistake this whole overlay exists to avoid: a container is
-    /// not an anchor, so eleven bare chords piled against a pane's edge with nothing under them
-    /// saying what any of them did. Each of those has a row of its own, and each now names it.
+    /// **For a verb whose readout is the pane itself** — `Cmd+C`, the commit door on a derivation,
+    /// the anim bench's scrub/play/ghost, the Compose carousel. Not a bin: it was briefly the home
+    /// of seven unrelated groups — `I`, `M`, `T F G H [ ]`, `Z X V`, `B N O P`, `L …` — and that was
+    /// the mistake this whole overlay exists to avoid: a container is not an anchor, so eleven bare
+    /// chords piled against a pane's edge with nothing under them saying what any of them did. Each
+    /// of those has a row of its own, and each now names it.
     Detail,
     /// The id headline of the piece being defined — the thing `I` types.
     IdField,
@@ -1976,11 +1977,11 @@ pub const BINDINGS: &[Binding] = &[
         "rescan solid / turn mesh x / y / z",
     )
     .at(Home::Control(ControlId::Mesh)),
-    // **The VLM labeler's cluster** — one row, four verbs. `L` photographs the focused piece and
+    // **The VLM labeler's cluster** — one row, three verbs. `L` photographs the focused piece and
     // asks the model; `Shift+L` walks everything missing judgement fields (and cancels a running
-    // walk); `U` applies the proposed labels through the ordinary edit path; `Y` discards them.
-    // `L`/`U`/`Y` are unbound in Tiles and Global; the L pair is the Cmd+Z shape — one key, the
-    // shifted form for the bigger sweep.
+    // walk); `Shift+Y` abandons the batch. A label applies on arrival, so there is no per-label
+    // confirm verb to bind. `L` is unbound in Tiles and Global; the L pair is the Cmd+Z shape — one
+    // key, the shifted form for the bigger sweep.
     bs(
         Action::SuggestLabels,
         KeyCode::KeyL,
@@ -2407,8 +2408,9 @@ pub fn binding(action: Action) -> &'static Binding {
 /// saying "2 edits it in place", and an author reading that reasonably concluded the tool was
 /// broken. Two live callers were wrong that way and neither could be spotted by reading them.
 ///
-/// `rows()` has the same note for the same reason — it pushed `b.chord` and collapsed `Cmd+Z` and
-/// `Shift+Cmd+Z` into "Cmd+Z, Z", naming a key that does not do that. One renderer, no exceptions.
+/// The deleted `rows()` carried the same note for the same reason — it pushed `b.chord` and
+/// collapsed `Cmd+Z` and `Shift+Cmd+Z` into "Cmd+Z, Z", naming a key that does not do that. The
+/// badge rows render through [`chord_column`], the same single path. One renderer, no exceptions.
 pub fn chord(action: Action) -> String {
     chord_text(binding(action))
 }
@@ -3493,11 +3495,20 @@ mod tests {
             // because "I am on the wrong map" is true on every tab — the state an author was in
             // when they opened the wrong kit three times in one afternoon, with no way back but
             // quitting the process. Costs a row it shares with `Save`.
-            (Context::Global, 18),
+            // 18 -> 16: measured 2026-08-21, not derived. The assertion is one-directional, so this
+            // pin sat stale-high while the six per-panel tab keys (`MapTab` … `NextTab`) collapsed
+            // into the three door-relative slots (`1`/`2`/`3`, "the kit stops being the project")
+            // and `ShowErrors` arrived. Two keys of headroom nobody granted, closed on the day it
+            // was noticed.
+            (Context::Global, 16),
             // 25 -> 26: `AcceptProposal`, the generate commit door. Bought deliberately, and it
             // costs no *row* — the four region-fills are `Stance::Idle` and this is
             // `Stance::Proposed`, so the two never share a list. See [`Stance::Proposed`].
-            (Context::Map, 26),
+            // 26 -> 24: measured 2026-08-21. The 26 was an increment stated on a count that was
+            // never re-measured — with `AcceptProposal` in, the table holds 24 `Context::Map` rows.
+            // A one-directional assert cannot catch a stale-high pin, so this one is corrected by
+            // counting rather than by arithmetic on its predecessor.
+            (Context::Map, 24),
             // 31 -> 32: `ExcludePack`. The importer scans every `.glb` under `assets/`, which is
             // right for finding art and wrong for offering it — a labelling batch spent its tenth
             // call of 778 describing `characters/cipher_field`, a character rig that could not be
