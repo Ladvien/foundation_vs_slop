@@ -10319,6 +10319,244 @@ fn a_badge_lights_while_its_key_is_down() {
     );
 }
 
+/// **A control that carries badges says so itself.**
+///
+/// The badge sits beside its control — the placement that covers nothing — so ownership is
+/// proximity, and in a dock of stacked rows proximity is deniable. While `K` is held, every control
+/// that anchors a cluster carries a one-pixel accent outline; the pair reads as one thing. Off `K`
+/// everything rests — an always-on halo would be one more thing to habituate past (Lewandowska,
+/// Dziśko & Jankowski 2022, `10.1038/s41598-022-16284-2`).
+#[test]
+fn an_anchored_control_lights_while_k_is_held() {
+    use bevy::ui::{ComputedNode, Outline};
+    use emerge_mapper::badges::BadgeCluster;
+    use emerge_mapper::chrome::Control;
+    use emerge_mapper::keys::{ControlId, Home};
+
+    let root = Fixture::new("badgehalo")
+        .descriptor("floor", "alpha")
+        .place("alpha/floor", (0.0, 0.0))
+        .build("m");
+    let mut app = badges_up(&root, emerge_mapper::tiles::Mode::Map);
+
+    let want: Vec<ControlId> = {
+        let mut q = app.world_mut().query::<&BadgeCluster>();
+        q.iter(app.world())
+            .filter_map(|c| match c.0 {
+                Home::Control(id) => Some(id),
+                Home::Legend => None,
+            })
+            .collect()
+    };
+    // The negative half below leans on a control that is laid out here and anchors nothing: the
+    // Map's filter box. If a Map verb ever homes there, pick a different bystander.
+    assert!(
+        !want.contains(&ControlId::Filter),
+        "this test assumes no Map binding homes at Filter; its negative case needs a new bystander"
+    );
+
+    let mut lit = 0usize;
+    let mut bystanders = 0usize;
+    {
+        let mut q = app
+            .world_mut()
+            .query::<(&Control, &ComputedNode, Option<&Outline>)>();
+        for (control, node, outline) in q.iter(app.world()) {
+            if node.size() == Vec2::ZERO {
+                continue;
+            }
+            let on = outline.is_some_and(|o| o.color == emerge_mapper::chrome::ACCENT);
+            if want.contains(&control.0) {
+                assert!(on, "{:?} anchors a cluster and carries no lit outline", control.0);
+                lit += 1;
+            } else {
+                assert!(!on, "{:?} anchors nothing and is lit anyway", control.0);
+                bystanders += 1;
+            }
+        }
+    }
+    // Anti-vacuity, both halves. Map's floor is at least: the frame's four, the status pane, the
+    // palette, and the two readout rows the drain added.
+    assert!(lit >= 8, "only {lit} controls lit on Map — the halo is not reaching the anchors");
+    assert!(bystanders >= 1, "no unanchored control was on screen, so the negative half checked nothing");
+
+    // Release: everything rests the same frame the clusters go.
+    app.world_mut()
+        .resource_mut::<bevy::input::ButtonInput<bevy::prelude::KeyCode>>()
+        .release_all();
+    for _ in 0..3 {
+        app.update();
+    }
+    let still: Vec<ControlId> = {
+        let mut q = app.world_mut().query::<(&Control, &Outline)>();
+        q.iter(app.world())
+            .filter(|(_, o)| o.color != bevy::prelude::Color::NONE)
+            .map(|(c, _)| c.0)
+            .collect()
+    };
+    assert!(still.is_empty(), "the key is up and these are still lit: {still:?}");
+}
+
+/// **The chord is body-size ink; the description stays a footnote.**
+///
+/// `chrome_census` bans raw font sizes but does not pin roles, so nothing else would notice if the
+/// one number this overlay exists to show quietly returned to 9 px. Ink identifies the part: the
+/// chord is [`chrome::KEY`], the description [`chrome::DIM`], and no third ink draws in a badge.
+#[test]
+fn a_badge_chord_reads_at_body_size() {
+    use emerge_mapper::badges::Badge;
+
+    let root = Fixture::new("badgetype")
+        .descriptor("floor", "alpha")
+        .build("m");
+    let mut app = badges_up(&root, emerge_mapper::tiles::Mode::Map);
+
+    let body = TextFont::from_font_size(emerge_mapper::chrome::text::BODY).font_size;
+    let hint = TextFont::from_font_size(emerge_mapper::chrome::text::HINT).font_size;
+    let (mut chords, mut descs) = (0usize, 0usize);
+    {
+        let mut roots_q = app.world_mut().query_filtered::<Entity, With<Badge>>();
+        let roots: Vec<Entity> = roots_q.iter(app.world()).collect();
+        let world = app.world();
+        for badge in roots {
+            let mut queue = vec![badge];
+            while let Some(e) = queue.pop() {
+                if let (Some(font), Some(color)) = (world.get::<TextFont>(e), world.get::<TextColor>(e))
+                {
+                    if color.0 == emerge_mapper::chrome::KEY {
+                        assert_eq!(font.font_size, body, "a chord away from BODY size");
+                        chords += 1;
+                    } else if color.0 == emerge_mapper::chrome::DIM {
+                        assert_eq!(font.font_size, hint, "a description away from HINT size");
+                        descs += 1;
+                    } else {
+                        panic!("a third ink draws inside a badge: {:?}", color.0);
+                    }
+                }
+                if let Some(kids) = world.get::<Children>(e) {
+                    queue.extend(kids.iter().rev());
+                }
+            }
+        }
+    }
+    assert!(
+        chords >= 10 && descs >= 5,
+        "checked {chords} chords and {descs} descriptions — too few for the assertion to mean much"
+    );
+}
+
+/// **Holding a piece puts the member-verbs on the MEMBERS list** — the one stance the two-fixture
+/// layout test never visits, driven for real: arm, then drop. A drop continues the hold (`placing`
+/// stays true), and it is the drop that gives `Stance::Holding` the member it needs to focus.
+#[test]
+fn a_held_piece_carries_its_badges_on_the_member_list() {
+    use bevy::input::ButtonInput;
+    use bevy::prelude::{IntoScheduleConfigs, KeyCode, Local, ResMut, Update};
+    use bevy::ui::Outline;
+    use emerge_mapper::badges::{Badge, BadgeCluster};
+    use emerge_mapper::chrome::Control;
+    use emerge_mapper::keys::{Action, ControlId, Home, Stance, binding};
+
+    let root = Fixture::new("badgehold")
+        .sized_descriptor("panel", "alpha", 0.2, 0.2)
+        .build("m");
+    let mut app = harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Tiles)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    app.update();
+
+    let once = |app: &mut App, chord: Vec<KeyCode>| {
+        app.add_systems(
+            Update,
+            IntoScheduleConfigs::before(
+                move |mut keys: ResMut<ButtonInput<KeyCode>>, mut done: Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        for k in &chord {
+                            keys.press(*k);
+                        }
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    };
+    let probe = |app: &App, tag: &str| {
+        let b = app.world().resource::<emerge_mapper::build::Build>();
+        eprintln!(
+            "PROBE {tag}: placing={} open={} members={} focus={} browsing={}",
+            b.placing,
+            b.open.is_some(),
+            b.open.as_ref().map(|c| c.members.len()).unwrap_or(0),
+            b.focus,
+            b.browsing.is_some(),
+        );
+    };
+    once(&mut app, vec![binding(Action::BuildArm).key]);
+    once(&mut app, vec![binding(Action::BuildDrop).key]);
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .release_all();
+    app.update();
+
+    let live = *app.world().resource::<emerge_mapper::keys::Live>();
+    assert_eq!(
+        live.1,
+        Stance::Holding,
+        "arm, drop, arm again must leave a piece in hand — without it this test drives nothing"
+    );
+
+    hold(&mut app, vec![binding(Action::Shortcuts).key]);
+    for _ in 0..8 {
+        app.update();
+    }
+
+    assert!(
+        controls_on_screen(&mut app).contains(&ControlId::Members),
+        "a held piece means an open tile, and an open tile lays out its MEMBERS list"
+    );
+    let members_cluster: Vec<Entity> = {
+        let mut q = app.world_mut().query::<(Entity, &BadgeCluster)>();
+        q.iter(app.world())
+            .filter(|(_, c)| c.0 == Home::Control(ControlId::Members))
+            .map(|(e, _)| e)
+            .collect()
+    };
+    assert_eq!(members_cluster.len(), 1, "one cluster stands on the member list");
+
+    // The three rows a hand gets while holding: move, flush, and the member walk — ten actions.
+    let actions: Vec<Action> = {
+        let mut q = app.world_mut().query::<(&Badge, &ChildOf)>();
+        q.iter(app.world())
+            .filter(|(_, parent)| parent.parent() == members_cluster[0])
+            .flat_map(|(b, _)| b.0.clone())
+            .collect()
+    };
+    for a in [
+        Action::BuildForward,
+        Action::BuildBack,
+        Action::BuildLeft,
+        Action::BuildRight,
+        Action::AlignForward,
+        Action::AlignBack,
+        Action::AlignLeft,
+        Action::AlignRight,
+        Action::MemberPrev,
+        Action::MemberNext,
+    ] {
+        assert!(actions.contains(&a), "{a:?} is live while holding and not on the member list");
+    }
+
+    // And the list itself is lit as the owner.
+    let members_lit = {
+        let mut q = app.world_mut().query::<(&Control, &Outline)>();
+        q.iter(app.world())
+            .any(|(c, o)| c.0 == ControlId::Members && o.color == emerge_mapper::chrome::ACCENT)
+    };
+    assert!(members_lit, "the member list anchors the hold's badges and is not lit");
+}
+
 /// **A control's badge sits beside it, not on it.**
 ///
 /// The rule started as *"the gutter on the leading edge, and onto that edge when there is no room"*,

@@ -60,7 +60,7 @@
 //! `a_key_still_fires_while_k_is_held` is what stops it being quietly lost.
 
 use bevy::prelude::*;
-use bevy::ui::{ComputedNode, UiGlobalTransform};
+use bevy::ui::{ComputedNode, Outline, UiGlobalTransform};
 
 use crate::chrome::{self, ACCENT, GAP_TIGHT, KEY, PANEL_BG, VEIL};
 use crate::keys::{self, Home};
@@ -185,7 +185,7 @@ impl Plugin for BadgePlugin {
             // flicker.
             .add_systems(
                 Update,
-                (rebuild_badges, place_badges, flash_live_badges)
+                (rebuild_badges, place_badges, flash_live_badges, light_anchored_controls)
                     .chain()
                     .in_set(keys::Phase::Act)
                     .run_if(in_state(crate::screen::Screen::Editor)),
@@ -806,6 +806,57 @@ fn flash_live_badges(
         }
         if border.top != edge {
             *border = BorderColor::all(edge);
+        }
+    }
+}
+
+/// **A control that carries badges says so itself while the overlay is up.**
+///
+/// The badge stands *beside* its control — a paid-for placement: drawn on it, it covered exactly
+/// the words that identify the control. Beside is honest, and it is also deniable: in a dock of
+/// stacked rows, "whose chord is this" is answered by proximity alone. So while `K` is held, the
+/// control that owns a cluster carries a one-pixel [`ACCENT`] outline — ownership drawn on the
+/// owner, with nothing covered.
+///
+/// `want` derives from the spawned clusters rather than from the census, so door-trimming and
+/// [`resolve`]'s fallback are already applied: a control whose verbs fell to the legend does not
+/// light, and when the key is up there are no clusters, so everything rests. The outline toggles by
+/// **colour** rather than by insert/remove — `Outline`'s own doc recommends `Color::NONE` for
+/// exactly this — and it draws outside the node, so lighting a control cannot reflow it. Rest is
+/// `NONE` by definition rather than a carried state: no other system writes `Outline`, which is
+/// what spares this one a `BadgeRest` twin.
+fn light_anchored_controls(
+    mut commands: Commands,
+    clusters: Query<&BadgeCluster>,
+    mut controls: Query<(Entity, &chrome::Control, Option<&mut Outline>)>,
+) {
+    let want: Vec<keys::ControlId> = clusters
+        .iter()
+        .filter_map(|c| match c.0 {
+            Home::Control(id) => Some(id),
+            Home::Legend => None,
+        })
+        .collect();
+    for (entity, control, outline) in &mut controls {
+        let target = if want.contains(&control.0) {
+            ACCENT
+        } else {
+            Color::NONE
+        };
+        match outline {
+            // Compare-and-set: an unconditional write every frame is the shape
+            // `tests/no_system_writes_every_frame.rs` polices out of this crate.
+            Some(mut on) => {
+                if on.color != target {
+                    on.color = target;
+                }
+            }
+            None if target != Color::NONE => {
+                commands
+                    .entity(entity)
+                    .insert(Outline::new(Val::Px(1.0), Val::Px(1.0), target));
+            }
+            None => {}
         }
     }
 }
