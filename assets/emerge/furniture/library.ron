@@ -5778,5 +5778,80 @@
             )),
             note: None,
         ),
+        (
+            id: "keyboard",
+            mesh: Some("low_poly_furniture/glb/Electronics/Keyboard.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.0),
+                pivot: Some((0.035064876, 0.0014614984)),
+                rotate: None,
+                front: Some(South),
+            ),
+            extent: (
+                footprint: Some((0.7933716, 0.3154717)),
+                height: Some(0.06396379),
+            ),
+            mount: Some(OnSurface(
+                class: "worktop",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                faces: [],
+                sockets: [],
+            ),
+            kind: [
+                "prop",
+            ],
+            effects: [
+                "uses-electricity",
+            ],
+            look: [
+                "grey",
+                "plastic",
+            ],
+            placement: (
+                rooms: [
+                    "office",
+                    "dining",
+                    "living",
+                    "command",
+                    "lab",
+                ],
+                group: None,
+            ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                    (
+                        at: (1, 0, 0),
+                        solid: true,
+                        edge: None,
+                    ),
+                ],
+            )),
+            note: Some("Low-poly, grey plastic keyboard with separate numeric keypad. Designed for placement on a surface, likely in an office or computer room. No functional effects."),
+            labels: Some((
+                by: (
+                    kind: Some(Model),
+                    effects: Some(Human),
+                    look: Some(Model),
+                    surfaces: Some(Model),
+                    mount: Some(Human),
+                    note: Some(Model),
+                ),
+                model: Some("qwen3-vl"),
+                at: "2026-08-20",
+                confidence: Some(High),
+            )),
+        ),
     ],
 )

@@ -125,6 +125,10 @@ pub fn descriptor_from_manifest(item: &ManifestItem, policy: Policy) -> Result<D
         // The converter has no lattice to give: the old schema had no inside-the-tile detail, so a
         // migrated piece starts with the default and an author fills it in.
         subgrid: Default::default(),
+        // **And no record of who labelled it**, which is the honest answer: a converted manifest
+        // item's tags were written by whatever produced the manifest. `None` says exactly that, and
+        // is deliberately not read as "a human decided this".
+        labels: None,
         id: item.key.clone(),
         mesh: Some(item.glb.clone()),
         align: Align {

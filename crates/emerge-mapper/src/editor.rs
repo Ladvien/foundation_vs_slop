@@ -857,7 +857,23 @@ impl Plugin for EditorPlugin {
                 // this file got the Maps-door gate, which killed the filter box on the Kit door for
                 // the second time; the first was the `EditorPlugin` gate, and the fix is the same:
                 // the door it runs on was never part of what it means.
-                (crate::filter::keys.in_set(keys::Phase::Text))
+                (
+                    crate::filter::keys.in_set(keys::Phase::Text),
+                    // **And the repaint, for the same reason — the third time this system has been
+                    // swept up by that gate.**
+                    //
+                    // It sat in the Maps-door block below until 2026-08-20, so on the Kit door *no
+                    // filter box has ever shown what was typed into it*: the text narrowed the list
+                    // and the box went on saying `filter`, with no caret, on the two panels that do
+                    // the most filtering. Found by looking at a captured frame — the tag block read
+                    // `1 of 55` under a box that denied anything had been typed — which is where the
+                    // last several defects here have been found and is not where a green suite
+                    // looks.
+                    //
+                    // Like `keys` above it, this takes the key stream and `Filters` and nothing
+                    // map-shaped, so the door it runs on was never part of what it means.
+                    crate::filter::refresh,
+                )
                     .run_if(in_state(crate::screen::Screen::Editor)),
             );
 
@@ -874,7 +890,6 @@ impl Plugin for EditorPlugin {
                     // Sensed before anything reads the cursor, so a click sees the anchor captured
                     // for its own press rather than one frame stale.
                     sense_fine_anchor.in_set(keys::Phase::Sense),
-                    crate::filter::refresh,
                 ),)
                     .run_if(in_state(crate::screen::Screen::Editor))
                     .run_if(crate::tiles::Door::map_door_is_open),

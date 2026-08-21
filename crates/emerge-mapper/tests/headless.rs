@@ -36,34 +36,107 @@ use fixtures::Fixture;
 /// crate reads the message stream and matches `logical_key`, which is the distinction
 /// `bevy_debugger/input` exists to honour.
 fn name_the_tile(app: &mut App, name: &str) {
-    let tap = |app: &mut App, logical: bevy::input::keyboard::Key, code: KeyCode| {
-        for state in [
-            bevy::input::ButtonState::Pressed,
-            bevy::input::ButtonState::Released,
-        ] {
-            app.world_mut()
-                .write_message(bevy::input::keyboard::KeyboardInput {
-                    key_code: code,
-                    logical_key: logical.clone(),
-                    state,
-                    text: None,
-                    repeat: false,
-                    window: Entity::PLACEHOLDER,
-                });
-        }
-        app.update();
-    };
     for c in name.chars() {
-        tap(
+        tap_key(
             app,
             bevy::input::keyboard::Key::Character(c.to_string().into()),
             KeyCode::KeyA,
         );
     }
-    tap(app, bevy::input::keyboard::Key::Enter, KeyCode::Enter);
+    tap_key(app, bevy::input::keyboard::Key::Enter, KeyCode::Enter);
     for _ in 0..2 {
         app.update();
     }
+}
+
+/// **One keystroke, the way a field really receives it** — a press and a release written to the
+/// `KeyboardInput` message stream, then a frame.
+///
+/// Not `ButtonInput`: every text handler in this crate reads the stream and matches `logical_key`,
+/// which is the distinction `bevy_debugger/input` exists to honour and the reason an agent could not
+/// type into this editor until it did. Shared rather than re-closed per test — it was written out
+/// twice before this, identically, which is the drift the crate's own chrome module exists against.
+fn tap_key(app: &mut App, logical: bevy::input::keyboard::Key, code: KeyCode) {
+    for state in [
+        bevy::input::ButtonState::Pressed,
+        bevy::input::ButtonState::Released,
+    ] {
+        app.world_mut()
+            .write_message(bevy::input::keyboard::KeyboardInput {
+                key_code: code,
+                logical_key: logical.clone(),
+                state,
+                text: None,
+                repeat: false,
+                window: Entity::PLACEHOLDER,
+            });
+    }
+    app.update();
+}
+
+/// **One chord, as `ButtonInput`** — for the verbs, which read that rather than the stream.
+///
+/// `release_all` before `press` is load-bearing: `just_pressed` needs a transition, and a key left
+/// down by an earlier call would otherwise never fire again. The `Local` latch is the other half —
+/// without it the key is held forever and `keys::repeating` starts auto-repeating it.
+fn press_once(app: &mut App, key: KeyCode) {
+    app.add_systems(
+        Update,
+        IntoScheduleConfigs::before(
+            move |mut keys: ResMut<bevy::input::ButtonInput<KeyCode>>, mut done: Local<bool>| {
+                if !*done {
+                    keys.release_all();
+                    keys.press(key);
+                    *done = true;
+                }
+            },
+            emerge_mapper::keys::Phase::Act,
+        ),
+    );
+    app.update();
+}
+
+/// **Every laid-out string inside the tag block**, headings and chips and the count line alike.
+///
+/// Walks up from each `Text` to see whether `ControlId::Tags` is an ancestor, which is how
+/// `the_tag_axes_have_a_block_to_stand_in` asks the same question — the block is a subtree, not a
+/// marker on each leaf. Zero-sized nodes are dropped: a chip that is spawned and laid out at nothing
+/// is invisible, and a test that counted it would pass over an empty pane.
+fn tag_block_text(app: &mut App) -> Vec<String> {
+    use bevy::ui::ComputedNode;
+
+    let block = {
+        let mut q = app
+            .world_mut()
+            .query::<(Entity, &emerge_mapper::chrome::Control)>();
+        q.iter(app.world())
+            .find(|(_, c)| c.0 == emerge_mapper::keys::ControlId::Tags)
+            .map(|(e, _)| e)
+    };
+    let Some(block) = block else {
+        panic!("the detail pane draws no `ControlId::Tags` node at all");
+    };
+    let mut q = app.world_mut().query::<(Entity, &Text, &ComputedNode)>();
+    let found: Vec<(Entity, String)> = q
+        .iter(app.world())
+        .filter(|(_, _, n)| n.size() != Vec2::ZERO)
+        .map(|(e, t, _)| (e, t.0.clone()))
+        .collect();
+    let world = app.world();
+    found
+        .into_iter()
+        .filter(|(e, _)| {
+            let mut up = Some(*e);
+            while let Some(x) = up {
+                if x == block {
+                    return true;
+                }
+                up = world.get::<ChildOf>(x).map(|p| p.parent());
+            }
+            false
+        })
+        .map(|(_, t)| t)
+        .collect()
 }
 
 /// An app with nothing that needs a screen.
@@ -3583,6 +3656,13 @@ fn undo_steps_back_through_the_meshes_brought_into_a_tile() {
 
     once(&mut app, vec![binding(Action::BuildArm).key]);
     once(&mut app, vec![binding(Action::BuildDrop).key]);
+    // **Which piece went in first, asked rather than assumed.** It used to be inferred from
+    // `two[0]` — that `Composition::members` comes back in drop order — which held only while the
+    // library list happened to hand the arrows the pieces in the order the fixture defined them.
+    // The 2026-08-20 reversal (newest-defined first) broke that coincidence and this test with it,
+    // which is the assumption being removed rather than re-encoded.
+    let first_in = members(&app);
+    assert_eq!(first_in.len(), 1, "one mesh is in: {first_in:?}");
     // A different piece, so the two steps are distinguishable by name rather than by count alone.
     once(&mut app, vec![binding(Action::BuildArm).key]);
     once(&mut app, vec![binding(Action::BuildBack).key]);
@@ -3603,8 +3683,9 @@ fn undo_steps_back_through_the_meshes_brought_into_a_tile() {
         "one undo takes the second mesh back out: {one:?}"
     );
     assert_eq!(
-        one[0], two[0],
-        "and it is the FIRST that survives, not whichever sorted first"
+        one, first_in,
+        "and it is the FIRST DROP that survives, not whichever the member list happens to hold at \
+         index 0"
     );
 
     once(
@@ -4930,22 +5011,6 @@ fn undo_after_two_drops_removes_the_second_mesh() {
             .map_or(0, |c| c.members.len())
     };
 
-    step(&mut app, vec![key(emerge_mapper::keys::Action::BuildDrop)]);
-    assert_eq!(n(&app), 1, "the first drop puts one member in");
-
-    // A different mesh for the second drop, the way an author picks the next piece.
-    step(&mut app, vec![key(emerge_mapper::keys::Action::Cancel)]);
-    step(
-        &mut app,
-        vec![key(emerge_mapper::keys::Action::TileListNext)],
-    );
-    step(&mut app, vec![key(emerge_mapper::keys::Action::BuildDrop)]);
-    assert_eq!(n(&app), 2, "the second drop puts a second member in");
-
-    // **Which meshes, not how many.** The count alone cannot tell "undo removed the one I just
-    // brought in" from "undo removed the other one", and the author reported exactly that second
-    // thing: *"when I undo after the second mesh, it throws out the first mesh, not the most recent
-    // one."*
     let sources = |app: &bevy::prelude::App| -> Vec<String> {
         app.world()
             .resource::<Build>()
@@ -4962,17 +5027,36 @@ fn undo_after_two_drops_removes_the_second_mesh() {
             })
             .unwrap_or_default()
     };
+    step(&mut app, vec![key(emerge_mapper::keys::Action::BuildDrop)]);
+    assert_eq!(n(&app), 1, "the first drop puts one member in");
+    // **Captured here, because `Composition::members` is not in drop order.** Reading it back at
+    // the end and calling index 0 "the first drop" held only while the library list handed the
+    // arrows its rows in fixture order; the 2026-08-20 reversal ended that and this is the honest
+    // question — what was in the tile after ONE drop.
+    let first_in = sources(&app)
+        .first()
+        .cloned()
+        .unwrap_or_else(|| panic!("one drop is one member"));
+
+    // A different mesh for the second drop, the way an author picks the next piece.
+    step(&mut app, vec![key(emerge_mapper::keys::Action::Cancel)]);
+    step(
+        &mut app,
+        vec![key(emerge_mapper::keys::Action::TileListNext)],
+    );
+    step(&mut app, vec![key(emerge_mapper::keys::Action::BuildDrop)]);
+    assert_eq!(n(&app), 2, "the second drop puts a second member in");
+
+    // **Which meshes, not how many.** The count alone cannot tell "undo removed the one I just
+    // brought in" from "undo removed the other one", and the author reported exactly that second
+    // thing: *"when I undo after the second mesh, it throws out the first mesh, not the most recent
+    // one."*
     let both = sources(&app);
     assert_eq!(both.len(), 2, "two distinct meshes are in: {both:?}");
-    let first_in = both
-        .iter()
-        .find(|s| s.contains("alpha"))
-        .unwrap_or_else(|| panic!("the first drop was the first library row: {both:?}"))
-        .clone();
     let second_in = both
         .iter()
-        .find(|s| s.contains("beta"))
-        .unwrap_or_else(|| panic!("the second drop was the next row: {both:?}"))
+        .find(|s| **s != first_in)
+        .unwrap_or_else(|| panic!("the second drop is the other member: {both:?}"))
         .clone();
 
     step(
@@ -5068,8 +5152,12 @@ fn undo_removes_the_most_recent_drop_not_the_first_row() {
 
     let root = Fixture::new("undo-sorted")
         // Row 0 sorts LAST, row 1 sorts FIRST — so the second drop lands at the top of the list.
-        .descriptor("zulu", "alpha")
+        // **Defined alfa-first so `zulu` is row 0.** The list is newest-defined first since
+        // 2026-08-20, and this test's whole premise is that the piece dropped FIRST is the one that
+        // sorts LAST in the member list — that is the presentation which makes a correct undo look
+        // wrong. Swap these two and the premise quietly evaporates rather than failing.
         .descriptor("alfa", "beta")
+        .descriptor("zulu", "alpha")
         .build("m");
     let mut app =
         emerge_mapper::harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Tiles).unwrap_or_else(|e| panic!("{e}"));
@@ -5549,9 +5637,15 @@ fn no_reachable_tiles_state_leaves_the_arrows_doing_nothing() {
         // Sized under a cell: the invariant is "an offered key does something", and the ladder
         // gives a full-cell piece no travel by design — that case has its own pin,
         // `an_arrow_on_a_piece_that_fills_the_axis_says_so`.
+        // **`beta_two` defined first, so `alpha_one` is row 0 and goes into the tile first.** The
+        // library list is newest-defined first since 2026-08-20; with the fixture the other way
+        // round the second drop lands the focus on member 0, where `MemberPrev` clamps and this
+        // sweep reads the clamp as a dead key. That boundary is not new and is not what this test
+        // characterises — it walks the states an author reaches, and the state it was written for
+        // is a focus with somewhere to step back to.
         let root = Fixture::new(&format!("matrix-{}", name.replace(' ', "-")))
-            .sized_descriptor("alpha_one", "alpha", 0.2, 0.2)
             .sized_descriptor("beta_two", "beta", 0.2, 0.2)
+            .sized_descriptor("alpha_one", "alpha", 0.2, 0.2)
             .build("m");
         let mut app = emerge_mapper::harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Tiles)
             .unwrap_or_else(|e| panic!("{e}"));
@@ -5667,8 +5761,12 @@ fn the_focus_walks_the_members_and_shift_delete_empties_the_tile() {
     use emerge_mapper::keys::Action;
 
     let root = Fixture::new("focus-walk")
-        .descriptor("alpha_one", "alpha")
+        // **Defined in reverse of the drop order.** The list is newest-defined first since
+        // 2026-08-20, so `alpha_one` is row 0 and goes in first — which is what leaves the SECOND
+        // member at the higher index, and `left` with somewhere to step back to. Defined the other
+        // way round the focus lands on 0 and this test measures a clamp instead of a walk.
         .descriptor("beta_two", "beta")
+        .descriptor("alpha_one", "alpha")
         .build("m");
     let mut app =
         emerge_mapper::harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Tiles).unwrap_or_else(|e| panic!("{e}"));
@@ -5778,8 +5876,11 @@ fn a_refused_mount_names_a_piece_that_would_hold_it() {
     let root = Fixture::new("mount-refusal")
         // A guest that needs a worktop, and a host that offers one — so the refusal has something
         // true to point at. `aa_` / `zz_` fix the library order, and therefore the drop order.
-        .mounted_descriptor("aa_lamp", "alpha", "worktop")
+        // **Desk first so the lamp is row 0.** The list is newest-defined first since 2026-08-20,
+        // and this test needs the guest dropped BEFORE the host — a lamp landing on a desk that is
+        // already there is the case that must succeed, not the one under test.
         .surface_descriptor("zz_desk", "beta", "worktop")
+        .mounted_descriptor("aa_lamp", "alpha", "worktop")
         .build("m");
     let mut app =
         emerge_mapper::harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Tiles).unwrap_or_else(|e| panic!("{e}"));
@@ -6347,9 +6448,13 @@ fn the_tile_feedback_script_can_actually_be_followed() {
     // the `site/` namespace can write its mesh under `assets/site/`.
     let root = Fixture::new("feedback")
         .pack("site/site", &["floor", "wall", "wall_low"])
-        .descriptor("site/floor", "site")
-        .sized_descriptor("site/wall", "site", 0.1, 1.0)
+        // **Defined back to front, so the rows come out front to back.** The library list is
+        // newest-defined first since 2026-08-20, and every walk count below is written against the
+        // script's prose — "one `right` lands on `site/floor`". Reversing the fixture keeps the
+        // counts describing what an author following the script actually does.
         .sized_descriptor("site/wall_low", "site", 0.2, 1.0)
+        .sized_descriptor("site/wall", "site", 0.1, 1.0)
+        .descriptor("site/floor", "site")
         .bounded_composition(
             "site/tile_1",
             (1.0, 4.0, 1.0),
@@ -8047,7 +8152,7 @@ fn a_mesh_awaiting_a_proposal_stays_out_of_the_tiles_palette() {
 #[cfg(feature = "debugger")]
 #[test]
 fn a_walk_rights_the_piece_it_asked_about_and_then_stops() {
-    use emerge_mapper::labels::{Entry, LabelQueue, Suggestions};
+    use emerge_mapper::labels::{Entry, Suggestions};
     use emerge_mapper::project::Project;
     use emerge_mapper::tiles::{EditTarget, ImportState};
     use emerge_mapper::vlm::NeedsTurn;
@@ -8075,9 +8180,6 @@ fn a_walk_rights_the_piece_it_asked_about_and_then_stops() {
             &EditTarget::Library("on_its_head".to_owned()),
             e,
         );
-        app.world_mut()
-            .resource_mut::<LabelQueue>()
-            .auto_apply_for_test();
         app.update();
     };
     let rotate_of = |app: &App, id: &str| {
@@ -8118,7 +8220,7 @@ fn a_walk_rights_the_piece_it_asked_about_and_then_stops() {
     assert_eq!(
         app.world().resource::<Suggestions>().pending(),
         0,
-        "and the proposal does not stay staged: `auto_apply_batch` reaches for the first staged \
+        "and the proposal does not stay staged: `apply_what_arrives` reaches for the first staged \
          entry every frame, so a refusal that kept it would retry sixty times a second for ever"
     );
 }
@@ -9140,10 +9242,21 @@ fn the_first_arrow_press_lands_on_the_first_piece() {
         .resource::<emerge_mapper::tiles::ImportState>()
         .selected_library_id
         .clone();
+    // **Asked of the list rather than named**, because which id is row 0 is not what this test is
+    // about — it is about the press that establishes a selection not also stepping past it. Naming
+    // the id here made the test go red for the 2026-08-20 reversal, which changed nothing it cares
+    // about.
+    let want = emerge_mapper::tiles::library_ids_for_test(
+        app.world().resource::<emerge_mapper::project::Project>(),
+        app.world().resource::<emerge_mapper::filter::Filters>(),
+        true,
+        None,
+    )
+    .first()
+    .cloned();
     assert_eq!(
-        picked.as_deref(),
-        Some("alpha/floor"),
-        "one press of `{}` must land on the FIRST piece. Landing on `alpha/wall` means the press \
+        picked, want,
+        "one press of `{}` must land on the FIRST piece. Landing on the second means the press \
          that establishes the selection also walked it, and the first row is unreachable going down.",
         binding(Action::TileListNext).chord
     );
@@ -11209,5 +11322,549 @@ fn a_control_in_a_band_really_is_in_one() {
         seen >= TABS.len(),
         "only {seen} laid-out control(s) were checked across {} tabs",
         TABS.len()
+    );
+}
+
+// ── the tag block's keyboard path ────────────────────────────────────────────────────────────────
+
+/// **Typing narrows the tag block, and every axis keeps its heading.**
+///
+/// The block draws the project's whole vocabulary so an author reads it rather than remembering it —
+/// 55 chips on the shipped kit, of which a piece holds three to six. A filter is this editor's
+/// answer to a list too long to scan, and `filter.rs`'s module note states the rule it has to obey:
+/// *"the rows that survive stay in exactly the order they were in… Nothing is re-ranked, ever."*
+/// Sears & Shneiderman 1994 (`10.1145/174630.174632`) is the measurement behind that — menus whose
+/// items moved were slower and users disliked them.
+///
+/// So the two things asserted here are the two things that could go wrong: the chips that do not
+/// match are **gone**, and the axes they left behind are **still there**, saying `-`. An axis that
+/// vanished with its last chip would move the three below it on every keystroke, and would make
+/// "not on this axis" look exactly like "this kit has no such axis".
+#[test]
+fn the_tag_filter_narrows_the_block_and_every_axis_keeps_its_heading() {
+    use emerge_mapper::filter::{Filters, Pane};
+    use emerge_mapper::keys::Action;
+
+    let root = Fixture::new("tagfilter")
+        .descriptor("floor", "alpha")
+        .build("m");
+    let mut app =
+        harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Meshes)
+            .unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..3 {
+        app.update();
+    }
+    let id = app
+        .world()
+        .resource::<emerge_mapper::project::Project>()
+        .library
+        .descriptors
+        .first()
+        .map(|d| d.id.clone())
+        .unwrap_or_else(|| panic!("the fixture must carry a descriptor"));
+    app.world_mut()
+        .resource_mut::<emerge_mapper::tiles::ImportState>()
+        .selected_library_id = Some(id);
+    for _ in 0..4 {
+        app.update();
+    }
+
+    press_once(&mut app, emerge_mapper::keys::binding(Action::FocusTagFilter).key);
+    for _ in 0..2 {
+        app.update();
+    }
+    assert_eq!(
+        app.world().resource::<Filters>().focus_pane(),
+        Some(Pane::Tags),
+        "`/` must put the cursor in the tag box — before this the block was 55 mouse targets and \
+         no keyboard path at all"
+    );
+    // One more frame before typing: every field here drains the stream while shut, so the key that
+    // opens it cannot become its first character (`keys.rs`, the `xseam` bug).
+    app.update();
+    for (logical, code) in [
+        ("w", KeyCode::KeyW),
+        ("o", KeyCode::KeyO),
+        ("r", KeyCode::KeyR),
+        ("k", KeyCode::KeyK),
+    ] {
+        tap_key(
+            &mut app,
+            bevy::input::keyboard::Key::Character(logical.into()),
+            code,
+        );
+    }
+    for _ in 0..4 {
+        app.update();
+    }
+    assert_eq!(
+        app.world().resource::<Filters>().text(Pane::Tags),
+        "work",
+        "the tag box takes the keys"
+    );
+
+    // **The box shows what was typed**, which it did not when this was first put in a frame: the
+    // detail pane despawns and respawns on every keystroke, so the box is a new entity each time and
+    // `filter::refresh` skipped it — it had already spent the `is_changed` that repaint needed. The
+    // block read `1 of 55` under a box that still said `filter tags`.
+    let typed: Vec<String> = {
+        let mut q = app
+            .world_mut()
+            .query::<(&Text, &emerge_mapper::filter::FilterText)>();
+        q.iter(app.world())
+            .filter(|(_, f)| f.0 == Pane::Tags)
+            .map(|(t, _)| t.0.clone())
+            .collect()
+    };
+    assert_eq!(
+        typed,
+        vec!["work_".to_owned()],
+        "the tag box must show the search and its caret, not the placeholder it was respawned with"
+    );
+
+    let inside = tag_block_text(&mut app);
+    assert!(
+        inside.iter().any(|t| t == "worktop"),
+        "`work` must leave `worktop` standing — the block holds {inside:?}"
+    );
+    for gone in ["prop", "inert", "plain"] {
+        assert!(
+            !inside.iter().any(|t| t == gone),
+            "`{gone}` does not match `work` and must not be drawn — the block holds {inside:?}"
+        );
+    }
+    for heading in ["KIND", "DOES", "LOOKS", "OFFERS"] {
+        assert!(
+            inside.iter().any(|t| t == heading),
+            "the `{heading}` heading left the block when its chips did — that moves every axis \
+             below it on each keystroke. It holds {inside:?}"
+        );
+    }
+    assert_eq!(
+        inside.iter().filter(|t| t.as_str() == "-").count(),
+        3,
+        "the three axes with no match must each say `-` rather than leaving a gap — {inside:?}"
+    );
+    assert!(
+        inside.iter().any(|t| t.contains("Enter takes it")),
+        "with exactly one token left the block must say so before the key is pressed — {inside:?}"
+    );
+
+    // And `Esc` gives the whole vocabulary back, which is the one key that always does.
+    tap_key(&mut app, bevy::input::keyboard::Key::Escape, KeyCode::Escape);
+    for _ in 0..4 {
+        app.update();
+    }
+    let back = tag_block_text(&mut app);
+    for token in ["prop", "inert", "plain", "worktop"] {
+        assert!(
+            back.iter().any(|t| t == token),
+            "`Esc` must put `{token}` back — the block holds {back:?}"
+        );
+    }
+}
+
+/// **`Enter` in the tag box takes the one match, and refuses a tie rather than guessing.**
+///
+/// The refusal is not defensive coding: on the shipped vocabulary `door` is a token on **two** axes
+/// (`kind` and `effects`), so `door` + `Enter` is genuinely ambiguous, and no amount of further
+/// typing separates them. Writing either one would be the editor deciding a tag on the author's
+/// behalf. It says how many matched and leaves the keyboard where it is, mid-word.
+#[test]
+fn enter_in_the_tag_box_takes_the_one_match_and_refuses_a_tie() {
+    use emerge_mapper::filter::{Filters, Pane};
+    use emerge_mapper::keys::Action;
+
+    let root = Fixture::new("tagenter")
+        .descriptor("floor", "alpha")
+        .build("m");
+    let mut app =
+        harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Meshes)
+            .unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..3 {
+        app.update();
+    }
+    let id = app
+        .world()
+        .resource::<emerge_mapper::project::Project>()
+        .library
+        .descriptors
+        .first()
+        .map(|d| d.id.clone())
+        .unwrap_or_else(|| panic!("the fixture must carry a descriptor"));
+    app.world_mut()
+        .resource_mut::<emerge_mapper::tiles::ImportState>()
+        .selected_library_id = Some(id.clone());
+    for _ in 0..4 {
+        app.update();
+    }
+    let surfaces = |app: &App, id: &str| {
+        app.world()
+            .resource::<emerge_mapper::project::Project>()
+            .library
+            .descriptors
+            .iter()
+            .find(|d| d.id == id)
+            .map(|d| d.offers.surfaces.clone())
+            .unwrap_or_default()
+    };
+    assert!(
+        surfaces(&app, &id).is_empty(),
+        "the fixture piece starts with no surface token, which is what makes the toggle visible"
+    );
+
+    press_once(&mut app, emerge_mapper::keys::binding(Action::FocusTagFilter).key);
+    for _ in 0..2 {
+        app.update();
+    }
+    app.update();
+    for (logical, code) in [
+        ("w", KeyCode::KeyW),
+        ("o", KeyCode::KeyO),
+        ("r", KeyCode::KeyR),
+        ("k", KeyCode::KeyK),
+    ] {
+        tap_key(
+            &mut app,
+            bevy::input::keyboard::Key::Character(logical.into()),
+            code,
+        );
+    }
+    tap_key(&mut app, bevy::input::keyboard::Key::Enter, KeyCode::Enter);
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(
+        surfaces(&app, &id),
+        vec!["worktop".to_owned()],
+        "`Enter` on a single match must toggle it through the same write a click makes"
+    );
+    assert_eq!(
+        app.world().resource::<Filters>().text(Pane::Tags),
+        "",
+        "and clear the box, so the next token is typed rather than deleted first"
+    );
+    assert_eq!(
+        app.world().resource::<Filters>().focus_pane(),
+        Some(Pane::Tags),
+        "and keep the keyboard — `Esc` is what leaves"
+    );
+
+    // Now a tie: `p` is in `prop`, `plain` and `worktop`.
+    tap_key(
+        &mut app,
+        bevy::input::keyboard::Key::Character("p".into()),
+        KeyCode::KeyP,
+    );
+    let before = (
+        surfaces(&app, &id),
+        app.world()
+            .resource::<emerge_mapper::project::Project>()
+            .library
+            .descriptors
+            .iter()
+            .find(|d| d.id == id)
+            .map(|d| d.kind.clone())
+            .unwrap_or_default(),
+    );
+    tap_key(&mut app, bevy::input::keyboard::Key::Enter, KeyCode::Enter);
+    for _ in 0..3 {
+        app.update();
+    }
+    let after_kind = app
+        .world()
+        .resource::<emerge_mapper::project::Project>()
+        .library
+        .descriptors
+        .iter()
+        .find(|d| d.id == id)
+        .map(|d| d.kind.clone())
+        .unwrap_or_default();
+    assert_eq!(
+        (surfaces(&app, &id), after_kind),
+        before,
+        "three tokens match `p`, so `Enter` must write nothing at all rather than pick one"
+    );
+    let said = app
+        .world()
+        .resource::<emerge_mapper::tiles::ImportState>()
+        .status
+        .note_text()
+        .to_owned();
+    assert!(
+        said.contains('3') && said.contains("match"),
+        "a tie has to say how many, so the author knows to keep typing — it said {said:?}"
+    );
+}
+
+/// **A label that arrives applies itself, with nobody pressing anything.**
+///
+/// The verbs that used to answer a proposal — `U` to apply, `Y` to discard — retired on 2026-08-20.
+/// Asked for at the keyboard: *"never ask for confirmation on a labeling except for labeling all…
+/// once you approve, everything is automatically labeled and applied."* So the thing to pin is that
+/// **no key is pressed in this test at all**: two proposals are staged, frames are stepped, and both
+/// have landed on their pieces.
+///
+/// One per frame is deliberate and asserted too — `apply_suggestion` may re-photograph a piece it
+/// had to right first, and a pump that drained the set in one frame would queue those shots faster
+/// than the booth can take them.
+#[test]
+fn a_staged_proposal_applies_itself_with_no_key_pressed() {
+    use emerge_mapper::labels::{Entry, Suggestions};
+    use emerge_mapper::tiles::EditTarget;
+
+    let root = Fixture::new("autoapply")
+        .unjudged_descriptor("floor", "alpha")
+        .unjudged_descriptor("wall", "alpha")
+        .build("m");
+    let mut app =
+        harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Meshes)
+            .unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..3 {
+        app.update();
+    }
+    let pieces: Vec<(String, String)> = app
+        .world()
+        .resource::<emerge_mapper::project::Project>()
+        .library
+        .descriptors
+        .iter()
+        .map(|d| (d.id.clone(), d.mesh.clone().unwrap_or_default()))
+        .collect();
+    assert_eq!(pieces.len(), 2, "two pieces, so the one-per-frame pump is visible");
+    for (id, mesh) in &pieces {
+        app.world_mut()
+            .resource_mut::<Suggestions>()
+            .insert(&EditTarget::Library(id.clone()), Entry::for_test(mesh));
+    }
+    assert_eq!(app.world().resource::<Suggestions>().pending(), 2);
+
+    app.update();
+    assert_eq!(
+        app.world().resource::<Suggestions>().pending(),
+        1,
+        "one per frame — a pump that drained the set would outrun the photo booth"
+    );
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(
+        app.world().resource::<Suggestions>().pending(),
+        0,
+        "and nothing is left waiting for a keypress that no longer exists"
+    );
+
+    // The description each proposal carried is on the piece, which is what "applied" means here.
+    for (id, _) in &pieces {
+        let note = app
+            .world()
+            .resource::<emerge_mapper::project::Project>()
+            .library
+            .get(id)
+            .and_then(|d| d.note.clone());
+        assert_eq!(
+            note.as_deref(),
+            Some("a thing"),
+            "`{id}` did not take the proposal that was staged for it"
+        );
+    }
+}
+
+/// **Delete sends a library mesh back to `NOT IMPORTED` and leaves the cursor on it there.**
+///
+/// Reported at the keyboard, 2026-08-20: *"if I delete a mesh on the meshes tab on the right scroll
+/// view, it should send it back to not import it, and then switch over so that it has focus on the
+/// not imported."* It did neither. `Delete` took the entry out of the library and stopped: no
+/// rescan, so the mesh was not among the candidates yet, and `selected` still pointed at whatever
+/// row it had pointed at before. `Shift+Delete` did the whole trip — two chords for one act, which
+/// is what this merge removed.
+///
+/// The shelf switch is not asserted separately because it is not separate state: `Shelf` is derived
+/// from `selected_library_id.is_none()`, so the two assertions below *are* "the list flipped to
+/// NOT IMPORTED with the piece under the highlight".
+#[test]
+fn delete_sends_a_mesh_back_to_not_imported_and_lands_on_it() {
+    use emerge_mapper::keys::Action;
+    use emerge_mapper::tiles::ImportState;
+
+    let root = Fixture::new("sendback")
+        .descriptor("floor", "alpha")
+        .descriptor("wall", "alpha")
+        .build("m");
+    let mut app =
+        harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Meshes)
+            .unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..4 {
+        app.update();
+    }
+    let (id, mesh) = app
+        .world()
+        .resource::<emerge_mapper::project::Project>()
+        .library
+        .descriptors
+        .first()
+        .map(|d| (d.id.clone(), d.mesh.clone().unwrap_or_default()))
+        .unwrap_or_else(|| panic!("the fixture must carry a descriptor with a mesh"));
+    app.world_mut()
+        .resource_mut::<ImportState>()
+        .selected_library_id = Some(id.clone());
+    for _ in 0..3 {
+        app.update();
+    }
+    let candidate_at = |app: &App, mesh: &str| {
+        app.world()
+            .resource::<ImportState>()
+            .candidates
+            .iter()
+            .position(|c| c.mesh == mesh)
+    };
+    assert_eq!(
+        candidate_at(&app, &mesh),
+        None,
+        "while it is in the library it is not a candidate — that is what the two shelves mean"
+    );
+
+    press_once(&mut app, emerge_mapper::keys::binding(Action::RemoveTile).key);
+    for _ in 0..4 {
+        app.update();
+    }
+
+    assert!(
+        app.world()
+            .resource::<emerge_mapper::project::Project>()
+            .library
+            .get(&id)
+            .is_none(),
+        "`{id}` is out of the library"
+    );
+    let back = candidate_at(&app, &mesh);
+    assert!(
+        back.is_some(),
+        "and its mesh is back among the candidates — without the rescan it would not be there yet, \
+         which is exactly what made the old Delete look like it had done nothing"
+    );
+    let state = app.world().resource::<ImportState>();
+    assert_eq!(
+        state.selected_library_id, None,
+        "the cursor leaves the library shelf, which is what puts NOT IMPORTED on screen"
+    );
+    assert_eq!(
+        Some(state.selected),
+        back,
+        "and lands on the piece that was just sent back, not on whichever row it was on before"
+    );
+}
+
+/// **The library shelf reads newest-defined first, and coming back to it returns you where you were.**
+///
+/// Asked for at the keyboard, 2026-08-20: *"whenever a user switches over to that list, the most
+/// recent item that they're working on is the one that's already selected."* Two things were wrong.
+/// `library.ron` is appended to, so the piece you had just imported was at the *bottom* of a list
+/// that is 88 rows today and is meant to be 700; and `right` seeded the selection with `.first()`,
+/// which was therefore the oldest piece in the project, every time.
+///
+/// **Only the definition order is reversed.** A row moves when a new piece is defined and at no
+/// other time — editing a description does not reshuffle the list, which was declined at the
+/// keyboard once the cost was named (`docs/ui.md` §3.5, "fixed positions, never reordered by
+/// recency"). That is asserted here too, because it is the half that is easy to lose later.
+#[test]
+fn the_library_reads_newest_first_and_remembers_the_row_you_left() {
+    use emerge_mapper::filter::Filters;
+    use emerge_mapper::keys::Action;
+    use emerge_mapper::project::Project;
+    use emerge_mapper::tiles::{ImportState, library_ids_for_test};
+
+    let root = Fixture::new("newestfirst")
+        .descriptor("oldest", "alpha")
+        .descriptor("middle", "alpha")
+        .descriptor("newest", "alpha")
+        .build("m");
+    let mut app =
+        harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Meshes)
+            .unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..4 {
+        app.update();
+    }
+    let shelf = |app: &App| {
+        library_ids_for_test(
+            app.world().resource::<Project>(),
+            app.world().resource::<Filters>(),
+            false,
+            None,
+        )
+    };
+    assert_eq!(
+        shelf(&app),
+        vec!["newest".to_owned(), "middle".to_owned(), "oldest".to_owned()],
+        "the shelf reads newest-defined first — `library.ron` is appended to, so its own order is \
+         oldest first and the piece you just imported was at the bottom"
+    );
+
+    // `right` with nothing remembered lands on the top row, which is the piece defined last.
+    press_once(&mut app, emerge_mapper::keys::binding(Action::FocusLibrary).key);
+    for _ in 0..2 {
+        app.update();
+    }
+    assert_eq!(
+        app.world()
+            .resource::<ImportState>()
+            .selected_library_id
+            .as_deref(),
+        Some("newest"),
+        "arriving with no history lands on the most recently defined piece, not the oldest"
+    );
+
+    // Move to another row, leave for the candidates, and come back.
+    app.world_mut()
+        .resource_mut::<ImportState>()
+        .selected_library_id = Some("middle".to_owned());
+    for _ in 0..2 {
+        app.update();
+    }
+    press_once(&mut app, emerge_mapper::keys::binding(Action::FocusCandidates).key);
+    for _ in 0..2 {
+        app.update();
+    }
+    assert_eq!(
+        app.world()
+            .resource::<ImportState>()
+            .selected_library_id,
+        None,
+        "`left` walks the candidates, which is what puts NOT IMPORTED on screen"
+    );
+    press_once(&mut app, emerge_mapper::keys::binding(Action::FocusLibrary).key);
+    for _ in 0..2 {
+        app.update();
+    }
+    assert_eq!(
+        app.world()
+            .resource::<ImportState>()
+            .selected_library_id
+            .as_deref(),
+        Some("middle"),
+        "coming back returns you to the row you left — before this it seeded `.first()` and threw \
+         away where you had got to"
+    );
+
+    // **Editing does not reshuffle.** Touch the oldest piece's tags; it stays where it was.
+    {
+        let mut project = app.world_mut().resource_mut::<Project>();
+        if let Some(d) = project
+            .measured
+            .descriptors
+            .iter_mut()
+            .find(|d| d.id == "oldest")
+        {
+            d.look = vec!["plain".to_owned()];
+        }
+    }
+    for _ in 0..2 {
+        app.update();
+    }
+    assert_eq!(
+        shelf(&app).last().map(String::as_str),
+        Some("oldest"),
+        "a piece that was edited does not jump to the top — the order is definition order, and \
+         reshuffling under an author's hand is what `docs/ui.md` §3.5 is against"
     );
 }

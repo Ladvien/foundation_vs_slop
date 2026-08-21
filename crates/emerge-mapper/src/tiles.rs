@@ -319,6 +319,21 @@ fn stage_camera(
     mut rig: ResMut<crate::view::Rig>,
     mut saved: ResMut<MapView>,
     mut staged: ResMut<StagedLift>,
+    // **The hole the world is drawn through**, whose shape decides how close the mesh stage can get.
+    // `surface::fit_viewport` hands this same rect to the camera as its viewport, so it is the frame
+    // the subject actually has to fit inside — not the window.
+    slot: Query<&bevy::ui::ComputedNode, With<crate::chrome::ViewportSlot>>,
+    // **The mesh as it is actually drawn**, which is the only honest source for how big it is.
+    // `staged_lift`, `align.rotate`, `align.scale` and a mesh whose origin is not its centre all
+    // move the art relative to what `extent` records — framing from the descriptor put a ceiling
+    // lamp half off the top of the hole, seen in a captured frame.
+    previews: Query<Entity, With<Preview>>,
+    kids: Query<&Children>,
+    boxes: Query<(&bevy::camera::primitives::Aabb, &GlobalTransform)>,
+    // What the hole and the subject last measured. Both re-frame: the hole for a first layout and a
+    // window resize, the subject because a mesh loads asynchronously and is not there to measure on
+    // the frame its row was selected.
+    mut last: Local<(Vec2, Vec3, Vec3)>,
 ) {
     // **Re-centre when the piece moves up, as well as when the tab changes.** Raising a sconce to
     // 2.4 m would otherwise push it out of a view framed on the floor, and the author's own edit would
@@ -334,9 +349,17 @@ fn stage_camera(
     // actually changes — a carousel step, a group added, an envelope resized — so this is the same
     // discrete-event shape and not a per-frame write that would take panning away.
     let strip_moved = *mode == Mode::Compose && carousel.is_changed();
-    if !mode.is_changed() && !lift_moved && !preset_moved && !strip_moved {
+    let hole = slot.iter().next().map(|n| n.size()).unwrap_or(Vec2::ZERO);
+    let subject = previews
+        .iter()
+        .next()
+        .and_then(|root| crate::thumbs::subject_bounds(root, &kids, &boxes));
+    let (lo, hi) = subject.unwrap_or((Vec3::ZERO, Vec3::ZERO));
+    let framing_moved = *mode == Mode::Meshes && (hole, lo, hi) != *last;
+    if !mode.is_changed() && !lift_moved && !preset_moved && !strip_moved && !framing_moved {
         return;
     }
+    *last = (hole, lo, hi);
     if lift_moved {
         staged.0 = want_lift;
     }
@@ -352,9 +375,44 @@ fn stage_camera(
                     elevation: rig.elevation,
                 });
             }
-            rig.focus = STAGE + Vec3::new(0.0, want_lift, 0.0);
-            // Close enough that one grid cell fills the view — the tab is about a single tile.
-            rig.height = TILE_VIEW_HEIGHT;
+            // **The mesh stage frames the piece; the tile stage frames a cell.**
+            //
+            // A tile is cell-sized by definition, so three cells of viewport is the right constant
+            // for it. A *mesh* is whatever came out of Blender — 0.12 m to 4 m in the shipped kit —
+            // and framing all of them at 4 m meant a mug occupied a thirtieth of the hole it was
+            // being described through. Asked for at the keyboard, 2026-08-20: *"when a mesh opens,
+            // it is zoomed in as much as possible while ensuring the mesh doesn't go underneath the
+            // left and right UI panels."* The panels are already answered by construction — the
+            // camera's viewport IS the gap between them — so this is the zoom half of it, fitted to
+            // that gap's real shape rather than to a square.
+            let framed = (*mode == Mode::Meshes && hole.x > 0.0 && hole.y > 0.0)
+                .then_some(subject)
+                .flatten()
+                .map(|(lo, hi)| {
+                    let size = hi - lo;
+                    let height =
+                        crate::compose::framing_height((size.x, size.z), size.y, hole.x / hole.y)
+                            .clamp(crate::view::MIN_ZOOM, crate::view::MAX_ZOOM);
+                    ((lo + hi) * 0.5, height)
+                });
+            match framed {
+                // **Aimed at the middle of the drawn box, not at the stage floor.** The Compose arm
+                // below learned the same thing in a captured frame: focused on the ground plane, a
+                // tall piece sits in the top half with the bottom empty, and the tighter the framing
+                // the worse it reads. Here the centre is measured rather than derived, so a piece
+                // hanging from a ceiling is framed where it hangs.
+                Some((centre, height)) => {
+                    rig.focus = centre;
+                    rig.height = height;
+                }
+                // Nothing drawn yet, or a hole that has not been laid out. The tile stage's constant
+                // is the honest answer until there is something to measure — and the moment the mesh
+                // materialises, `framing_moved` brings this system straight back.
+                None => {
+                    rig.focus = STAGE + Vec3::new(0.0, want_lift, 0.0);
+                    rig.height = TILE_VIEW_HEIGHT;
+                }
+            }
             // Canonical iso framing — the author may arrive from a ground-level anim preset.
             rig.elevation = crate::view::ISO_ELEVATION;
         }
@@ -410,8 +468,13 @@ fn stage_camera(
             // aiming at it put a 2.4 m tile in the top half of the frame with the bottom empty —
             // seen in a captured frame, and the same correction the Tiles arm makes with `want_lift`.
             rig.focus = crate::compose::COMPOSE_STAGE + Vec3::Y * carousel.0.tallest * 0.5;
-            rig.height = crate::compose::framing_height(carousel.0.extent, carousel.0.tallest)
-                .min(crate::view::MAX_ZOOM);
+            rig.height = crate::compose::framing_height(
+                carousel.0.extent,
+                carousel.0.tallest,
+                crate::compose::SQUARE,
+            )
+            .max(TILE_VIEW_HEIGHT)
+            .min(crate::view::MAX_ZOOM);
             rig.elevation = crate::view::ISO_ELEVATION;
         }
         Mode::Map => {
@@ -661,6 +724,7 @@ fn note_keys(
                 // Empty clears, the same rule the edge and anchor tokens follow — one keystroke path
                 // for setting and unsetting rather than a second control for "remove".
                 d.note = (!text.is_empty()).then(|| text.clone());
+                crate::labels::stamp_human(d, emerge_core::descriptor::Axis::Note);
                 state.record(before);
                 let said = if text.is_empty() {
                     "description cleared".to_owned()
@@ -1045,6 +1109,7 @@ fn mount_height_keys(
                     return;
                 };
                 d.mount = Some(next);
+                crate::labels::stamp_human(d, emerge_core::descriptor::Axis::Mount);
                 state.record(before);
                 let said = format!("{id} — {want:.2} m up the wall");
                 state.status.say(persist(&mut project, where_to, said));
@@ -3099,6 +3164,21 @@ impl Axis {
             Axis::Surfaces => &mut d.offers.surfaces,
         }
     }
+
+    /// **This axis as the schema names it**, for the provenance record.
+    ///
+    /// Two enums, because they are not the same list: this one is *what the tag block draws* — four
+    /// chip rows — and `emerge_core::descriptor::Axis` is *what a labeller can write*, which is those
+    /// four plus `mount` and `note`. Folding them together would either put two fields with no chips
+    /// into a chip loop or leave the mount and the description with nowhere to be recorded.
+    fn origin(self) -> emerge_core::descriptor::Axis {
+        match self {
+            Axis::Kind => emerge_core::descriptor::Axis::Kind,
+            Axis::Effects => emerge_core::descriptor::Axis::Effects,
+            Axis::Look => emerge_core::descriptor::Axis::Look,
+            Axis::Surfaces => emerge_core::descriptor::Axis::Surfaces,
+        }
+    }
 }
 
 /// One candidate row, carrying its index.
@@ -3177,7 +3257,7 @@ impl Plugin for TilesPlugin {
             .init_resource::<ScaleEdit>()
             .init_resource::<HeightEdit>()
             .init_resource::<StagedLift>()
-            .init_resource::<DemoteArm>()
+            .init_resource::<LibraryCursor>()
             // **The Tiles tab's state**, registered here rather than in its own plugin because both
             // tabs are this file's, and a `Res<T>` a system takes must exist before the first frame —
             // a missing one panics rather than skipping (`CLAUDE.md`).
@@ -3272,7 +3352,7 @@ impl Plugin for TilesPlugin {
                         cell_keys.in_set(crate::keys::Phase::Text),
                         crate::build::naming_keys.in_set(crate::keys::Phase::Text),
                     ),
-                    (style_tabs, paint_label_progress, auto_apply_batch),
+                    (style_tabs, paint_label_progress, apply_what_arrives),
                     rebuild_candidates.run_if(
                         resource_changed::<ImportState>
                             .or_else(resource_changed::<crate::filter::Filters>)
@@ -3289,7 +3369,13 @@ impl Plugin for TilesPlugin {
                         resource_changed::<ImportState>
                             .or_else(resource_changed::<crate::labels::LabelGeneration>)
                             .or_else(resource_exists_and_changed::<Mode>)
-                            .or_else(resource_changed::<crate::build::Build>),
+                            .or_else(resource_changed::<crate::build::Build>)
+                            // **The tag filter, and only the tag filter.** Not
+                            // `resource_changed::<Filters>`: one resource holds all four boxes, so
+                            // that condition would despawn and respawn this whole pane on every
+                            // keystroke typed into the *candidate* list beside it — a rebuild for a
+                            // change this pane cannot show. See `tag_filter_changed`.
+                            .or_else(tag_filter_changed),
                     ),
                     refresh_lines,
                     // **Both stages, nested as one.** A system tuple caps at twenty in 0.19, and these
@@ -3312,9 +3398,11 @@ impl Plugin for TilesPlugin {
                     scale_keys.in_set(crate::keys::Phase::Text),
                     mount_height_keys.in_set(crate::keys::Phase::Text),
                     tile_history_keys.in_set(crate::keys::Phase::Act),
-                    demote_tile.in_set(crate::keys::Phase::Act),
+                    // `Phase::Text` beside the other field handlers, because it *is* one: the tag
+                    // box has the keyboard, and this is what its commit key does.
+                    take_the_one_match.in_set(crate::keys::Phase::Text),
                     exclude_pack.in_set(crate::keys::Phase::Act),
-                    disarm_demote.run_if(resource_changed::<ImportState>),
+                    remember_library_row.run_if(resource_changed::<ImportState>),
                     refresh_cells,
                 ),)
                     .run_if(in_state(crate::screen::Screen::Editor)),
@@ -3537,6 +3625,8 @@ fn style_tabs(
 /// `Esc` blurs and clears. That ordering is also what stops this from being the `xseam` bug again —
 /// while the box holds focus the context is `Typing`, so the `Enter` that leaves it cannot also
 /// reach `BuildDrop` in the same frame, and by the next frame it is no longer `just_pressed`.
+/// **And `/` puts it in the tag box**, one panel over — the same idea, so the same system rather
+/// than a second one that would have to be kept in step with this one.
 fn focus_filter(
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<crate::keys::Live>,
@@ -3546,6 +3636,73 @@ fn focus_filter(
         // The pane this tab's list is filtered by — the same one `rebuild_candidates` reads, so the
         // box that takes the keys is the box above the rows they narrow.
         filters.take_focus(crate::filter::Pane::Candidates);
+    }
+    if crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::FocusTagFilter) {
+        filters.take_focus(crate::filter::Pane::Tags);
+    }
+}
+
+/// **`Enter` in the tag box means "that one".**
+///
+/// The block is the one place in this editor where the whole vocabulary is on screen at once — 55
+/// chips at the shipped kit's size — and until now every one of them was a mouse target and nothing
+/// else. Typing narrows; when exactly one token is left, this toggles it through [`toggle_tag`], the
+/// same write a click makes, and clears the box so the next token can be typed straight away.
+///
+/// **The two refusals are answers, not failures**, so they go to `Status::note` and the box keeps the
+/// keyboard — you are mid-word, and taking it away would mean pressing `/` again to finish typing:
+///
+/// - *nothing matches* — a typo, and the fix is another keystroke.
+/// - *more than one matches* — and this really happens: `door` is a token on **two** axes (`kind` and
+///   `effects`), so `door` + `Enter` is genuinely ambiguous and guessing at it would write a tag
+///   nobody asked for. `doo`… will not disambiguate it either; that pair is what the mouse is for,
+///   and the count line says so before the key is pressed.
+///
+/// Not gated on the tab. The box only exists in the mesh pane, but a focus that outlived a tab change
+/// with nothing left to answer its `Enter` would be a keyboard nobody can get back — `filter::keys`
+/// hands this key over unconditionally, so the system that takes it has to be there unconditionally
+/// too.
+fn take_the_one_match(
+    mut events: MessageReader<KeyboardInput>,
+    mut filters: ResMut<crate::filter::Filters>,
+    project: Option<ResMut<Project>>,
+    mut state: ResMut<ImportState>,
+) {
+    if filters.focus_pane() != Some(crate::filter::Pane::Tags) {
+        return;
+    }
+    let pressed = events.read().any(|e| {
+        e.state.is_pressed() && matches!(e.logical_key, Key::Enter)
+    });
+    if !pressed {
+        return;
+    }
+    let Some(mut project) = project else { return };
+    let needle = filters.text(crate::filter::Pane::Tags).to_owned();
+    // Every surviving token across all four axes, because the box narrows the block rather than one
+    // axis of it — which is also why the tie below is real rather than theoretical.
+    let mut matches: Vec<(Axis, usize)> = Vec::new();
+    for axis in [Axis::Kind, Axis::Effects, Axis::Look, Axis::Surfaces] {
+        for (ix, name) in axis.tokens(&project.vocab).names().enumerate() {
+            if filters.keeps(crate::filter::Pane::Tags, name) {
+                matches.push((axis, ix));
+            }
+        }
+    }
+    match matches.as_slice() {
+        [] => state
+            .status
+            .note(format!("no token matches `{needle}` - Esc gives them all back")),
+        [(axis, ix)] => {
+            toggle_tag(*axis, *ix, &mut project, &mut state);
+            // Cleared rather than blurred: two tags in a row is `/ t a b Enter w o o d Enter`, and
+            // an author who is done presses `Esc` — the one key that leaves every box in this editor.
+            filters.clear(crate::filter::Pane::Tags);
+        }
+        many => state.status.note(format!(
+            "{} tokens match `{needle}` - keep typing, or click the one you mean",
+            many.len()
+        )),
     }
 }
 
@@ -4624,21 +4781,22 @@ fn step_mount(project: &mut Project, state: &mut ImportState) {
         }
     }
     d.mount = Some(want);
+    crate::labels::stamp_human(d, emerge_core::descriptor::Axis::Mount);
     let said = format!("mount: {}", mount_label(d.mount.as_ref()));
     state.record(history_before);
     state.status.say(persist(project, where_to, said));
 }
 
-/// **`U` applies / `Y` discards the VLM's pending proposal** — the review verbs, through the
-/// ordinary edit path: snapshot, mutate at the captured target, record, persist. For a library
-/// entry that persist IS `commit_measured`, so the vocabulary gate rules on the exact bytes
-/// written; for a candidate the change stays in memory until the author's Enter — the existing
-/// doors, no new writer. The suggestion is consumed on success and kept when the write was
-/// refused, so a `NOT WRITTEN` never eats a proposal.
+/// **`Shift+Y` abandons the labeler** — proposals, queue, booth shots and anything in flight.
+///
+/// The last of the three review verbs. `U` and `Y` retired on 2026-08-20 when a label stopped
+/// waiting to be confirmed (see [`apply_what_arrives`]): with nothing ever staged, "apply this one"
+/// and "discard this one" named a state that could no longer exist, and a key bound to an
+/// unreachable state is the dead path this crate refuses everywhere else. This one is not that — a
+/// walk in progress is very much a thing to stop, and stopping it is the only way to.
 fn suggestion_keys(
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<crate::keys::Live>,
-    mut project: ResMut<Project>,
     mut state: ResMut<ImportState>,
     mut suggestions: ResMut<crate::labels::Suggestions>,
     mut generation: ResMut<crate::labels::LabelGeneration>,
@@ -4646,61 +4804,39 @@ fn suggestion_keys(
     mut label_tasks: ResMut<crate::labels::LabelTasks>,
     mut rig: ResMut<crate::label_booth::ShotRig>,
 ) {
-    // `Shift+Y`: the whole labeler emptied at once — proposals, batch, booth queue, in-flight.
-    if keys::just_pressed(&keyboard, *live, Action::DiscardAllSuggestions) {
-        state.status.note(crate::labels::clear_all_labels(
-            &mut suggestions,
-            &mut generation,
-            &mut label_queue,
-            &mut label_tasks,
-            &mut rig,
-        ));
+    if !keys::just_pressed(&keyboard, *live, Action::DiscardAllSuggestions) {
         return;
     }
-    let apply = keys::just_pressed(&keyboard, *live, Action::ApplySuggestion);
-    let discard = keys::just_pressed(&keyboard, *live, Action::DiscardSuggestion);
-    if !apply && !discard {
-        return;
-    }
-    let Some(target) = state.target() else {
-        state.status.note("nothing focused".to_owned());
-        return;
-    };
-    let name = crate::labels::name_of(&target).to_owned();
-    if discard {
-        if suggestions.remove(&target).is_some() {
-            generation.0 = generation.0.wrapping_add(1);
-            state
-                .status
-                .note(format!("discarded the proposed labels for `{name}`"));
-        } else {
-            state.status.note("no proposed labels here".to_owned());
-        }
-        return;
-    }
-    apply_suggestion(
-        target,
-        &name,
-        &mut project,
-        &mut state,
+    state.status.note(crate::labels::clear_all_labels(
         &mut suggestions,
         &mut generation,
-        &label_tasks,
+        &mut label_queue,
+        &mut label_tasks,
         &mut rig,
-    );
+    ));
 }
 
-/// **A batch confirms what it proposes, one per frame.**
+/// **A label that arrives is a label that lands**, one per frame.
 ///
-/// The commit door still exists and still guards the single `L`: one mesh is a decision an author
-/// is standing in front of. A walk of hundreds is a different act — asked for at the keyboard,
-/// 2026-08-15 — and the confirmation is the decision to start it. Everything downstream is the same
-/// path `U` takes, including the guards and the righting branch, so a batch cannot write something
-/// a keypress would have refused.
+/// # There is no review door any more, and that was a decision at the keyboard
 ///
-/// One per frame rather than draining: `apply_suggestion` may re-photograph a piece it had to right
-/// first, and a loop here would queue those shots faster than the booth can take them.
-fn auto_apply_batch(
+/// Until 2026-08-20 a single `L` staged its answer and waited for `U`, while a batch confirmed its
+/// own — one verb, two behaviours, decided by which key started it. Asked for directly: *"never ask
+/// for confirmation on a labeling except for labeling all… once you approve, everything is
+/// automatically labeled and applied."* So the flag that told the two apart is gone, and with it
+/// `U` and `Y`: a proposal is never left standing for a keypress, so keys to answer one had nothing
+/// to act on.
+///
+/// **The review did not disappear; it moved after the fact**, which is what the provenance work of
+/// the same day is for. Every value written here is stamped `By::Model`, so the pane draws it in
+/// [`crate::chrome::UNCHECKED`] until a person confirms it — *"a machine decided this and you have
+/// not"* is now a thing you can see across a whole kit, rather than a keypress you had to spend
+/// before the value existed. `Cmd+Z` undoes a piece, `Shift+Delete` strips one back, and `Shift+Y`
+/// abandons a running walk with everything it has staged.
+///
+/// One per frame rather than draining: [`apply_suggestion`] may re-photograph a piece it had to
+/// right first, and a loop here would queue those shots faster than the booth can take them.
+fn apply_what_arrives(
     queue: Res<crate::labels::LabelQueue>,
     mut project: ResMut<Project>,
     mut state: ResMut<ImportState>,
@@ -4709,7 +4845,10 @@ fn auto_apply_batch(
     label_tasks: Res<crate::labels::LabelTasks>,
     mut rig: ResMut<crate::label_booth::ShotRig>,
 ) {
-    if !queue.auto_apply() || queue.paused() {
+    // **A held walk stops applying too.** Pausing exists so an author can look at something without
+    // the pane changing under them; applying what is already staged would be the walk carrying on in
+    // the one way that writes to disk.
+    if queue.paused() {
         return;
     }
     let Some(target) = suggestions.first_target() else {
@@ -4738,10 +4877,10 @@ pub(crate) const MAX_RIGHTINGS: u8 = 2;
 
 /// **Apply one proposal, wherever the decision came from.**
 ///
-/// `U` is one caller; a batch running with auto-confirm is the other. Extracted rather than
-/// duplicated because the interesting part is not the field copy — it is the two guards around it
-/// (the piece may have gone, the mesh may have changed under the proposal) and the righting branch,
-/// and a second copy of those is a second set of rules to keep in step.
+/// One caller since 2026-08-20 — [`apply_what_arrives`] — and still its own function, because the
+/// interesting part is not the field copy: it is the two guards around it (the piece may have gone,
+/// the mesh may have changed under the proposal) and the righting branch, which are the rules a
+/// second copy would drift on. It was extracted when there were two callers and `U` was one of them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_suggestion(
     target: EditTarget,
@@ -4887,7 +5026,7 @@ pub(crate) fn apply_suggestion(
         // Unreachable: the match above just resolved it, and nothing between can invalidate it.
         return;
     };
-    crate::labels::apply_fields(d, &entry.suggestion, &vocab);
+    crate::labels::apply_fields(d, &entry.suggestion, &entry.provenance, &vocab);
     state.record(history_before);
     let said = persist(
         project,
@@ -4898,10 +5037,18 @@ pub(crate) fn apply_suggestion(
     // `said.starts_with("NOT WRITTEN")` — a control-flow decision made by sniffing a message for a
     // prefix the function it came from was free to reword. `persist` returns a `Result` now, so the
     // question is asked of the type.
-    if said.is_ok() {
-        suggestions.remove(&target);
-        generation.0 = generation.0.wrapping_add(1);
-    }
+    // **A refused write drops the proposal too**, and that is not tidiness — it is the same
+    // termination argument the two guards above make, now that nothing waits for a keypress.
+    //
+    // Keeping it staged was right while `U` existed: the author could fix the vocabulary and press
+    // the key again. With every answer applying on arrival, a proposal the write refuses is reached
+    // by `apply_what_arrives` on the *next frame*, refused identically, and reported again — the
+    // 60 Hz loop this file already paid for once (`not applied - that piece is gone (x184)`, seen on
+    // the first real run against `big`). The vocabulary gate's verdict does not change by waiting, so
+    // the honest answer is one loud problem and a proposal that is gone. Press `L` again after fixing
+    // the vocabulary.
+    suggestions.remove(&target);
+    generation.0 = generation.0.wrapping_add(1);
     state.status.say(said);
 }
 
@@ -5104,21 +5251,38 @@ fn commit_candidate(
     }
 }
 
-/// **Take a tile back out of the library.**
+/// **Send a mesh back out of the library, and land on it where it lands.**
 ///
-/// The tiles tab lists what is IN the library above what could be added to it, because "configure the
-/// tiles" is both halves of that and an editor with an add and no remove is one where a mistyped
+/// The Meshes tab lists what is IN the library beside what could be added to it, because "configure
+/// the tiles" is both halves of that and an editor with an add and no remove is one where a mistyped
 /// import is permanent.
 ///
-/// It refuses to remove a descriptor the open map is using. An orphaned placement is not an error the
-/// map can carry — it names a descriptor nothing defines, so the piece silently fails to appear and
-/// the author finds out by counting crates. Saying "12 placements use this" is the answer; deleting
-/// them on their behalf is not.
+/// # It was two verbs until 2026-08-20, and they named one act
+///
+/// `Delete` removed the entry and `Shift+Delete` "demoted" it — took it out, rescanned, and let it
+/// re-enter as a freshly measured candidate. But the candidate list *is* "meshes on disk that are not
+/// in the library", so removing an entry always sends its mesh back there; the only difference was
+/// that Delete did not rescan, so the shelf flipped to `NOT IMPORTED` and the piece you had just
+/// deleted was not in it yet and the cursor was on something else. Reported at the keyboard: *"if I
+/// delete a mesh on the meshes tab on the right scroll view, it should send it back to not import it,
+/// and then switch over so that it has focus on the not imported."*
+///
+/// So there is one verb, it rescans, and it leaves the cursor on the piece. **One press, no arming**
+/// — chosen at the keyboard over the two-press warning `Shift+Delete` used to carry, because this
+/// tab has its own undo stack and the whole trip is one step on it (`Snapshot` holds both halves by
+/// design).
+///
+/// It still refuses to remove a descriptor a map places or a composition names. An orphaned
+/// placement is not an error the map can carry — it names a descriptor nothing defines, so the piece
+/// silently fails to appear and the author finds out by counting crates. Saying "12 placements use
+/// this" is the answer; deleting them on their behalf is not.
 fn remove_tile(
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<crate::keys::Live>,
     mut project: ResMut<Project>,
     mut state: ResMut<ImportState>,
+    mut suggestions: ResMut<crate::labels::Suggestions>,
+    mut generation: ResMut<crate::labels::LabelGeneration>,
 ) {
     if !keys::just_pressed(&keyboard, *live, Action::RemoveTile) {
         return;
@@ -5126,20 +5290,56 @@ fn remove_tile(
     let Some(id) = state.selected_library_id.clone() else {
         state
             .status
-            .note("select a library tile to remove it".to_owned());
+            .note("select a library mesh to send it back".to_owned());
         return;
+    };
+    // The mesh path is the reborn candidate's name — captured before the entry is gone, through the
+    // same question the Map asks before it deletes anything on this piece's behalf.
+    let mesh = match remove_blockers(&id, &project) {
+        Ok(mesh) => mesh,
+        Err(e) => return state.status.problem(e),
     };
     let before = state.snapshot(&project);
     match take_out_of_library(&id, &mut project) {
         Ok(path) => {
+            // The rescan IS the strip: `import::scan` measures the GLB fresh, so the candidate
+            // re-enters with the importer's facts and none of the author's judgements.
+            scan(&project, &mut state);
+            // **The shelf follows the cursor, so this is the switch.** `Shelf` is derived —
+            // `selected_library_id.is_none()` is *"the arrows are walking the candidates"* — so
+            // clearing it and pointing `selected` at the reborn row is what puts `NOT IMPORTED` on
+            // screen with the piece under the highlight. There is no second flag to set.
+            if let Some(at) = mesh
+                .as_ref()
+                .and_then(|m| state.candidates.iter().position(|c| &c.mesh == m))
+            {
+                state.selected = at;
+            }
             state.selected_library_id = None;
+            // Proposed labels under either identity judged the piece as it was configured —
+            // stale by definition now.
+            let dropped = suggestions
+                .remove(&EditTarget::Library(id.clone()))
+                .is_some()
+                | mesh.as_ref().is_some_and(|m| {
+                    suggestions
+                        .remove(&EditTarget::Candidate(m.clone()))
+                        .is_some()
+                });
+            if dropped {
+                generation.0 = generation.0.wrapping_add(1);
+            }
             state.record(before);
-            state
-                .status
-                .note(format!("removed `{id}` from the library"));
-            info!("removed `{id}` from {}", path.display());
+            // **An entry with no mesh has nowhere to go back to**, and says so rather than claiming
+            // a trip it did not make. Rare — every imported piece has one — but a library is a file
+            // somebody can hand-edit.
+            state.status.note(match &mesh {
+                Some(_) => format!("sent `{id}` back to NOT IMPORTED — measured fresh, stripped"),
+                None => format!("removed `{id}` — it named no mesh, so nothing came back"),
+            });
+            info!("sent `{id}` back out of {}", path.display());
         }
-        Err(e) => state.status.problem(format!("not removed: {e}")),
+        Err(e) => state.status.problem(format!("not sent back: {e}")),
     }
 }
 
@@ -5216,28 +5416,25 @@ fn take_out_of_library(id: &str, project: &mut Project) -> Result<std::path::Pat
 
 /// **What would stop `id` being sent back to the candidates**, and the mesh it would come back as.
 ///
-/// Extracted because two verbs now ask it. The Tiles tab asks before demoting; the **Map** asks
-/// before it deletes anything, and that ordering is the whole reason this is a function: a blocker
-/// discovered *after* placements were gone would be a destructive half-act with nothing to show
-/// for it.
+/// Extracted because two callers ask it. The Meshes tab asks before sending a piece back; the
+/// **Map** asks before it deletes anything, and that ordering is the whole reason this is a
+/// function: a blocker discovered *after* placements were gone would be a destructive half-act with
+/// nothing to show for it.
 ///
 /// It deliberately does **not** check the placement count. That is the one precondition the Map verb
 /// exists to clear, and `take_out_of_library` still enforces it at the door for every caller.
-pub(crate) fn demote_blockers(id: &str, project: &Project) -> Result<String, String> {
-    // An entry with no mesh has nothing to come back as; sending it "back" would just be Delete
-    // wearing a costume, so it refuses and names the honest key.
-    let Some(mesh) = project
+pub(crate) fn remove_blockers(id: &str, project: &Project) -> Result<Option<String>, String> {
+    // **An entry with no mesh is not a refusal any more.** It used to be, because Delete and
+    // Shift+Delete were two verbs and this one could point at the other: *"nothing to send back
+    // (Delete removes it outright)"*. With one verb there is nowhere to point, and there is nothing
+    // wrong with the request either — the entry goes, and nothing comes back because there was never
+    // a mesh to come back. `None` says exactly that and the caller reports it.
+    let mesh = project
         .measured
         .descriptors
         .iter()
         .find(|d| d.id == id)
-        .and_then(|d| d.mesh.clone())
-    else {
-        return Err(format!(
-            "`{id}` has no mesh — nothing to send back ({} removes it outright)",
-            crate::keys::REMOVE_NAME
-        ));
-    };
+        .and_then(|d| d.mesh.clone());
     // **Compositions are the second referrer of a descriptor id, and they are stricter than a map.**
     // `policy::layered_library` hard-refuses a composition whose member descriptor is missing, so a
     // library written without the entry does not give a map with a hole — it gives a project that
@@ -5279,98 +5476,45 @@ pub(crate) fn demote_blockers(id: &str, project: &Project) -> Result<String, Str
     Ok(mesh)
 }
 
-/// Which library entry `Shift+Delete` has armed for demotion — the first press's answer, waiting
-/// for the second.
+/// **The library row you were last on**, so leaving the shelf and coming back returns you to it.
+///
+/// # Why it is not just `ImportState::selected_library_id`
+///
+/// That field does two jobs: it is the library cursor *and* the discriminant `Shelf` is derived
+/// from — `is_none()` means "the arrows are walking the candidates". So `left` has to clear it to
+/// switch shelves, and clearing it is what forgot which row you were on. Coming back seeded the
+/// selection with the first id in the list, which before 2026-08-20 was the **oldest piece in the
+/// project**, every time.
+///
+/// A resource rather than a second field on `ImportState`, for the reason `disarm_demote` was one:
+/// the recorder below is gated on `resource_changed::<ImportState>`, and writing back into that
+/// resource would re-trigger its own gate for ever.
 #[derive(Resource, Default)]
-struct DemoteArm(Option<String>);
+pub struct LibraryCursor(pub Option<String>);
 
-/// **Send a library entry back to the candidate list, stripped.**
-///
-/// "Redo this one from scratch" is a different intent from Delete's "this was a mistake": the piece
-/// leaves the library through the same door, but its GLB is still on disk, so the rescan measures it
-/// fresh and it re-enters the candidate list carrying exactly what the importer can see — footprint
-/// and height, no tags, no note, no mount.
-///
-/// Two presses, because the strip is the point and the point is destructive: the first press arms
-/// with a warning naming what is lost, the second press on the same piece sends it. Moving the
-/// focus disarms (`disarm_demote`) — the confirmation is for THIS piece, not whichever one is
-/// focused when the key lands next. One undo step covers the whole trip, `Snapshot` holding both
-/// halves by design.
-fn demote_tile(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    live: Res<crate::keys::Live>,
-    mut project: ResMut<Project>,
-    mut state: ResMut<ImportState>,
-    mut arm: ResMut<DemoteArm>,
-    mut suggestions: ResMut<crate::labels::Suggestions>,
-    mut generation: ResMut<crate::labels::LabelGeneration>,
-) {
-    if !keys::just_pressed(&keyboard, *live, Action::DemoteTile) {
-        return;
-    }
-    let Some(id) = state.selected_library_id.clone() else {
-        state
-            .status
-            .note("select a library tile to send it back".to_owned());
+/// Remember the library row while there is one. Silent, and it writes to nothing it reads.
+fn remember_library_row(state: Res<ImportState>, mut cursor: ResMut<LibraryCursor>) {
+    let Some(id) = state.selected_library_id.as_deref() else {
         return;
     };
-    if arm.0.as_deref() != Some(id.as_str()) {
-        arm.0 = Some(id.clone());
-        state.status.problem(format!(
-            "sending `{id}` back to the candidates loses its tags, note and mount — \
-             Shift+{} again sends it",
-            crate::keys::REMOVE_NAME
-        ));
-        return;
-    }
-    arm.0 = None;
-    // The mesh path is the reborn candidate's name — captured before the entry is gone, through the
-    // same question the Map asks before it deletes anything on this piece's behalf.
-    let mesh = match demote_blockers(&id, &project) {
-        Ok(mesh) => mesh,
-        Err(e) => return state.status.problem(e),
-    };
-    let before = state.snapshot(&project);
-    match take_out_of_library(&id, &mut project) {
-        Ok(path) => {
-            // The rescan IS the strip: `import::scan` measures the GLB fresh, so the candidate
-            // re-enters with the importer's facts and none of the author's judgements.
-            scan(&project, &mut state);
-            if let Some(at) = state.candidates.iter().position(|c| c.mesh == mesh) {
-                state.selected = at;
-            }
-            state.selected_library_id = None;
-            // Proposed labels under either identity judged the piece as it was configured —
-            // stale by definition now.
-            let dropped = suggestions
-                .remove(&EditTarget::Library(id.clone()))
-                .is_some()
-                | suggestions
-                    .remove(&EditTarget::Candidate(mesh.clone()))
-                    .is_some();
-            if dropped {
-                generation.0 = generation.0.wrapping_add(1);
-            }
-            state.record(before);
-            state.status.note(format!(
-                "sent `{id}` back to the candidates — measured fresh, stripped"
-            ));
-            info!("demoted `{id}` out of {}", path.display());
-        }
-        Err(e) => state.status.problem(format!("not sent back: {e}")),
+    if cursor.0.as_deref() != Some(id) {
+        cursor.0 = Some(id.to_owned());
     }
 }
 
-/// The arm is for ONE piece: focus moving off it disarms, so a `Shift+Delete` aimed at the lamp can
-/// never fire the confirmation the sofa armed. Silent — writing a status here would itself change
-/// `ImportState` and re-run the gate.
-fn disarm_demote(state: Res<ImportState>, mut arm: ResMut<DemoteArm>) {
-    let Some(armed) = arm.0.clone() else {
-        return;
-    };
-    if state.selected_library_id.as_deref() != Some(armed.as_str()) {
-        arm.0 = None;
-    }
+/// **Where entering the library shelf should land**, given what it holds and where you were.
+///
+/// The remembered row when it is still on the shelf — a piece can be sent back to `NOT IMPORTED`,
+/// renamed, or filtered out from under the cursor — and otherwise the first row, which since the
+/// order was reversed is the most recently defined piece. Both entrances ask this, because a chip
+/// and a key that disagreed about where they land would be two answers to one question.
+fn library_landing(ids: &[String], cursor: &LibraryCursor) -> Option<String> {
+    cursor
+        .0
+        .as_deref()
+        .filter(|id| ids.iter().any(|had| had == id))
+        .map(str::to_owned)
+        .or_else(|| ids.first().cloned())
 }
 
 /// Does anything under this entity carry a drawable mesh? The watchdog's one question.
@@ -5406,20 +5550,27 @@ fn on_tag_chip(
         return;
     };
     let Some(mut project) = project else { return };
+    toggle_tag(chip.axis, chip.token, &mut project, &mut state);
+}
+
+/// **The one write that turns a token on or off**, whichever hand asked for it.
+///
+/// Two callers: a click on a chip ([`on_tag_chip`]) and `Enter` in the tag filter
+/// ([`take_the_one_match`]). Extracted rather than copied because the interesting part is not the
+/// `push`/`remove` — it is the three things around it that a second copy would eventually drift on:
+/// the write goes **through the focus**, the list stays in **vocabulary order** so a library diff
+/// shows real changes only, and a `kind` **settles its implied effects**. A keyboard path that got
+/// any one of those wrong would write descriptors the mouse path never could.
+fn toggle_tag(axis: Axis, token_ix: usize, project: &mut Project, state: &mut ImportState) {
     // **Both the token and the vocabulary order come out first, owned.** What follows needs a mutable
     // borrow of the same `Project`, and the sort key cannot be read from it while that is held.
     let (token, order, vocab) = {
-        let names: Vec<String> = chip
-            .axis
-            .tokens(&project.vocab)
-            .names()
-            .map(str::to_owned)
-            .collect();
+        let names: Vec<String> = axis.tokens(&project.vocab).names().map(str::to_owned).collect();
         // The whole vocabulary, for the settle below — it carries the `implies` rule now, not just
         // the DOES ordering. Read here for the same reason everything else in this block is: the
         // write needs `project` mutably.
         let vocab = project.vocab.clone();
-        match names.get(chip.token) {
+        match names.get(token_ix) {
             Some(t) => (t.clone(), names, vocab),
             None => return,
         }
@@ -5430,11 +5581,11 @@ fn on_tag_chip(
     // change, and nothing reached disk. The one accessor exists so this cannot happen; missing it
     // here is what it looks like when it does.
     // Taken before the write — the only moment the old value still exists.
-    let history_before = state.snapshot(&project);
+    let history_before = state.snapshot(project);
     let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
         return;
     };
-    let list = chip.axis.list(d);
+    let list = axis.list(d);
     match list.iter().position(|t| *t == token) {
         Some(i) => {
             list.remove(i);
@@ -5449,12 +5600,16 @@ fn on_tag_chip(
     // **A kind typed by hand implies the same effects a labelled one does.** The rule is about the
     // word, not about who wrote it — so `uses-electricity` follows a chip click exactly as it
     // follows a proposal, and stops following when the kind is clicked off again.
-    if chip.axis == Axis::Kind {
+    if axis == Axis::Kind {
         crate::labels::settle_implied_effects(d, &vocab);
     }
-    let said = format!("{} tags updated", chip.axis.label().to_lowercase());
+    // **A person decided this one**, which is the whole difference between a chip a model lit and a
+    // chip you lit. Stamped after the write and only for the axis touched — the other three keep
+    // whatever record they had, which is the case per-axis provenance exists for.
+    crate::labels::stamp_human(d, axis.origin());
+    let said = format!("{} tags updated", axis.label().to_lowercase());
     state.record(history_before);
-    state.status.say(persist(&mut project, where_to, said));
+    state.status.say(persist(project, where_to, said));
 }
 
 // **No `Res<Build>` any more.** This system used to read `build.placing` to decide whether the arrows
@@ -5470,6 +5625,8 @@ fn move_selection(
     mut state: ResMut<ImportState>,
     // A mesh whose judgement is still a proposal is not composable — see `composable`.
     suggestions: Res<crate::labels::Suggestions>,
+    // Where `right` lands: the row you left, not the first one on the shelf.
+    cursor: Res<LibraryCursor>,
 ) {
     // **Read the keys before touching the focus.** Clearing `selected_library_id` unconditionally
     // would steal the focus back on the very next frame after a library row was clicked — the system
@@ -5503,17 +5660,16 @@ fn move_selection(
         state.status.note("candidates".to_owned());
     }
     if to_library {
-        match library_ids(
+        let ids = library_ids(
             project.as_ref(),
             &filters,
             live.0 == crate::keys::Context::Tiles,
             Some(&suggestions),
-        )
-        .first()
-        {
-            Some(first) => {
+        );
+        match library_landing(&ids, &cursor) {
+            Some(land) => {
                 if state.selected_library_id.is_none() {
-                    state.selected_library_id = Some(first.clone());
+                    state.selected_library_id = Some(land);
                 }
                 // **The heading cursor goes when the library takes over.** Leaving it set meant two
                 // highlights on screen and two readers disagreeing about which was live.
@@ -5929,16 +6085,51 @@ pub fn library_ids_for_test(
 pub(crate) fn library_ids(
     project: &Project,
     filters: &crate::filter::Filters,
+    labeled_only: bool,
+    pending: Option<&crate::labels::Suggestions>,
+) -> Vec<String> {
+    library_rows(project, filters, labeled_only, pending)
+        .into_iter()
+        .map(|d| d.id.clone())
+        .collect()
+}
+
+/// **What the library shelf shows, in the order it shows it** — the one definition of both.
+///
+/// # Newest first, and why that is not "reordered by recency"
+///
+/// `library.ron` is appended to, so its order *is* definition order and the piece you just imported
+/// was at the bottom of it — 88 rows today, and the kit this editor exists to build is 700. Worse,
+/// `right` seeded the selection with `.first()`, so switching to this shelf landed you on the oldest
+/// piece in the project every time. Asked for at the keyboard, 2026-08-20: *"whenever a user
+/// switches over to that list, the most recent item that they're working on is the one that's
+/// already selected."*
+///
+/// Reversed, and **only** reversed. A row's position changes when a new piece is defined and at no
+/// other time — editing a description does not move anything, which was the other half of the ask
+/// and was declined at the keyboard once the cost was named: `filter.rs` and `docs/ui.md` §3.5 both
+/// hold *"fixed positions, never reordered by recency"*, on Sears & Shneiderman 1994
+/// (`10.1145/174630.174632`) measuring people slower on menus whose items moved, and preferring the
+/// ones that did not. A list that reshuffles as you work is the thing that finding is measured
+/// against.
+///
+/// **Rows rather than ids, because the panel needs the descriptor and the keys need the id**, and
+/// when those were two filters written twice the eye and the arrows disagreed about what was on
+/// screen — which is the failure `keep_library_selection_visible` exists to clean up after.
+pub(crate) fn library_rows<'a>(
+    project: &'a Project,
+    filters: &crate::filter::Filters,
     // Composing asks only for judged meshes; the definition bench asks for all of them.
     labeled_only: bool,
     // Proposals waiting on a human — a mesh with one is not settled yet. See `composable`.
     pending: Option<&crate::labels::Suggestions>,
-) -> Vec<String> {
+) -> Vec<&'a emerge_core::descriptor::Descriptor> {
     let pane = crate::filter::Pane::Candidates;
     project
         .library
         .descriptors
         .iter()
+        .rev()
         .filter(|d| filters.keeps(pane, &d.id))
         // **A tile is composed only from JUDGED meshes.** The two tabs share one list and ask
         // different questions of it: the Meshes tab is the definition bench and shows everything,
@@ -5951,7 +6142,6 @@ pub(crate) fn library_ids(
         // tab."* `labels::needs_labels` is the same predicate the VLM batch picks its targets with,
         // so "what the labeler still owes you" and "what you cannot build with yet" cannot drift.
         .filter(|d| !labeled_only || composable(d, pending))
-        .map(|d| d.id.clone())
         .collect()
 }
 
@@ -6686,8 +6876,21 @@ fn on_shelf_click(
     mode: Option<Res<Mode>>,
     mut state: Option<ResMut<ImportState>>,
     mut build: Option<ResMut<crate::build::Build>>,
+    // **A global observer, so every resource it takes is optional** — see `on_cell_verb`. This one
+    // is `init_resource`d by the tiles plugin, but a click on a `Button` outside the editor still
+    // reaches here, and in 0.19 a missing `Res<T>` takes the application down rather than skipping.
+    cursor: Option<Res<LibraryCursor>>,
 ) {
-    let (Ok(chip), Some(project), Some(filters), Some(suggestions), Some(mode), Some(state), Some(build)) = (
+    let (
+        Ok(chip),
+        Some(project),
+        Some(filters),
+        Some(suggestions),
+        Some(mode),
+        Some(state),
+        Some(build),
+        Some(cursor),
+    ) = (
         chips.get(click.entity),
         project,
         filters,
@@ -6695,7 +6898,9 @@ fn on_shelf_click(
         mode,
         state.as_mut(),
         build.as_mut(),
-    ) else {
+        cursor,
+    )
+    else {
         return;
     };
     // The census counts, never a panel — `census_is_the_one_counter` forbids reading
@@ -6714,11 +6919,11 @@ fn on_shelf_click(
         // different things depending on how it was made.
         Shelf::Library => {
             build.browsing = None;
-            match library_ids(&project, &filters, *mode == Mode::Tiles, Some(&suggestions)).first()
-            {
-                Some(first) => {
+            let ids = library_ids(&project, &filters, *mode == Mode::Tiles, Some(&suggestions));
+            match library_landing(&ids, &cursor) {
+                Some(land) => {
                     if state.selected_library_id.is_none() {
-                        state.selected_library_id = Some(first.clone());
+                        state.selected_library_id = Some(land);
                     }
                     state.focused_pack = None;
                     state.status.note("library".to_owned());
@@ -7039,16 +7244,12 @@ fn rebuild_candidates(
                 draw_candidates(p, &state, &filters, &project);
                 return;
             }
-            for d in project
-                .library
-                .descriptors
-                .iter()
-                .filter(|d| filters.keeps(pane, &d.id))
-                // The Tiles palette composes, so it lists only judged meshes — see `library_ids`,
-                // which the arrows walk by. The two must agree or the keys step onto rows the eye
-                // cannot see.
-                .filter(|d| !on_tiles || composable(d, Some(&suggestions)))
-            {
+            // **Through `library_rows`, which is also what the arrows walk.** This used to repeat
+            // the filter inline with a comment promising the two agreed — and they did, until the
+            // order moved: newest-first in one place and file order in the other is the keys
+            // stepping onto rows the eye cannot see, which is the exact failure that comment named.
+            // One function answers "what is on this shelf, in what order" for both.
+            for d in library_rows(&project, &filters, on_tiles, Some(&suggestions)) {
                 let selected = state.selected_library_id.as_deref() == Some(d.id.as_str());
                 // **Green when it has been judged, plain when it still owes an answer.** The one
                 // glance that says whether a mesh can build anything yet; on the Tiles tab every
@@ -7368,6 +7569,24 @@ fn build_detail(p: &mut ChildSpawnerCommands, build: &crate::build::Build, proje
     }
 }
 
+/// **Has the tag filter's text moved since last frame?** — the one filter this pane can show.
+///
+/// `Filters` is one resource holding four boxes, so `resource_changed` over it fires for a keystroke
+/// typed into the candidate list too, and this pane would be torn down and rebuilt for a change it
+/// cannot display. A `Local` of what was last drawn is the precision that costs one `String`.
+///
+/// It is a run condition, so it is evaluated **every frame regardless of what else gated the
+/// system** — 0.19 has no short-circuit, which this crate's `CLAUDE.md` records twice. That is what
+/// makes the `Local` safe here: it tracks the text, not the runs.
+fn tag_filter_changed(filters: Res<crate::filter::Filters>, mut last: Local<String>) -> bool {
+    let now = filters.text(crate::filter::Pane::Tags);
+    if last.as_str() == now {
+        return false;
+    }
+    *last = now.to_owned();
+    true
+}
+
 /// Rebuild the detail for whichever candidate is selected.
 fn rebuild_detail(
     mut commands: Commands,
@@ -7380,6 +7599,8 @@ fn rebuild_detail(
     project: Res<Project>,
     mode: Res<Mode>,
     build: Res<crate::build::Build>,
+    // The tag block narrows by typing, so the pane that draws it has to know what was typed.
+    filters: Res<crate::filter::Filters>,
     panes: Query<Entity, With<DetailPane>>,
 ) {
     for pane in &panes {
@@ -7793,12 +8014,64 @@ fn rebuild_detail(
                 },
                 crate::chrome::Control(crate::keys::ControlId::Tags),
             ));
+            // **What survives the filter, worked out before anything is spawned.**
+            //
+            // The count line has to stand *under the box* and above the axes — a count printed after
+            // the block it describes is a footnote, and the thing it answers ("is `Enter` going to
+            // take one, or am I still narrowing?") is wanted before the eye moves. So the pass that
+            // decides which chips are drawn happens first and the render reads its answer.
+            //
+            // Vocabulary order is untouched by all of this. Narrowing removes; it never promotes,
+            // sorts or re-ranks — Sears & Shneiderman 1994 (`10.1145/174630.174632`) measured users
+            // slower on menus whose items moved, and preferring the ones that did not; `filter.rs`'s
+            // own module note states the same rule for the three lists. A block whose chips changed
+            // places as you typed would cost exactly what the filter is here to save.
+            let needle = filters.text(crate::filter::Pane::Tags).to_owned();
+            let surviving: Vec<(Axis, usize, Vec<(usize, String)>)> =
+                [Axis::Kind, Axis::Effects, Axis::Look, Axis::Surfaces]
+                    .into_iter()
+                    .filter_map(|axis| {
+                        let vocab = axis.tokens(&project.vocab);
+                        if vocab.tokens.is_empty() {
+                            return None;
+                        }
+                        let kept: Vec<(usize, String)> = vocab
+                            .names()
+                            .enumerate()
+                            .filter(|(_, n)| filters.keeps(crate::filter::Pane::Tags, n))
+                            .map(|(i, n)| (i, n.to_owned()))
+                            .collect();
+                        Some((axis, vocab.tokens.len(), kept))
+                    })
+                    .collect();
+            let total: usize = surviving.iter().map(|(_, all, _)| all).sum();
+            let shown: usize = surviving.iter().map(|(_, _, kept)| kept.len()).sum();
             tags.with_children(|p| {
-                for axis in [Axis::Kind, Axis::Effects, Axis::Look, Axis::Surfaces] {
-                    let vocab = axis.tokens(&project.vocab);
-                    if vocab.tokens.is_empty() {
-                        continue;
-                    }
+                // **The box, and the block's first keyboard path.** 55 chips were 55 mouse targets:
+                // `on_tag_chip` was their only writer, on an editor whose whole argument is that
+                // keystrokes are faster. `/` puts the cursor here, typing narrows, `Enter` takes the
+                // one match, `Esc` gives everything back.
+                crate::filter::spawn(p, crate::filter::Pane::Tags);
+                // **What `Enter` will do, said before it is pressed** — and nothing at all while the
+                // box is empty, where `55 of 55` would be a line that never changes and never helps.
+                if !needle.is_empty() {
+                    let line = match shown {
+                        0 => format!("nothing matches `{needle}`"),
+                        1 => format!("1 of {total}  -  Enter takes it"),
+                        n => format!("{n} of {total}  -  keep typing"),
+                    };
+                    p.spawn((
+                        Text::new(line),
+                        TextColor(DIM),
+                        TextFont::from_font_size(crate::chrome::text::HINT),
+                        Node {
+                            margin: UiRect::top(Val::Px(crate::chrome::GAP_TIGHT)),
+                            ..default()
+                        },
+                    ));
+                }
+                for (axis, _, kept) in &surviving {
+                    let axis = *axis;
                     let held: Vec<String> = match axis {
                         Axis::Kind => d.kind.clone(),
                         Axis::Effects => d.effects.clone(),
@@ -7826,7 +8099,30 @@ fn rebuild_detail(
                             Axis::Surfaces => e.suggestion.offers_surfaces.clone(),
                         })
                         .unwrap_or_default();
+                    // **Did a model write this axis, and has nobody checked it since?**
+                    //
+                    // Read once per axis rather than per chip: it is a property of the axis, and
+                    // asking it 21 times for `KIND` would be the same lookup 21 times.
+                    let unchecked = d
+                        .labels
+                        .as_ref()
+                        .and_then(|l| l.by.get(axis.origin()))
+                        == Some(emerge_core::descriptor::By::Model);
                     crate::chrome::section(p, axis.label());
+                    // **An axis the filter emptied keeps its heading and says `-`.**
+                    //
+                    // Dropping the whole axis would move the three below it every time a letter is
+                    // typed, which is the moving-menu cost the filter exists to avoid — and it would
+                    // make "not on this axis" look identical to "this kit has no such axis". A dash
+                    // is an answer; a gap is a question.
+                    if kept.is_empty() {
+                        p.spawn((
+                            Text::new("-"),
+                            TextColor(LABEL),
+                            TextFont::from_font_size(crate::chrome::text::LABEL),
+                        ));
+                        continue;
+                    }
                     p.spawn(Node {
                         flex_direction: FlexDirection::Row,
                         flex_wrap: FlexWrap::Wrap,
@@ -7835,7 +8131,7 @@ fn rebuild_detail(
                         ..default()
                     })
                     .with_children(|chips| {
-                        for (ix, name) in vocab.names().enumerate() {
+                        for (ix, name) in kept.iter().map(|(i, n)| (*i, n.as_str())) {
                             let on = held.iter().any(|h| h == name);
                             // Proposed-but-not-held: ghost-lit in SUGGEST with a hairline border —
                             // visibly a question, not a selection. A token both held and proposed is
@@ -7846,7 +8142,15 @@ fn rebuild_detail(
                                 TagChip { axis, token: ix },
                                 name,
                                 10.0,
-                                if on {
+                                // **Four states, and the fourth is new.** Held-and-yours is
+                                // `TEXT`; held-but-a-model-wrote-it is `UNCHECKED`, the same slate
+                                // as a proposal, lightened because it now sits on the selected fill;
+                                // proposed-not-held is `SUGGEST` with a border; everything else is
+                                // `LABEL`. Held and ghost are told apart by the fill, which is why
+                                // the two blues can be siblings rather than rivals.
+                                if on && unchecked {
+                                    crate::chrome::UNCHECKED
+                                } else if on {
                                     TEXT
                                 } else if ghost {
                                     crate::chrome::SUGGEST

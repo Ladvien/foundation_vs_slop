@@ -61,7 +61,30 @@ storing it.
 
 Four stages. Each ships on its own and each is useful without the next.
 
-### Stage 1 — the descriptor records how each label arrived
+### Stage 1 ✅ SHIPPED 2026-08-20 — the descriptor records how each label arrived
+
+`emerge_core::descriptor::LabelOrigin` is on `Descriptor` as `labels: Option<LabelOrigin>`;
+`labels::apply_fields` stamps `Model` for every axis it writes and `labels::stamp_human` stamps
+`Human` from the three places a person writes one (a tag chip or the tag filter's `Enter`, the
+description field, the mount cycle). The editor shows it where the author asked for it: a held chip a
+model wrote and nobody has confirmed renders `chrome::UNCHECKED`, one a person decided renders `TEXT`.
+`vlm::Confidence` moved to `emerge-core` and is re-exported, because a descriptor now carries one.
+
+**Two deviations from what is written below, both deliberate:**
+
+- **No `LIBRARY_VERSION` bump.** `Library::validate` refuses a version it does not recognise, so
+  bumping would refuse every existing `library.ron` until somebody edited the number — for a field
+  that is optional by construction and whose absence already means exactly the right thing. A version
+  bump is for fields that *move*.
+- **`By` has two variants, not three.** `Import` was drafted and cut: nothing in the importer writes
+  any of the six labelled fields — it measures size, extent and cells — so the variant would have had
+  no writer, and a value no code path can produce is a stub wearing a schema's clothes. `None` already
+  says *no record*, which is precisely what a manifest-generated descriptor means.
+
+`#[serde(skip_serializing_if)]` throughout, so the 87 pieces with no record gain nothing: measured on
+the furniture kit, one labelled piece took the file from 5,781 lines to 5,793.
+
+The original plan follows, unchanged.
 
 Add one field to `Descriptor`:
 

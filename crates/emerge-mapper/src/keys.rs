@@ -477,6 +477,14 @@ pub enum Action {
     /// **Put the cursor in the filter box.** The box was reachable only by mouse, on a tab whose
     /// whole argument is that keystrokes are faster.
     FocusFilter,
+    /// **Put the cursor in the tag box** — the same verb, one panel over, on the block that holds the
+    /// project's whole vocabulary.
+    ///
+    /// Its own action rather than a second context for [`Action::FocusFilter`], because the two boxes
+    /// are on screen **at the same moment**: the candidate list down the right, the tag block in the
+    /// detail pane on the left. One key cannot mean both without asking which one the author meant,
+    /// and a key that guesses is the thing this census exists to prevent.
+    FocusTagFilter,
     PanForward,
     PanBack,
     PanLeft,
@@ -491,11 +499,12 @@ pub enum Action {
     Accept,
     FoldPack,
     Rescan,
+    /// **Send a library mesh back to `NOT IMPORTED`**, stripped, and land the cursor on it there.
+    ///
+    /// One verb since 2026-08-20. `DemoteTile` sat beside it on the shifted chord and named the same
+    /// act — the candidate list *is* "meshes on disk not in the library", so taking an entry out
+    /// always sends its mesh back; only the rescan and the cursor differed. See `tiles::remove_tile`.
     RemoveTile,
-    /// Send a library entry back to the candidate list, stripped — it re-enters as a freshly
-    /// measured candidate with no tags, note or mount. Destructive, so it takes two presses:
-    /// the first arms with a warning, the second sends.
-    DemoteTile,
     /// Arm the clone tool: drag a box to take a copy of every placement inside it, then click to
     /// stamp the whole set somewhere else — as many times as it is held.
     CloneMode,
@@ -586,10 +595,6 @@ pub enum Action {
     /// separate restore verb would be a second way to say the same thing, and the row already says
     /// which state it is in.
     ExcludePack,
-    /// Apply the pending suggestion to the focused piece, through the ordinary edit path.
-    ApplySuggestion,
-    /// Drop the pending suggestion.
-    DiscardSuggestion,
     /// Drop EVERY pending suggestion, cancel the batch, and abandon in-flight requests — the
     /// one-key way out of a labeling run that went wrong.
     DiscardAllSuggestions,
@@ -1444,17 +1449,7 @@ pub const BINDINGS: &[Binding] = &[
         false,
         Context::Meshes,
         REMOVE_NAME,
-        "remove / Shift: demote",
-    )
-    .at(Home::Control(ControlId::Pieces)),
-    bs(
-        Action::DemoteTile,
-        REMOVE_KEY,
-        false,
-        true,
-        Context::Meshes,
-        REMOVE_NAME,
-        "remove / Shift: demote",
+        "send back to NOT IMPORTED",
     )
     .at(Home::Control(ControlId::Pieces)),
     // **This tab's own history**, on the same chords and for the reason `keys.rs`'s undo comment
@@ -1993,7 +1988,7 @@ pub const BINDINGS: &[Binding] = &[
         false,
         Context::Meshes,
         "L",
-        "suggest / all / apply / discard / clear",
+        "suggest / all / abandon",
     )
     .at(Home::Control(ControlId::Tags)),
     bs(
@@ -2003,29 +1998,10 @@ pub const BINDINGS: &[Binding] = &[
         true,
         Context::Meshes,
         "L",
-        "suggest / all / apply / discard / clear",
+        "suggest / all / abandon",
     )
     .at(Home::Control(ControlId::Tags)),
 
-    b(
-        Action::ApplySuggestion,
-        KeyCode::KeyU,
-        false,
-        Context::Meshes,
-        "U",
-        "suggest / all / apply / discard / clear",
-    )
-    .at(Home::Control(ControlId::Tags)),
-    bs(
-        Action::DiscardSuggestion,
-        KeyCode::KeyY,
-        false,
-        false,
-        Context::Meshes,
-        "Y",
-        "suggest / all / apply / discard / clear",
-    )
-    .at(Home::Control(ControlId::Tags)),
     bs(
         Action::DiscardAllSuggestions,
         KeyCode::KeyY,
@@ -2033,7 +2009,32 @@ pub const BINDINGS: &[Binding] = &[
         true,
         Context::Meshes,
         "Y",
-        "suggest / all / apply / discard / clear",
+        "suggest / all / abandon",
+    )
+    .at(Home::Control(ControlId::Tags)),
+    // **`/` narrows the tag block, and it is this context's only mouse-shaped hole.**
+    //
+    // The block draws the project's whole vocabulary — 55 chips on the shipped kit, of which a piece
+    // holds three to six — and every one of them was a mouse target and nothing else: `on_tag_chip`
+    // was their only writer. `docs/ui.md` §4.2 is the rule that makes that a defect rather than a
+    // preference: everything reachable by mouse is reachable by keyboard and vice versa.
+    //
+    // **A row this context pays for, deliberately.** `no_context_carries_more_than_a_learnable_
+    // vocabulary` is the ceiling and it is not one to route around — but the alternative was leaving
+    // the largest control in the pane keyboard-unreachable, which is a worse answer than one more
+    // chord. `/` because it is what "search here" has meant for forty years, and because Meshes has
+    // no symbol keys at all: `[`/`]` walk layers and nothing else in this context is punctuation.
+    //
+    // Homed on the block rather than on the box: `chrome::Control(ControlId::Tags)` is the column,
+    // the box is its first row, and `filter::spawn` deliberately brings no control of its own for
+    // exactly this reason — two `Control`s in one subtree is the badge system with two answers.
+    b(
+        Action::FocusTagFilter,
+        KeyCode::Slash,
+        false,
+        Context::Meshes,
+        "/",
+        "filter the tags / Enter takes the one match",
     )
     .at(Home::Control(ControlId::Tags)),
     // The arrows are the Tiles tab's too. Legal, and the reason the census models context at all:
@@ -2910,7 +2911,6 @@ mod tests {
             Action::AcceptEdges,
             Action::Rescan,
             Action::RemoveTile,
-            Action::DemoteTile,
             Action::UndoTile,
             Action::RedoTile,
             Action::CellLeft,
@@ -2932,8 +2932,6 @@ mod tests {
             Action::SuggestLabels,
             Action::SuggestAll,
             Action::ExcludePack,
-            Action::ApplySuggestion,
-            Action::DiscardSuggestion,
             Action::DiscardAllSuggestions,
             Action::PrevRig,
             Action::NextRig,
@@ -2988,6 +2986,7 @@ mod tests {
             Action::KitOpen,
             Action::KitLeave,
             Action::FocusFilter,
+            Action::FocusTagFilter,
             Action::ShowErrors,
         ];
         assert_eq!(
@@ -3518,7 +3517,19 @@ mod tests {
             // remove. **No new key to learn**: Space already means "the obvious thing to this row"
             // on two other tabs, and it is inert off a heading by construction rather than by
             // prose, since making it a second key on `Accept` would have let Space commit a tile.
-            (Context::Meshes, 33),
+            // 32 -> 31: `DemoteTile` retired on 2026-08-20 into `RemoveTile`, which now does the
+            // whole trip — out of the library, rescanned, and the cursor left on the reborn row.
+            // 34 -> 32: `ApplySuggestion` and `DiscardSuggestion` retired on 2026-08-20 — a label
+            // no longer waits to be confirmed, so `U` and `Y` named a state that cannot occur. The
+            // number goes DOWN here, which the assertion below does not police (it catches growth);
+            // stated anyway, because a count nobody updated is a count nobody can trust.
+            // 33 -> 34: `FocusTagFilter`. The tag block draws the project's whole vocabulary — 55
+            // chips on the shipped kit — and every one of them was a mouse target and nothing else:
+            // `tiles::on_tag_chip` was their only writer, on the tab whose argument is that
+            // keystrokes are faster. `/` is a **new key to learn**, which the two rows above this one
+            // were each able to avoid; it is charged knowingly, because the alternative was leaving
+            // the largest control in the pane keyboard-unreachable. `docs/ui.md` §4.2.
+            (Context::Meshes, 31),
             // 21 -> 22: `ClearTile`. `MemberPrev`/`MemberNext` replace the X nudge rather than
             // adding to it, so the walk costs nothing here.
             // 22 -> 26: the KIT list (FVS: the tab could author tiles and never show them).
@@ -3645,12 +3656,15 @@ mod tests {
             assert_eq!(one.does, does);
         }
 
-        // The labeler's five verbs read as one row, the shifted forms rendered as such.
+        // **The labeler's three verbs read as one row**, the shifted forms rendered as such. It was
+        // five until 2026-08-20, when `U` and `Y` retired: a label applies on arrival, so "apply
+        // this one" and "discard this one" named a state that no longer occurs. What is left is ask
+        // about this piece, ask about everything, and abandon a walk in progress.
         let labels = badges(Context::Meshes, Stance::Idle)
             .into_iter()
-            .find(|r| r.does == "suggest / all / apply / discard / clear")
+            .find(|r| r.does == "suggest / all / abandon")
             .unwrap_or_else(|| panic!("no labels row"));
-        assert_eq!(labels.chord, "L, Shift+L, U, Y, Shift+Y");
+        assert_eq!(labels.chord, "L, Shift+L, Shift+Y");
     }
 
     /// **The overlay key is held, not tapped.** `pressed` must answer for it while it is down —

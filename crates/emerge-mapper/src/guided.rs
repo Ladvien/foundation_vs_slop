@@ -206,6 +206,37 @@ impl Plugin for GuidePlugin {
         });
         // **By id, so a script can send the author to a named mesh** and know they arrived — the
         // selection is what `B` derives for and what `Enter` imports.
+        // **Does the focused piece hold this token, on this axis?**
+        //
+        // The one objective question in a walk of the tag block, and the reason it is worth a
+        // checkpoint rather than a judgement call: the block's whole point is that a keystroke can
+        // now do what only a click could, so *"did the token actually land"* has a true answer and
+        // an author should not have to be the one who checks it. Takes `{"axis": "look", "token":
+        // "wood"}`; an unknown axis answers `false` rather than panicking, because a script is a
+        // file somebody typed.
+        let carries_token = app.register_system(
+            |args: In<Value>,
+             state: Res<crate::tiles::ImportState>,
+             project: Option<Res<Project>>| {
+                let (Some(project), Some(target)) = (project, state.target()) else {
+                    return false;
+                };
+                let Some(d) = state.placed_at_target(&target, &project) else {
+                    return false;
+                };
+                let Some(token) = args.0.get("token").and_then(Value::as_str) else {
+                    return false;
+                };
+                let held: &[String] = match args.0.get("axis").and_then(Value::as_str) {
+                    Some("kind") => &d.kind,
+                    Some("effects") => &d.effects,
+                    Some("look") => &d.look,
+                    Some("surfaces") => &d.offers.surfaces,
+                    _ => return false,
+                };
+                held.iter().any(|t| t == token)
+            },
+        );
         let selected_mesh = app.register_system(
             |args: In<Value>, state: Res<crate::tiles::ImportState>| {
                 args.0
@@ -302,6 +333,7 @@ impl Plugin for GuidePlugin {
         checkpoints.register("the proposal was kept", proposal_kept);
         checkpoints.register("the map is saved", map_saved);
         checkpoints.register("the mesh declares an edge", mesh_declares_edge);
+        checkpoints.register("the piece carries", carries_token);
     }
 }
 

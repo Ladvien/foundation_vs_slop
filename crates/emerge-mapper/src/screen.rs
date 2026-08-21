@@ -238,7 +238,6 @@ pub const OWNERSHIP: &[(&str, Ownership)] = &[
     ("emerge_mapper::editor::EdgeFaults", Ownership::Door),
     ("emerge_mapper::tiles::ImportState", Ownership::Door),
     ("emerge_mapper::tiles::CellEdit", Ownership::Door),
-    ("emerge_mapper::tiles::DemoteArm", Ownership::Door),
     ("emerge_mapper::tiles::DerivedEdges", Ownership::Door),
     ("emerge_mapper::tiles::HeightEdit", Ownership::Door),
     ("emerge_mapper::tiles::LatticePick", Ownership::Door),
@@ -246,6 +245,9 @@ pub const OWNERSHIP: &[(&str, Ownership)] = &[
     ("emerge_mapper::tiles::NoteEdit", Ownership::Door),
     ("emerge_mapper::tiles::ScaleEdit", Ownership::Door),
     ("emerge_mapper::tiles::StagedLift", Ownership::Door),
+    // The library row you were last on. `Door`, because a different kit's ids mean nothing here —
+    // a remembered `furniture/sofa` pointing into `site` would land the cursor on nothing.
+    ("emerge_mapper::tiles::LibraryCursor", Ownership::Door),
     ("emerge_mapper::compose::ComposeState", Ownership::Door),
     ("emerge_mapper::compose::Budget", Ownership::Door),
     ("emerge_mapper::compose::StagedCarousel", Ownership::Door),

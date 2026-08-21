@@ -1,0 +1,85 @@
+{
+  "_": "The Meshes tab after the 2026-08-20 tag-block work: the vocabulary narrows by typing, Enter takes the one match, and U/Y walk a batch. Most steps are judgement calls on purpose — the objective ones are the two that ask whether a token actually landed.",
+  "steps": [
+    {
+      "label": "look at the tag block before touching it",
+      "goal": "the block draws the project's whole vocabulary — 55 chips on the furniture kit — so an author reads it rather than remembering it. That is the trade being tested: recognition, at the price of a wall",
+      "do": [
+        "pick any mesh so the detail pane fills",
+        "say whether the four axes read as four groups, or as one field of grey boxes"
+      ],
+      "checkpoint": null,
+      "recovery": "there is nothing to get wrong — 'it reads as a wall' is the useful answer, not the wrong one"
+    },
+    {
+      "label": "find the filter without being told where it is",
+      "goal": "the box sits between `mount` and `KIND`, and it is the block's first keyboard path. If it has to be pointed out, it is in the wrong place",
+      "do": [
+        "without pressing anything, say where you would type to narrow the chips",
+        "then hold K and see where the / badge lands"
+      ],
+      "checkpoint": null,
+      "recovery": "if you looked at the list panel's filter box on the right instead, say so — the two say different things on purpose and that is exactly what is being checked"
+    },
+    {
+      "label": "narrow it to one token",
+      "goal": "typing removes chips and never moves the ones that stay. Sears & Shneiderman 1994 measured users slower on menus whose items reordered themselves, which is why this narrows rather than promotes",
+      "do": [
+        "press /",
+        "type `wood`",
+        "watch the count line under the box, and the three axes that go to `-`"
+      ],
+      "checkpoint": null,
+      "recovery": "if the box still shows `filter tags` while you are typing into it, stop and say so — that was a live bug on 2026-08-20 and its fix is what this step is walking"
+    },
+    {
+      "label": "take it with Enter",
+      "goal": "one keystroke does what only a mouse could do before. The block was 55 click targets and nothing else",
+      "do": [
+        "press Enter",
+        "look at where `wood` now sits in LOOKS, and at the status line"
+      ],
+      "checkpoint": "the piece carries",
+      "args": {
+        "axis": "look",
+        "token": "wood"
+      },
+      "recovery": "if Enter did nothing, read the count line: more than one token matched, and it refuses rather than guessing. Keep typing until it says `Enter takes it`"
+    },
+    {
+      "label": "type the next one without leaving the box",
+      "goal": "Enter clears the box and keeps the keyboard, so two tokens are one gesture rather than two round trips. Esc is the way out",
+      "do": [
+        "type `worn` and press Enter",
+        "then press Esc and confirm the whole vocabulary is back"
+      ],
+      "checkpoint": "the piece carries",
+      "args": {
+        "axis": "look",
+        "token": "worn"
+      },
+      "recovery": "if you had to press / again between the two, say so — that is the loop this step exists to measure"
+    },
+    {
+      "label": "which of these did a model decide",
+      "goal": "since 2026-08-20 a held chip a model wrote and nobody confirmed is pale blue; one you decided is white. The record is per axis, because keeping the model's kind and rewriting its description is the normal case",
+      "do": [
+        "pick a mesh you have labelled with L or Shift+L",
+        "say which axes are still the model's guess, reading only the colours"
+      ],
+      "checkpoint": null,
+      "recovery": "if every chip is white, this piece has no record yet — that is what every piece labelled before today looks like, and it is deliberately not read as 'a human decided this'"
+    },
+    {
+      "label": "watch a batch label itself",
+      "goal": "since 2026-08-20 a label applies the moment it arrives — no key answers it. The only prompt left is Shift+L when the scope already holds labelled pieces, and approving that runs the lot",
+      "do": [
+        "press Shift+L and read the question if one appears",
+        "watch the rows turn green on their own, with your hands off the keyboard",
+        "say whether anything landed that you would have rejected"
+      ],
+      "checkpoint": null,
+      "recovery": "Shift+Y abandons a walk outright; Cmd+Z undoes one piece. If you wanted a chance to refuse before it was written, that is the finding — say so"
+    }
+  ]
+}

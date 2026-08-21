@@ -212,12 +212,14 @@ impl VlmConfig {
 }
 
 /// How sure the model said it was — display only, never a branch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum Confidence {
-    High,
-    Medium,
-    Low,
-}
+///
+/// **Defined in `emerge-core` now**, because a descriptor carries one: since 2026-08-20 the record
+/// of who wrote a label survives the keypress that applies it
+/// (`emerge_core::descriptor::LabelOrigin`), and the confidence is part of that record. A type two
+/// crates share belongs in the one they both depend on; re-exported here so every `vlm::Confidence`
+/// in this crate still resolves, and so the JSON the model answers with parses against the same
+/// three variants it always did.
+pub use emerge_core::descriptor::Confidence;
 
 /// A vocabulary addition the model wanted and could not have — the only legal exit for an
 /// out-of-vocab idea. Flagged for a human; never enters the axes.

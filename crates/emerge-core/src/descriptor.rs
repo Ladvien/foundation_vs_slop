@@ -80,6 +80,166 @@ pub struct Descriptor {
     /// scaled, how `front` was derived — and today that survives only because nothing re-serializes
     /// the file.
     pub note: Option<String>,
+
+    /// **Where each of the fields above came from** — a machine's guess, or a person's decision.
+    ///
+    /// `None` is *no record*, which is what every descriptor written before 2026-08-20 has and what
+    /// a generator that fills this struct from a manifest still writes. It is deliberately **not**
+    /// read as "a human decided this": absence of evidence is the one thing this field exists to
+    /// stop being mistaken for evidence.
+    ///
+    /// See [`LabelOrigin`] for why it is per-axis.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<LabelOrigin>,
+}
+
+/// **How a descriptor's labels arrived, one axis at a time.**
+///
+/// # Why this exists
+///
+/// A vision model proposes `kind`, `effects`, `look`, `surfaces`, a `mount` and a description; a
+/// person accepts them with one keypress. After that keypress the file held the *values* and nothing
+/// else — the model's name, the date and its own stated confidence were dropped on the floor, and a
+/// guess and a judgement were byte-identical from then on.
+///
+/// That is the failure Goddard, Roudsari & Wyatt 2011 (`10.1136/amiajnl-2011-000089`) call
+/// **automation bias**: the measured tendency to over-accept an automated recommendation, producing
+/// errors of commission that would not happen without the aid. Two of their named mitigations are
+/// *emphasising accountability* and *attaching confidence to the output* — which require the record
+/// to survive the acceptance, because otherwise there is nothing left to attach it to.
+///
+/// The shape is PROV-DM's (Belhajjame et al., W3C 2013) at its smallest: an **agent** ([`By`], and
+/// [`Self::model`] when that agent is a model), an **activity** collapsed to the moment it happened
+/// ([`Self::at`]), and the **entity** being the descriptor this rides on.
+///
+/// # Why per-axis
+///
+/// Because the mixed case is the normal case. You keep the model's `kind` and rewrite its
+/// description; a single "model or human" stamp would call the whole piece human the moment one word
+/// was touched, and the question worth answering — *which of these has nobody actually checked?* —
+/// would have no answer again.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LabelOrigin {
+    /// Per-axis, and `None` per axis means the same as `None` here: no record.
+    pub by: AxisOrigin,
+    /// Which model, when one wrote any of it. Absent for a piece only ever labelled by hand.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The day of the most recent write, `YYYY-MM-DD`. A date rather than a timestamp: this is read
+    /// by a person deciding what to re-check, not by anything that needs to order two edits.
+    pub at: String,
+    /// How sure the model said it was, carried through from the proposal. Display only, never a
+    /// branch — the same rule it follows while the proposal is still pending.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<Confidence>,
+}
+
+/// One [`By`] per field a labeller can write, so the mixed case has somewhere to live.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AxisOrigin {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<By>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effects: Option<By>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub look: Option<By>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub surfaces: Option<By>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount: Option<By>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<By>,
+}
+
+/// **Who wrote a value.**
+///
+/// Two variants and not three. An `Import` for "the measuring pass put this here" was drafted and
+/// cut, because nothing in the importer writes any of these six fields — it measures size, extent
+/// and cells — so the variant would have had no writer, and a value no code path can produce is a
+/// stub wearing a schema's clothes. `None` already says *no record*, which is exactly and only what
+/// a manifest-generated descriptor means. Add the variant when something claims it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum By {
+    /// A model proposed it and a person pressed apply. **Not the same as a person deciding it** —
+    /// that distinction is the whole point of this enum.
+    Model,
+    /// A person typed it, clicked it, or confirmed it in the editor.
+    Human,
+}
+
+/// How sure a labeller said it was — display only, never a branch.
+///
+/// Lives here rather than in the mapper's `vlm` module because a descriptor now carries one: a type
+/// two crates share has to sit in the one they both depend on, and duplicating three variants so
+/// each crate could own a copy is how two enums that mean the same thing drift apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Confidence {
+    High,
+    Medium,
+    Low,
+}
+
+impl LabelOrigin {
+    /// **A fresh record naming the model that is about to write**, with no axis claimed yet.
+    ///
+    /// The caller stamps the axes it actually wrote, one at a time, because a suggestion does not
+    /// carry all six: a proposal with no `mount` leaves the author's mount alone, and claiming it
+    /// here would be a record of something that did not happen.
+    pub fn stamped(model: &str, at: &str, confidence: Option<Confidence>) -> LabelOrigin {
+        LabelOrigin {
+            by: AxisOrigin::default(),
+            model: Some(model.to_owned()),
+            at: at.to_owned(),
+            confidence,
+        }
+    }
+}
+
+impl AxisOrigin {
+    /// The one axis a hand edit touched, by the name the editor's tag block uses.
+    ///
+    /// A method rather than six call sites reaching into fields, so "the author clicked a `look`
+    /// chip" is one statement in one place — the same argument [`Descriptor::labels`] makes about
+    /// having a single record at all.
+    pub fn set(&mut self, axis: Axis, by: By) {
+        *match axis {
+            Axis::Kind => &mut self.kind,
+            Axis::Effects => &mut self.effects,
+            Axis::Look => &mut self.look,
+            Axis::Surfaces => &mut self.surfaces,
+            Axis::Mount => &mut self.mount,
+            Axis::Note => &mut self.note,
+        } = Some(by);
+    }
+
+    /// What wrote this axis, or `None` for no record.
+    pub fn get(&self, axis: Axis) -> Option<By> {
+        match axis {
+            Axis::Kind => self.kind,
+            Axis::Effects => self.effects,
+            Axis::Look => self.look,
+            Axis::Surfaces => self.surfaces,
+            Axis::Mount => self.mount,
+            Axis::Note => self.note,
+        }
+    }
+}
+
+/// **Which labelled field**, so [`AxisOrigin`] can be addressed rather than pattern-matched at every
+/// call site.
+///
+/// Six, not four: `mount` and `note` are written by the same apply and are just as worth doubting as
+/// a tag is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Axis {
+    Kind,
+    Effects,
+    Look,
+    Surfaces,
+    Mount,
+    Note,
 }
 
 /// **A tile's internal lattice** — the thing that lets two pieces agree on where they meet.
@@ -1050,6 +1210,13 @@ impl Descriptor {
             // needs `note: Some("")` — deliberate, because a note is somebody's reasoning and losing
             // it should take an act.
             note: patch.note.clone().or_else(|| self.note.clone()),
+            // **The patch's record wins whole, or the base's is inherited whole.**
+            //
+            // Not merged per axis, and that is the point rather than a shortcut: a policy patch that
+            // rewrites a piece's `kind` is a *different* labeller from whoever wrote the base, and
+            // a merge would leave the base's `by.kind` standing over a value the patch replaced —
+            // a record that names the wrong author, which is worse than no record at all.
+            labels: patch.labels.clone().or_else(|| self.labels.clone()),
         }
     }
 

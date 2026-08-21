@@ -998,19 +998,32 @@ pub fn slot_at(carousel: &Carousel, origin: Vec3, dir: Vec3) -> Option<usize> {
 /// and a vertical metre projects to `cos(elevation)` of one. Framing on the floor plan alone cut the
 /// tops off four 2.4 m tiles — measured in a captured frame, not predicted.
 ///
-/// The horizontal fit assumes a square viewport, which is exact for the debugger's mirror camera and
-/// conservative for a window with two panels eating its width.
+/// **`usable_aspect` is the width of the hole the world is drawn through, over its height.** The
+/// camera's viewport is `chrome::ViewportSlot`'s rect, not the window (`surface::fit_viewport`), so
+/// the panels cannot be drawn over — but a horizontal fit that ignores the ratio will still push a
+/// wide subject off the sides of that hole. Pass [`SQUARE`] to keep the old conservative assumption.
 ///
-/// Returned unclamped: the caller decides what to do when it exceeds [`crate::view::MAX_ZOOM`],
-/// because that is a thing to say out loud rather than to silently crop.
-pub fn framing_height(extent: (f32, f32), tallest: f32) -> f32 {
+/// Returned unclamped **at both ends**: the caller decides what to do when it exceeds
+/// [`crate::view::MAX_ZOOM`], and the caller supplies its own floor. The floor used to be
+/// `TILE_VIEW_HEIGHT` inside here, which was right for a sheet of tiles and wrong the moment the
+/// mesh stage wanted to frame a 12 cm mug — it could never zoom closer than three metres.
+pub fn framing_height(extent: (f32, f32), tallest: f32, usable_aspect: f32) -> f32 {
     /// A little air around the strip, so the outermost miniature is not flush with the window edge.
     const MARGIN: f32 = 1.15;
     let spread = (extent.0 + extent.1) * std::f32::consts::FRAC_1_SQRT_2;
     let elevation = crate::view::ISO_ELEVATION;
     let vertical = spread * elevation.sin() + tallest * elevation.cos();
-    (vertical.max(spread) * MARGIN).max(crate::tiles::TILE_VIEW_HEIGHT)
+    // The viewport is `height` metres tall and `height * usable_aspect` metres wide, so a subject
+    // spreading `spread` across it needs `spread / usable_aspect` of height to fit sideways.
+    (vertical.max(spread / usable_aspect.max(f32::EPSILON)) * MARGIN).max(0.0)
 }
+
+/// **A viewport as wide as it is tall** — the assumption this function used to make for everyone.
+///
+/// Still what the Compose sheet passes: its own hole is not square either, but its framing has been
+/// judged in captured frames at this value and re-fitting it is a separate change with its own
+/// before-and-after. Named rather than a bare `1.0` so the assumption is greppable.
+pub const SQUARE: f32 = 1.0;
 
 /// **The carousel as it currently stands**, written by [`restage_group`] and read by everything that
 /// has to agree with it — the gizmos, the labels, the click, the camera.
@@ -1219,7 +1232,8 @@ fn restage_group(
     // **A strip too big to be seen whole says so.** The rig stops at `MAX_ZOOM`, so past that the
     // outer miniatures are cropped — and cropped read as complete is exactly the silent truncation
     // `fill::box_fill` grew its `truncated` flag to avoid.
-    let want = framing_height(carousel.extent, carousel.tallest);
+    let want = framing_height(carousel.extent, carousel.tallest, SQUARE)
+        .max(crate::tiles::TILE_VIEW_HEIGHT);
     if want > crate::view::MAX_ZOOM {
         state.status.problem(format!(
             "this composition and its neighbours need a {want:.0} m view and the camera stops at \
@@ -2948,14 +2962,22 @@ mod carousel_tests {
     /// 2.4 m tiles, because a group that stands up occupies screen the footprint says nothing about.
     #[test]
     fn the_framing_accounts_for_how_tall_the_groups_stand() {
-        let flat = framing_height((4.0, 4.0), 0.1);
-        let tall = framing_height((4.0, 4.0), 6.0);
+        use super::SQUARE;
+        let flat = framing_height((4.0, 4.0), 0.1, SQUARE);
+        let tall = framing_height((4.0, 4.0), 6.0, SQUARE);
         assert!(tall > flat, "height has to widen the view: {tall} vs {flat}");
-        // It never frames tighter than one tile's worth of view …
-        assert_eq!(framing_height((0.0, 0.0), 0.0), crate::tiles::TILE_VIEW_HEIGHT);
+        // **The floor moved to the callers on 2026-08-20** and the reason is the mesh stage: a
+        // 12 cm mug has to be framable at 12 cm, and a floor of `TILE_VIEW_HEIGHT` in here made
+        // that impossible for every caller at once. Nothing frames tighter than nothing.
+        assert_eq!(framing_height((0.0, 0.0), 0.0, SQUARE), 0.0);
+        // A narrower hole than it is tall needs MORE height to fit the same spread sideways.
+        assert!(
+            framing_height((4.0, 4.0), 0.1, 0.5) > flat,
+            "the horizontal fit has to answer to the shape of the hole, not to a square"
+        );
         // … and a big enough strip outruns the rig, which is the condition `restage_group` reports.
         assert!(
-            framing_height((80.0, 50.0), 2.4) > crate::view::MAX_ZOOM,
+            framing_height((80.0, 50.0), 2.4, SQUARE) > crate::view::MAX_ZOOM,
             "a strip this size is exactly what the crop report is for"
         );
     }

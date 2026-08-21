@@ -353,6 +353,7 @@ fn bake(
             // as the render-target race, from a completely different cause, which is the argument for
             // measuring rather than assuming twice over.
             let (centre, extent) = subject_bounds(model, &children, &bounds)
+                .map(|(lo, hi)| aim_and_span(lo, hi))
                 .unwrap_or((BOOTH + Vec3::Y * 0.5, subject_extent(&d)));
             *tf = Transform::from_translation(centre + Vec3::new(1.0, 0.85, 1.0) * extent * FRAMING)
                 .looking_at(centre, Vec3::Y);
@@ -392,17 +393,24 @@ fn bake(
     thumbs.baked.insert(d.id.clone());
 }
 
-/// The world-space centre and largest dimension of everything actually drawn under `root`.
+/// **The world-space box of everything actually drawn under `root`** — `(low corner, high corner)`.
 ///
 /// `None` when nothing under it has an `Aabb` yet, which the caller treats as "fall back to what the
 /// descriptor says" — that path is reachable only in the frames before the mesh exists, and the
 /// readiness gate above means the bake does not aim then. `pub(crate)`: the label booth frames from
-/// the same measured bounds, so the two booths cannot drift apart on what "framed" means.
+/// the same measured bounds, so the two booths cannot drift apart on what "framed" means — and since
+/// 2026-08-20 so does the mesh stage's camera.
+///
+/// **It returns the box rather than a centre and a diameter**, and that widening is the whole reason
+/// the mesh stage could use it. A thumbnail booth points a camera at a subject from a fixed distance,
+/// so one number is enough; an isometric stage has to know how far the subject spreads *sideways*
+/// versus how tall it *stands*, because those two land on different axes of the viewport. Collapsing
+/// to `max(x, y, z)` here would have forced the third caller to measure the world a second time.
 pub(crate) fn subject_bounds(
     root: Entity,
     children: &Query<&Children>,
     bounds: &Query<(&Aabb, &GlobalTransform)>,
-) -> Option<(Vec3, f32)> {
+) -> Option<(Vec3, Vec3)> {
     let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
     let mut any = false;
     let mut queue = vec![root];
@@ -427,10 +435,15 @@ pub(crate) fn subject_bounds(
             queue.extend(kids.iter());
         }
     }
-    any.then(|| {
-        let size = hi - lo;
-        ((lo + hi) * 0.5, size.x.max(size.y).max(size.z).max(0.05))
-    })
+    any.then_some((lo, hi))
+}
+
+/// A measured box as the booths want it: where to aim, and how big across at its widest.
+///
+/// The floor keeps a flat decal from putting the camera inside itself.
+pub(crate) fn aim_and_span(lo: Vec3, hi: Vec3) -> (Vec3, f32) {
+    let size = hi - lo;
+    ((lo + hi) * 0.5, size.x.max(size.y).max(size.z).max(0.05))
 }
 
 /// The subject's largest dimension, from what the descriptor records. The fallback for the frames

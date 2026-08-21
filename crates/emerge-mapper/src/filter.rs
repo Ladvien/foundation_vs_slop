@@ -27,6 +27,15 @@ pub enum Pane {
     Candidates,
     /// The animation bench's rig list.
     Rigs,
+    /// **The tag block in the mesh detail pane** — the project's whole vocabulary, 55 chips at the
+    /// shipped kit's size, of which a piece holds three to six.
+    ///
+    /// The fourth pane and the only one that narrows a *grid* rather than a list, which changes two
+    /// things and nothing else. Its `Enter` **takes the one match** instead of handing the keyboard
+    /// back (see [`keys`]), because for a list `Enter` means "done narrowing" and here it means
+    /// "that one" — the block had no keyboard path at all before, only 55 mouse targets. And its box
+    /// carries no [`crate::keys::ControlId`] of its own: it sits inside a block that already is one.
+    Tags,
 }
 
 /// The filter text of each list, and which box is taking keys.
@@ -40,6 +49,7 @@ pub struct Filters {
     palette: String,
     candidates: String,
     rigs: String,
+    tags: String,
     /// The box that owns the keyboard, or `None`. Read by `editor::not_typing`.
     focus: Option<Pane>,
 }
@@ -51,6 +61,7 @@ impl Filters {
             Pane::Palette => &self.palette,
             Pane::Candidates => &self.candidates,
             Pane::Rigs => &self.rigs,
+            Pane::Tags => &self.tags,
         }
     }
 
@@ -83,7 +94,19 @@ impl Filters {
             Pane::Palette => &mut self.palette,
             Pane::Candidates => &mut self.candidates,
             Pane::Rigs => &mut self.rigs,
+            Pane::Tags => &mut self.tags,
         }
+    }
+
+    /// **Empty one box without giving the keyboard back** — the one thing `Escape` and `blur` do not
+    /// between them.
+    ///
+    /// `tiles::take_the_one_match` needs exactly this: it has just taken the token that was typed, and
+    /// the next token wants a clear box and the cursor still in it. A public method rather than
+    /// widening [`Self::text_mut`], which is private because a filter anything can write is a filter
+    /// that gets written from somewhere that has not thought about the focus.
+    pub fn clear(&mut self, pane: Pane) {
+        self.text_mut(pane).clear();
     }
 
     /// Is a filter box taking keys right now?
@@ -124,30 +147,52 @@ pub struct FilterText(pub Pane);
 
 /// Spawn a filter box above a list.
 pub fn spawn(parent: &mut ChildSpawnerCommands, pane: Pane) {
-    parent
-        .spawn((
-            UiButton,
-            Hovered::default(),
-            FilterBox(pane),
-            // One line covers all three panes: they live in different tabs' panels, so exactly one
-            // is ever laid out and the badge lands on whichever list is on screen.
-            crate::chrome::Control(crate::keys::ControlId::Filter),
-            Node {
-                width: Val::Percent(100.0),
-                padding: CHIP_PAD,
-                flex_shrink: 0.0,
-                ..default()
-            },
-            BackgroundColor(ROW_BG),
-        ))
-        .with_children(|b| {
-            b.spawn((
-                Text::new("filter"),
-                TextColor(DIM),
-                TextFont::from_font_size(crate::chrome::text::BODY),
-                FilterText(pane),
-            ));
-        });
+    let mut b = parent.spawn((
+        UiButton,
+        Hovered::default(),
+        FilterBox(pane),
+        Node {
+            width: Val::Percent(100.0),
+            padding: CHIP_PAD,
+            flex_shrink: 0.0,
+            ..default()
+        },
+        BackgroundColor(ROW_BG),
+    ));
+    // **Which census control this box *is*, and the one pane that is not one.**
+    //
+    // One `ControlId::Filter` covers the three list boxes: they live in different tabs' panels, so
+    // exactly one is ever laid out and the badge lands on whichever list is on screen. The tag box
+    // breaks that arithmetic — it is in the mesh detail pane, which is on screen at the same moment
+    // as the candidate list beside it, so two boxes would both claim `Filter` and the badge system
+    // would have two answers to one question. It sits inside a block that is already
+    // `ControlId::Tags`, and that is where `/`'s badge belongs anyway: one row above the box, on the
+    // thing the key narrows.
+    if pane != Pane::Tags {
+        b.insert(crate::chrome::Control(crate::keys::ControlId::Filter));
+    }
+    b.with_children(|b| {
+        b.spawn((
+            Text::new(placeholder(pane)),
+            TextColor(DIM),
+            TextFont::from_font_size(crate::chrome::text::BODY),
+            FilterText(pane),
+        ));
+    });
+}
+
+/// **What an empty box says it will narrow.**
+///
+/// Three of the four sit directly above the list they filter, where "filter" is unambiguous because
+/// there is nothing else it could mean. The tag box does not: it is in the mesh detail pane, one row
+/// under `mount`/`front`, **at the same moment** as the candidate list's own box across the screen —
+/// two identical words, two different jobs. Measured in a frame rather than argued about: the first
+/// capture after this box existed showed both, and neither said which was which.
+fn placeholder(pane: Pane) -> &'static str {
+    match pane {
+        Pane::Tags => "filter tags",
+        _ => "filter",
+    }
 }
 
 /// Click to focus. Clicking the box that is already focused clears it, which is the fastest way back
@@ -180,6 +225,17 @@ pub fn keys(mut events: MessageReader<KeyboardInput>, mut filters: ResMut<Filter
         match &event.logical_key {
             // Enter and Escape both stop typing; Escape also throws the filter away, so there is one
             // key that always gets you back to the whole list.
+            //
+            // **Except in the tag box, whose `Enter` belongs to the block below it.** For a list,
+            // `Enter` means *done narrowing* — the rows are already on screen and the arrows walk
+            // them. The tag block has no arrows and 55 targets, so there `Enter` means *take that
+            // one*, and `tiles::take_the_one_match` is the single owner of it. Left alone here
+            // rather than handled in both places: two systems reading the same keystroke and each
+            // acting on it is the two-path failure this crate refuses everywhere else.
+            //
+            // `Escape` still leaves, from every box including this one, so there is no way to be
+            // stuck in a filter.
+            Key::Enter if pane == Pane::Tags => {}
             Key::Enter => filters.focus = None,
             Key::Escape => {
                 filters.text_mut(pane).clear();
@@ -222,16 +278,22 @@ pub fn refresh(
             bg.0 = want;
         }
     }
-    // The text, unlike the fill, only changes when the filter does.
-    if !filters.is_changed() {
-        return;
-    }
+    // **Every frame, like the fill above** — and this used to be gated on `filters.is_changed()`.
+    //
+    // That gate was correct while every box outlived the keystrokes typed into it. The tag box does
+    // not: `tiles::rebuild_detail` despawns and respawns the whole detail pane on each keystroke, so
+    // the box is a **new entity** carrying a fresh placeholder, and by then the change this repaint
+    // needed has already been spent. Found in a frame — the box read `filter` while `1 of 55` stood
+    // under it, so the block knew what had been typed and the box denied it.
+    //
+    // Costs nothing in the steady state: both loops compare before writing, which is what
+    // `a_drawing_system_writes_only_when_something_changed` is actually asking for.
     for (which, mut text, mut colour) in &mut texts {
         let focused = filters.focus == Some(which.0);
         let raw = filters.text(which.0);
         let (want, want_colour) = match (focused, raw.is_empty()) {
             (true, _) => (format!("{raw}_"), ACCENT),
-            (false, true) => ("filter".to_owned(), DIM),
+            (false, true) => (placeholder(which.0).to_owned(), DIM),
             (false, false) => (raw.to_owned(), TEXT),
         };
         if text.0 != want {

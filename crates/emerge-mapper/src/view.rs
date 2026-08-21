@@ -47,7 +47,12 @@ const ISO_DISTANCE: f32 = 20.784_609; // |(12, 12, 12)| = 12 * sqrt 3
 /// Quarter turns, so the grid stays square to the screen at every detent.
 const ROTATION_STEPS: u32 = 4;
 
-const MIN_ZOOM: f32 = 4.0;
+/// **The closest the rig goes.** Was 4.0 — the same as `tiles::TILE_VIEW_HEIGHT` — which made the
+/// floor of the wheel equal to the whole framing of the mesh stage: a 12 cm mug could not be zoomed
+/// in on by any means, and the stage that exists to look at one mesh could never fill itself with it.
+/// `pub(crate)` because `tiles::stage_camera` clamps its computed framing to the same limit; a stage
+/// that framed closer than the wheel allows would spring back on the first scroll.
+pub(crate) const MIN_ZOOM: f32 = 0.25;
 /// The furthest out the rig goes. `pub(crate)` because the Compose sheet has to know it: a gallery
 /// that needs more than this to be seen whole is cropped, and cropped silently reads as complete.
 pub(crate) const MAX_ZOOM: f32 = 80.0;

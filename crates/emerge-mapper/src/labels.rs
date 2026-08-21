@@ -348,7 +348,6 @@ pub(crate) fn clear_all_labels(
     queue.queue.clear();
     queue.total = 0;
     queue.paused = false;
-    queue.auto_apply = false;
     queue.current = None;
     // Dropping the task cancels it, the same way the in-flight label requests below are cancelled.
     queue.warming = None;
@@ -581,7 +580,7 @@ pub(crate) fn poll_tasks(
 }
 
 /// `YYYY-MM-DD` (UTC) now — the adopt stamp's own date recipe.
-fn date_today() -> String {
+pub(crate) fn date_today() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -793,14 +792,6 @@ pub struct Overwrite {
 pub struct LabelQueue {
     queue: std::collections::VecDeque<EditTarget>,
     total: usize,
-    /// **A batch confirms its own proposals.**
-    ///
-    /// The single `L` still stages for `U`, because one mesh is a decision an author is present
-    /// for. A walk of hundreds is not: asked for at the keyboard, 2026-08-15 — *"I wanted it to
-    /// auto confirm when I'm doing a whole batch labeling."* The confirmation is the decision to
-    /// run the walk, and the review moves after the fact — a wrong label is visible in the list
-    /// (unjudged rows are plain, judged ones green) and `Shift+Delete` sends a piece back stripped.
-    auto_apply: bool,
     /// **What is being photographed and asked about right now**, for the panel. The status line
     /// carried this and nothing else did, so it was gone the moment anything else wrote a note.
     current: Option<String>,
@@ -843,7 +834,6 @@ fn arm_batch(queue: &mut LabelQueue, targets: Vec<EditTarget>, root: &std::path:
     queue.total = targets.len();
     queue.queue = targets.into_iter().collect();
     queue.paused = false;
-    queue.auto_apply = true;
     let root = root.to_path_buf();
     queue.warming = Some(Warm {
         task: AsyncComputeTaskPool::get().spawn(async move {
@@ -856,17 +846,6 @@ fn arm_batch(queue: &mut LabelQueue, targets: Vec<EditTarget>, root: &std::path:
 }
 
 impl LabelQueue {
-    /// **Arm the batch's self-confirmation without running a batch**, for a test.
-    ///
-    /// The righting path is only reachable through `auto_apply`, and a headless test cannot get
-    /// there the ordinary way: the walk starts with a photo shoot, and the booth needs a GPU. This
-    /// is the one flag between a staged proposal and `tiles::apply_suggestion`, so setting it is
-    /// what lets a test ask the question the batch asks.
-    #[cfg(any(test, feature = "debugger"))]
-    pub fn auto_apply_for_test(&mut self) {
-        self.auto_apply = true;
-    }
-
     pub fn running(&self) -> bool {
         !self.queue.is_empty()
     }
@@ -879,11 +858,6 @@ impl LabelQueue {
     /// The subject in hand, if any.
     pub fn current(&self) -> Option<&str> {
         self.current.as_deref()
-    }
-
-    /// Whether this walk confirms what it proposes.
-    pub fn auto_apply(&self) -> bool {
-        self.auto_apply
     }
 
     pub fn progress(&self) -> (usize, usize) {
@@ -1369,14 +1343,30 @@ pub(crate) fn settled_effects(
 pub fn apply_fields(
     d: &mut emerge_core::descriptor::Descriptor,
     s: &Suggestion,
+    stamp: &Provenance,
     vocab: &emerge_core::vocab::Vocabularies,
 ) {
+    use emerge_core::descriptor::{Axis, By, LabelOrigin};
+
+    // **The record is rebuilt, not merged into.** An apply replaces every axis it carries, so a
+    // stale `Human` left on one of them from a hand edit two minutes ago would name the wrong author
+    // for a value the model has just overwritten — which is the one failure a provenance field can
+    // have that is worse than not existing. Axes this proposal does *not* carry keep their record,
+    // by being stamped below only where a write happens.
+    let mut origin = LabelOrigin::stamped(&stamp.model, &stamp.date, Some(s.confidence));
+    if let Some(was) = &d.labels {
+        origin.by = was.by;
+    }
     d.kind = s.kind.clone();
     d.effects = s.effects.clone();
     d.look = s.look.clone();
     d.offers.surfaces = s.offers_surfaces.clone();
+    for axis in [Axis::Kind, Axis::Effects, Axis::Look, Axis::Surfaces] {
+        origin.by.set(axis, By::Model);
+    }
     if let Some(mount) = &s.mount {
         d.mount = Some(mount.clone());
+        origin.by.set(Axis::Mount, By::Model);
     }
     // The front face is a judgement from appearance; `needs_turn` deliberately is NOT applied —
     // the righting turn is a re-measure (`tiles::rotate_mesh`), a human's key to press.
@@ -1388,6 +1378,7 @@ pub fn apply_fields(
     // fall back to one, and an apply that wrote the other would keep a sentence nobody read.
     if let Some(note) = s.description() {
         d.note = Some(note.to_owned());
+        origin.by.set(Axis::Note, By::Model);
     }
     if !s.rooms.is_empty() {
         d.placement.rooms = s.rooms.clone();
@@ -1398,6 +1389,33 @@ pub fn apply_fields(
     // **Inside, not beside.** The derived half of `effects` has to follow every kind that lands, and
     // a caller that has to remember to call it is a caller that eventually does not.
     settle_implied_effects(d, vocab);
+    d.labels = Some(origin);
+}
+
+/// **Record that a person wrote this axis, today.**
+///
+/// The other half of [`apply_fields`], and the half that makes the record worth keeping: a chip
+/// clicked, a description typed, a mount cycled. Without it every axis a model ever touched would
+/// read `Model` forever, including the ones the author sat down and corrected — so the pane would
+/// go on flagging work that has already been checked, and an author would learn to ignore the flag.
+/// That is the automation-bias mitigation failing in the other direction, and it is why this is a
+/// six-line function called from three places rather than a note in a design document.
+///
+/// `at` moves to today even when a model wrote the rest, because the date answers *when was this
+/// piece last touched by anyone*, which is the question somebody triaging a kit actually has.
+pub(crate) fn stamp_human(
+    d: &mut emerge_core::descriptor::Descriptor,
+    axis: emerge_core::descriptor::Axis,
+) {
+    use emerge_core::descriptor::{By, LabelOrigin};
+
+    let today = date_today();
+    let record = d.labels.get_or_insert_with(|| LabelOrigin {
+        at: today.clone(),
+        ..Default::default()
+    });
+    record.at = today;
+    record.by.set(axis, By::Human);
 }
 
 // ── the persistent cache ─────────────────────────────────────────────────────────────────────────
@@ -1684,7 +1702,7 @@ mod tests {
         let mut s = suggestion();
         s.kind = vec!["light".to_owned()];
         s.effects = vec![];
-        apply_fields(&mut applied, &s, &vocab());
+        apply_fields(&mut applied, &s, &stamp(), &vocab());
         assert!(
             applied.effects.iter().any(|e| e == "uses-electricity"),
             "a proposal that says nothing about effects still lands with the implied one"
@@ -1750,6 +1768,16 @@ mod tests {
             // empty here — and empty is not permissive: an invented token is refused, naming the axis.
             edge: emerge_core::vocab::Vocabulary::default(),
             slot: emerge_core::vocab::Vocabulary::default(),
+        }
+    }
+
+    /// Who a test's apply is standing in for. Every field on it is read by `apply_fields`, so a
+    /// shared one keeps the four call sites saying the same thing about the same imaginary run.
+    fn stamp() -> Provenance {
+        Provenance {
+            model: "stub".to_owned(),
+            date: "2026-08-06".to_owned(),
+            attempts: 1,
         }
     }
 
@@ -2170,7 +2198,7 @@ mod tests {
         let mut s = suggestion(); // kind: [light], effects: [emit], look: [], mount: OnWall, note: Some
         s.rooms = vec![];
         s.group = None;
-        apply_fields(&mut d, &s, &vocab());
+        apply_fields(&mut d, &s, &stamp(), &vocab());
 
         assert_eq!(d.kind, vec!["light".to_owned()], "kind replaced");
         // **Replacement, and then the settle** — the proposal carried `["emit"]` and the `light`
@@ -2203,7 +2231,7 @@ mod tests {
         let mut s = suggestion();
         s.rooms = vec!["kitchen".to_owned()];
         s.group = Some("cook_set".to_owned());
-        apply_fields(&mut d, &s, &vocab());
+        apply_fields(&mut d, &s, &stamp(), &vocab());
         assert_eq!(d.placement.rooms, vec!["kitchen".to_owned()]);
         assert_eq!(d.placement.group.as_deref(), Some("cook_set"));
 
@@ -2219,10 +2247,88 @@ mod tests {
         });
         let before_align_rotate = d.align.rotate;
         let before_extent = d.extent.clone();
-        apply_fields(&mut d, &s, &vocab());
+        apply_fields(&mut d, &s, &stamp(), &vocab());
         assert_eq!(d.align.front, Some(emerge_core::descriptor::Face::South));
         assert_eq!(d.align.rotate, before_align_rotate, "no rotation applied");
         assert_eq!(d.extent, before_extent, "no re-measure smuggled in");
+    }
+
+    /// **An apply records that a model wrote it, and a hand edit takes one axis back.**
+    ///
+    /// Before this, the two were byte-identical in `library.ron` the moment `U` was pressed: the
+    /// model's name, the date and its own confidence were dropped by `apply_fields`, and the only
+    /// surviving copy lived in `target/vlm_suggestions.ron` — inside the build directory, so
+    /// `cargo clean` deleted every record of what any model had ever said about the kit.
+    ///
+    /// The per-axis half is the part worth pinning. Goddard, Roudsari & Wyatt 2011
+    /// (`10.1136/amiajnl-2011-000089`) on automation bias: the mitigations are *accountability* and
+    /// *attaching confidence to the output*, and neither survives a stamp that calls the whole piece
+    /// human because one word was retyped.
+    #[test]
+    fn an_apply_says_a_model_wrote_it_and_a_hand_edit_claims_one_axis() {
+        use emerge_core::descriptor::{Axis, By};
+
+        let mut d = emerge_core::descriptor::Descriptor::default();
+        assert!(
+            d.labels.is_none(),
+            "no record is the honest starting state — not `Human`"
+        );
+
+        apply_fields(&mut d, &suggestion(), &stamp(), &vocab());
+        let Some(rec) = d.labels.clone() else {
+            panic!("an apply must leave a record");
+        };
+        assert_eq!(rec.model.as_deref(), Some("stub"), "which model answered");
+        assert_eq!(rec.at, "2026-08-06", "and when");
+        assert_eq!(
+            rec.confidence,
+            Some(Confidence::High),
+            "and how sure it said it was — the proposal's own word, kept"
+        );
+        for axis in [Axis::Kind, Axis::Effects, Axis::Look, Axis::Surfaces, Axis::Mount, Axis::Note]
+        {
+            assert_eq!(
+                rec.by.get(axis),
+                Some(By::Model),
+                "the suggestion carries {axis:?}, so the record must say the model wrote it"
+            );
+        }
+
+        // A person rewrites the description. That axis, and only that axis, becomes theirs.
+        stamp_human(&mut d, Axis::Note);
+        let Some(rec) = d.labels.clone() else {
+            panic!("the record survives a hand edit");
+        };
+        assert_eq!(rec.by.get(Axis::Note), Some(By::Human), "the axis touched");
+        assert_eq!(
+            rec.by.get(Axis::Kind),
+            Some(By::Model),
+            "and no other — a piece whose kind is still the model's guess must go on saying so"
+        );
+        assert_eq!(
+            rec.model.as_deref(),
+            Some("stub"),
+            "the model that wrote the rest is still named"
+        );
+
+        // A second apply over a hand-edited piece re-claims the axes it writes, and no more.
+        let mut s = suggestion();
+        s.note = None;
+        s.what = String::new();
+        apply_fields(&mut d, &s, &stamp(), &vocab());
+        let Some(rec) = d.labels.clone() else {
+            panic!("a record survives a second apply");
+        };
+        assert_eq!(
+            rec.by.get(Axis::Kind),
+            Some(By::Model),
+            "an axis the proposal carries is the model's again"
+        );
+        assert_eq!(
+            rec.by.get(Axis::Note),
+            Some(By::Human),
+            "an axis it says nothing about keeps the author's claim — a proposal with no words              does not overwrite the description, so it must not claim to have"
+        );
     }
 
     #[test]

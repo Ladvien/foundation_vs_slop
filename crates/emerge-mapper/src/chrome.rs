@@ -98,6 +98,18 @@ pub const PROBLEM_TEXT: Color = Color::srgb(1.0, 0.93, 0.90);
 /// deliberately neither [`ACCENT`] (amber = a live edit, yours) nor [`DANGER`] (red = wrong):
 /// a proposal is a question, and it must not read as either an answer or an alarm.
 pub const SUGGEST: Color = Color::srgb(0.42, 0.58, 0.66);
+/// **A value a model wrote that nobody has checked** — [`SUGGEST`]'s sibling, one state later.
+///
+/// [`SUGGEST`] is a proposal *pending*: it sits on [`ROW_BG`], where a mid slate reads fine. This is
+/// the same idea after `U` — the token is now held, so it sits on [`ROW_SELECTED`], and the same
+/// slate against that lighter fill measures about **2.6:1**, under any threshold `docs/ui.md` §1.3
+/// will accept for text. Scaled toward white rather than hand-picked, so retinting `SUGGEST` retints
+/// this with it — the audit's `ENVELOPE_IDLE` finding, which was `ACCENT` divided by two and
+/// transcribed.
+///
+/// The pair is the whole visible half of `emerge_core::descriptor::LabelOrigin`: this ink means *a
+/// machine decided this and you have not*, and [`TEXT`] on the same chip means *you did*.
+pub const UNCHECKED: Color = scaled(SUGGEST, 1.45);
 /// **A mesh that has been judged** — every axis answered, so it can compose a tile.
 ///
 /// Asked for at the keyboard, 2026-08-15: *"could we add a visual indicator based on color to show
@@ -1517,6 +1529,13 @@ pub fn chip<'a>(
     let mut c = parent.spawn((
         bevy::ui_widgets::Button,
         Hovered::default(),
+        // **A chip answers the pointer, like every row does.** It carried `Hovered` from the day it
+        // was written — but only as a hit-test, for the "is the pointer over UI" question, and
+        // nothing ever painted it. The 2026-08-17 audit found that as its seventh defect: *"hover
+        // exists as a hit-test everywhere and as feedback almost nowhere"*, and the tag block is 55
+        // clickable things that gave no sign of being clickable. `RowRest` is the whole fix —
+        // `style_list_rows` already keys on it and has never needed to know what it is painting.
+        RowRest(fill),
         marker,
         Node {
             padding: CHIP_PAD,
