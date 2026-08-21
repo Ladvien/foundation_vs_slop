@@ -337,14 +337,16 @@ pub mod text {
     /// A tab's word in the strip, and the chooser's column headers.
     pub const TAB: f32 = 13.0;
     /// **The readable default.** A row's value, a field's contents, the problem banner, a census
-    /// row — anything the author is reading rather than orienting by.
+    /// row — anything the author is reading rather than orienting by. The chord on a badge is
+    /// this size on purpose: it is the one thing a badge exists to have read.
     pub const BODY: f32 = 11.0;
     /// A block or list heading. Quiet: uppercase, dim ink, and [`super::GAP_GROUP`] above it.
     pub const HEADING: f32 = 10.0;
     /// The dim half of a label/value pair, and a log line.
     pub const LABEL: f32 = 10.0;
-    /// Chords, badges, footnotes, and the always-on hint — the smallest thing on screen, and never
-    /// the thing being read.
+    /// Badge descriptions, footnotes, and the always-on hint — the smallest thing on screen, and
+    /// never the thing being read. (Badge *chords* moved up to [`BODY`]; the description beside a
+    /// chord stays down here, quieter on both axes.)
     pub const HINT: f32 = 9.0;
 }
 

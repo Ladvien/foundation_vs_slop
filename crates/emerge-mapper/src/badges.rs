@@ -77,9 +77,10 @@ const CLUSTER_W: f32 = 132.0;
 /// How wide a legend's descriptions may run before they wrap.
 ///
 /// With [`CHORD_COL`] beside it this fixes the block's width, which is what keeps it inside the
-/// viewport: the longest line in the census — the label verbs' *"suggest / all-or-hold / apply /
-/// discard / clear all"* — is otherwise wider than the ground the legend stands on, and it pushed the
-/// whole block over the piece list.
+/// viewport: the longest legend line in the census — the move row's *"move / Shift: clone /
+/// M: keep as a composition"* — is otherwise wider than the ground the legend stands on, and an
+/// earlier widest line (the label verbs', since shortened) pushed the whole block over the piece
+/// list.
 ///
 /// The pair has to add up to less than the viewport, and the viewport is what is left of the window
 /// once both docks have taken theirs. Widening either is a decision about that, not a free choice.
@@ -102,10 +103,11 @@ const GUTTER: f32 = 88.0;
 /// The column a legend's chords hold, so its descriptions line up under each other rather than
 /// stepping in and out with the width of the chord above.
 ///
-/// Wide enough for the longest chord this census can render — the labeler's `L, Shift+L, U, Y,
-/// Shift+Y`, twenty-five characters. It was set for `Cmd+Z, Shift+Cmd+Z` and that was too narrow: a
-/// chord past the column pushes its description right, widening the whole block, and the block is
-/// already about as wide as the viewport it has to sit in.
+/// Wide enough for the longest chord the legend currently renders — the generate row's
+/// `F, G, Shift+G, Cmd+G`, twenty characters at `text::BODY` (the arrows that once held the
+/// record moved to `MEMBERS` with the drain). It was set for `Cmd+Z, Shift+Cmd+Z` and
+/// that was too narrow: a chord past the column pushes its description right, widening the whole
+/// block, and the block is already about as wide as the viewport it has to sit in.
 ///
 /// A `min_width` rather than a `width` all the same, so a longer chord some day pushes rather than
 /// clips: the same choice, for the same reason, the old two-column key list made and wrote five lines
@@ -855,7 +857,9 @@ fn one_badge(c: &mut ChildSpawnerCommands, badge: &keys::Badge, legend: bool, la
             },
             Text::new(badge.chord.clone()),
             TextColor(KEY),
-            TextFont::from_font_size(chrome::text::HINT),
+            // The chord is the one thing a badge exists to have read, so it gets the reading
+            // size — the descriptions stay at `HINT`, quieter on both axes.
+            TextFont::from_font_size(chrome::text::BODY),
             // A chord with a space in it is one token to a reader and two to a
             // line-breaker.
             TextLayout::new(Justify::Left, LineBreak::NoWrap),

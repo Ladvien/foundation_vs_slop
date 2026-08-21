@@ -1152,7 +1152,7 @@ pub const BINDINGS: &[Binding] = &[
         false,
         Context::Map,
         "B",
-        "move / Shift: clone a set / M: keep as a composition",
+        "move / Shift: clone / M: keep as a composition",
     )
     .at(Home::Legend),
     bs(
@@ -1162,7 +1162,7 @@ pub const BINDINGS: &[Binding] = &[
         true,
         Context::Map,
         "B",
-        "move / Shift: clone a set / M: keep as a composition",
+        "move / Shift: clone / M: keep as a composition",
     )
     .at(Home::Legend),
     // **A third verb on a state that already exists.** `Shift+B` drags a box and leaves a set in
@@ -1176,7 +1176,7 @@ pub const BINDINGS: &[Binding] = &[
         false,
         Context::Map,
         "M",
-        "move / Shift: clone a set / M: keep as a composition",
+        "move / Shift: clone / M: keep as a composition",
     )
     .at(Home::Legend),
     b(
@@ -1453,7 +1453,7 @@ pub const BINDINGS: &[Binding] = &[
         false,
         Context::Meshes,
         "R",
-        "rescan / exclude this pack",
+        "rescan / exclude",
     )
     .at(Home::Control(ControlId::Pieces)),
     bs(
@@ -1467,7 +1467,7 @@ pub const BINDINGS: &[Binding] = &[
         // for as long as the key list was a table nobody could read, and glaring the moment the
         // chord went on the control it belongs to.
         "R",
-        "rescan / exclude this pack",
+        "rescan / exclude",
     )
     .at(Home::Control(ControlId::Pieces)),
     // The Cmd+Z shape again: one key, the shifted form for the reversible-but-destructive sibling.
@@ -3320,7 +3320,7 @@ mod tests {
     /// # Two things it deliberately does not catch, so nobody reads it as more than it is
     ///
     /// **The annotation form is exempt.** `"walk the lists / Shift: x5"` is four arrows and one idea
-    /// with a note about a modifier, not four ideas; `"move / Shift: clone a set / M: keep as a
+    /// with a note about a modifier, not four ideas; `"move / Shift: clone / M: keep as a
     /// composition"` names its chords outright. Both put a `chord:` prefix on the trailing phrase,
     /// and that prefix *is* the pairing — so a phrase after the first containing a colon exempts the
     /// row. Without this the rule flags exactly the prose the two abandoned attempts flagged.
