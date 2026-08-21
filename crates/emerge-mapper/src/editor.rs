@@ -787,6 +787,10 @@ enum Field {
     /// `H`, `R`/`T`, `Y`/`U`, `[`/`]`, `O` and `Cmd+2` would act *on* — all six read "the placement
     /// under the cursor", which the author could only learn by trying one. `Cmd+2` was reported as
     /// missing by someone looking straight at the map for it, which is what this row answers.
+    ///
+    /// Since 2026-08-21 it is also those verbs' badge *home*: `H`, `[`/`]`, `X` and `O` draw here
+    /// while `K` is held (the turn cluster draws on [`Self::Yaw`]), so the row that names the
+    /// subject is the row the chords stand on. See [`Field::control`].
     Under,
     /// **Where the map disagrees with the tokens the tiles declare.**
     ///
@@ -797,6 +801,17 @@ enum Field {
 }
 
 impl Field {
+    /// The rows that are badge homes — YAW carries the turn cluster, UNDER the piece-verbs. A
+    /// mapping rather than a literal at each spawn, the `CellVerb::control()` shape, so the row
+    /// loop stays one loop.
+    fn control(self) -> Option<crate::keys::ControlId> {
+        match self {
+            Field::Yaw => Some(crate::keys::ControlId::Yaw),
+            Field::Under => Some(crate::keys::ControlId::Under),
+            _ => None,
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Field::Edges => "EDGES",
@@ -1348,12 +1363,15 @@ fn spawn_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
                 Field::Hint,
                 Field::Edges,
             ] {
-                s.spawn(Node {
+                let mut spawned = s.spawn(Node {
                     flex_direction: FlexDirection::Row,
                     align_items: AlignItems::Center,
                     ..default()
-                })
-                .with_children(|row| {
+                });
+                if let Some(id) = field.control() {
+                    spawned.insert(crate::chrome::Control(id));
+                }
+                spawned.with_children(|row| {
                     crate::chrome::row_label(row, 62.0, field.label());
                     crate::chrome::row_value(row, "", TEXT, field);
                 });

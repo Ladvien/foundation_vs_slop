@@ -45,8 +45,8 @@
 //!
 //! - [`keys::Home::Control`] — on the control it acts through, found by [`chrome::Control`].
 //! - [`keys::Home::Legend`] — in a column over empty ground, **with its description beside its
-//!   chord**, for a verb that acts on neither. `Cmd+Z` undoes and there is nothing on screen it
-//!   undoes *on*; drawing it on something would be a claim about that thing. The legend is the one
+//!   chord**, for a verb that acts on neither. `Esc` backs out and there is nothing on screen it
+//!   backs out *of*; drawing it on something would be a claim about that thing. The legend is the one
 //!   place a badge carries prose, because it is the one place there is nothing under it to read.
 //!
 //! # What did not change, and must not

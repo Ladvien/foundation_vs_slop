@@ -7437,8 +7437,11 @@ fn build_detail(p: &mut ChildSpawnerCommands, build: &crate::build::Build, proje
         ));
     };
 
+    // **The TILE heading is spawned once, above the branches**, because every branch opens with
+    // it — including the one that says "press N to start one", which is exactly the line `N`'s
+    // badge should land on. It carries the anchor the tile-verbs badge onto.
+    crate::chrome::section(p, "TILE").insert(crate::chrome::Control(crate::keys::ControlId::Tile));
     let Some(comp) = build.open.as_ref() else {
-        crate::chrome::section(p, "TILE");
         line(
             p,
             "no tile open — press N to start one".to_owned(),
@@ -7448,12 +7451,10 @@ fn build_detail(p: &mut ChildSpawnerCommands, build: &crate::build::Build, proje
         return;
     };
     let emerge_core::composition::Envelope::Bounded { size } = comp.envelope else {
-        crate::chrome::section(p, "TILE");
         line(p, format!("`{}` claims no tile", comp.id), DANGER, 10.0);
         return;
     };
 
-    crate::chrome::section(p, "TILE");
     line(p, comp.id.clone(), TEXT, 12.0);
     line(
         p,
@@ -7529,7 +7530,9 @@ fn build_detail(p: &mut ChildSpawnerCommands, build: &crate::build::Build, proje
         ),
     }
 
-    crate::chrome::section(p, "MEMBERS");
+    // The member-verbs' badge home: the list whose `>` focus marker is their readout.
+    crate::chrome::section(p, "MEMBERS")
+        .insert(crate::chrome::Control(crate::keys::ControlId::Members));
     if comp.members.is_empty() {
         line(
             p,

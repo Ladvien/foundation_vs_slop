@@ -211,9 +211,11 @@ pub enum Home {
     Control(ControlId),
     /// **In the legend**, for a verb that acts on neither.
     ///
-    /// `Cmd+Z` undoes; there is nothing on screen it undoes *on*. Pan, save, the removal mode, the
-    /// region fills — a good third of this editor's vocabulary has no subject and no widget, and
-    /// pretending otherwise means drawing a chord on something it does not control.
+    /// `Esc` backs out; there is nothing on screen it backs out *of* in particular. Pan turns the
+    /// camera, whose one honest anchor — the compass — stands down while `K` is held; the region
+    /// fills paint ground that is not a widget. About a fifth of this editor's vocabulary has no
+    /// subject and no control, and pretending otherwise means drawing a chord on something it does
+    /// not control.
     ///
     /// So they are drawn together, in a column over empty ground, **each with its description beside
     /// its chord**. That is the one place a badge is allowed to carry prose: everywhere else the
@@ -255,7 +257,8 @@ pub enum ControlId {
     /// `Display::None`.
     ///
     /// **For a verb whose readout is the pane itself** — `Cmd+C`, the commit door on a derivation,
-    /// the anim bench's scrub/play/ghost, the Compose carousel. Not a bin: it was briefly the home
+    /// each tab's undo pair (what undo changes is what the pane reports), the anim bench's
+    /// scrub/play/ghost, the Compose carousel. Not a bin: it was briefly the home
     /// of seven unrelated groups — `I`, `M`, `T F G H [ ]`, `Z X V`, `B N O P`, `L …` — and that was
     /// the mistake this whole overlay exists to avoid: a container is not an anchor, so eleven bare
     /// chords piled against a pane's edge with nothing under them saying what any of them did. Each
@@ -280,6 +283,18 @@ pub enum ControlId {
     Filter,
     /// The animation bench's rig list.
     Rigs,
+    /// The Map's YAW row — the facing the turn cluster writes.
+    Yaw,
+    /// The Map's UNDER row — the piece under the cursor, which the piece-verbs act on and the row
+    /// exists to name.
+    Under,
+    /// The TILE card in the Tiles pane — the tile being assembled, open or not: its heading is on
+    /// screen in every branch, including the one that says "press N to start one".
+    Tile,
+    /// The MEMBERS list of the open tile — the focus the member-verbs move. On screen whenever a
+    /// verb homed here is live: every one is `Stance::Holding`, and Holding means an open tile
+    /// with a focused member (`editor::sense_context`).
+    Members,
 }
 
 impl ControlId {
@@ -300,7 +315,9 @@ impl ControlId {
             | ControlId::Mount
             | ControlId::CellGrid
             | ControlId::Tags
-            | ControlId::Mesh => true,
+            | ControlId::Mesh
+            | ControlId::Tile
+            | ControlId::Members => true,
             // The lists and the window's own furniture: each is a whole node with open ground beside
             // it, so a badge sits against its edge and reads as attached.
             ControlId::DoorStrip
@@ -311,7 +328,11 @@ impl ControlId {
             | ControlId::Palette
             | ControlId::Pieces
             | ControlId::Filter
-            | ControlId::Rigs => false,
+            | ControlId::Rigs
+            // The Map's readout rows sit in the StatusBlock, a plain column with open ground
+            // beside it — no fold to pin their badges to.
+            | ControlId::Yaw
+            | ControlId::Under => false,
         }
     }
 
@@ -341,13 +362,17 @@ impl ControlId {
             | ControlId::Palette
             | ControlId::Pieces
             | ControlId::Filter
-            | ControlId::Rigs => false,
+            | ControlId::Rigs
+            | ControlId::Yaw
+            | ControlId::Under
+            | ControlId::Tile
+            | ControlId::Members => false,
         }
     }
 
     /// Every one, so a ratchet can enumerate. A `ControlId` nothing homes to is a word with no
     /// meaning, and a `ControlId` no panel attaches is a badge that never appears.
-    pub const ALL: [ControlId; 14] = [
+    pub const ALL: [ControlId; 18] = [
         ControlId::DoorStrip,
         ControlId::Title,
         ControlId::Back,
@@ -362,6 +387,10 @@ impl ControlId {
         ControlId::Pieces,
         ControlId::Filter,
         ControlId::Rigs,
+        ControlId::Yaw,
+        ControlId::Under,
+        ControlId::Tile,
+        ControlId::Members,
     ];
 }
 
@@ -865,7 +894,7 @@ pub const BINDINGS: &[Binding] = &[
         "S",
         "save",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Title)),
     b(
         Action::MainMenu,
         KeyCode::KeyO,
@@ -945,7 +974,7 @@ pub const BINDINGS: &[Binding] = &[
         "Z",
         "undo / redo",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Detail)),
     bs(
         Action::Redo,
         KeyCode::KeyZ,
@@ -955,7 +984,7 @@ pub const BINDINGS: &[Binding] = &[
         "Z",
         "undo / redo",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Detail)),
     // **Z and C turn the brush; X puts it back.** They sit under the left hand already resting on
     // WASD, which the brackets never did — and `Z` is free as a bare key precisely because the
     // modifier check above keeps `Cmd+Z` (undo) and `Z` (aim) apart rather than letting the chord
@@ -975,7 +1004,7 @@ pub const BINDINGS: &[Binding] = &[
         "H",
         "target the stack",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Under)),
     // **The arrows, on the tab that had none.** `Stance::Idle` because a piece already in hand is
     // being placed, not chosen — and the same two keys are then free to mean something else, which is
     // what the axis is for. Indifferent to Shift on purpose: `Shift` is the five-row stride here, the
@@ -1018,7 +1047,7 @@ pub const BINDINGS: &[Binding] = &[
         "R",
         "turn L / turn R / tip x / tip z / straight",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Yaw)),
     b(
         Action::TurnPieceRight,
         KeyCode::KeyT,
@@ -1027,7 +1056,7 @@ pub const BINDINGS: &[Binding] = &[
         "T",
         "turn L / turn R / tip x / tip z / straight",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Yaw)),
     b(
         Action::TipX,
         KeyCode::KeyY,
@@ -1036,7 +1065,7 @@ pub const BINDINGS: &[Binding] = &[
         "Y",
         "turn L / turn R / tip x / tip z / straight",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Yaw)),
     b(
         Action::TipZ,
         KeyCode::KeyU,
@@ -1045,7 +1074,7 @@ pub const BINDINGS: &[Binding] = &[
         "U",
         "turn L / turn R / tip x / tip z / straight",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Yaw)),
     b(
         Action::Straighten,
         KeyCode::KeyV,
@@ -1054,7 +1083,7 @@ pub const BINDINGS: &[Binding] = &[
         "V",
         "turn L / turn R / tip x / tip z / straight",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Yaw)),
     // **The brackets lift.** Free in this context (the Tiles tab's layer pair is never live with
     // the Map), and vertically suggestive in a way no letter is. One subgrid unit per press, held
     // repeat for a long ride up; the authored offset is `Placed::lift`, the one amendment to
@@ -1086,7 +1115,7 @@ pub const BINDINGS: &[Binding] = &[
         "[",
         "lift / lower this",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Under)),
     b(
         Action::LiftUp,
         KeyCode::BracketRight,
@@ -1095,7 +1124,7 @@ pub const BINDINGS: &[Binding] = &[
         "]",
         "lift / lower this",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Under)),
     // **The delete key arms a tool; it does not delete.** Removing on the keypress meant the only
     // preview of what was about to go was the author's memory of where the cursor was.
     b(
@@ -1106,7 +1135,7 @@ pub const BINDINGS: &[Binding] = &[
         "X",
         "removal mode",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Under)),
     // **`B` is the last free key under the left hand.** The cluster an author's hand already rests on
     // is `Q W E R T / A S D F G / Z X C V B`, and every other letter in it is spoken for — pan, turn
     // view, aim, aim-reset, turn-piece, fill, remove. `B` is bound in the Tiles tab too (`ScanMesh`),
@@ -1167,7 +1196,7 @@ pub const BINDINGS: &[Binding] = &[
         "O",
         "pin / unpin",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Under)),
     // **Four ways to cover a region, on one row, each named by its own chord.**
     //
     // `F` was a row of its own reading "flood fill" and the three `G`s shared a row reading
@@ -1465,7 +1494,7 @@ pub const BINDINGS: &[Binding] = &[
         "Z",
         "undo / redo",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Detail)),
     bs(
         Action::RedoTile,
         KeyCode::KeyZ,
@@ -1475,7 +1504,7 @@ pub const BINDINGS: &[Binding] = &[
         "Z",
         "undo / redo",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Detail)),
     // **The lattice, by keyboard.** Two rows, which is what the twelve-row ceiling leaves once the
     // seven above and the labels row are counted — the cursor and the layer share one row (they are
     // one idea: where in the lattice), each reading its chords in order, the `W, A, S, D  pan` shape.
@@ -1698,7 +1727,7 @@ pub const BINDINGS: &[Binding] = &[
         "up",
         "move the piece",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Members)),
     bsp(
         Action::BuildBack,
         KeyCode::ArrowDown,
@@ -1709,7 +1738,7 @@ pub const BINDINGS: &[Binding] = &[
         "down",
         "move the piece",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Members)),
     // **Left/right walk the members, and that is a trade made deliberately.** They used to nudge on
     // the X axis; the cost of taking them is that sideways is reached by turning the view (`Q`/`E`
     // step quarter detents and `step_in_view` maps the arrows through the yaw) or by `Shift`+arrow
@@ -1728,7 +1757,7 @@ pub const BINDINGS: &[Binding] = &[
         "left",
         "move the piece",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Members)),
     bsp(
         Action::BuildRight,
         KeyCode::ArrowRight,
@@ -1739,7 +1768,7 @@ pub const BINDINGS: &[Binding] = &[
         "right",
         "move the piece",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Members)),
     // The member walk moved here to free them. A prev/next pair, no modifier, under the fingers.
     bsp(
         Action::MemberPrev,
@@ -1751,7 +1780,7 @@ pub const BINDINGS: &[Binding] = &[
         ",",
         "step to the previous / next member",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Members)),
     bsp(
         Action::MemberNext,
         KeyCode::Period,
@@ -1762,7 +1791,7 @@ pub const BINDINGS: &[Binding] = &[
         ".",
         "step to the previous / next member",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Members)),
     // **Flush is its own verb, not a finer rung.** The author's word for it was *"left aligned"*,
     // and it is what a wall needs: a 0.1 m panel sits flush at -0.45 in a 1 m tile, and no rung of
     // any divisor lands on -0.45 — the position is a function of the piece's own width.
@@ -1776,7 +1805,7 @@ pub const BINDINGS: &[Binding] = &[
         "up",
         "flush it to that side",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Members)),
     bsp(
         Action::AlignBack,
         KeyCode::ArrowDown,
@@ -1787,7 +1816,7 @@ pub const BINDINGS: &[Binding] = &[
         "down",
         "flush it to that side",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Members)),
     bsp(
         Action::AlignLeft,
         KeyCode::ArrowLeft,
@@ -1798,7 +1827,7 @@ pub const BINDINGS: &[Binding] = &[
         "left",
         "flush it to that side",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Members)),
     bsp(
         Action::AlignRight,
         KeyCode::ArrowRight,
@@ -1809,7 +1838,7 @@ pub const BINDINGS: &[Binding] = &[
         "right",
         "flush it to that side",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Members)),
     b(
         Action::BuildArm,
         KeyCode::Space,
@@ -1818,7 +1847,7 @@ pub const BINDINGS: &[Binding] = &[
         "Space",
         "take the piece / Esc puts it back",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Pieces)),
     b(
         Action::BuildDown,
         KeyCode::BracketLeft,
@@ -1862,7 +1891,7 @@ pub const BINDINGS: &[Binding] = &[
         "Enter",
         "drop the piece / Shift: a slot",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Pieces)),
     bs(
         Action::BuildSlot,
         KeyCode::Enter,
@@ -1872,7 +1901,7 @@ pub const BINDINGS: &[Binding] = &[
         "Enter",
         "drop the piece / Shift: a slot",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Pieces)),
     b(
         Action::BuildTurn,
         KeyCode::KeyR,
@@ -1881,7 +1910,7 @@ pub const BINDINGS: &[Binding] = &[
         "R",
         "turn / remove this / Shift: empty the tile",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Tile)),
     // **`bs`, both of them.** A bare binding is indifferent to Shift and would swallow the shifted
     // chord — the collision the census exists to catch, and the precedent `RemoveTile`/`DemoteTile`
     // set on the Meshes tab.
@@ -1894,7 +1923,7 @@ pub const BINDINGS: &[Binding] = &[
         REMOVE_NAME,
         "turn / remove this / Shift: empty the tile",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Tile)),
     bs(
         Action::ClearTile,
         REMOVE_KEY,
@@ -1904,7 +1933,7 @@ pub const BINDINGS: &[Binding] = &[
         REMOVE_NAME,
         "turn / remove this / Shift: empty the tile",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Tile)),
     // **No save key here, on purpose.** `Cmd+S` is Global and already means *save what is open*; a
     // second one in this context would collide with it, and the collision is the census pointing out
     // that they are the same verb. The handler asks which mode is live.
@@ -1916,7 +1945,7 @@ pub const BINDINGS: &[Binding] = &[
         "N",
         "name a new tile",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Tile)),
     // **Its own stack, like every other tab's.** `UndoTile` is the *mesh* tab's, over library edits;
     // this one is over the tile in hand. Two tabs editing different files through one stack would
     // make "undo" mean whichever thing was touched last, which is the shape `Action::UndoTile`'s own
@@ -1930,7 +1959,7 @@ pub const BINDINGS: &[Binding] = &[
         "Z",
         "undo / redo",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Detail)),
     bs(
         Action::RedoBuild,
         KeyCode::KeyZ,
@@ -1940,7 +1969,7 @@ pub const BINDINGS: &[Binding] = &[
         "Z",
         "undo / redo",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Detail)),
     b(
         Action::ScanMesh,
         KeyCode::KeyB,
@@ -2175,7 +2204,7 @@ pub const BINDINGS: &[Binding] = &[
         "O",
         "previous / next composition",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Detail)),
     b(
         Action::CarouselNext,
         KeyCode::KeyP,
@@ -2184,7 +2213,7 @@ pub const BINDINGS: &[Binding] = &[
         "P",
         "previous / next composition",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Detail)),
     // One row, two chords — the Map, Tiles and Anim pairs again.
     // One row, two chords, same as the Map and Tiles undo pairs.
     bs(
@@ -2196,7 +2225,7 @@ pub const BINDINGS: &[Binding] = &[
         "Z",
         "undo / redo the last write",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Detail)),
     bs(
         Action::RedoBench,
         KeyCode::KeyZ,
@@ -2206,7 +2235,7 @@ pub const BINDINGS: &[Binding] = &[
         "Z",
         "undo / redo the last write",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Detail)),
     // The staged figure's phase scrub. Left/Right are held keys (`pressed`, like panning), Shift
     // slows the sweep — read in the handler, the `rotate_mesh` precedent, so `needs_shift` stays
     // `None` and the escape hatch keeps working.
@@ -3420,10 +3449,19 @@ mod tests {
     /// which is precisely the case `Home::Legend` exists for, and the one home it cannot be given
     /// instead is a control that does not exist yet. It arrived in the same change that deleted four
     /// per-panel problem logs, so the *screen* got quieter by more than this row costs.
+    ///
+    /// **Eight since 2026-08-21, and the commit message again.** The legend was drained onto
+    /// readouts: the Map's piece-verbs moved to the rows that display what they change (`YAW`,
+    /// `UNDER`), the tile-verbs to the TILE card and the MEMBERS list, take/drop to the piece
+    /// list, save to the document's name in the chrome bar, and every tab's undo pair to its own
+    /// text pane. What remains is the set with no honest control: `Esc`, the journal, `Cmd+Delete`,
+    /// the camera (whose anchor — the compass — stands down while `K` is held), the tool-armers
+    /// whose subject is a future click, the generate row, and the grid rungs whose readout does
+    /// not exist yet. Map's worst stance is the new eight.
     #[test]
     fn no_home_carries_more_than_it_can_show() {
         const CAP: usize = 8;
-        const LEGEND: usize = 16;
+        const LEGEND: usize = 8;
         let mut over = Vec::new();
         for (context, stance) in POLICED.into_iter().flat_map(|c| STANCES.map(|s| (c, s))) {
             // The frame's badges are on screen at the same time as the tab's, so they are counted
