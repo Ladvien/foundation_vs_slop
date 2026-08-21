@@ -1976,7 +1976,7 @@ pub const BINDINGS: &[Binding] = &[
         false,
         Context::Meshes,
         "B",
-        "rescan solid / turn mesh x / y / z",
+        "rescan solid / turn x / y / z",
     )
     .at(Home::Control(ControlId::Mesh)),
     b(
@@ -1985,7 +1985,7 @@ pub const BINDINGS: &[Binding] = &[
         false,
         Context::Meshes,
         "N",
-        "rescan solid / turn mesh x / y / z",
+        "rescan solid / turn x / y / z",
     )
     .at(Home::Control(ControlId::Mesh)),
     b(
@@ -1994,7 +1994,7 @@ pub const BINDINGS: &[Binding] = &[
         false,
         Context::Meshes,
         "O",
-        "rescan solid / turn mesh x / y / z",
+        "rescan solid / turn x / y / z",
     )
     .at(Home::Control(ControlId::Mesh)),
     b(
@@ -2003,7 +2003,7 @@ pub const BINDINGS: &[Binding] = &[
         false,
         Context::Meshes,
         "P",
-        "rescan solid / turn mesh x / y / z",
+        "rescan solid / turn x / y / z",
     )
     .at(Home::Control(ControlId::Mesh)),
     // **The VLM labeler's cluster** — one row, three verbs. `L` photographs the focused piece and
@@ -2064,7 +2064,7 @@ pub const BINDINGS: &[Binding] = &[
         false,
         Context::Meshes,
         "/",
-        "filter the tags / Enter takes the one match",
+        "filter the tags",
     )
     .at(Home::Control(ControlId::Tags)),
     // The arrows are the Tiles tab's too. Legal, and the reason the census models context at all:

@@ -92,7 +92,7 @@ const DOES_COL: f32 = 138.0;
 /// while a control's cluster shares that ground with every other control's and with the legend. The
 /// piece list's five labelled verbs at the legend's width reached halfway across the viewport and
 /// clipped both. Narrower wraps more and stays put.
-const CONTROL_DOES_COL: f32 = 96.0;
+const CONTROL_DOES_COL: f32 = 90.0;
 
 /// **The strip at the viewport's leading edge that belongs to the left dock's badges.**
 ///
