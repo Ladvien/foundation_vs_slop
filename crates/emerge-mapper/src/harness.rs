@@ -153,6 +153,35 @@ pub fn add_debugger_plugins(app: &mut App) -> &mut App {
 /// Both entry points do this, because it is not cosmetic: the embedded default is 95 codepoints of
 /// ASCII, so every `—` in the editor's copy — and in the refusals `emerge-core` hands back — draws as
 /// a tofu box. A harness whose text ran through a different font would measure different layout.
+/// **Resize the headless surface**, for a test that needs a window shape the default is not.
+///
+/// The windowed app resizes through `fit_surface_to_window`, which needs a `PrimaryWindow`; a
+/// headless run has none, so this writes the image the way that system would. Everything follows
+/// from the image — the cameras render into it and the UI lays out against it — so the caller only
+/// has to step a few frames afterwards for the new geometry to land. Sizes are physical texels; at
+/// the harness's `UiScale` of 1.2, divide by 1.2 for logical pixels.
+pub fn resize_surface(app: &mut App, width: u32, height: u32) -> Result<(), String> {
+    let handle = app
+        .world()
+        .get_resource::<crate::surface::Surface>()
+        .ok_or("no Surface resource — is the editor built?")?
+        .image
+        .clone();
+    let mut images = app
+        .world_mut()
+        .get_resource_mut::<Assets<Image>>()
+        .ok_or("no image assets")?;
+    let Some(mut image) = images.get_mut(&handle) else {
+        return Err("the surface image is gone".into());
+    };
+    image.resize(bevy::render::render_resource::Extent3d {
+        width: width.max(1),
+        height: height.max(1),
+        depth_or_array_layers: 1,
+    });
+    Ok(())
+}
+
 pub fn install_font(app: &mut App, root: &Path) -> Result<(), String> {
     let path = root.join("assets/fonts/FiraMono-Regular.ttf");
     let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;

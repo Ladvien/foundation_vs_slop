@@ -165,7 +165,15 @@ impl Plugin for SurfacePlugin {
 /// A starting size only — [`fit_surface_to_window`] owns it from the first frame that has a window.
 /// Headless runs keep it, because there is no window to ask and an image of zero has no valid
 /// texture.
-const INITIAL_EDGE: u32 = 1024;
+///
+/// **Window-shaped, deliberately.** It was a 1024 square, and the square told a comfortable lie:
+/// with both docks at their fixed widths, a square surface leaves a stage too narrow for the badge
+/// legend to stand in at all, so the geometry the headless ratchets policed was one the windowed
+/// app never renders — the first real-window capture showed the legend buried under the piece
+/// list's boxes while every test was green. This is a 16:9 the docks leave a real stage inside;
+/// `emerge_mapper::harness::resize_surface` is how a test asks for another shape.
+const INITIAL_W: u32 = 1536;
+const INITIAL_H: u32 = 864;
 
 fn spawn_surface(world: &mut World) {
     // `main.rs` and `build_headless_at` both insert `ClearColor` before the editor's plugins; a
@@ -181,8 +189,8 @@ fn spawn_surface(world: &mut World) {
         return;
     };
     let size = Extent3d {
-        width: INITIAL_EDGE,
-        height: INITIAL_EDGE,
+        width: INITIAL_W,
+        height: INITIAL_H,
         depth_or_array_layers: 1,
     };
     let mut image = Image {

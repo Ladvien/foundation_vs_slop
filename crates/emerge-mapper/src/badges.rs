@@ -94,11 +94,10 @@ const DOES_COL: f32 = 138.0;
 /// clipped both. Narrower wraps more and stays put.
 const CONTROL_DOES_COL: f32 = 90.0;
 
-/// **The strip at the viewport's leading edge that belongs to the left dock's badges.**
-///
-/// Wide enough for the chord column of a dock's badge list plus its gap. The legend is kept out of
-/// it, which is what stops the two drawing through each other.
-const GUTTER: f32 = 88.0;
+/// **A leader line's thickness, in logical pixels.** One: it is a connector, not a shape, and the
+/// badge-border ink ([`KEY`]) at a hairline reads against both the veil and a panel without
+/// competing with either.
+const LEAD_THICK: f32 = 1.0;
 
 /// The column a legend's chords hold, so its descriptions line up under each other rather than
 /// stepping in and out with the width of the chord above.
@@ -149,6 +148,17 @@ pub struct Badge(pub Vec<keys::Action>);
 /// looking at would be the second place that decides what a badge looks like.
 #[derive(Component)]
 pub struct BadgeRest(pub Color, pub Color);
+
+/// **The three segments of a cluster's leader** — the reach out of the anchor, the run down the
+/// corridor, the landing into the box. Spawned among the layer's children *before* every cluster so
+/// a line paints under any box it meets; laid out by [`place_badges`]; the run and the landing stay
+/// hidden whenever the box sits level with its anchor and the reach alone is the line.
+#[derive(Component)]
+pub struct Lead(pub [Entity; 3]);
+
+/// One segment of a leader line — a hairline [`Node`] in the badge-border ink.
+#[derive(Component)]
+pub struct LeadSeg;
 
 /// **Which tab's badges are up, in which [`keys::Stance`], and against which controls** — so the
 /// layer is rebuilt when the answer changes and not on every frame the key is held.
@@ -369,6 +379,32 @@ fn rebuild_badges(
     homes.sort_by_key(|h| paint_order(*h));
 
     for (layer, _) in &mut layers {
+        // **Leaders under boxes.** Siblings paint in spawn order, so every segment is spawned
+        // before any cluster: a line that meets a box passes under its face and the box stays
+        // readable, which is the reading order the whole overlay exists for.
+        let mut leads: Vec<(Home, [Entity; 3])> = Vec::new();
+        for home in homes.iter().filter(|h| matches!(h, Home::Control(_))) {
+            let mut three = [Entity::PLACEHOLDER; 3];
+            commands.entity(layer).with_children(|p| {
+                for seg in &mut three {
+                    *seg = p
+                        .spawn((
+                            LeadSeg,
+                            Node {
+                                // PLACES-ITSELF-OK: a leader segment, laid against its anchor and
+                                // its box by `place_badges` — same standing as the clusters.
+                                position_type: PositionType::Absolute,
+                                ..default()
+                            },
+                            BackgroundColor(KEY),
+                            Visibility::Hidden,
+                            bevy::picking::Pickable::IGNORE,
+                        ))
+                        .id();
+                }
+            });
+            leads.push((*home, three));
+        }
         for home in &homes {
             commands.entity(layer).with_children(|p| {
                 // **A legend is a column; everything else is a wrapping row of bare chords.** The
@@ -387,7 +423,7 @@ fn rebuild_badges(
                     Home::Legend => true,
                     Home::Control(id) => !id.in_a_band(),
                 };
-                p.spawn((
+                let mut spawned = p.spawn((
                     BadgeCluster(*home),
                     // A cluster stands where its anchor is, which flow has no opinion about —
                     // `place_badges` computes it from a rect or a projection every frame.
@@ -431,8 +467,11 @@ fn rebuild_badges(
                     // visibility-hidden UI node does occupy layout, which is the difference.
                     Visibility::Hidden,
                     bevy::picking::Pickable::IGNORE,
-                ))
-                .with_children(|c| {
+                ));
+                if let Some((_, three)) = leads.iter().find(|(h, _)| h == home) {
+                    spawned.insert(Lead(*three));
+                }
+                spawned.with_children(|c| {
                     for badge in live_badges.iter().filter(|b| b.home == *home) {
                         one_badge(c, badge, legend, labelled);
                     }
@@ -444,30 +483,27 @@ fn rebuild_badges(
 
 /// **The rect a [`Home`] is drawn against**, in surface pixels.
 ///
-/// One space for both anchors, and that is what makes this one mechanism rather than two wearing
-/// one name: [`ComputedNode`] + [`UiGlobalTransform`] are in physical surface pixels. So there is
-/// exactly one conversion, at the write, and it is by [`UiScale`]. (`Camera::world_to_viewport`
-/// answered here too while a world-anchored `Subject` existed; the projection left with it.)
+/// [`ComputedNode`] + [`UiGlobalTransform`] are in physical surface pixels, so there is exactly one
+/// conversion, at the write, and it is by [`UiScale`].
 ///
 /// `None` is *"there is no honest answer"* and the cluster stays hidden. It is never repositioned to
 /// somewhere else — a home that quietly moved is precisely what would hide a control that has
 /// stopped being drawn.
-///
-/// It answers **two** rects: where the badge is aimed, and the ground it may not leave. They differ
-/// per home and the difference is the point — a control's badge is bounded by the *pane* that holds
-/// it, vertically, so a row scrolled below the fold pins its chord at that pane's edge instead of
-/// sliding down to the foot of the window, where it reads as belonging to the status band.
 struct Anchored {
     at: Rect,
-    within: Rect,
+    /// **The scrolling pane that clips this control, if one does.** It no longer bounds the box —
+    /// boxes pack in a rail and never bury one another — it clamps the **leader's anchor end**: a
+    /// row scrolled past the fold is pointed at from the pane edge nearest it, which is where
+    /// scrolling would bring it back. The earlier design pinned the *box* there instead, and on a
+    /// real kit a scrolled pane stacked boxes on one edge until the deepest were unreadable.
+    fold: Option<Rect>,
     /// **Is this control in one of the frame's fixed-height bands?**
     ///
     /// The chrome bar, the door strip and the status band are twenty-six logical pixels of chrome
     /// with no slack; a badge top-aligned to a control there hangs below it, and reported from the
-    /// keyboard, *"there's not enough room to offset them below."* So a banded badge is **centred on
-    /// its control** — level with the thing it names, which is what a label beside a button should
-    /// be. A dock has vertical room, so a badge there stays level with the *row* it names rather than
-    /// with the middle of a pane.
+    /// keyboard, *"there's not enough room to offset them below."* So a banded badge is **centred
+    /// on its control** — level with the thing it names — and joins no rail: a band is its own
+    /// ground, and its badges are bare chords that fit it.
     banded: bool,
 }
 
@@ -478,8 +514,6 @@ fn anchor(
     controls: &Query<(Entity, &chrome::Control, &ComputedNode, &UiGlobalTransform)>,
     parents: &Query<&ChildOf>,
     folds: &Query<&bevy::ui_widgets::ScrollArea>,
-    window: Rect,
-    stage: Rect,
 ) -> Option<Anchored> {
     fn rect_of(node: &ComputedNode, tf: &UiGlobalTransform) -> Option<Rect> {
         let size = node.size();
@@ -501,18 +535,7 @@ fn anchor(
                 return None;
             }
             let (entity, at) = first;
-            // **The pane that clips it, if one does.** Horizontally the badge is free inside the
-            // window — it lives *beside* the pane, which is the whole point — so only the vertical
-            // band comes from the fold.
             let fold = fold_of(entity, parents, folds, rects);
-            let within = match fold {
-                Some(f) => Rect::from_corners(
-                    Vec2::new(window.min.x, f.min.y),
-                    Vec2::new(window.max.x, f.max.y),
-                )
-                .intersect(window),
-                None => window,
-            };
             // Asked of the frame, not of a height: `chrome::Frame` names these three, so a band that
             // grows or shrinks cannot make this answer stale the way a pixel threshold would.
             let bands = [frame.chrome_bar, frame.door_strip, frame.status];
@@ -520,82 +543,22 @@ fn anchor(
                 parents.get(*e).ok().map(|p| p.parent())
             })
             .any(|e| bands.contains(&e));
-            Some(Anchored { at, within, banded })
+            Some(Anchored { at, fold, banded })
         }
         Home::Legend => {
             // **The hole the world is drawn through**, because that is the only ground in this
-            // window that belongs to nothing. The chrome bar and the status band were tried first,
-            // one region each, and both are twenty-six pixels tall: a chord with its description
-            // beside it does not fit in either, so the cluster spilled out of the band it was
-            // supposed to be tidied into. A legend needs a column, and only the viewport has one.
+            // window that belongs to nothing — the anchor here is only the preferred corner's rect;
+            // [`settle_legend`] is what actually finds the ground.
             let (node, tf) = rects.get(frame.viewport).ok()?;
-            rect_of(node, tf).map(|at| Anchored { at, within: stage, banded: false })
+            rect_of(node, tf).map(|at| Anchored { at, fold: None, banded: false })
         }
     }
 }
 
-/// **Where a cluster's top-left corner goes**, given its anchor, its own measured size, and the rect
-/// it has to stay inside.
-///
-/// Two placements, one per kind of anchor, each chosen so a cluster does not land on the thing it
-/// is pointing at:
-///
-/// - **A control** is named from its leading edge — the gutter beside it, where the panel's own
-///   `MARGIN` usually leaves room — level with it in a band and level with its row in a dock.
-///   **The window is not inset for this**, and that was tried: `I` and `M` sit in the panel's
-///   own `MARGIN + PAD`, which fits them with about a pixel to spare, so insetting the bound by a
-///   margin made them stop fitting and flip out of the panel entirely. A badge one pixel from the
-///   window edge reads tight; a badge on the wrong side of its panel reads wrong.
-///   **Where the gutter has no room, the badge goes to the trailing edge instead**, and
-///   that is a correction: clamping it onto the leading edge was tried first and it covered exactly
-///   the words that identify the control — `Cmd+O` over `‹ ki`, `1, 2, 3` over `M`, `Cmd+C` over
-///   `TILE`. A badge that hides the label it is attached to has undone its own job. Every anchor in
-///   the right-hand dock still uses the leading side, so nothing that already read well moved.
-/// - **The legend** takes the viewport's **bottom-right** corner, inset. The top-left was tried first
-///   and it is the one corner that is *not* free: a control in the left dock puts its badges just
-///   past the panel's trailing edge, top-aligned with the pane — so on Meshes and Tiles the detail
-///   pane's seven chords landed straight across the legend's own. The legend is nearly as wide as
-///   the viewport, so there is no horizontal strip to move it into; the free ground is vertical, and
-///   the far corner is the only one no control cluster and no gizmo reaches. The same corner every
-///   time is what makes it learnable as a position rather than read as a list.
-///
-/// An anchor as wide as the window — the door strip, the chrome bar — has room on neither side, and
-/// there the clamp still puts the cluster on an edge. That is the honest last answer: a badge pinned
-/// to an edge still names its key, and one drawn off the window does not.
-fn spot(home: Home, anchor: Rect, cluster: Vec2, scale: f32, bound: Rect, banded: bool) -> Vec2 {
-    // Every constant here is written in logical pixels, the units the rest of this crate states
-    // lengths in; everything it is compared against is physical. One multiply, at the top, so a
-    // future constant cannot be added in the wrong space.
-    let reach = REACH * scale;
-    match home {
-        Home::Control(_) => {
-            let leading = anchor.min.x - cluster.x - reach;
-            let x = if leading >= bound.min.x {
-                leading
-            } else {
-                anchor.max.x + reach
-            };
-            // Level with the control in a band; level with the *row* in a dock, which is what keeps a
-            // badge attached to the line it names rather than to the middle of the pane holding it.
-            let y = if banded {
-                anchor.center().y - cluster.y * 0.5
-            } else {
-                anchor.min.y
-            };
-            Vec2::new(x, y)
-        }
-        // **The far corner, and nothing to dodge in it.** It was raised by the compass's own height
-        // for a while, because the gizmo owns the opposite end of this edge — and then the gizmo
-        // learned to stand down while the badges are up, which is the better fix and made the
-        // clearance dead weight. Dead weight with a consequence: it pushed the legend up into the
-        // lattice cursor's cross.
-        Home::Legend => anchor.max - cluster - Vec2::splat(reach * 3.0),
-    }
-}
-
-/// **Where a home sits in the PAINT order** — the legend first, so that where two anchors genuinely
-/// overlap the more specific badge draws on top. Bevy paints siblings in spawn order, so this is a
-/// spawn-time question and [`rebuild_badges`] is where it is asked.
+/// **Where a home sits in the PAINT order** — the legend first, so that where a leader passes the
+/// legend's ground the box still draws over the line. Bevy paints siblings in spawn order, so this
+/// is a spawn-time question and [`rebuild_badges`] is where it is asked — and the leader segments
+/// are spawned before everything here, which is what puts every line under every box.
 fn paint_order(home: Home) -> usize {
     match home {
         Home::Legend => 0,
@@ -605,15 +568,12 @@ fn paint_order(home: Home) -> usize {
 
 /// **Where a home sits in the PLACEMENT order**, which is deliberately not [`paint_order`].
 ///
-/// A cluster is placed clear of the ones placed before it, so the order *is* the priority: a badge
-/// standing on a control has one right place and the legend has a whole corner, so the controls go
-/// first and the legend yields. That is the opposite of the paint order, and the two are not one
-/// list read twice — they answer different questions about the same pair.
-///
-/// Within the controls, `ControlId::ALL` order, because `Query` iteration order is **not stable
-/// across `App` instances**: without a stated key, two clusters clamped to one pane edge would
-/// stack in whichever order the query happened to yield, and the overlay would lay itself out
-/// differently on two runs of the same test.
+/// Banded boxes hold their bands, the rails pack next, and the legend — which has a whole stage to
+/// stand in — yields to all of them. Within a rail the primary key is the **anchor's own y** (see
+/// [`place_badges`]: order preservation is what makes right-angle leaders crossing-free); this
+/// index is the tie-break, stated because `Query` iteration order is **not stable across `App`
+/// instances** — without a stated key the overlay would lay itself out differently on two runs of
+/// the same test.
 fn place_order(home: Home) -> (usize, usize) {
     match home {
         Home::Control(id) => (
@@ -627,45 +587,108 @@ fn place_order(home: Home) -> (usize, usize) {
     }
 }
 
-/// **Step a cluster clear of the ones already placed**, without leaving the ground it is bound to.
-///
-/// Several controls in one pane can clamp to the same edge — a scrolled detail pane puts `I`, `M`,
-/// the cursor keys, the cell keys, the mesh keys and the label verbs all at the same `y`. Stacked
-/// they are six unreadable boxes in one place, which is the report this whole area started from:
-/// *"why is rescan in the middle legend area when there is a UI button for it."*
-///
-/// `down` is which way the free ground lies, and it follows the anchor: a control's badge is aimed
-/// at the top of its row, so it steps down; the legend sits in the bottom corner, so it steps up.
-///
-/// **Bounded by `taken.len()`**, because each step puts this cluster past exactly one rect it hit
-/// and the `y` only moves one way — so the loop cannot run longer than the list it is dodging. When
-/// there is no room left it stops and lets the overlap show: a badge pinned somewhere honest beats
-/// one pushed off the ground it belongs to.
-fn step_clear(taken: &[Rect], mut at: Vec2, size: Vec2, within: Rect, down: bool, gap: f32) -> Vec2 {
-    let hi = (within.max - size).max(within.min);
-    for _ in 0..taken.len() {
-        let me = Rect::from_corners(at, at + size);
-        let Some(hit) = taken.iter().find(|t| !t.intersect(me).is_empty()) else {
-            break;
-        };
-        let want = if down {
-            hit.max.y + gap
-        } else {
-            hit.min.y - size.y - gap
-        };
-        if want < within.min.y || want > hi.y {
-            break;
-        }
-        at.y = want;
-    }
-    at
+/// Does `a` cover any real ground of `b` — more than a hairline's worth in both directions?
+fn covers(a: Rect, b: Rect) -> bool {
+    let i = a.intersect(b);
+    i.width() > 1.0 && i.height() > 1.0
 }
 
-/// Place every cluster against its anchor, and reveal it once it has a size to place.
+/// **The first free `y` at or below `pref` for a box of `size` at `x`, clear of everything placed.**
 ///
-/// Runs every frame the layer is up, because the panels move: a list scrolls, a pane grows a row, the
-/// docks resize with the window. A badge that only moved when the census changed would sit still
-/// through exactly the part an author is watching.
+/// Bounded by `taken.len()`: each step lands this box just past one rect it hit and `y` only grows,
+/// so the loop cannot run longer than the list it is dodging — and after stepping past a rect, that
+/// rect can never hit again. There is **no give-up arm**. The old placement stopped when its bound
+/// ran out and *let the overlap show*, and a real kit on a real window priced that honesty: the
+/// legend under the piece list's boxes, four cell rows buried beneath their own neighbours. A box
+/// that cannot hug its row now sits further down the same rail, and the leader carries the
+/// attachment — that trade is what the leader exists to buy.
+fn settle_down(pref: f32, size: Vec2, x: f32, taken: &[Rect], gap: f32) -> f32 {
+    let mut y = pref;
+    for _ in 0..=taken.len() {
+        let me = Rect::from_corners(Vec2::new(x, y), Vec2::new(x, y) + size);
+        let Some(hit) = taken.iter().find(|t| covers(**t, me)) else {
+            break;
+        };
+        y = hit.max.y + gap;
+    }
+    y
+}
+
+/// **The legend's ground: its corner if free, else up the column, else a column to the left —
+/// never an overlap.**
+///
+/// The same corner every time is what makes the legend learnable as a *place*
+/// ([`keys::Home::Legend`]), so the corner is always the first try and the search never moves it
+/// further than the placed boxes force. Fekete & Plaisant's excentric labels
+/// (`10.1145/302979.303148`) state the rule this search implements: a callout lives in free space,
+/// and free space is found, not hoped for. Both loops are bounded by `taken.len()` — climbing
+/// clears at least one rect per step, and each column shift moves strictly left past one.
+fn settle_legend(size: Vec2, stage: Rect, taken: &[Rect], gap: f32) -> Vec2 {
+    let corner = (stage.max - size - Vec2::splat(gap * 3.0)).max(stage.min);
+    let mut x = corner.x;
+    for _ in 0..=taken.len() {
+        let mut y = corner.y;
+        for _ in 0..=taken.len() {
+            let me = Rect::from_corners(Vec2::new(x, y), Vec2::new(x, y) + size);
+            let Some(top) = taken
+                .iter()
+                .filter(|t| covers(**t, me))
+                .map(|t| t.min.y)
+                .reduce(f32::min)
+            else {
+                return Vec2::new(x, y);
+            };
+            let up = top - size.y - gap;
+            if up < stage.min.y {
+                break;
+            }
+            y = up;
+        }
+        // The column is blocked all the way up: step left past the leftmost thing standing in it.
+        let column = Rect::from_corners(
+            Vec2::new(x, stage.min.y),
+            Vec2::new(x + size.x, stage.max.y),
+        );
+        let Some(left) = taken
+            .iter()
+            .filter(|t| covers(**t, column))
+            .map(|t| t.min.x)
+            .reduce(f32::min)
+        else {
+            break;
+        };
+        let shifted = left - size.x - gap;
+        if shifted < stage.min.x {
+            break;
+        }
+        x = shifted;
+    }
+    // No free ground at all — the corner, and the overlap ratchet is what says whether this state
+    // is ever actually reached.
+    corner
+}
+
+/// **Place every cluster — rail-packed, never overlapping, each tied to its anchor by a
+/// right-angle leader — and reveal it once it has a size.**
+///
+/// **The model is boundary labeling** (Bekos, Kaufmann, Symvonis & Wolff 2007,
+/// `10.1016/j.comgeo.2006.05.003`): boxes stand on one straight rail beside the dock that owns
+/// their anchors, stacked **in their anchors' order** — the condition under which right-angle
+/// leaders cannot cross one another. Fekete & Plaisant's excentric labels
+/// (`10.1145/302979.303148`) are the other parent: a callout on free ground, tied by a line, beats
+/// a box squeezed onto ground it does not fit. Two vertical runs may coincide on the corridor —
+/// two lines becoming one line is legible; two lines crossing is not, and the sort is what forbids
+/// the second. (Marschner & Shirley's chapter on diagram aesthetics says the same two words this
+/// paragraph keeps using: minimize crossings and bends.)
+///
+/// A leader is three hairline segments in the badge-border ink: the **reach** out of the anchor's
+/// stage-facing edge, the **run** down the corridor between dock and rail — ground no box can
+/// stand on — and the **landing** into the box. A box level with its anchor draws the reach alone,
+/// which is the common case and reads as the old adjacency.
+///
+/// Runs every frame the layer is up, because the panels move: a list scrolls, a pane grows a row,
+/// the docks resize with the window. A badge that only moved when the census changed would sit
+/// still through exactly the part an author is watching.
 fn place_badges(
     frame: Res<chrome::Frame>,
     ui_scale: Res<UiScale>,
@@ -674,7 +697,14 @@ fn place_badges(
     parents: Query<&ChildOf>,
     folds: Query<&bevy::ui_widgets::ScrollArea>,
     layers: Query<Entity, With<BadgeLayer>>,
-    mut clusters: Query<(&BadgeCluster, &ComputedNode, &mut Node, &mut Visibility)>,
+    mut clusters: Query<(
+        &BadgeCluster,
+        &ComputedNode,
+        &mut Node,
+        &mut Visibility,
+        Option<&Lead>,
+    )>,
+    mut segs: Query<(&mut Node, &mut Visibility), (With<LeadSeg>, Without<BadgeCluster>)>,
 ) {
     let Some(layer) = layers.iter().next() else {
         return;
@@ -693,62 +723,183 @@ fn place_badges(
     // drew landed 20% further from the corner than the point it named. A zero or negative scale is a
     // host misconfiguration rather than a state to render around; guarded so it cannot make a NaN.
     let scale = if ui_scale.0 > 0.0 { ui_scale.0 } else { 1.0 };
+    let reach = REACH * scale;
+    let thick = (LEAD_THICK * scale).max(1.0);
 
-    // **The legend stands in the hole the world is drawn through, so it is bounded by that.** The
-    // viewport is already the one answer to "where the world is" — `surface::fit_viewport_to_frame`
-    // hands the same rect to the map camera — and intersecting it with the window is what stops a
-    // squeezed layout, where the viewport overflows the frame, carrying the legend off the edge.
+    // **The stage: the hole the world is drawn through**, intersected with the window because the
+    // viewport is a flex item and on a window too narrow for both docks it overflows the frame.
+    // Boxes and the legend live here and nowhere else — a box over a panel would cover the words
+    // that identify what some other badge points at, and the docks are not veiled ground.
     let stage = rects
         .get(frame.viewport)
         .ok()
         .map(|(node, tf)| Rect::from_center_size(tf.translation, node.size()))
         .filter(|r| r.size() != Vec2::ZERO)
-        // **Intersected with the window, not taken raw.** The viewport is a flex item, and on a
-        // window too narrow for both docks it overflows the frame — so clamping to it alone let the
-        // legend run off the right edge, which the clamp exists to prevent. The viewport says where
-        // these belong; the window says what can be seen; a badge has to satisfy both.
         .map(|r| r.intersect(window))
-        // **Minus the strip the left dock's badges land in.** Every badge for a row in that panel
-        // sits just outside it, and the legend reaches back far enough to meet them: measured with
-        // the lattice cursor's cross drawn *through* the legend, `G` rendering as `G +S` across
-        // `Cmd+S  save`. Both were unreadable. [`GUTTER`] is what keeps them apart, and it is why
-        // [`DOES_COL`] is as narrow as it is.
-        .map(|r| Rect::from_corners(Vec2::new(r.min.x + GUTTER * scale, r.min.y), r.max))
-        .filter(|r| r.size().x > 1.0)
         .unwrap_or(window);
 
-    // **One pass, in a stated order, each cluster clear of the last** — see [`place_order`] for why
-    // the order is written down rather than taken from the query, and [`step_clear`] for what
-    // "clear" costs when the ground runs out.
     let mut items: Vec<_> = clusters.iter_mut().collect();
     items.sort_by_key(|(cluster, ..)| place_order(cluster.0));
-    let mut taken: Vec<Rect> = Vec::new();
-    for (cluster, node, mut style, mut visibility) in items {
-        let size = node.size();
-        let placed = (size != Vec2::ZERO)
-            .then(|| {
-                anchor(cluster.0, &frame, &rects, &controls, &parents, &folds, window, stage)
-            })
-            .flatten()
-            .map(|Anchored { at, within, banded }| {
-                // The bound decides which side of a control the badge goes, so `anchor` answers it
-                // alongside the rect rather than it being decided in two places.
-                let want = spot(cluster.0, at, size, scale, within, banded);
-                // Clamped rather than taken down: a badge pinned to an edge still names its key, and
-                // a badge that vanished when its anchor drifted off screen would be missing exactly
-                // when an author is hunting for it.
-                let hi = (within.max - size).max(within.min);
-                let want = want.clamp(within.min, hi);
-                // Which way the free ground lies is the anchor's own answer: a control's badge is
-                // top-aligned with its row, the legend stands in the bottom corner.
-                let down = matches!(cluster.0, Home::Control(_));
-                let want = step_clear(&taken, want, size, within, down, REACH * scale);
-                taken.push(Rect::from_corners(want, want + size));
-                (want, within)
-            });
+    let anchors: Vec<Option<Anchored>> = items
+        .iter()
+        .map(|(cluster, node, ..)| {
+            (node.size() != Vec2::ZERO)
+                .then(|| anchor(cluster.0, &frame, &rects, &controls, &parents, &folds))
+                .flatten()
+        })
+        .collect();
 
-        let show = match placed {
-            Some((at, _)) => {
+    // **The rails: every un-banded control box column-aligns just past the widest anchor on its
+    // side.** One straight rail per side reads as one thing, and it is what gives every leader's
+    // vertical run a corridor — the strip between dock edge and rail — where no box can stand.
+    let mid = window.center().x;
+    let side_of = |a: &Anchored| a.at.center().x <= mid;
+    let mut left_edge = f32::MIN;
+    let mut right_edge = f32::MAX;
+    for (i, a) in anchors.iter().enumerate() {
+        let (Some(a), (cluster, ..)) = (a, &items[i]) else {
+            continue;
+        };
+        if matches!(cluster.0, Home::Control(_)) && !a.banded {
+            if side_of(a) {
+                left_edge = left_edge.max(a.at.max.x);
+            } else {
+                right_edge = right_edge.min(a.at.min.x);
+            }
+        }
+    }
+
+    struct Plan {
+        pos: Option<Vec2>,
+        lead: [Option<Rect>; 3],
+    }
+    let mut plans: Vec<Plan> = (0..items.len())
+        .map(|_| Plan { pos: None, lead: [None; 3] })
+        .collect();
+    let mut taken: Vec<Rect> = Vec::new();
+
+    // **The elbow between an anchor point and a box**, as up to three hairline rects.
+    let elbow = |a: Vec2, corridor_x: f32, box_edge_x: f32, box_center_y: f32| -> [Option<Rect>; 3] {
+        let h = |x0: f32, x1: f32, y: f32| {
+            Rect::from_corners(
+                Vec2::new(x0.min(x1), y - thick * 0.5),
+                Vec2::new(x0.max(x1), y + thick * 0.5),
+            )
+        };
+        if (a.y - box_center_y).abs() <= thick {
+            [Some(h(a.x, box_edge_x, a.y)), None, None]
+        } else {
+            let v = Rect::from_corners(
+                Vec2::new(corridor_x - thick * 0.5, a.y.min(box_center_y)),
+                Vec2::new(corridor_x + thick * 0.5, a.y.max(box_center_y)),
+            );
+            [
+                Some(h(a.x, corridor_x, a.y)),
+                Some(v),
+                Some(h(corridor_x, box_edge_x, box_center_y)),
+            ]
+        }
+    };
+
+    // ── Banded boxes first: their ground is their band, beside their control as before. ──────────
+    for (i, a) in anchors.iter().enumerate() {
+        let (Some(a), (cluster, node, ..)) = (a, &items[i]) else {
+            continue;
+        };
+        if !(matches!(cluster.0, Home::Control(_)) && a.banded) {
+            continue;
+        }
+        let size = node.size();
+        let leading = a.at.min.x - size.x - reach;
+        let x = if leading >= window.min.x {
+            leading
+        } else {
+            a.at.max.x + reach
+        };
+        let y = a.at.center().y - size.y * 0.5;
+        let pos = Vec2::new(x, y);
+        let me = Rect::from_corners(pos, pos + size);
+        plans[i].pos = Some(pos);
+        // The stub that says "this box is that control's": anchor edge to box edge, level.
+        let (a_x, box_edge) = if x >= a.at.max.x {
+            (a.at.max.x, x)
+        } else {
+            (a.at.min.x, x + size.x)
+        };
+        plans[i].lead = elbow(Vec2::new(a_x, a.at.center().y), a_x, box_edge, a.at.center().y);
+        taken.push(me);
+        for seg in plans[i].lead.iter().flatten() {
+            taken.push(*seg);
+        }
+    }
+
+    // ── The rails, left then right, each in its anchors' order. ──────────────────────────────────
+    for left in [true, false] {
+        let mut rail: Vec<usize> = (0..items.len())
+            .filter(|i| {
+                matches!(items[*i].0 .0, Home::Control(_))
+                    && anchors[*i].as_ref().is_some_and(|a| !a.banded && side_of(a) == left)
+            })
+            .collect();
+        rail.sort_by(|x, y| {
+            let (ax, ay) = (
+                anchors[*x].as_ref().map(|a| a.at.center().y).unwrap_or(0.0),
+                anchors[*y].as_ref().map(|a| a.at.center().y).unwrap_or(0.0),
+            );
+            ax.total_cmp(&ay)
+                .then(place_order(items[*x].0 .0).cmp(&place_order(items[*y].0 .0)))
+        });
+        let mut floor = stage.min.y;
+        for i in rail {
+            let a = anchors[i].as_ref().unwrap_or_else(|| unreachable!());
+            let size = items[i].1.size();
+            let (x, corridor_x, a_x) = if left {
+                (left_edge + reach * 2.0, left_edge + reach, a.at.max.x)
+            } else {
+                (right_edge - reach * 2.0 - size.x, right_edge - reach, a.at.min.x)
+            };
+            // The leader's anchor end: the row's own centre, clamped into the pane when the row is
+            // beyond the fold — pointed at from where scrolling would bring it back.
+            let a_y = match a.fold {
+                Some(f) => a.at.center().y.clamp(f.min.y + thick, (f.max.y - thick).max(f.min.y)),
+                None => a.at.center().y,
+            };
+            let pref = a
+                .at
+                .min
+                .y
+                .clamp(stage.min.y, (stage.max.y - size.y).max(stage.min.y))
+                .max(floor);
+            let y = settle_down(pref, size, x, &taken, reach)
+                .clamp(stage.min.y, (stage.max.y - size.y).max(stage.min.y));
+            let pos = Vec2::new(x, y);
+            plans[i].pos = Some(pos);
+            let box_edge = if left { x } else { x + size.x };
+            plans[i].lead = elbow(Vec2::new(a_x, a_y), corridor_x, box_edge, y + size.y * 0.5);
+            taken.push(Rect::from_corners(pos, pos + size));
+            for seg in plans[i].lead.iter().flatten() {
+                taken.push(*seg);
+            }
+            floor = y + size.y + reach;
+        }
+    }
+
+    // ── The legend last: it has a whole stage to stand in, so it yields to everything. ───────────
+    for (i, a) in anchors.iter().enumerate() {
+        let ((cluster, node, ..), Some(_)) = (&items[i], a) else {
+            continue;
+        };
+        if cluster.0 != Home::Legend {
+            continue;
+        }
+        let size = node.size();
+        plans[i].pos = Some(settle_legend(size, stage, &taken, reach));
+    }
+
+    // ── Write everything, gated. ─────────────────────────────────────────────────────────────────
+    for (i, (_, _, style, visibility, lead)) in items.iter_mut().enumerate() {
+        let show = match plans[i].pos {
+            Some(at) => {
                 let (left, top) = (Val::Px(at.x / scale), Val::Px(at.y / scale));
                 if style.left != left {
                     style.left = left;
@@ -760,8 +911,44 @@ fn place_badges(
             }
             None => Visibility::Hidden,
         };
-        if *visibility != show {
-            *visibility = show;
+        if **visibility != show {
+            **visibility = show;
+        }
+        let Some(lead) = lead else { continue };
+        for (k, entity) in lead.0.iter().enumerate() {
+            let Ok((mut node, mut vis)) = segs.get_mut(*entity) else {
+                continue;
+            };
+            let want = if plans[i].pos.is_none() { None } else { plans[i].lead[k] };
+            match want {
+                Some(r) => {
+                    let (l, t) = (Val::Px(r.min.x / scale), Val::Px(r.min.y / scale));
+                    let (w, h) = (
+                        Val::Px((r.width() / scale).max(LEAD_THICK)),
+                        Val::Px((r.height() / scale).max(LEAD_THICK)),
+                    );
+                    if node.left != l {
+                        node.left = l;
+                    }
+                    if node.top != t {
+                        node.top = t;
+                    }
+                    if node.width != w {
+                        node.width = w;
+                    }
+                    if node.height != h {
+                        node.height = h;
+                    }
+                    if *vis != Visibility::Inherited {
+                        *vis = Visibility::Inherited;
+                    }
+                }
+                None => {
+                    if *vis != Visibility::Hidden {
+                        *vis = Visibility::Hidden;
+                    }
+                }
+            }
         }
     }
 }

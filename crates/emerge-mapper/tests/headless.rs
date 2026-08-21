@@ -11293,23 +11293,20 @@ fn the_tag_axes_have_a_block_to_stand_in() {
 
 /// **A verb whose row is out of view is pinned to its own pane, not floating past it.**
 ///
+/// **A row beyond the fold is pointed at from its pane's edge.**
+///
 /// A row in a `chrome::scroll_list` keeps its rect when it scrolls out of view — only its clip
-/// changes. Taken at face value that would put a badge hundreds of pixels below the pane, level with
-/// the status band, naming a row nobody can see.
+/// changes. Taken at face value that would aim a leader hundreds of pixels below the pane, level
+/// with the status band, naming a row nobody can see. Boxes used to be pinned there bodily, and a
+/// scrolled pane stacked them on one edge until the deepest were buried; now the **box** packs in
+/// the rail like any other, and it is the **leader's anchor end** that clamps to the pane — the
+/// line points at the edge where scrolling would bring the row back.
 ///
-/// It used to be answered by sending those verbs to the legend instead. That moved the problem: with
-/// the detail pane scrolled, six groups arrived there at once and the legend grew to twenty labelled
-/// rows — taller than the viewport, which the piece list's own badges then drew through. So the fold
-/// is a **bound** again: `badges::anchor` answers `within` from it and `place_badges` clamps, which
-/// pins the badge at the edge of the pane its row is in.
-///
-/// The invariant: **a `Control` cluster's top edge is inside the fold of the pane its anchor sits
-/// in.** Not the whole cluster — a labelled column can be taller than a short pane, and pinning it
-/// at the edge is still the honest answer there.
+/// The invariant: a paned control's leader begins inside its pane's fold, give or take a hairline.
 #[test]
-fn a_badge_for_a_row_out_of_view_pins_to_its_own_pane() {
+fn a_row_beyond_the_fold_is_pointed_at_from_its_pane() {
     use bevy::ui::{ComputedNode, UiGlobalTransform};
-    use emerge_mapper::badges::BadgeCluster;
+    use emerge_mapper::badges::{BadgeCluster, Lead, LeadSeg};
     use emerge_mapper::keys::Home;
 
     let root = Fixture::new("badgefold")
@@ -11321,10 +11318,9 @@ fn a_badge_for_a_row_out_of_view_pins_to_its_own_pane() {
     let mut checked = 0usize;
     for mode in TABS {
         let mut app = badges_up(&root, mode);
-        // **A piece in the pane, because that is when the paned controls exist at all.** `IdField`,
-        // `Mount`, `CellGrid`, `Tags` and `Mesh` are drawn by the detail pane, and the pane draws
-        // nothing until something is selected — without this the test measured zero controls on
-        // every tab and enforced its rule against nothing, which it says so itself below.
+        // **A piece in the pane, because that is when the paned controls exist at all.** The detail
+        // pane draws nothing until something is selected — without this the test would measure zero
+        // paned controls on every tab and enforce its rule against nothing.
         let id = app
             .world()
             .resource::<emerge_mapper::project::Project>()
@@ -11344,7 +11340,7 @@ fn a_badge_for_a_row_out_of_view_pins_to_its_own_pane() {
         }
 
         // Every control, with the fold it sits inside — the same walk `badges::fold_of` makes.
-        let folds: Vec<(emerge_mapper::keys::ControlId, Option<Rect>)> = {
+        let folds: Vec<(emerge_mapper::keys::ControlId, Rect)> = {
             let mut q = app
                 .world_mut()
                 .query::<(Entity, &emerge_mapper::chrome::Control, &ComputedNode)>();
@@ -11355,49 +11351,60 @@ fn a_badge_for_a_row_out_of_view_pins_to_its_own_pane() {
                 .collect();
             let world = app.world();
             ids.into_iter()
-                .map(|(e, id)| {
+                .filter_map(|(e, id)| {
                     let mut up = world.get::<ChildOf>(e).map(|p| p.parent());
-                    let mut fold = None;
                     while let Some(x) = up {
                         if world.get::<bevy::ui_widgets::ScrollArea>(x).is_some() {
-                            fold = world
+                            return world
                                 .get::<ComputedNode>(x)
                                 .zip(world.get::<UiGlobalTransform>(x))
-                                .map(|(n, tf)| Rect::from_center_size(tf.translation, n.size()));
-                            break;
+                                .filter(|(n, _)| n.size() != Vec2::ZERO)
+                                .map(|(n, tf)| {
+                                    (id, Rect::from_center_size(tf.translation, n.size()))
+                                });
                         }
                         up = world.get::<ChildOf>(x).map(|p| p.parent());
                     }
-                    (id, fold)
+                    None
                 })
                 .collect()
         };
 
-        let drawn: Vec<(emerge_mapper::keys::ControlId, Rect)> = {
+        // Every paned cluster's reach segment starts inside its pane.
+        let leads: Vec<(emerge_mapper::keys::ControlId, Entity)> = {
             let mut q = app
                 .world_mut()
-                .query::<(&BadgeCluster, &ComputedNode, &UiGlobalTransform, &Visibility)>();
+                .query::<(&BadgeCluster, &Lead, &Visibility)>();
             q.iter(app.world())
-                .filter(|(_, n, _, vis)| n.size() != Vec2::ZERO && **vis != Visibility::Hidden)
-                .filter_map(|(c, n, tf, _)| match c.0 {
-                    Home::Control(id) => {
-                        Some((id, Rect::from_center_size(tf.translation, n.size())))
-                    }
+                .filter(|(.., vis)| **vis != Visibility::Hidden)
+                .filter_map(|(c, lead, _)| match c.0 {
+                    Home::Control(id) => Some((id, lead.0[0])),
                     Home::Legend => None,
                 })
                 .collect()
         };
-        for (id, at) in drawn {
-            let Some((_, Some(fold))) = folds.iter().find(|(x, f)| *x == id && f.is_some()) else {
+        let mut seg_q = app
+            .world_mut()
+            .query_filtered::<(&ComputedNode, &UiGlobalTransform, &Visibility), With<LeadSeg>>();
+        let world = app.world();
+        for (id, seg) in leads {
+            let Some((_, fold)) = folds.iter().find(|(x, _)| *x == id) else {
                 continue;
             };
+            let Ok((node, tf, vis)) = seg_q.get(world, seg) else {
+                continue;
+            };
+            if *vis == Visibility::Hidden || node.size() == Vec2::ZERO {
+                loose.push(format!("{}: {id:?} shows no reach segment at all", mode.label()));
+                continue;
+            }
             checked += 1;
-            // One pixel of slack: the clamp is arithmetic on physical pixels, not an exact equality.
-            if at.min.y < fold.min.y - 1.0 || at.min.y > fold.max.y + 1.0 {
+            let y = tf.translation.y;
+            if y < fold.min.y - 2.0 || y > fold.max.y + 2.0 {
                 loose.push(format!(
-                    "{}: {id:?} at y {:.0}, pane {:.0}..{:.0}",
+                    "{}: {id:?} is pointed at from y {:.0}, outside its pane {:.0}..{:.0}",
                     mode.label(),
-                    at.min.y,
+                    y,
                     fold.min.y,
                     fold.max.y
                 ));
@@ -11408,33 +11415,34 @@ fn a_badge_for_a_row_out_of_view_pins_to_its_own_pane() {
     loose.dedup();
     assert!(
         loose.is_empty(),
-        "these badges hang outside the pane holding the row they name:\n  {}",
+        "these leaders start outside the pane holding the row they name:\n  {}",
         loose.join("\n  ")
     );
     assert!(
         checked >= TABS.len(),
-        "only {checked} paned cluster(s) were measured across {} tabs; the rule is being enforced \
+        "only {checked} paned leader(s) were measured across {} tabs; the rule is being enforced \
          against nothing",
         TABS.len()
     );
 }
 
-/// **No cluster draws through another**, which is the arithmetic this overlay kept losing.
+/// **Nothing covers anything: no box over a box, no box over a control, no box over another's
+/// line.** This is the arithmetic the overlay kept losing, now stated as the packer's contract.
 ///
-/// Reported from the keyboard with the detail pane scrolled: the piece list's five labelled badges
-/// landed on top of the legend and covered the descriptions for `F G H [ ] Z X`. Both were placed
-/// correctly by their own rule — the legend takes the viewport's far corner, a dock's badge stands
-/// beside its list — and the viewport is not wide enough for both. No placement rule fixes that; the
-/// only levers are how much each one carries and how they yield to each other.
+/// It used to be a trade-off — `step_clear` moved the loser until its bound ran out and then *let
+/// the overlap show*, and the first capture on a real window priced that: the legend under the
+/// piece list's boxes, cell rows buried beneath their own neighbours. The rail packer and the
+/// legend's free-ground search have no give-up arm, so red here is not a census-width problem any
+/// more: it means `badges::place_badges` broke its own contract, or a screen genuinely has more
+/// badge than stage — either way a bug, not a wording chore.
 ///
-/// So this is the guard that makes those levers answerable: `badges::place_order` states who yields,
-/// `badges::step_clear` moves the loser, and this measures the result against the real tree. It is a
-/// **ratchet on the census's own size** — when it goes red, the answer is usually that a description
-/// grew, not that the geometry is wrong.
+/// Measured at two shapes: the harness default, and the author's actual window in physical texels
+/// — the geometry on which a square-surfaced suite stayed green while the real screen buried the
+/// legend.
 #[test]
 fn no_badge_cluster_draws_through_another() {
     use bevy::ui::{ComputedNode, UiGlobalTransform};
-    use emerge_mapper::badges::BadgeCluster;
+    use emerge_mapper::badges::{BadgeCluster, Lead, LeadSeg};
 
     let root = Fixture::new("badgeoverlap")
         .descriptor("floor", "alpha")
@@ -11443,35 +11451,106 @@ fn no_badge_cluster_draws_through_another() {
 
     let mut through = Vec::new();
     let mut checked = 0usize;
-    for mode in TABS {
-        let mut app = badges_up(&root, mode);
-        let drawn: Vec<(String, Rect)> = {
-            let mut q = app
-                .world_mut()
-                .query::<(&BadgeCluster, &ComputedNode, &UiGlobalTransform, &Visibility)>();
-            q.iter(app.world())
-                .filter(|(_, n, _, vis)| n.size() != Vec2::ZERO && **vis != Visibility::Hidden)
-                .map(|(c, n, tf, _)| {
-                    (
-                        format!("{:?}", c.0),
-                        Rect::from_center_size(tf.translation, n.size()),
-                    )
-                })
-                .collect()
-        };
-        checked += drawn.len();
-        for (i, (a_name, a)) in drawn.iter().enumerate() {
-            for (b_name, b) in drawn.iter().skip(i + 1) {
-                let hit = a.intersect(*b);
+    for surface in [None, Some((2560u32, 1406u32))] {
+        for mode in TABS {
+            let mut app = badges_up(&root, mode);
+            if let Some((w, h)) = surface {
+                harness::resize_surface(&mut app, w, h).unwrap_or_else(|e| panic!("{e}"));
+                for _ in 0..8 {
+                    app.update();
+                }
+            }
+            let tag = match surface {
+                None => mode.label().to_owned(),
+                Some((w, h)) => format!("{} at {w}x{h}", mode.label()),
+            };
+
+            let drawn: Vec<(String, Rect, Option<[Entity; 3]>)> = {
+                let mut q = app.world_mut().query::<(
+                    &BadgeCluster,
+                    &ComputedNode,
+                    &UiGlobalTransform,
+                    &Visibility,
+                    Option<&Lead>,
+                )>();
+                q.iter(app.world())
+                    .filter(|(_, n, _, vis, _)| n.size() != Vec2::ZERO && **vis != Visibility::Hidden)
+                    .map(|(c, n, tf, _, lead)| {
+                        (
+                            format!("{:?}", c.0),
+                            Rect::from_center_size(tf.translation, n.size()),
+                            lead.map(|l| l.0),
+                        )
+                    })
+                    .collect()
+            };
+            let controls_drawn: Vec<(String, Rect)> = {
+                let mut q = app
+                    .world_mut()
+                    .query::<(&emerge_mapper::chrome::Control, &ComputedNode, &UiGlobalTransform)>();
+                q.iter(app.world())
+                    .filter(|(_, n, _)| n.size() != Vec2::ZERO)
+                    .map(|(c, n, tf)| {
+                        (format!("{:?}", c.0), Rect::from_center_size(tf.translation, n.size()))
+                    })
+                    .collect()
+            };
+            let segs_drawn: Vec<(usize, Rect)> = {
+                let mut owner_of: std::collections::HashMap<Entity, usize> = Default::default();
+                for (i, (.., lead)) in drawn.iter().enumerate() {
+                    if let Some(l) = lead {
+                        for e in l {
+                            owner_of.insert(*e, i);
+                        }
+                    }
+                }
+                let mut q = app.world_mut().query_filtered::<(
+                    Entity,
+                    &ComputedNode,
+                    &UiGlobalTransform,
+                    &Visibility,
+                ), With<LeadSeg>>();
+                q.iter(app.world())
+                    .filter(|(_, n, _, vis)| n.size() != Vec2::ZERO && **vis != Visibility::Hidden)
+                    .filter_map(|(e, n, tf, _)| {
+                        owner_of
+                            .get(&e)
+                            .map(|i| (*i, Rect::from_center_size(tf.translation, n.size())))
+                    })
+                    .collect()
+            };
+
+            checked += drawn.len();
+            let covers = |a: Rect, b: Rect| {
+                let hit = a.intersect(b);
                 // A pixel of touching is two boxes side by side; anything with area is one drawn
                 // through the other.
-                if hit.width() > 1.0 && hit.height() > 1.0 {
-                    through.push(format!(
-                        "{}: {a_name} and {b_name} overlap by {:.0}x{:.0} px",
-                        mode.label(),
-                        hit.width(),
-                        hit.height()
-                    ));
+                hit.width() > 1.0 && hit.height() > 1.0
+            };
+            for (i, (a_name, a, _)) in drawn.iter().enumerate() {
+                for (b_name, b, _) in drawn.iter().skip(i + 1) {
+                    if covers(*a, *b) {
+                        let hit = a.intersect(*b);
+                        through.push(format!(
+                            "{tag}: {a_name} and {b_name} overlap by {:.0}x{:.0} px",
+                            hit.width(),
+                            hit.height()
+                        ));
+                    }
+                }
+                for (c_name, c) in &controls_drawn {
+                    if covers(*a, *c) {
+                        through.push(format!(
+                            "{tag}: {a_name} covers the control {c_name}"
+                        ));
+                    }
+                }
+                for (owner, s) in &segs_drawn {
+                    if *owner != i && covers(*a, *s) {
+                        through.push(format!(
+                            "{tag}: {a_name} covers another badge's leader"
+                        ));
+                    }
                 }
             }
         }
@@ -11480,16 +11559,131 @@ fn no_badge_cluster_draws_through_another() {
     through.dedup();
     assert!(
         through.is_empty(),
-        "these badge clusters cover each other, so a verb is on screen and unreadable. Shorten what \
-         the census says, or narrow `badges::DOES_COL` / `CONTROL_DOES_COL` — the placement rules \
-         have already yielded as far as the viewport allows:\n  {}",
+        "something is covered, so a verb or its ground is on screen and unreadable. The packer has \
+         no give-up arm, so this is `badges::place_badges` breaking its own contract — not a \
+         census wording chore:\n  {}",
         through.join("\n  ")
     );
     assert!(
-        checked >= TABS.len(),
-        "only {checked} cluster(s) were measured across {} tabs; the rule is being enforced against \
-         nothing",
+        checked >= TABS.len() * 2,
+        "only {checked} cluster(s) were measured across two shapes of {} tabs; the rule is being \
+         enforced against nothing",
         TABS.len()
+    );
+}
+
+/// **Every control's badges are tied to it** — at least one hairline segment, connected at both
+/// ends: one touching the anchor, one touching the box. The tie is what bought the freedom to pack
+/// boxes on free ground at all; lose it and a displaced badge is just a floating box again.
+#[test]
+fn every_control_cluster_is_tied_to_its_anchor() {
+    use bevy::ui::{ComputedNode, UiGlobalTransform};
+    use emerge_mapper::badges::{BadgeCluster, Lead, LeadSeg};
+    use emerge_mapper::keys::Home;
+
+    let root = Fixture::new("badgetie")
+        .descriptor("floor", "alpha")
+        .place("alpha/floor", (0.0, 0.0))
+        .build("m");
+
+    let mut untied = Vec::new();
+    let mut checked = 0usize;
+    for surface in [None, Some((2560u32, 1406u32))] {
+        for mode in TABS {
+            let mut app = badges_up(&root, mode);
+            if let Some((w, h)) = surface {
+                harness::resize_surface(&mut app, w, h).unwrap_or_else(|e| panic!("{e}"));
+                for _ in 0..8 {
+                    app.update();
+                }
+            }
+            let tag = match surface {
+                None => mode.label().to_owned(),
+                Some((w, h)) => format!("{} at {w}x{h}", mode.label()),
+            };
+
+            let clusters: Vec<(emerge_mapper::keys::ControlId, Rect, [Entity; 3])> = {
+                let mut q = app.world_mut().query::<(
+                    &BadgeCluster,
+                    &ComputedNode,
+                    &UiGlobalTransform,
+                    &Visibility,
+                    &Lead,
+                )>();
+                q.iter(app.world())
+                    .filter(|(_, n, _, vis, _)| n.size() != Vec2::ZERO && **vis != Visibility::Hidden)
+                    .filter_map(|(c, n, tf, _, lead)| match c.0 {
+                        Home::Control(id) => {
+                            Some((id, Rect::from_center_size(tf.translation, n.size()), lead.0))
+                        }
+                        Home::Legend => None,
+                    })
+                    .collect()
+            };
+            let anchors: Vec<(emerge_mapper::keys::ControlId, Rect)> = {
+                let mut q = app
+                    .world_mut()
+                    .query::<(&emerge_mapper::chrome::Control, &ComputedNode, &UiGlobalTransform)>();
+                q.iter(app.world())
+                    .filter(|(_, n, _)| n.size() != Vec2::ZERO)
+                    .map(|(c, n, tf)| (c.0, Rect::from_center_size(tf.translation, n.size())))
+                    .collect()
+            };
+            let mut seg_q = app.world_mut().query_filtered::<(
+                &ComputedNode,
+                &UiGlobalTransform,
+                &Visibility,
+            ), With<LeadSeg>>();
+            let world = app.world();
+            for (id, cluster, segs) in clusters {
+                let Some((_, anchor)) = anchors.iter().find(|(a, _)| *a == id) else {
+                    continue;
+                };
+                checked += 1;
+                let shown: Vec<Rect> = segs
+                    .iter()
+                    .filter_map(|e| seg_q.get(world, *e).ok())
+                    .filter(|(n, _, vis)| **vis != Visibility::Hidden && n.size() != Vec2::ZERO)
+                    .map(|(n, tf, _)| Rect::from_center_size(tf.translation, n.size()))
+                    .collect();
+                if shown.is_empty() {
+                    untied.push(format!("{tag}: {id:?} has no leader at all"));
+                    continue;
+                }
+                if let Some(fat) = shown.iter().find(|r| r.width().min(r.height()) > 4.0) {
+                    untied.push(format!(
+                        "{tag}: {id:?} has a {:.0}x{:.0} segment — that is a box, not a hairline",
+                        fat.width(),
+                        fat.height()
+                    ));
+                }
+                let slack = 3.0;
+                let near = |r: &Rect, of: Rect| {
+                    let grown = Rect::from_corners(
+                        of.min - Vec2::splat(slack),
+                        of.max + Vec2::splat(slack),
+                    );
+                    !grown.intersect(*r).is_empty()
+                };
+                if !shown.iter().any(|r| near(r, *anchor)) {
+                    untied.push(format!("{tag}: {id:?}'s leader never touches the control"));
+                }
+                if !shown.iter().any(|r| near(r, cluster)) {
+                    untied.push(format!("{tag}: {id:?}'s leader never touches its box"));
+                }
+            }
+        }
+    }
+    untied.sort();
+    untied.dedup();
+    assert!(
+        untied.is_empty(),
+        "these badges are not tied to what they name:\n  {}",
+        untied.join("\n  ")
+    );
+    assert!(
+        checked >= TABS.len() * 4,
+        "only {checked} tied cluster(s) were measured; the rule is being enforced against nothing"
     );
 }
 
