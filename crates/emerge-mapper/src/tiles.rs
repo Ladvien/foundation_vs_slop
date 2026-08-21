@@ -7492,7 +7492,11 @@ fn build_detail(p: &mut ChildSpawnerCommands, build: &crate::build::Build, proje
     // **The grid, and where you are on it.** The ladder is the focused piece's own span, deepened
     // in thirds by `J` — so what an author reads here is steps between centre and flush, not cells
     // of a lattice the piece can land beside.
-    crate::chrome::section(p, "GRID");
+    // The grid verbs' badge home — the rung line under this heading is what `J` and `[`/`]`
+    // change, and with no tile open the section is absent, which `badges::resolve` answers by
+    // sending them to the legend.
+    crate::chrome::section(p, "GRID")
+        .insert(crate::chrome::Control(crate::keys::ControlId::Grid));
     let n = project
         .lattice
         .snap_divisor

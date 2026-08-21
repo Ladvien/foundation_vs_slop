@@ -295,6 +295,10 @@ pub enum ControlId {
     /// verb homed here is live: every one is `Stance::Holding`, and Holding means an open tile
     /// with a focused member (`editor::sense_context`).
     Members,
+    /// The GRID section of the open tile — the rung and layer its verbs walk. Absent with no tile
+    /// open, and `badges::resolve` sends its verbs to the legend for exactly that state; with a
+    /// tile open, the line that says "J for thirds" is the line `J` lands on.
+    Grid,
 }
 
 impl ControlId {
@@ -317,7 +321,8 @@ impl ControlId {
             | ControlId::Tags
             | ControlId::Mesh
             | ControlId::Tile
-            | ControlId::Members => true,
+            | ControlId::Members
+            | ControlId::Grid => true,
             // The lists and the window's own furniture: each is a whole node with open ground beside
             // it, so a badge sits against its edge and reads as attached.
             ControlId::DoorStrip
@@ -366,13 +371,14 @@ impl ControlId {
             | ControlId::Yaw
             | ControlId::Under
             | ControlId::Tile
-            | ControlId::Members => false,
+            | ControlId::Members
+            | ControlId::Grid => false,
         }
     }
 
     /// Every one, so a ratchet can enumerate. A `ControlId` nothing homes to is a word with no
     /// meaning, and a `ControlId` no panel attaches is a badge that never appears.
-    pub const ALL: [ControlId; 18] = [
+    pub const ALL: [ControlId; 19] = [
         ControlId::DoorStrip,
         ControlId::Title,
         ControlId::Back,
@@ -391,6 +397,7 @@ impl ControlId {
         ControlId::Under,
         ControlId::Tile,
         ControlId::Members,
+        ControlId::Grid,
     ];
 }
 
@@ -1856,7 +1863,7 @@ pub const BINDINGS: &[Binding] = &[
         "[",
         "layer",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Grid)),
     b(
         Action::BuildUp,
         KeyCode::BracketRight,
@@ -1865,7 +1872,7 @@ pub const BINDINGS: &[Binding] = &[
         "]",
         "layer",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Grid)),
     // **`J` cycles the rung, latched.** The same key the Map cycles its drawn grid with, and the same
     // argument: Bier's snap-dragging latches every one of its modal commands, and StickyLines'
     // designers avoid held modifiers because menus and modifiers *"make them lose focus"*. Safe to
@@ -1878,7 +1885,7 @@ pub const BINDINGS: &[Binding] = &[
         "J",
         "grid deeper by thirds, wrapping",
     )
-    .at(Home::Legend),
+    .at(Home::Control(ControlId::Grid)),
     // **Both stated with `bs`.** A bare `b` is *indifferent* to Shift by design, so it would swallow
     // the shifted chord rather than sit beside it — the same pair `RemoveTile`/`DemoteTile` makes.
     // A hole rather than a piece is the rarer of the two, so it takes the modifier.
@@ -3454,10 +3461,12 @@ mod tests {
     /// readouts: the Map's piece-verbs moved to the rows that display what they change (`YAW`,
     /// `UNDER`), the tile-verbs to the TILE card and the MEMBERS list, take/drop to the piece
     /// list, save to the document's name in the chrome bar, and every tab's undo pair to its own
-    /// text pane. What remains is the set with no honest control: `Esc`, the journal, `Cmd+Delete`,
-    /// the camera (whose anchor — the compass — stands down while `K` is held), the tool-armers
-    /// whose subject is a future click, the generate row, and the grid rungs whose readout does
-    /// not exist yet. Map's worst stance is the new eight.
+    /// text pane. The Tiles grid verbs followed on the same day the leaders landed: with a tile
+    /// open, GRID's own line is what they walk, and with none, `badges::resolve` returns them
+    /// here — which is the legend's job, not a third home. What remains is the set with no honest
+    /// control: `Esc`, the journal, `Cmd+Delete`, the camera (whose anchor — the compass — stands
+    /// down while `K` is held), the tool-armers whose subject is a future click, the generate row,
+    /// and Map's own grid rung. Map's worst stance is the eight.
     #[test]
     fn no_home_carries_more_than_it_can_show() {
         const CAP: usize = 8;

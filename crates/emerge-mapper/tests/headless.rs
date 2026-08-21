@@ -9937,6 +9937,29 @@ fn controls_on_screen(app: &mut App) -> Vec<emerge_mapper::keys::ControlId> {
         .collect()
 }
 
+/// **Put a piece in the detail pane**, because that is when the paned controls exist at all — the
+/// pane draws nothing until something is selected, and an overlap rule enforced against an empty
+/// pane is enforced against a different, smaller layout than the one an author works in.
+fn stage_a_piece(app: &mut App) {
+    let id = app
+        .world()
+        .resource::<emerge_mapper::project::Project>()
+        .library
+        .descriptors
+        .first()
+        .map(|d| d.id.clone());
+    if let (Some(id), Some(mut state)) = (
+        id,
+        app.world_mut()
+            .get_resource_mut::<emerge_mapper::tiles::ImportState>(),
+    ) {
+        state.selected_library_id = Some(id);
+    }
+    for _ in 0..4 {
+        app.update();
+    }
+}
+
 /// What should be drawn on this tab, in this stance — the census, resolved against what is on screen
 /// through `badges::resolve`, which is the editor's own rule rather than a second copy of it.
 fn expected_badges(
@@ -11318,26 +11341,7 @@ fn a_row_beyond_the_fold_is_pointed_at_from_its_pane() {
     let mut checked = 0usize;
     for mode in TABS {
         let mut app = badges_up(&root, mode);
-        // **A piece in the pane, because that is when the paned controls exist at all.** The detail
-        // pane draws nothing until something is selected — without this the test would measure zero
-        // paned controls on every tab and enforce its rule against nothing.
-        let id = app
-            .world()
-            .resource::<emerge_mapper::project::Project>()
-            .library
-            .descriptors
-            .first()
-            .map(|d| d.id.clone());
-        if let (Some(id), Some(mut state)) = (
-            id,
-            app.world_mut()
-                .get_resource_mut::<emerge_mapper::tiles::ImportState>(),
-        ) {
-            state.selected_library_id = Some(id);
-        }
-        for _ in 0..4 {
-            app.update();
-        }
+        stage_a_piece(&mut app);
 
         // Every control, with the fold it sits inside — the same walk `badges::fold_of` makes.
         let folds: Vec<(emerge_mapper::keys::ControlId, Rect)> = {
@@ -11454,6 +11458,9 @@ fn no_badge_cluster_draws_through_another() {
     for surface in [None, Some((2560u32, 1406u32))] {
         for mode in TABS {
             let mut app = badges_up(&root, mode);
+            // The populated pane, not the empty one: the first real-kit capture found the fallback
+            // firing exactly where an unselected fixture had nothing to measure.
+            stage_a_piece(&mut app);
             if let Some((w, h)) = surface {
                 harness::resize_surface(&mut app, w, h).unwrap_or_else(|e| panic!("{e}"));
                 for _ in 0..8 {
@@ -11591,6 +11598,7 @@ fn every_control_cluster_is_tied_to_its_anchor() {
     for surface in [None, Some((2560u32, 1406u32))] {
         for mode in TABS {
             let mut app = badges_up(&root, mode);
+            stage_a_piece(&mut app);
             if let Some((w, h)) = surface {
                 harness::resize_surface(&mut app, w, h).unwrap_or_else(|e| panic!("{e}"));
                 for _ in 0..8 {

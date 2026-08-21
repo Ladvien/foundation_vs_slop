@@ -74,16 +74,14 @@ const REACH: f32 = 4.0;
 /// badges at one anchor cannot overlap by construction.
 const CLUSTER_W: f32 = 132.0;
 
-/// How wide a legend's descriptions may run before they wrap.
+/// How wide a legend's descriptions may run before they wrap — a **cap**, not a width.
 ///
-/// With [`CHORD_COL`] beside it this fixes the block's width, which is what keeps it inside the
-/// viewport: the longest legend line in the census — the move row's *"move / Shift: clone /
-/// M: keep as a composition"* — is otherwise wider than the ground the legend stands on, and an
-/// earlier widest line (the label verbs', since shortened) pushed the whole block over the piece
-/// list.
-///
-/// The pair has to add up to less than the viewport, and the viewport is what is left of the window
-/// once both docks have taken theirs. Widening either is a decision about that, not a free choice.
+/// The wrapper hugs its words and wraps only past this, so a legend of five short globals is a
+/// narrow block and only a long line — the move row's *"move / Shift: clone / M: keep as a
+/// composition"* — pays in height. It was a fixed width once, and the fixed block (this cap plus a
+/// fixed chord column) measured wider than any free ground the populated Meshes tab has: the legend
+/// fell back to its corner and was buried, with every test green. A block that hugs is a block that
+/// fits.
 const DOES_COL: f32 = 138.0;
 
 /// **The same column on a badge that stands on its own control.**
@@ -99,19 +97,16 @@ const CONTROL_DOES_COL: f32 = 90.0;
 /// competing with either.
 const LEAD_THICK: f32 = 1.0;
 
-/// The column a legend's chords hold, so its descriptions line up under each other rather than
-/// stepping in and out with the width of the chord above.
+/// One glyph's advance at [`chrome::text::BODY`], logical pixels — FiraMono is the only face in
+/// the build and it is monospace, so `chars * BODY_CHAR_W` is exact, not an estimate.
+/// `compose::LABEL_CHAR_W` is the same measurement made once before, at the same size.
 ///
-/// Wide enough for the longest chord the legend currently renders — the generate row's
-/// `F, G, Shift+G, Cmd+G`, twenty characters at `text::BODY` (the arrows that once held the
-/// record moved to `MEMBERS` with the drain). It was set for `Cmd+Z, Shift+Cmd+Z` and
-/// that was too narrow: a chord past the column pushes its description right, widening the whole
-/// block, and the block is already about as wide as the viewport it has to sit in.
-///
-/// A `min_width` rather than a `width` all the same, so a longer chord some day pushes rather than
-/// clips: the same choice, for the same reason, the old two-column key list made and wrote five lines
-/// about.
-const CHORD_COL: f32 = 140.0;
+/// It sizes the legend's chord column to the longest chord *this* legend actually holds, so the
+/// descriptions line up down the block (`docs/ui.md` §3.1: a panel is rows, not strings) without a
+/// constant wide enough for the fattest chord the census has ever had — which is the difference
+/// between a legend that fits the populated Meshes tab's free ground and one that measured wider
+/// than any of it.
+const BODY_CHAR_W: f32 = 6.6;
 
 /// **Nothing renders `keys::rows`.**
 ///
@@ -423,6 +418,16 @@ fn rebuild_badges(
                     Home::Legend => true,
                     Home::Control(id) => !id.in_a_band(),
                 };
+                // The chord column the legend's rows share: the longest chord it holds, measured
+                // exactly (monospace), so descriptions align without a census-wide constant.
+                let chord_col = live_badges
+                    .iter()
+                    .filter(|b| b.home == Home::Legend)
+                    .map(|b| b.chord.chars().count())
+                    .max()
+                    .unwrap_or(0) as f32
+                    * BODY_CHAR_W
+                    + 1.0;
                 let mut spawned = p.spawn((
                     BadgeCluster(*home),
                     // A cluster stands where its anchor is, which flow has no opinion about —
@@ -473,7 +478,7 @@ fn rebuild_badges(
                 }
                 spawned.with_children(|c| {
                     for badge in live_badges.iter().filter(|b| b.home == *home) {
-                        one_badge(c, badge, legend, labelled);
+                        one_badge(c, badge, legend, labelled, chord_col);
                     }
                 });
             });
@@ -614,19 +619,27 @@ fn settle_down(pref: f32, size: Vec2, x: f32, taken: &[Rect], gap: f32) -> f32 {
     y
 }
 
-/// **The legend's ground: its corner if free, else up the column, else a column to the left —
+/// **The legend's ground: the corner column if it can, else the nearest free column to it —
 /// never an overlap.**
 ///
 /// The same corner every time is what makes the legend learnable as a *place*
-/// ([`keys::Home::Legend`]), so the corner is always the first try and the search never moves it
-/// further than the placed boxes force. Fekete & Plaisant's excentric labels
-/// (`10.1145/302979.303148`) state the rule this search implements: a callout lives in free space,
-/// and free space is found, not hoped for. Both loops are bounded by `taken.len()` — climbing
-/// clears at least one rect per step, and each column shift moves strictly left past one.
+/// ([`keys::Home::Legend`]), so the corner's own column is always tried first and the search never
+/// settles further from it than the placed boxes force. Candidate columns are taken from the
+/// **edges of the boxes themselves** — one just left of each placed rect — walked rightmost-first;
+/// a greedy "shift past the leftmost blocker" was tried and it leapt clean over the free ground
+/// between the two rails on the populated Tiles tab, straight to a dead column, and fell back onto
+/// the piece list's boxes. Fekete & Plaisant's excentric labels (`10.1145/302979.303148`) state
+/// the rule this search implements: a callout lives in free space, and free space is found, not
+/// hoped for. Bounded: at most `taken + 1` columns, each climbed past at most `taken` rects.
 fn settle_legend(size: Vec2, stage: Rect, taken: &[Rect], gap: f32) -> Vec2 {
     let corner = (stage.max - size - Vec2::splat(gap * 3.0)).max(stage.min);
-    let mut x = corner.x;
-    for _ in 0..=taken.len() {
+    let mut columns: Vec<f32> = std::iter::once(corner.x)
+        .chain(taken.iter().map(|t| t.min.x - size.x - gap))
+        .filter(|x| *x >= stage.min.x && *x <= corner.x)
+        .collect();
+    columns.sort_by(|a, b| b.total_cmp(a));
+    columns.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+    for x in columns {
         let mut y = corner.y;
         for _ in 0..=taken.len() {
             let me = Rect::from_corners(Vec2::new(x, y), Vec2::new(x, y) + size);
@@ -644,26 +657,8 @@ fn settle_legend(size: Vec2, stage: Rect, taken: &[Rect], gap: f32) -> Vec2 {
             }
             y = up;
         }
-        // The column is blocked all the way up: step left past the leftmost thing standing in it.
-        let column = Rect::from_corners(
-            Vec2::new(x, stage.min.y),
-            Vec2::new(x + size.x, stage.max.y),
-        );
-        let Some(left) = taken
-            .iter()
-            .filter(|t| covers(**t, column))
-            .map(|t| t.min.x)
-            .reduce(f32::min)
-        else {
-            break;
-        };
-        let shifted = left - size.x - gap;
-        if shifted < stage.min.x {
-            break;
-        }
-        x = shifted;
     }
-    // No free ground at all — the corner, and the overlap ratchet is what says whether this state
+    // No free column at all — the corner, and the overlap ratchet is what says whether this state
     // is ever actually reached.
     corner
 }
@@ -769,11 +764,12 @@ fn place_badges(
         }
     }
 
+    #[derive(Clone, Copy)]
     struct Plan {
         pos: Option<Vec2>,
         lead: [Option<Rect>; 3],
     }
-    let mut plans: Vec<Plan> = (0..items.len())
+    let mut banded_plans: Vec<Plan> = (0..items.len())
         .map(|_| Plan { pos: None, lead: [None; 3] })
         .collect();
     let mut taken: Vec<Rect> = Vec::new();
@@ -819,22 +815,32 @@ fn place_badges(
         let y = a.at.center().y - size.y * 0.5;
         let pos = Vec2::new(x, y);
         let me = Rect::from_corners(pos, pos + size);
-        plans[i].pos = Some(pos);
+        banded_plans[i].pos = Some(pos);
         // The stub that says "this box is that control's": anchor edge to box edge, level.
         let (a_x, box_edge) = if x >= a.at.max.x {
             (a.at.max.x, x)
         } else {
             (a.at.min.x, x + size.x)
         };
-        plans[i].lead = elbow(Vec2::new(a_x, a.at.center().y), a_x, box_edge, a.at.center().y);
+        banded_plans[i].lead = elbow(Vec2::new(a_x, a.at.center().y), a_x, box_edge, a.at.center().y);
         taken.push(me);
-        for seg in plans[i].lead.iter().flatten() {
+        for seg in banded_plans[i].lead.iter().flatten() {
             taken.push(*seg);
         }
     }
 
-    // ── The rails, left then right, each in its anchors' order. ──────────────────────────────────
-    for left in [true, false] {
+    // ── The rails and the legend, twice if needed. ───────────────────────────────────────────────
+    //
+    // **Comfort first, compactness if the legend cannot stand.** A rail box prefers to sit level
+    // with its anchor, and on most tabs that comfort costs nothing. On the populated Tiles tab it
+    // cost everything: the slack above the first box was exactly the ground the legend needed, and
+    // no free rectangle remained anywhere in the stage — measured 22 px short in the best band.
+    // So the packing runs once with preferences honoured; if the legend's search then ends in a
+    // colliding corner, it runs once more with every rail packed tight from the stage's top —
+    // association survives in the leaders, which is what the leaders are for — and the legend
+    // search runs again against the ground that freed. Two passes at most, both deterministic.
+    let banded_taken = taken.clone();
+    let rail_of = |left: bool| -> Vec<usize> {
         let mut rail: Vec<usize> = (0..items.len())
             .filter(|i| {
                 matches!(items[*i].0 .0, Home::Control(_))
@@ -849,52 +855,108 @@ fn place_badges(
             ax.total_cmp(&ay)
                 .then(place_order(items[*x].0 .0).cmp(&place_order(items[*y].0 .0)))
         });
-        let mut floor = stage.min.y;
-        for i in rail {
-            let a = anchors[i].as_ref().unwrap_or_else(|| unreachable!());
-            let size = items[i].1.size();
-            let (x, corridor_x, a_x) = if left {
-                (left_edge + reach * 2.0, left_edge + reach, a.at.max.x)
-            } else {
-                (right_edge - reach * 2.0 - size.x, right_edge - reach, a.at.min.x)
-            };
-            // The leader's anchor end: the row's own centre, clamped into the pane when the row is
-            // beyond the fold — pointed at from where scrolling would bring it back.
-            let a_y = match a.fold {
-                Some(f) => a.at.center().y.clamp(f.min.y + thick, (f.max.y - thick).max(f.min.y)),
-                None => a.at.center().y,
-            };
-            let pref = a
-                .at
-                .min
-                .y
-                .clamp(stage.min.y, (stage.max.y - size.y).max(stage.min.y))
-                .max(floor);
-            let y = settle_down(pref, size, x, &taken, reach)
-                .clamp(stage.min.y, (stage.max.y - size.y).max(stage.min.y));
-            let pos = Vec2::new(x, y);
-            plans[i].pos = Some(pos);
-            let box_edge = if left { x } else { x + size.x };
-            plans[i].lead = elbow(Vec2::new(a_x, a_y), corridor_x, box_edge, y + size.y * 0.5);
-            taken.push(Rect::from_corners(pos, pos + size));
-            for seg in plans[i].lead.iter().flatten() {
-                taken.push(*seg);
-            }
-            floor = y + size.y + reach;
-        }
-    }
+        rail
+    };
 
-    // ── The legend last: it has a whole stage to stand in, so it yields to everything. ───────────
-    for (i, a) in anchors.iter().enumerate() {
-        let ((cluster, node, ..), Some(_)) = (&items[i], a) else {
-            continue;
-        };
-        if cluster.0 != Home::Legend {
-            continue;
+    let attempt = |compact: bool| -> (Vec<Plan>, Vec<Rect>) {
+        let mut plans: Vec<Plan> = (0..items.len())
+            .map(|_| Plan { pos: None, lead: [None; 3] })
+            .collect();
+        // Banded boxes were placed once above; copy their plans and ground into this attempt.
+        for (i, p) in banded_plans.iter().enumerate() {
+            if p.pos.is_some() {
+                plans[i] = Plan { pos: p.pos, lead: p.lead };
+            }
         }
-        let size = node.size();
-        plans[i].pos = Some(settle_legend(size, stage, &taken, reach));
+        let mut taken = banded_taken.clone();
+        for left in [true, false] {
+            let mut floor = stage.min.y;
+            for i in rail_of(left) {
+                let a = anchors[i].as_ref().unwrap_or_else(|| unreachable!());
+                if let Some(f) = a.fold {
+                    let seen = a.at.intersect(f);
+                    if seen.width() <= 0.0 || seen.height() <= 0.0 {
+                        continue;
+                    }
+                }
+                let size = items[i].1.size();
+                let (x, corridor_x, a_x) = if left {
+                    (left_edge + reach * 2.0, left_edge + reach, a.at.max.x)
+                } else {
+                    (right_edge - reach * 2.0 - size.x, right_edge - reach, a.at.min.x)
+                };
+                let pref = if compact {
+                    floor
+                } else {
+                    a.at
+                        .min
+                        .y
+                        .clamp(stage.min.y, (stage.max.y - size.y).max(stage.min.y))
+                        .max(floor)
+                };
+                let y = settle_down(pref, size, x, &taken, reach)
+                    .clamp(stage.min.y, (stage.max.y - size.y).max(stage.min.y));
+                let pos = Vec2::new(x, y);
+                plans[i].pos = Some(pos);
+                let box_edge = if left { x } else { x + size.x };
+                // **The leader's anchor end: the nearest point on the anchor's edge, not its
+                // centre.** A list is taller than its badge, and centre-attachment drew a run the
+                // full half-height of the palette — long enough that the legend, refusing to cover
+                // it, gave up its own corner. Nearest-point is the standard callout attachment and
+                // collapses the common case back to a bare stub. Clamped into the fold when the
+                // row is beyond it — pointed at from where scrolling would bring it back.
+                let a_y = {
+                    let near = (y + size.y * 0.5)
+                        .clamp(a.at.min.y + thick, (a.at.max.y - thick).max(a.at.min.y));
+                    match a.fold {
+                        Some(f) => near.clamp(f.min.y + thick, (f.max.y - thick).max(f.min.y)),
+                        None => near,
+                    }
+                };
+                plans[i].lead = elbow(Vec2::new(a_x, a_y), corridor_x, box_edge, y + size.y * 0.5);
+                taken.push(Rect::from_corners(pos, pos + size));
+                for seg in plans[i].lead.iter().flatten() {
+                    taken.push(*seg);
+                }
+                floor = y + size.y + reach;
+            }
+        }
+        // The legend last: it has a whole stage to stand in, so it yields to everything.
+        for (i, a) in anchors.iter().enumerate() {
+            let ((cluster, node, ..), Some(_)) = (&items[i], a) else {
+                continue;
+            };
+            if cluster.0 != Home::Legend {
+                continue;
+            }
+            let size = items[i].1.size();
+            let _ = node;
+            plans[i].pos = Some(settle_legend(size, stage, &taken, reach));
+        }
+        (plans, taken)
+    };
+
+    let (mut plans, mut taken_out) = attempt(false);
+    let legend_collides = |plans: &[Plan], taken: &[Rect]| -> bool {
+        (0..items.len()).any(|i| {
+            items[i].0 .0 == Home::Legend
+                && plans[i].pos.is_some_and(|at| {
+                    let size = items[i].1.size();
+                    let me = Rect::from_corners(at, at + size);
+                    taken.iter().any(|t| covers(*t, me))
+                })
+        })
+    };
+    if legend_collides(&plans, &taken_out) {
+        let again = attempt(true);
+        // Keep the compact answer only if it actually houses the legend — otherwise comfort
+        // stands and the overlap ratchet is what reports the screen that defeated both.
+        if !legend_collides(&again.0, &again.1) {
+            plans = again.0;
+            taken_out = again.1;
+        }
     }
+    let _ = taken_out;
 
     // ── Write everything, gated. ─────────────────────────────────────────────────────────────────
     for (i, (_, _, style, visibility, lead)) in items.iter_mut().enumerate() {
@@ -1050,7 +1112,13 @@ fn light_anchored_controls(
 
 /// **One badge, wherever it is going.** The pad and the ordinary flow spawn the same thing; a second
 /// spelling of a badge is the drift `chrome.rs` exists to stop, one module along.
-fn one_badge(c: &mut ChildSpawnerCommands, badge: &keys::Badge, legend: bool, labelled: bool) {
+fn one_badge(
+    c: &mut ChildSpawnerCommands,
+    badge: &keys::Badge,
+    legend: bool,
+    labelled: bool,
+    chord_col: f32,
+) {
     c.spawn((
         Badge(badge.actions.clone()),
         Node {
@@ -1089,7 +1157,7 @@ fn one_badge(c: &mut ChildSpawnerCommands, badge: &keys::Badge, legend: bool, la
                 // `docs/ui.md` §3.1's argument that a panel is rows and not strings, applied to the
                 // last thing in this editor that was still a string. Only inside the legend's one
                 // box: a standalone badge is its own object and hugs its chord.
-                min_width: if legend { Val::Px(CHORD_COL) } else { Val::Auto },
+                min_width: if legend { Val::Px(chord_col) } else { Val::Auto },
                 flex_shrink: 0.0,
                 ..default()
             },
@@ -1118,7 +1186,10 @@ fn one_badge(c: &mut ChildSpawnerCommands, badge: &keys::Badge, legend: bool, la
                 // *cluster* instead was tried and is the wrong lever:
                 // `align_items: Stretch` plus a shrinkable row let flex take the
                 // words down to nothing rather than wrap them.
-                width: Val::Px(if legend { DOES_COL } else { CONTROL_DOES_COL }),
+                // A cap, not a width: the wrapper hugs its words and wraps only past this, so a
+                // short description costs exactly what it measures. The fixed width before it made
+                // every box as wide as the longest description the census allows.
+                max_width: Val::Px(if legend { DOES_COL } else { CONTROL_DOES_COL }),
                 ..default()
             })
             .with_children(|w| {
