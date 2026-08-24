@@ -80,6 +80,17 @@ pub enum Context {
     Tiles,
     /// A text field is taking raw keys. Overlaps everything, and suppresses everything.
     Typing,
+    /// **A list filter box is taking keys, and the list's own walk stays live.**
+    ///
+    /// The same *phase* as [`Context::Typing`] — not a tab — with one deliberate difference: while a
+    /// filter box owns the keyboard, the rows the box narrows must keep walking, or narrowing a
+    /// 318-candidate list would strand the author with no way to reach the row the filter just
+    /// showed them. Reported at the keyboard, 2026-08-23: typing into the box killed the up/down
+    /// walk of the Meshes list. The exemption is per-binding ([`Binding::while_filtering`]) and the
+    /// census test [`only_the_list_walks_fire_while_a_filter_box_holds_the_keys`] asserts it over
+    /// the whole table — `Context::Filter` is not a hole in the focus guard, it is the same guard
+    /// with a named exception.
+    Filter,
 }
 
 impl Context {
@@ -89,6 +100,11 @@ impl Context {
         match (self, other) {
             // Typing shadows every other context by construction — that is what makes it the guard.
             (Typing, _) | (_, Typing) => true,
+            // Filter is the same phase wearing a per-tab face: the box is live *alongside* its tab
+            // (the walk keys stay live), so it overlaps everything the way Typing does. No binding
+            // carries `Filter` as its context — the collision test never sees it — and the arm is
+            // still stated rather than left to the catch-all, so a future context costs a decision.
+            (Filter, _) | (_, Filter) => true,
             (Global, _) | (_, Global) => true,
             // **A tab overlaps only itself.** Five arms rather than a `self == other` catch-all,
             // because the catch-all would also make a *new* context overlap only itself by default —
@@ -151,19 +167,19 @@ pub enum Stance {
     /// takes its place. The Map context stays at twelve either way, and an author cannot start a
     /// second generate on top of an answer they have not looked at yet.
     Proposed,
-    /// **The kit list is live** — the arrows walk the tiles already authored, not the meshes.
+    /// **The Tiles page is live** — the arrows walk the tiles already authored, not the meshes.
     ///
     /// The fourth phase, and it exists because the Tiles tab could make tiles and never show them.
     /// An author finished four and could not see the kit, could not reopen one to correct it, and had
     /// no way to notice they had built the same thing twice. The one that was wrong — a low wall
-    /// sitting in the middle of its tile instead of flush — was only fixable by editing
+    /// sitting in the middle of its floor instead of flush — was only fixable by editing
     /// `compositions.ron` by hand.
     ///
     /// It is a stance rather than a flag for the same reason `Proposed` is: the arrows and `Enter`
     /// mean something different while it is on, and a key list that did not say so would be lying.
-    /// **It costs no new key.** `left`/`right` were unbound on this tab at `Idle`, and
+    /// **It costs no new key.** `left`/`right` were unused on this tab at `Idle`, and
     /// `docs/tiles_tab_contract.md` recorded exactly why — *"There is one list on this tab, so there
-    /// is nothing to switch between."* There are two now, so the reservation is spent.
+    /// is nothing to switch between."* There are two pages now, so the reservation is spent.
     Browsing,
 }
 
@@ -302,44 +318,12 @@ pub enum ControlId {
 }
 
 impl ControlId {
-    /// **Is this control a row inside a scrolling pane?**
-    ///
-    /// It decides where the control's badge may go, and it is stated here because it is a fact about
-    /// the editor's shape rather than about any one frame. A row inside a pane is *content*: its
-    /// chord belongs at the content's own leading edge, in the panel's `MARGIN + PAD` inset, and the
-    /// pane's far edge is a different part of the screen — a badge flipped out there floats in the
-    /// viewport hundreds of pixels from the row it names, attached to nothing. So a chord too wide
-    /// for that inset goes to the legend instead, with its description, which is what the legend is.
-    ///
-    /// `a_paned_control_really_is_inside_a_pane` in `tests/headless.rs` checks this against the real
-    /// tree, so it cannot drift from the panels it describes.
-    pub const fn in_a_pane(self) -> bool {
-        match self {
-            ControlId::IdField
-            | ControlId::Mount
-            | ControlId::CellGrid
-            | ControlId::Tags
-            | ControlId::Mesh
-            | ControlId::Tile
-            | ControlId::Members
-            | ControlId::Grid => true,
-            // The lists and the window's own furniture: each is a whole node with open ground beside
-            // it, so a badge sits against its edge and reads as attached.
-            ControlId::DoorStrip
-            | ControlId::Title
-            | ControlId::Back
-            | ControlId::Hint
-            | ControlId::Detail
-            | ControlId::Palette
-            | ControlId::Pieces
-            | ControlId::Filter
-            | ControlId::Rigs
-            // The Map's readout rows sit in the StatusBlock, a plain column with open ground
-            // beside it — no fold to pin their badges to.
-            | ControlId::Yaw
-            | ControlId::Under => false,
-        }
-    }
+    // A static `in_a_pane` table lived here once, with a headless validator holding it to the real
+    // tree. It classified where a paned control's badge could go — and then the rails rework made
+    // that a runtime question (`badges::fold_of` walks the actual `ScrollArea` ancestry), so the
+    // table decided nothing and its validator guarded a behaviour that no longer existed. Deleted
+    // rather than kept as documentation: a maintained parallel model of the UI tree is exactly the
+    // second census this module exists to refuse.
 
     /// **Is this control in one of the frame's fixed-height bands?**
     ///
@@ -502,15 +486,21 @@ pub enum Action {
     AcceptProposal,
     /// Keep the set in hand as a reusable group — see `editor::composition_from_set`.
     GroupFromSet,
-    /// **Show the kit** — the tiles already authored — and let the arrows walk it.
-    KitEnter,
-    KitPrev,
-    KitNext,
-    /// **Reopen the selected tile for editing.** The verb the tab never had: every tile was a new
-    /// blank one, so a tile saved wrong stayed wrong.
-    KitOpen,
-    /// **Leave the kit for the mesh list** — `left`, the way back out of a column browser.
-    KitLeave,
+    /// **Drill from the Tiles page into the Meshes page** — `right` on the tile list, the descend
+    /// half of the column browser. The tile under the cursor stays selected and the next `Enter`
+    /// drops the picked mesh into it.
+    PageEnter,
+    /// **Ascend back to the Tiles page** — `left` at idle on the Meshes page, mirroring
+    /// [`Action::PageEnter`].
+    PageLeave,
+    /// **Reopen the selected tile for editing** from the Tiles page — `Enter` on the tile list,
+    /// the verb the tab never had: every tile was a new blank one, so a tile saved wrong stayed
+    /// wrong.
+    TileOpen,
+    /// **Walk the authored tiles on the Tiles page** — the `up`/`down` pair that moves the tile
+    /// cursor, exactly as the library's own pair moves the mesh cursor.
+    TilePrev,
+    TileNext,
     /// **Put the cursor in the filter box.** The box was reachable only by mouse, on a tab whose
     /// whole argument is that keystrokes are faster.
     FocusFilter,
@@ -522,6 +512,14 @@ pub enum Action {
     /// detail pane on the left. One key cannot mean both without asking which one the author meant,
     /// and a key that guesses is the thing this census exists to prevent.
     FocusTagFilter,
+    /// **Add a token to the vocabulary** — the keyboard half of the tag block's `+` chip.
+    ///
+    /// The block draws the project's whole vocabulary and every chip was a mouse target and nothing
+    /// else, so growing the vocabulary was a hand edit to `vocab.ron` — the one file in the project
+    /// whose comments are content. `Shift+T` opens the prompt with the axis on `kind`, cycled
+    /// left/right; the `+` chip on an axis row opens it with that axis preset. Both go through
+    /// `token_prompt`, one code path.
+    NewToken,
     PanForward,
     PanBack,
     PanLeft,
@@ -727,6 +725,15 @@ pub struct Binding {
     /// **Where this verb's badge is drawn.** See [`Home`], and [`Draft::at`] for why there is no
     /// default.
     pub home: Home,
+    /// **The one deliberate hole in the filter focus guard.**
+    ///
+    /// `false` for every row except the list walks ([`Draft::also_filtered`]); while the live
+    /// context is [`Context::Filter`], only these fire. Everything else — `Enter`, `Esc`, `Space`,
+    /// letters, the tab chords, `Cmd+S` — stays suppressed exactly as it is while
+    /// [`Context::Typing`] holds the keyboard, and
+    /// [`only_the_list_walks_fire_while_a_filter_box_holds_the_keys`] polices that over the whole
+    /// table.
+    pub while_filtering: bool,
 }
 
 /// **A binding that has not said where it lives yet.**
@@ -741,6 +748,7 @@ pub struct Draft {
     needs_shift: Option<bool>,
     needs_stance: Option<Stance>,
     context: Context,
+    while_filtering: bool,
     chord: &'static str,
     does: &'static str,
 }
@@ -755,10 +763,23 @@ impl Draft {
             needs_shift: self.needs_shift,
             needs_stance: self.needs_stance,
             context: self.context,
+            while_filtering: self.while_filtering,
             chord: self.chord,
             does: self.does,
             home,
         }
+    }
+
+    /// **A list-walk row stays live while the filter box owns the keyboard.**
+    ///
+    /// The one flag a binding is allowed to set, and it names exactly what it buys: the walk whose
+    /// rows the box narrows. Chainable before [`Draft::at`], and deliberately not a constructor
+    /// parameter — a row has to say it is a list walk to get the exemption, and a new walk
+    /// forgotten here is a dead key while filtering, which is the defect this whole context was
+    /// built to close.
+    pub const fn also_filtered(mut self) -> Draft {
+        self.while_filtering = true;
+        self
     }
 }
 
@@ -1025,6 +1046,7 @@ pub const BINDINGS: &[Binding] = &[
         "up",
         "walk the palette / Shift: x5",
     )
+    .also_filtered()
     .at(Home::Control(ControlId::Palette)),
     bp(
         Action::PaletteNext,
@@ -1035,6 +1057,7 @@ pub const BINDINGS: &[Binding] = &[
         "down",
         "walk the palette / Shift: x5",
     )
+    .also_filtered()
     .at(Home::Control(ControlId::Palette)),
     // **A separate cluster from the aim keys, on purpose.** `Z`/`C` turn the BRUSH and must keep
     // doing only that: binding them to the selection is what made rotation feel broken before,
@@ -1352,6 +1375,7 @@ pub const BINDINGS: &[Binding] = &[
         "up",
         "walk the lists / Shift: x5",
     )
+    .also_filtered()
     .at(Home::Control(ControlId::Pieces)),
     b(
         Action::NextCandidate,
@@ -1361,6 +1385,7 @@ pub const BINDINGS: &[Binding] = &[
         "down",
         "walk the lists / Shift: x5",
     )
+    .also_filtered()
     .at(Home::Control(ControlId::Pieces)),
     b(
         Action::FocusCandidates,
@@ -1477,8 +1502,10 @@ pub const BINDINGS: &[Binding] = &[
         "rescan / exclude",
     )
     .at(Home::Control(ControlId::Pieces)),
-    // The Cmd+Z shape again: one key, the shifted form for the reversible-but-destructive sibling.
-    // Shift+Delete DEMOTES — back to the candidates, stripped — where bare Delete removes outright.
+    // One verb since 2026-08-20: bare Delete does the whole trip — out of the library, rescanned,
+    // stripped, the cursor left on the reborn row. Its shifted sibling `DemoteTile` retired into it
+    // (the candidate list IS "meshes on disk not in the library", so taking an entry out always
+    // sends its mesh back), and the shifted chord is deliberately refused rather than aliased.
     bs(
         Action::RemoveTile,
         REMOVE_KEY,
@@ -1520,11 +1547,13 @@ pub const BINDINGS: &[Binding] = &[
     // `W A S D` (the camera's, on every tab), nor the arrows (they walk the two lists), nor `H J K L`
     // (`K` is the shortcuts overlay). This is the nearest remaining cluster with the right *shape* —
     // T above, F left, G below, H right — and shape is what the hand remembers.
-    // `Z, X, C, V` is the run under the left hand, free here because they are Map bindings and the
-    // two tabs are never live together, which is the case `Context` exists to model.
-    b(
+    // **`bs`, both of them.** A bare binding is indifferent to Shift and would swallow the shifted
+    // chord — the collision the census exists to catch, and the precedent `Rescan`/`ExcludePack`
+    // set on this same tab.
+    bs(
         Action::CellForward,
         KeyCode::KeyT,
+        false,
         false,
         Context::Meshes,
         "T",
@@ -1558,6 +1587,25 @@ pub const BINDINGS: &[Binding] = &[
         "cell right",
     )
     .at(Home::Control(ControlId::CellGrid)),
+    // **`Shift+T` adds a vocabulary token** — the keyboard half of the tag block's `+` chip.
+    //
+    // `Shift+N` was the first choice and is deliberately not: bare `N` is `RotateMeshX` with
+    // `needs_shift: None`, so `Shift+N` is the documented escape hatch that forces a turn past
+    // authored cells (`rotate_mesh`'s `force`). A `Some(true)` binding on `N` would collide with it
+    // — the collision test only treats two `Some` as exclusive — and deleting the escape hatch to
+    // free the chord is the wrong trade. `Shift+T` is free, and the shifted form of the cell cursor
+    // is the same shape `Shift+R` (rescan/exclude) and `Shift+L` (suggest/all) already use: one key,
+    // the shifted form for the wider act. Costs no row — it shares `CellForward`'s.
+    bs(
+        Action::NewToken,
+        KeyCode::KeyT,
+        false,
+        true,
+        Context::Meshes,
+        "T",
+        "add a vocabulary token",
+    )
+    .at(Home::Control(ControlId::Tags)),
     b(
         Action::LayerDown,
         KeyCode::BracketLeft,
@@ -1627,67 +1675,74 @@ pub const BINDINGS: &[Binding] = &[
     // **The list walk is `bp`, not `bsp`.** It is *indifferent* to Shift on purpose: `Shift`+arrow is
     // the five-row stride the Meshes tab already uses, and the same shared system serves both tabs.
     // The tile-moving pair is `bsp` because bare and shifted are genuinely different verbs there.
-    // **The kit, and it costs no new key.** `left`/`right` were the tab's one unbound pair at
-    // `Idle`, reserved by the contract against there being a second list; this is that list.
+    // **The pages, and they cost no new keys.** `left`/`right` were the tab's one unbound pair at
+    // `Idle`, reserved by the contract against there being a second list — and the Tiles page and
+    // the Meshes page are that second list, split the way the shelf strip was.
+    //
+    // The Tiles page owns `TilePrev`/`TileNext` (walk the authored tiles), `TileOpen` (open the
+    // tile under the cursor) and `PageEnter` (drill to the Meshes page, where the library and the
+    // un-imported candidates are picked from). The Meshes page owns `PageLeave` (ascend back).
+    // `Esc` backs out of either, the tab's global "not that".
+    //
+    // **`Enter` means one thing per page, and the stance axis says which.** `TileOpen` is bound at
+    // `Stance::Browsing`; `BuildDrop`/`BuildSlot` at `Stance::Idle` — so on the Tiles page Enter
+    // opens the tile, and on the Meshes page it drops the picked mesh. One key, two pages, no
+    // collision, which is the reason the stance axis exists at all.
     bp(
-        Action::KitEnter,
-        KeyCode::ArrowRight,
-        false,
-        Stance::Idle,
-        Context::Tiles,
-        "right",
-        "show the kit / Esc goes back",
-    )
-    .at(Home::Control(ControlId::Pieces)),
-    bp(
-        Action::KitPrev,
+        Action::TilePrev,
         KeyCode::ArrowUp,
         false,
         Stance::Browsing,
         Context::Tiles,
         "up",
-        "walk the kit",
+        "walk the tiles",
     )
+    .also_filtered()
     .at(Home::Control(ControlId::Pieces)),
     bp(
-        Action::KitNext,
+        Action::TileNext,
         KeyCode::ArrowDown,
         false,
         Stance::Browsing,
         Context::Tiles,
         "down",
-        "walk the kit",
+        "walk the tiles",
     )
+    .also_filtered()
     .at(Home::Control(ControlId::Pieces)),
-    // **`right` descends**: into the kit from the mesh list, then into the tile from the kit. `Esc`
-    // backs out of either. A column browser's idiom, and it is what keeps `Enter` meaning one thing:
-    // `BuildDrop` is bound across every stance, so an `Enter` here would be one key with two
-    // meanings — the collision the census forbids, and the reason the stance axis exists at all.
+    // **`right` descends** into the Meshes page, where a tile's members are picked — the drill the
+    // author asked for. `left` ascends on the other side (`PageLeave`); `Esc` backs out of either.
     bp(
-        Action::KitOpen,
+        Action::PageEnter,
         KeyCode::ArrowRight,
         false,
         Stance::Browsing,
         Context::Tiles,
         "right",
-        "reopen this tile / left goes back",
+        "to the meshes / left goes back",
     )
     .at(Home::Control(ControlId::Pieces)),
-    // **`left` ascends, because a column browser is symmetric.** The strip promised this and the
-    // binding did not exist: the hint read *"right reopens / left back"* over an unbound key, and the
-    // first fix was to reword the hint to name `Esc` instead. That was backwards — reported at the
-    // keyboard, 2026-08-15: *"I would expect left to move back to meshes."* `Esc` still backs out
-    // (it backs out of everything), so this adds the direction the idiom implies rather than a
-    // second way to do something new. Adjacent to `KitOpen` and sharing its `does`, so it costs no
-    // row.
+    // **`left` ascends, because a column browser is symmetric.** From the Meshes page, `left`
+    // returns to the Tiles page, which is what the strip promised. `Esc` still backs out of
+    // everything. Costs no row: it shares `PageEnter`'s.
     bp(
-        Action::KitLeave,
+        Action::PageLeave,
         KeyCode::ArrowLeft,
+        false,
+        Stance::Idle,
+        Context::Tiles,
+        "left",
+        "back to the tiles",
+    )
+    .at(Home::Control(ControlId::Pieces)),
+    bp(
+        Action::TileOpen,
+        KeyCode::Enter,
         false,
         Stance::Browsing,
         Context::Tiles,
-        "left",
-        "reopen this tile / left goes back",
+        "Enter",
+        "open this tile",
     )
     .at(Home::Control(ControlId::Pieces)),
     // **`F` finds.** The filter box had one writer — a mouse click — on the tab that argues
@@ -1713,6 +1768,7 @@ pub const BINDINGS: &[Binding] = &[
         "up",
         "walk the library / Shift: x5",
     )
+    .also_filtered()
     .at(Home::Control(ControlId::Pieces)),
     bp(
         Action::TileListNext,
@@ -1723,6 +1779,7 @@ pub const BINDINGS: &[Binding] = &[
         "down",
         "walk the library / Shift: x5",
     )
+    .also_filtered()
     .at(Home::Control(ControlId::Pieces)),
     bsp(
         Action::BuildForward,
@@ -1889,21 +1946,28 @@ pub const BINDINGS: &[Binding] = &[
     // **Both stated with `bs`.** A bare `b` is *indifferent* to Shift by design, so it would swallow
     // the shifted chord rather than sit beside it — the same pair `RemoveTile`/`DemoteTile` makes.
     // A hole rather than a piece is the rarer of the two, so it takes the modifier.
-    bs(
+    // **`bsp`, both of them.** `Enter` on the Meshes page drops the picked piece into the open
+    // tile — and `Enter` on the Tiles page opens the tile under the cursor (`TileOpen`). The two
+    // are one key with two jobs, so the stance axis says which: dropping is what `Idle` does, and
+    // a tile list walk is `Browsing`. The old rows were stance-less, which the census could not
+    // tell from the table.
+    bsp(
         Action::BuildDrop,
         KeyCode::Enter,
         false,
         false,
+        Stance::Idle,
         Context::Tiles,
         "Enter",
         "drop the piece / Shift: a slot",
     )
     .at(Home::Control(ControlId::Pieces)),
-    bs(
+    bsp(
         Action::BuildSlot,
         KeyCode::Enter,
         false,
         true,
+        Stance::Idle,
         Context::Tiles,
         "Enter",
         "drop the piece / Shift: a slot",
@@ -2331,11 +2395,11 @@ const fn full(
         needs_shift,
         needs_stance,
         context,
+        while_filtering: false,
         chord,
         does,
     }
 }
-
 const fn b(
     action: Action,
     key: KeyCode,
@@ -2654,15 +2718,23 @@ impl Default for Live {
 
 /// Who owns the keyboard: the live tab, unless a field is taking raw keys — and what is in hand.
 ///
-/// **Typing clears the stance to [`Stance::Idle`].** Not because the piece is put down — it is not —
-/// but because `Typing` suppresses every action anyway ([`fires_in`]), and leaving a live `Holding`
-/// beside it would be a second state that decides nothing while looking like it decides something.
+/// **Typing keeps whatever stance the tab had.** The stance was cleared to [`Stance::Idle`] while
+/// the old `Typing`-for-everything reigned, because every action was suppressed anyway and a live
+/// `Holding` beside it would have been a second state that decided nothing. [`Context::Filter`]
+/// changed that: the list walks stay live while the box holds the keys, and two of them — the Tiles
+/// page's `TilePrev`/`TileNext` — are bound at [`Stance::Browsing`], so a Filter that blanked the
+/// stance to Idle would kill exactly the walk it exists to keep. The stance survives, and the
+/// suppression is stated where it decides: [`allowed`] refuses Filter for every binding that did
+/// not opt in with [`Draft::also_filtered`].
 pub fn live(tab: Context, typing: bool, stance: Stance) -> Live {
-    if typing {
-        Live(Context::Typing, Stance::Idle)
-    } else {
-        Live(tab, stance)
-    }
+    Live(
+        if typing {
+            Context::Typing
+        } else {
+            tab
+        },
+        stance,
+    )
 }
 
 /// May an action bound to `want` fire, given who owns the keyboard?
@@ -2673,7 +2745,7 @@ pub fn live(tab: Context, typing: bool, stance: Stance) -> Live {
 /// census would fire *while* you type. So the suppression is stated once, here, and `overlaps` keeps
 /// doing only the tab-exclusion half it was written for.
 pub fn fires_in(want: Context, live: Context) -> bool {
-    live != Context::Typing && want.overlaps(live)
+    live != Context::Typing && live != Context::Filter && want.overlaps(live)
 }
 
 /// Does this binding's [`Stance`] requirement hold right now? `None` is always satisfied — the same
@@ -2688,7 +2760,16 @@ fn stance_ok(b: &Binding, live: Stance) -> bool {
 /// Every gate a binding must pass except the key itself, in one place so the three entry points below
 /// cannot drift from each other.
 fn allowed(b: &Binding, keys: &ButtonInput<KeyCode>, live: Live) -> bool {
-    fires_in(b.context, live.0)
+    // **The one exemption, named where the guard lives.** `Context::Filter` is Typing with a
+    // deliberate hole: the list walks keep firing while the box that narrows them holds the keys.
+    // Everything else goes through `fires_in`, which refuses Filter the way it refuses Typing, so
+    // the exemption is exactly the rows that called [`Draft::also_filtered`] and nothing else.
+    let context_ok = if live.0 == Context::Filter {
+        b.while_filtering
+    } else {
+        fires_in(b.context, live.0)
+    };
+    context_ok
         && stance_ok(b, live.1)
         // A bare binding must not fire while the modifier is held, or `Cmd+S` would also pan the
         // camera back — and `Cmd+Z` would turn the brush as well as undo, now that `Z` aims.
@@ -2971,6 +3052,7 @@ mod tests {
             Action::SuggestAll,
             Action::ExcludePack,
             Action::DiscardAllSuggestions,
+            Action::NewToken,
             Action::PrevRig,
             Action::NextRig,
             Action::AdoptMeasured,
@@ -3008,6 +3090,7 @@ mod tests {
             Action::BuildDrop,
             Action::BuildSlot,
             Action::BuildArm,
+            Action::BuildNew,
             Action::UndoBuild,
             Action::RedoBuild,
             Action::AlignForward,
@@ -3017,12 +3100,11 @@ mod tests {
             Action::BuildTurn,
             Action::BuildDropMember,
             Action::ClearTile,
-            Action::BuildNew,
-            Action::KitEnter,
-            Action::KitPrev,
-            Action::KitNext,
-            Action::KitOpen,
-            Action::KitLeave,
+            Action::PageEnter,
+            Action::PageLeave,
+            Action::TileOpen,
+            Action::TilePrev,
+            Action::TileNext,
             Action::FocusFilter,
             Action::FocusTagFilter,
             Action::ShowErrors,
@@ -3587,11 +3669,15 @@ mod tests {
             // keystrokes are faster. `/` is a **new key to learn**, which the two rows above this one
             // were each able to avoid; it is charged knowingly, because the alternative was leaving
             // the largest control in the pane keyboard-unreachable. `docs/ui.md` §4.2.
-            (Context::Meshes, 31),
+            // 34 -> 35: `NewToken`. `Shift+T` grows the vocabulary from the tag block — the `+`
+            // chip's keyboard half. Costs no row: it shares `CellForward`'s, the same shape
+            // `Shift+R`/`Shift+L` already use.
+            (Context::Meshes, 32),
             // 21 -> 22: `ClearTile`. `MemberPrev`/`MemberNext` replace the X nudge rather than
             // adding to it, so the walk costs nothing here.
-            // 22 -> 26: the KIT list (FVS: the tab could author tiles and never show them).
-            // `right` opens it, `up`/`down` walk it, `right` again reopens the selected tile -- four
+            // 22 -> 26: the KIT shelf (FVS: the tab could author tiles and never show them).
+            // `right` opened it, `up`/`down` walked it, `right` again reopened the selected tile —
+            // the four keys this next entry retires.
             // 26 -> 28: `,` and `.` for the member walk, freeing `left`/`right` so that all four
             // arrows move the piece. The author's report was that two of four directions moved it
             // and the other two did something unrelated, which on an isometric view is exactly what
@@ -3601,9 +3687,13 @@ mod tests {
             // kept out of each other's lists by the stance. `Esc` backs out, which the tab already
             // promised ("Esc always returns to Choosing").
             // 29 -> 30: `FocusFilter`. The filter box was mouse-only; see its binding.
-            // 28 -> 29: `KitLeave`. `left` at `Stance::Browsing` was unbound while the KIT strip
+            // 28 -> 29: `KitLeave`. `left` at `Stance::Browsing` was unbound while the KIT shelf
             // told authors it went back — the census cannot see prose, so the lie survived until
             // somebody pressed it. Costs no row: it shares `KitOpen`'s.
+            // 30 -> 30: the KIT shelf became the TILES page (2026-08-23). `KitEnter/KitPrev/
+            // KitNext/KitOpen/KitLeave` retired; `PageEnter/PageLeave/TileOpen/TilePrev/TileNext`
+            // took their place — the same five keys, the same context, and the drill is now the
+            // page pair the author asked for (`right` into Meshes, `left` back to Tiles).
             (Context::Tiles, 30),
             (Context::Anim, 11),
             (Context::Compose, 7),
@@ -3834,6 +3924,62 @@ mod tests {
         }
     }
 
+
+    /// **The filter box keeps the list walks and suppresses everything else.**
+    ///
+    /// [`Context::Filter`] is the one deliberate hole in the focus guard: while a filter box owns
+    /// the keyboard, the rows it narrows must keep walking. Asserted over the WHOLE census, the
+    /// same shape as [`no_action_fires_while_a_field_is_taking_keys`] — exactly the bindings that
+    /// called [`Draft::also_filtered`] fire at `Live(Context::Filter, _)`, and nothing else does,
+    /// so a row added later without the opt-in is a dead key while filtering and this test names
+    /// it.
+    #[test]
+    fn only_the_list_walks_fire_while_a_filter_box_holds_the_keys() {
+        let mut input = ButtonInput::<KeyCode>::default();
+        for b in BINDINGS {
+            input.press(b.key);
+        }
+        // The walks are bare keys, so the modifier must be UP for them to pass `allowed` — the
+        // Typing census above presses MOD_KEYS because it asserts nothing fires either way; here
+        // the flagged rows must actually fire, so the modifier stays out of it.
+        for b in BINDINGS {
+            let fires = just_pressed(&input, Live(Context::Filter, Stance::Idle), b.action);
+            // A walk bound at another stance (the Tiles page's pair is `Stance::Browsing`) is
+            // correctly quiet at Idle — the stance axis still applies while filtering; only the
+            // context gate loosened. So the expected value is the opt-in AND the stance.
+            let want = b.while_filtering && stance_ok(b, Stance::Idle);
+            assert_eq!(
+                fires,
+                want,
+                "{:?} {} while a filter box owned the keyboard — a row that did not call \
+                 [`Draft::also_filtered`] must stay suppressed, and a walk that did must stay live",
+                b.action,
+                if want {
+                    "must fire"
+                } else {
+                    "must not fire"
+                }
+            );
+        }
+        // The stance survives into Filter: the Tiles page's walk is bound at `Stance::Browsing`,
+        // and a Filter that blanked the stance to Idle would kill exactly the walk it exists to
+        // keep. Same shape as the loop above, but with the arrow pressed fresh (the loop's press
+        // set is cleared so `just_pressed` sees a real transition) and the Browsing stance.
+        let mut walked = ButtonInput::<KeyCode>::default();
+        walked.press(KeyCode::ArrowUp);
+        assert!(
+            just_pressed(
+                &walked,
+                Live(Context::Filter, Stance::Browsing),
+                Action::TilePrev
+            ),
+            "the Tiles page walk must fire while its filter box is open, at its own stance"
+        );
+        assert!(
+            !just_pressed(&walked, Live(Context::Filter, Stance::Idle), Action::TilePrev),
+            "and the same key must not fire at Idle — the stance axis still applies while filtering"
+        );
+    }
 
     /// A modified chord fires only with the modifier, and the bare key only without — `S` pans and
     /// the modified `S` saves. Driven through `MOD_KEYS` rather than a named `ControlLeft`, so the

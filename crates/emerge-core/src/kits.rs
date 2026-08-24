@@ -45,8 +45,9 @@ use crate::policy::Policy;
 /// Bumped whenever the shape below changes. A mismatch is refused, never migrated.
 ///
 /// `2` added [`Kits::lattice`], which arrived here from [`crate::map::Map`] after one stop in
-/// between — see [`Lattice`].
-pub const KITS_VERSION: u32 = 2;
+/// between — see [`Lattice`]. `3` added [`Kits::bash`] — the named combinations a map draws on,
+/// which were an ad-hoc per-map list of namespaces until a second map wanted the same one.
+pub const KITS_VERSION: u32 = 3;
 
 /// The binding file, at the project root beside `vocab.ron`.
 pub const KITS_FILE: &str = "kits.ron";
@@ -219,6 +220,22 @@ pub struct Bind {
     pub dir: String,
 }
 
+/// **A named combination of kits** — what a map offers to build from.
+///
+/// Names namespaces, not directories, for the reason [`Bind`] separates them: `site` is the
+/// interface and `site_greybox` is one implementation of it. Binding decides which directory
+/// answers for a namespace; a bash decides which of those answers a given map draws on.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Bash {
+    /// One snake_case segment — what a map's `bash` field names.
+    pub name: String,
+    /// Namespaces, each of which this project binds.
+    pub kits: Vec<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
 /// **The project's kit bindings**, read from `kits.ron`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -237,6 +254,13 @@ pub struct Kits {
     /// order, which decides nothing — a duplicate id is refused rather than resolved by position,
     /// so there is no last-wins rule to remember.
     pub bind: Vec<Bind>,
+    /// **The named combinations a map can draw from** — see [`Bash`]. An empty list is a project
+    /// whose maps each offer every bound kit.
+    ///
+    /// **Required, with no `serde(default)`.** A defaulted list would let a file mean "no bashes"
+    /// without saying so, and there is no older file to be lenient towards: [`Kits::validate`]
+    /// refuses any version that is not exactly [`KITS_VERSION`].
+    pub bash: Vec<Bash>,
     /// **Where new work lands** when the command line does not say: the `dir` of one of the binds.
     ///
     /// Separate from the binding because it answers a different question. Binding says what
@@ -269,6 +293,12 @@ impl Kits {
     pub fn authoring_bind(&self) -> Option<&Bind> {
         let want = self.authoring.as_deref()?;
         self.bind.iter().find(|b| b.dir == want)
+    }
+
+    /// The bash by that name, or `None` — which every caller refuses by name rather than
+    /// resolving to something else.
+    pub fn bash_named(&self, name: &str) -> Option<&Bash> {
+        self.bash.iter().find(|b| b.name == name)
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -315,6 +345,53 @@ impl Kits {
                          namespace; a directory answering to two is a library that disagrees with \
                          itself, which `Library::namespace` refuses at load.",
                         b.dir, self.bind[j].namespace, b.namespace
+                    ));
+                }
+            }
+        }
+        // **A bash names kits this project binds, and no id check comes with it.**
+        // `bound_library` already refuses a duplicate id across the whole merge, quoting
+        // `Library::validate`, and a subset of a duplicate-free set is duplicate-free — so a bash
+        // cannot introduce one.
+        for (i, b) in self.bash.iter().enumerate() {
+            if !crate::naming::is_snake_case(&b.name) {
+                return Err(format!(
+                    "kits: `{}` is not a usable bash name. A bash is one snake_case segment — the \
+                     name a map's `bash` field gives.",
+                    b.name
+                ));
+            }
+            if let Some(j) = self.bash.iter().position(|o| o.name == b.name)
+                && j != i
+            {
+                return Err(format!(
+                    "kits: bash `{}` is declared twice. A map names one by name, so two of them \
+                     make the name ambiguous.",
+                    b.name
+                ));
+            }
+            if b.kits.is_empty() {
+                return Err(format!(
+                    "kits: bash `{}` names no kits. A bash is what a map builds from, and an empty \
+                     one offers nothing.",
+                    b.name
+                ));
+            }
+            for (k, ns) in b.kits.iter().enumerate() {
+                if !self.bind.iter().any(|d| d.namespace == *ns) {
+                    return Err(format!(
+                        "kits: bash `{}` names `{ns}`, which this project does not bind. Bind it, \
+                         or take it out of the bash.",
+                        b.name
+                    ));
+                }
+                if let Some(j) = b.kits.iter().position(|o| o == ns)
+                    && j != k
+                {
+                    return Err(format!(
+                        "kits: bash `{}` names `{ns}` twice. A bash is a set of kits, so the \
+                         second naming says nothing the first did not.",
+                        b.name
                     ));
                 }
             }
@@ -481,6 +558,7 @@ mod tests {
                     dir: (*d).to_owned(),
                 })
                 .collect(),
+            bash: Vec::new(),
             authoring: (!authoring.is_empty()).then(|| authoring.to_owned()),
         }
     }
@@ -548,7 +626,8 @@ mod tests {
     /// `serde(default)` and nothing else.
     #[test]
     fn a_project_that_states_no_lattice_gets_the_authored_one() {
-        let text = r#"(version: 2, bind: [(namespace: "f", dir: "f")], authoring: Some("f"))"#;
+        let text =
+            r#"(version: 3, bind: [(namespace: "f", dir: "f")], authoring: Some("f"), bash: [])"#;
         let k = Kits::parse(text).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(k.lattice, Lattice::default());
         assert_eq!(k.lattice.face_bands, 1, "the half-metre grid the kits use");
@@ -581,5 +660,79 @@ mod tests {
         let text = k.to_ron().unwrap_or_else(|e| panic!("{e}"));
         let e = Kits::parse(&text).err().unwrap_or_default();
         assert!(e.contains("this build reads"), "{e}");
+    }
+
+    /// A bash whose members this project binds survives the round trip with its note intact — the
+    /// note is the only field nothing else reads, so it is the one a lossy round trip would drop.
+    #[test]
+    fn a_bash_round_trips_with_its_note() {
+        let mut k = kits(&[("f", "f"), ("g", "g")], "f");
+        k.bash.push(Bash {
+            name: "hub".to_owned(),
+            kits: vec!["f".to_owned(), "g".to_owned()],
+            note: Some("the two kits the atrium is built from".to_owned()),
+        });
+        let text = k.to_ron().unwrap_or_else(|e| panic!("{e}"));
+        let back = Kits::parse(&text).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(back, k);
+        assert_eq!(
+            back.bash_named("hub").map(|b| b.kits.as_slice()),
+            Some(["f".to_owned(), "g".to_owned()].as_slice())
+        );
+        assert!(back.bash_named("nope").is_none(), "an undeclared name resolves to nothing");
+    }
+
+    /// **A project states its combinations, even when it has none.**
+    ///
+    /// A `Vec` field with no `serde(default)` is genuinely required — serde only answers a missing
+    /// field for `Option` types — so an omitted `bash` is refused by name rather than read as an
+    /// empty list. That distinction matters here and does not for [`crate::map::Map::bash`]: "this
+    /// project declares no combinations" and "nobody has said" would otherwise be one file.
+    #[test]
+    fn a_binding_that_states_no_bash_at_all_is_refused_by_name() {
+        let silent = r#"(version: 3, bind: [(namespace: "f", dir: "f")], authoring: Some("f"))"#;
+        let e = Kits::parse(silent).err().unwrap_or_default();
+        assert!(e.contains("bash"), "the refusal names the field: {e}");
+    }
+
+    /// **A bash names namespaces this project binds.** One naming a kit nothing loads would offer
+    /// an author rows that cannot resolve, which is the failure binding exists to prevent one level
+    /// down.
+    #[test]
+    fn a_bash_naming_an_unbound_kit_is_refused() {
+        let text = r#"(version: 3, bind: [(namespace: "f", dir: "f")], authoring: Some("f"),
+            bash: [(name: "hub", kits: ["f", "nope"])])"#;
+        let e = Kits::parse(text).err().unwrap_or_default();
+        assert!(e.contains("nope") && e.contains("does not bind"), "{e}");
+    }
+
+    /// The four remaining refusals, each by its own wording — a map names a bash by name, so every
+    /// way the name or the membership can be ambiguous is refused rather than resolved.
+    #[test]
+    fn a_bash_that_cannot_be_named_unambiguously_is_refused() {
+        let bad = |bash: &str| {
+            let text = format!(
+                r#"(version: 3, bind: [(namespace: "f", dir: "f"), (namespace: "g", dir: "g")],
+                    authoring: Some("f"), bash: [{bash}])"#
+            );
+            Kits::parse(&text).err().unwrap_or_default()
+        };
+        assert!(
+            bad(r#"(name: "Hub Kit", kits: ["f"])"#).contains("not a usable bash name"),
+            "a name that is not one snake_case segment"
+        );
+        assert!(
+            bad(r#"(name: "hub", kits: ["f"]), (name: "hub", kits: ["g"])"#)
+                .contains("declared twice"),
+            "two bashes answering to one name"
+        );
+        assert!(
+            bad(r#"(name: "hub", kits: [])"#).contains("names no kits"),
+            "a bash that offers nothing"
+        );
+        assert!(
+            bad(r#"(name: "hub", kits: ["f", "f"])"#).contains("names `f` twice"),
+            "one kit named twice in one bash"
+        );
     }
 }

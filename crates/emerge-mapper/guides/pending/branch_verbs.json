@@ -2,8 +2,10 @@
   "steps": [
     {
       "label": "open the Tiles tab",
-      "goal": "everything in the first half happens there, and the key list changes with the tab. The tab opens a blank tile for you",
-      "do": ["press 3"],
+      "goal": "everything in the first half happens there, and the key list changes with the tab. The tab opens on your tiles — the list, not a blank tile; a tile opens when you press Enter on a row",
+      "do": [
+        "press 2"
+      ],
       "checkpoint": "the Tiles tab is open",
       "recovery": "if a text field has the keyboard the number types into it: press Escape first"
     },
@@ -71,16 +73,16 @@
       "recovery": "if a prompt appears asking about the name, that is deliberate -- answer it and say whether the question made sense"
     },
     {
-      "label": "reopen it from the KIT list",
-      "goal": "the kit is a tab on the list now, reached with right. Reopening used to land you looking at a tile you could not immediately edit",
+      "label": "reopen it from the tiles",
+      "goal": "the tiles page lists what you have authored. Reopening lands you on the meshes page with the tile in hand, ready to edit",
       "do": [
-        "press right to enter the KIT list",
+        "press left to come back to the tiles page if you are not already there",
         "walk to the tile you just named",
         "press Enter to reopen it",
         "now press an arrow"
       ],
       "checkpoint": "a tile is open",
-      "recovery": "press left to come back out of the KIT list. If the arrow did nothing on the reopened tile, that is the report"
+      "recovery": "press left to come back out to the meshes page. If the arrow did nothing on the reopened tile, that is the report"
     },
     {
       "label": "go to the Map and place a few pieces",
@@ -129,7 +131,9 @@
     {
       "label": "save the map",
       "goal": "the end of the loop: what you built is on disk in a form the game reads",
-      "do": ["press Cmd+S"],
+      "do": [
+        "press Cmd+S"
+      ],
       "checkpoint": "the map is saved",
       "recovery": "if it refuses, the message names what it objected to -- that message is the report"
     }

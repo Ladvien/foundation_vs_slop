@@ -94,6 +94,9 @@ pub fn add_editor_plugins(app: &mut App) -> &mut App {
         // The error names a `Plugins<_>` bound rather than the cap, so this is worth the comment.
         // Still one list, in one order — the nesting is punctuation, not a second code path.
         (
+            // **The vocabulary prompt** — the tag block's `+` chip and `Shift+T` both land here.
+            // In the shared list because a headless test drives `Shift+T` the same way a person does.
+            crate::token_prompt::TokenPromptPlugin,
             // Two plugins, two jobs: the capture rig is the shared crate, the verbs are ours.
             bevy_devshot::DevShotPlugin,
             crate::devshot::DrivePlugin,

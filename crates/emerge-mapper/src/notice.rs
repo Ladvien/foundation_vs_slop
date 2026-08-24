@@ -56,9 +56,9 @@ struct Showing {
 /// run to about twenty words, which is four or five seconds of reading before the eye has to find it
 /// on screen at all.
 ///
-/// Nothing is lost when it goes: [`crate::chrome::problem_log`] holds the whole run at the foot of
-/// the tab's own panel. See [`crate::chrome::problem_toast`] for why fading is what makes the toast
-/// honest rather than what makes it lossy.
+/// Nothing is lost when it goes: the session [`crate::chrome::Journal`] keeps every refusal behind
+/// `Cmd+E`, out of `Esc`'s reach. See [`crate::chrome::problem_toast`] for why fading is what makes
+/// the toast honest rather than what makes it lossy.
 const TOAST_SECS: f32 = 7.0;
 /// The last stretch, spent going out. Long enough to read as leaving rather than as a glitch.
 const TOAST_FADE: f32 = 0.6;
@@ -125,6 +125,7 @@ fn paint_notices(
     // **No `Node` here any more.** Whether the toast is on screen is its clock's answer, not this
     // system's — see [`fade_toast`]. This writes what it says.
     mut banners: Query<(&mut Text, &crate::chrome::ProblemBanner)>,
+    journals: Query<&Node, With<crate::chrome::JournalPanel>>,
 ) {
     let tab = *mode;
     let status = match tab {
@@ -143,6 +144,14 @@ fn paint_notices(
     if toast.shown != newest || showing.tab != Some(tab) {
         toast.left = if newest.is_some() { TOAST_SECS } else { 0.0 };
         toast.shown = newest.clone();
+    }
+    // **The toast stands down for as long as the journal is up.** `toggle_journal` zeroes it at
+    // the moment of opening; without this, a refusal raised while the panel was open re-armed it —
+    // seven seconds of the same sentence drawn over the journal's own title, the exact overlap the
+    // stand-down exists to prevent. `shown` still tracks above, so closing the panel does not
+    // resurrect a toast that was already read as the journal's first line.
+    if toast.left > 0.0 && journals.iter().any(|n| n.display != Display::None) {
+        toast.left = 0.0;
     }
     // **Remembered here, and this is load-bearing.** The re-arm above compares against it, so a
     // `Showing` nothing ever wrote would make every frame look like a tab change and the toast would
@@ -517,13 +526,25 @@ fn paint_journal(
     panels: Query<&Node, With<crate::chrome::JournalPanel>>,
     lists: Query<Entity, With<crate::chrome::JournalList>>,
     lines: Query<Entity, With<crate::chrome::ProblemLogLine>>,
-    mut showing: Local<Option<usize>>,
+    mut was_open: Local<bool>,
 ) {
     let open = panels.iter().any(|n| n.display != Display::None);
     if !open {
         // Nothing to draw and nothing to keep: the next open rebuilds from the journal, which is the
         // only copy that matters.
-        *showing = None;
+        *was_open = false;
+        return;
+    }
+    // **Rebuilt when the journal changed or the panel just opened — never on a count.** This
+    // guarded on the line count once, and a count is exactly what the journal keeps constant: a
+    // repeat folds into the last entry's `(xN)` without adding a line, and at [`crate::chrome::JOURNAL_CAP`]
+    // every new entry replaces an old one — so an open panel showed stale tallies and, at the cap,
+    // froze for the rest of the session. `Journal` is only dereferenced mutably when a refusal was
+    // recorded, so its change flag is the honest clock — and cheaper than rendering 200 lines a
+    // frame to compare them.
+    let rebuild = journal.is_changed() || !*was_open;
+    *was_open = true;
+    if !rebuild {
         return;
     }
     let want: Vec<String> = journal
@@ -539,10 +560,6 @@ fn paint_journal(
             )),
         })
         .collect();
-    if *showing == Some(want.len()) {
-        return;
-    }
-    *showing = Some(want.len());
     for e in &lines {
         commands.entity(e).despawn();
     }

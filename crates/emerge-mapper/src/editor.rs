@@ -157,11 +157,6 @@ pub struct EditorState {
     /// Advanced on every solve, so pressing `G` twice offers a different arrangement rather than the
     /// same one — a generator that cannot be asked again is one you have to undo to disagree with.
     seed: u64,
-    /// Categories the author has folded away.
-    ///
-    /// A set of names rather than a per-row flag: the grouping is derived from the library every
-    /// rebuild, so a flag stored on a row would be lost the moment the library changed.
-    collapsed: std::collections::HashSet<String>,
     /// A pin waiting for its reason: the placement index, and what has been typed so far.
     ///
     /// `Placed::owned_because` is *a reason, never a bool*, on the schema's own argument: a bool lets
@@ -477,10 +472,11 @@ pub struct TargetLock(Option<(String, (f32, f32))>);
 /// The locked target's highlight — a third marker quad beside removal's red and clone's blue,
 /// because three tools making three different promises must not share a colour.
 ///
-/// `pub(crate)` because `badges::sense_subject` reads it: the piece-verbs' badges go on the thing the
-/// verbs would act on, and this quad is already the editor's own answer to which piece that is.
+/// File-private again: it was widened for a `badges::sense_subject` that read it while badges had a
+/// third anchor on the piece in the world, and that anchor was removed — the piece-verbs' badges
+/// live on the `UNDER` readout row now.
 #[derive(Component)]
-pub(crate) struct TargetTile;
+struct TargetTile;
 
 impl CloneDrag {
     /// Whether a set is in hand — the one question `keys` asks (for `Esc`'s layering).
@@ -582,7 +578,6 @@ impl Default for EditorState {
             hint: String::new(),
             next_id: 0,
             seed: 1,
-            collapsed: std::collections::HashSet::new(),
             pinning: None,
             grouping: None,
             replacing: None,
@@ -645,6 +640,20 @@ struct SizeField(Axis);
 pub struct SizeEdit {
     active: Option<(Axis, String)>,
 }
+
+/// **The palette categories the author has folded away.**
+///
+/// A set of names rather than a per-row flag: the grouping is derived from the library on every
+/// rebuild, so a flag stored on a row would be lost the moment the library changed.
+///
+/// **Its own resource, and that is what makes the palette cheap.** It was a field on
+/// `EditorState`, which `rebuild_palette` watches — and it is the *only* thing on that resource a
+/// row's content reads, so every status note and every repeat tick of the aim keys tore down all
+/// forty-odd rows and respawned them with their thumbnails. Same argument [`RemovalDrag`] and
+/// [`MoveDrag`] are separate for, from the other end: a watcher wants a resource that changes twice
+/// per use, not one that changes constantly.
+#[derive(Resource, Default)]
+pub struct Folded(pub std::collections::HashSet<String>);
 
 /// The value text of one axis row, refreshed as the size changes.
 #[derive(Component, Clone, Copy)]
@@ -853,8 +862,8 @@ impl Plugin for EditorPlugin {
             // documented 0.19 trap: every run condition is evaluated, and `rebuild_palette`'s
             // `resource_changed::<ThumbGeneration>` panics if only ThumbsPlugin — which also inits
             // it, idempotently — happens to be absent from the app.
-            .init_resource::<crate::thumbs::ThumbGeneration>()
             .init_resource::<SizeEdit>()
+            .init_resource::<Folded>()
             .init_resource::<EdgeFaults>()
             // Shared by both tabs' lists, so it is registered once here rather than by whichever
             // plugin happens to build first.
@@ -982,12 +991,11 @@ impl Plugin for EditorPlugin {
                     // into one system — that would be one system with two subjects and two
                     // lifetimes.
                     (drive_ghost, drive_clone_ghost, drive_stamp_ghost).run_if(in_map_mode),
-                    // **Not gated on the mode.** The stamped rows are part of the map, so they stay
+                    // **Not gated on the map.** The stamped rows are part of the map, so they stay
                     // drawn while an author is on Tiles or Compose looking at the group that made
                     // them — a world that empties out when you change tabs would read as the stamp
                     // having failed.
-                    // Nested: Bevy 0.19 caps an `add_systems` tuple at 20 and this one is full.
-                    (redraw_stamps, fade_ghost, brighten_held),
+                    redraw_stamps,
                     // Nested: the tuple is at Bevy 0.19's cap of 20. `redraw_edited` is the Map
                     // side of a Tiles-tab write, so it rides with the other per-frame repaints.
                     // Nested: the tuple is at Bevy 0.19's cap of 20. `cycle_grid` is a census
@@ -1015,7 +1023,7 @@ impl Plugin for EditorPlugin {
                             // condition being evaluated is what made a bare `Res<T>` behind an
                             // earlier `false` panic on launch.
                             resource_exists_and_changed::<Project>
-                                .or_else(resource_changed::<EditorState>)
+                                .or_else(resource_changed::<Folded>)
                                 .or_else(resource_changed::<crate::filter::Filters>)
                                 // A newly created portrait handle has to be bound, and binding
                                 // happens when the row is built. See `thumbs::ThumbGeneration` for
@@ -1039,6 +1047,17 @@ impl Plugin for EditorPlugin {
                 ),)
                     .run_if(in_state(crate::screen::Screen::Editor))
                     .run_if(crate::tiles::Door::map_door_is_open),
+            )
+            // **The ghost pair is NOT map-door gated** — the map block above was swallowing it. A
+            // tile's picked-but-not-dropped mesh (`StagedTile` + `Ghost`) is assembled on the Tiles
+            // tab, so `fade_ghost` and `brighten_held` never ran under the kit door, and the ghost
+            // rendered solid and shadow-casting: it read as "already added" instead of "awaiting
+            // Enter". Both are unconditional editor rendering — they brush materials on entities
+            // that carry their own markers, and `Ghost` only ever exists on a staged tile. What
+            // stays map-gated is `redraw_stamps`, which repaints stamped rows of the MAP.
+            .add_systems(
+                Update,
+                (fade_ghost, brighten_held).run_if(in_state(crate::screen::Screen::Editor)),
             )
             .add_observer(on_row_click)
             .add_observer(on_category_click)
@@ -1469,16 +1488,16 @@ fn rebuild_palette(
     mut commands: Commands,
     project: Res<Project>,
     open: Res<OpenMap>,
-    state: Res<EditorState>,
     thumbs: Option<Res<crate::thumbs::Thumbnails>>,
     filters: Res<crate::filter::Filters>,
+    fold: Res<Folded>,
     lists: Query<Entity, With<PaletteList>>,
 ) {
     for list in &lists {
         commands.entity(list).despawn_related::<Children>();
         commands.entity(list).with_children(|p| {
             for (category, members) in palette_categories(&project, &open, &filters) {
-                let folded = state.collapsed.contains(&category);
+                let folded = fold.0.contains(&category);
                 p.spawn((
                     UiButton,
                     Hovered::default(),
@@ -1645,12 +1664,12 @@ fn palette_categories(project: &Project,
 pub fn palette_indices(
     project: &Project,
     open: &OpenMap,
-    state: &EditorState,
+    fold: &Folded,
     filters: &crate::filter::Filters,
 ) -> Vec<usize> {
     palette_categories(project, &*open, filters)
         .into_iter()
-        .filter(|(category, _)| !state.collapsed.contains(category))
+        .filter(|(category, _)| !fold.0.contains(category))
         .flat_map(|(_, members)| members)
         .collect()
 }
@@ -1688,13 +1707,13 @@ fn categories(project: &Project) -> Vec<(String, Vec<usize>)> {
 fn on_category_click(
     activate: On<Activate>,
     headers: Query<&CategoryHeader>,
-    mut state: ResMut<EditorState>,
+    mut fold: ResMut<Folded>,
 ) {
     let Ok(header) = headers.get(activate.entity) else {
         return;
     };
-    if !state.collapsed.remove(&header.0) {
-        state.collapsed.insert(header.0.clone());
+    if !fold.0.remove(&header.0) {
+        fold.0.insert(header.0.clone());
     }
 }
 
@@ -1715,6 +1734,7 @@ fn walk_palette(
     project: Res<Project>,
     open: Res<OpenMap>,
     filters: Res<crate::filter::Filters>,
+    fold: Res<Folded>,
     mut state: ResMut<EditorState>,
 ) {
     let dt = time.delta_secs();
@@ -1727,7 +1747,7 @@ fn walk_palette(
         return;
     }
 
-    let visible = palette_indices(&project, &open, &state, &filters);
+    let visible = palette_indices(&project, &open, &fold, &filters);
     if visible.is_empty() {
         // A refusal, not silence: an empty palette after a filter looks exactly like a dead key.
         state
@@ -2228,23 +2248,42 @@ fn draw_map_grid(
     );
 }
 
-fn draw_bounds(
-    open: Res<OpenMap>, mut gizmos: Gizmos) {
+/// **The map's envelope in world space** — centre, then size.
+///
+/// Extracted so the wireframe an author sees and the rect a badge must not cover are computed from
+/// one expression. `badges::sense_world_ink` projects this to screen and calls it ink; if the two
+/// ever disagreed, the overlay would carefully avoid a box that is not where the box is.
+pub fn map_bounds(open: &OpenMap) -> (Vec3, Vec3) {
     // `floor_rect` is the floor PLAN — map space, centred on zero. Drawing happens in the world, so
     // the origin goes back on here.
     let (min_x, min_z, max_x, max_z) = open.map.floor_rect();
     let (floor, ceiling) = open.map.height_span();
     let (w, h, d) = open.map.bounds;
-    let centre = Vec3::new(
-        open.map.origin.0 + (min_x + max_x) * 0.5,
-        (floor + ceiling) * 0.5,
-        open.map.origin.2 + (min_z + max_z) * 0.5,
-    );
+    (
+        Vec3::new(
+            open.map.origin.0 + (min_x + max_x) * 0.5,
+            (floor + ceiling) * 0.5,
+            open.map.origin.2 + (min_z + max_z) * 0.5,
+        ),
+        Vec3::new(w, h, d),
+    )
+}
+
+fn draw_bounds(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<crate::keys::Live>,
+    open: Res<OpenMap>,
+    mut gizmos: Gizmos,
+) {
+    let (centre, size) = map_bounds(&open);
+    // Faded while the shortcut key is held, the same as the Tiles envelope — the two are the same
+    // claim about the world, so they step back together (`chrome::WORLD_HELD`).
+    let held = crate::keys::pressed(&keyboard, *live, crate::keys::Action::Shortcuts);
     // `cube`, not `cuboid` — 0.19 spells it `Gizmos::cube` and takes a transform whose SCALE is
     // the box's size (`bevy_gizmos-0.19.0/src/gizmos.rs:637`).
     gizmos.cube(
-        Transform::from_translation(centre).with_scale(Vec3::new(w, h, d)),
-        BOUNDS_LINE,
+        Transform::from_translation(centre).with_scale(size),
+        crate::chrome::stepped_back(BOUNDS_LINE, held),
     );
 }
 
@@ -2380,6 +2419,9 @@ pub fn not_typing(
     // `Enter` that confirms a name is also `BuildDrop`, so without this the same keypress named the
     // tile and dropped a piece into it.
     build: Res<crate::build::Build>,
+    // The vocabulary prompt, added with the tag block's `+` chip (2026-08-22). While it is open,
+    // typing a name containing `n` must not rotate the mesh — the guard this list exists to give.
+    token: Res<crate::token_prompt::TokenPrompt>,
 ) -> bool {
     state.renaming.is_none()
         && state.pinning.is_none()
@@ -2387,6 +2429,7 @@ pub fn not_typing(
         && edit.active.is_none()
         && import.renaming.is_none()
         && build.naming.is_none()
+        && token.open.is_none()
         && !filters.typing()
         && !cell.typing()
         && !note.typing()
@@ -2415,12 +2458,19 @@ pub fn sense_context(
     width: Res<crate::tiles::ScaleEdit>,
     height: Res<crate::tiles::HeightEdit>,
     build: Res<crate::build::Build>,
+    token: Res<crate::token_prompt::TokenPrompt>,
     move_drag: Res<MoveDrag>,
     clone_drag: Res<CloneDrag>,
     proposal: Res<Proposal>,
     derived: Res<crate::tiles::DerivedEdges>,
     mut live: ResMut<keys::Live>,
 ) {
+    // **The filter box is its own context, not a member of `typing`.** Every other field makes the
+    // whole census quiet ([`keys::Context::Typing`]); a filter box narrows a list that must keep
+    // walking while it holds the keys ([`keys::Context::Filter`]), so it is split out of the one
+    // big disjunction and folded into `Live` separately below. The box is still a text field —
+    // letters go to it, not to the verbs — only the list's own walk keys stay live.
+    let filter_typing = filters.typing();
     let typing = state.renaming.is_some()
         || state.pinning.is_some()
         // **`grouping` was missing here**, so naming a captured composition also dispatched Map
@@ -2430,14 +2480,15 @@ pub fn sense_context(
         || state.grouping.is_some()
         || edit.active.is_some()
         || import.renaming.is_some()
-        || filters.typing()
         || cell.typing()
         || note.typing()
         || width.typing()
         || height.typing()
-        // The tile name prompt — the same key that confirms a name is `BuildDrop`, so the Tiles tab
+        // The tile name prompt — the same key that confirms a tile is `BuildDrop`, so the Tiles tab
         // must stop dispatching while it is open.
-        || build.naming.is_some();
+        || build.naming.is_some()
+        // The vocabulary prompt — typing a token name must not rotate the mesh.
+        || token.open.is_some();
     // **What is in hand, asked of the tab that can be holding something.** Two tabs can, and they hold
     // different things: the assembler has a piece taken with `Space`, the map has one picked up in
     // Move or a set captured in Clone. Both answer the same question — *do the arrows move a thing, or
@@ -2464,9 +2515,9 @@ pub fn sense_context(
         // in the tile the library could never be walked again, so every second drop was a repeat.
         //
         // The pair says what the arrows are for: there is a piece, and you are placing it.
-        // **The kit list outranks a held piece**, and cannot honestly collide with it: `KitEnter` is
-        // bound at `Idle`, so nothing is in hand at the moment the list opens, and `open_saved`
-        // clears both flags.
+        // **The Tiles page outranks a held piece**, and cannot honestly collide with it: `TileOpen`
+        // and `PageEnter` are bound at `Browsing`, so the page's keys are what a held piece cannot
+        // swallow — and opening from the page clears `placing` and `browsing` together.
         keys::Context::Tiles if build.browsing.is_some() => keys::Stance::Browsing,
         keys::Context::Tiles if build.placing && crate::build::focused(&build) => {
             keys::Stance::Holding
@@ -2484,9 +2535,18 @@ pub fn sense_context(
         }
         _ => keys::Stance::Idle,
     };
-    let want = keys::live(mode.context(), typing, stance);
+    let want = if filter_typing {
+        // The filter box holds the keys: the census answers [`keys::Context::Filter`], which keeps
+        // the list's own walk live and suppresses everything else. The stance is whatever the tab
+        // computed — the Tiles page keeps `Browsing` so its page-walk pair still passes
+        // `stance_ok` — because [`keys::live`] keeps the stance for Filter the way it does for a
+        // tab.
+        keys::Live(keys::Context::Filter, stance)
+    } else {
+        keys::live(mode.context(), typing, stance)
+    };
     // Written through the change detector only when it actually moves, so `Live` staying put does not
-    // wake every `resource_changed` reader in the editor every frame.
+    // wake every `resource_changed` reader in the editor on every frame.
     if *live != want {
         *live = want;
     }
@@ -4234,6 +4294,34 @@ fn stamp_here(project: &mut Project,
     state.status.note(format!("stamped `{of}` as {id}"));
 }
 
+/// **The heights stamped rows sit at** — answered parallel to `expanded.placements`.
+///
+/// One owner, because the preview and the commit must not disagree about where a stamped piece
+/// sits. `drive_stamp_ghost` used to spawn its rows at the authored `lift`, which drew every
+/// sinking or seated member on the floor and then landed it somewhere else — the module note's own
+/// rule broken, with "somewhere" replaced by "some height".
+///
+/// The expanded rows are not in `map.placements`, so their heights cannot come from the map's own
+/// resolve. A scratch map carrying both is the question `stack::resolve_y` was written for.
+///
+/// `pub`, not `pub(crate)`: the test that proves the preview and the commit agree lives in
+/// `tests/headless.rs`, which is another crate — the reason `stamp_here_for_test`, `ghost_anchor`
+/// and `palette_indices` are public.
+pub fn stamped_heights(
+    map: &emerge_core::map::Map,
+    library: &emerge_core::library::Library,
+    expanded: &emerge_core::composition::Expansion,
+) -> Result<Vec<f32>, String> {
+    let mut scratch = map.clone();
+    scratch
+        .placements
+        .extend(expanded.placements.iter().cloned());
+    let mut ys = emerge_core::stack::resolve_y(&scratch, library)?;
+    // The map's own rows first, the expansion's after — so what is returned is indexed by the
+    // expansion alone and no caller has to know where the join was.
+    Ok(ys.split_off(map.placements.len()))
+}
+
 /// Draw every stamped row, and nothing else.
 ///
 /// **Rebuilt wholesale from `map.stamps` whenever it changes.** A diffing version would be faster and
@@ -4252,7 +4340,17 @@ fn redraw_stamps(
     mut picture: ResMut<StampPicture>,
     drawn: Query<Entity, With<StampInstance>>,
 ) {
-    if !project.is_changed() {
+    // **The subject is `open.map.stamps`, so `OpenMap` is in the gate.** It was `Project` alone, and
+    // a stamp does not live on `Project`: `delete_stamp` takes the row off `OpenMap` and touches
+    // `Project` not at all — its caller `drive_removal` holds an immutable `ResMut<Project>` — so a
+    // deleted nurse station stayed drawn. The screen and the file disagreeing is what this
+    // function's own note says it exists to prevent. `Project` stays in the gate because a
+    // composition edited on Tiles changes what a stamp expands to.
+    //
+    // A placement edit now redraws the stamped set too, and that is correct rather than incidental:
+    // a stamped row's height resolves against `map.placements` (see the scratch map below), so a
+    // table placed under a stamped lamp moves the lamp.
+    if !(project.is_changed() || open.is_changed()) {
         return;
     }
     // **The instance, not the rows.** `Children` is `linked_spawn`, so this takes the pieces with
@@ -4283,16 +4381,11 @@ fn redraw_stamps(
             return;
         }
     };
-    // The expanded rows are not in `map.placements`, so their heights cannot come from the map's own
-    // resolve. A scratch map carrying both answers the question `stack::resolve_y` was written for.
-    let mut scratch = open.map.clone();
-    scratch
-        .placements
-        .extend(expanded.placements.iter().cloned());
-    // Loud. A silent return here is the failure mode this editor's own notes call the worst it had:
-    // an empty patch of floor where a composition should be, with nothing anywhere saying why.
-    let ys = match emerge_core::stack::resolve_y(&scratch, &project.library) {
+    let ys = match stamped_heights(&open.map, &project.library, &expanded) {
         Ok(ys) => ys,
+        // Loud. A silent return here is the failure mode this editor's own notes call the worst it
+        // had: an empty patch of floor where a composition should be, with nothing anywhere saying
+        // why.
         Err(e) => {
             state
                 .status
@@ -4301,7 +4394,6 @@ fn redraw_stamps(
             return;
         }
     };
-    let first = open.map.placements.len();
     let mut drawn = 0usize;
     // **One parent per stamp, minted on first sight of a row belonging to it.** Identity, not a
     // transform node: the rows already carry world positions from `spawn_piece`, and a parent with a
@@ -4320,7 +4412,7 @@ fn redraw_stamps(
             Some(patch) => base.patched_with(patch),
             None => base.clone(),
         };
-        let Some(&y) = ys.get(first + k) else {
+        let Some(&y) = ys.get(k) else {
             continue;
         };
         // **Provenance as structure.** `Expansion::from` is returned for exactly this, so that no
@@ -4863,7 +4955,7 @@ fn keys(
         // the button go through, and it raises the unsaved-changes question rather than exiting.
         //
         // **Map tab only, deliberately.** On Tiles `Esc` puts down the piece in hand and leaves the
-        // kit list; on Compose and Anim it takes a problem block down. Each of those has its own
+        // meshes page; on Compose and Anim it takes a problem block down. Each of those has its own
         // idea of "nothing in hand", decided by a different system in the same frame — so a shared
         // "did anything consume it" rule would be guessing at four answers. The hint line names the
         // key on every tab, which is what keeps the others from being dead ends.
@@ -6848,6 +6940,37 @@ pub(crate) fn ghost_is_armed(tool: Tool, brush: Option<usize>, composition_armed
     tool == Tool::Place && (brush.is_some() || composition_armed)
 }
 
+/// **What the brush ghost previews**, given what is in hand, which tool is armed, and whether a
+/// composition is.
+///
+/// Pure and separate from [`drive_ghost`] for the reason [`under_readout`] and [`ghost_anchor`] are:
+/// that system needs `cursor_ground`, which needs a viewport, so a headless test cannot reach this
+/// rule at all — and a test written against the whole system is blank whatever the rule does, which
+/// means it passes with the rule deleted.
+pub(crate) fn brush_ghost_subject(
+    tool: Tool,
+    carried: Option<(usize, f32, (u8, u8))>,
+    brush: Option<(usize, f32, (u8, u8))>,
+    composition_armed: bool,
+) -> Option<(usize, f32, (u8, u8))> {
+    match (carried, tool) {
+        (Some(carried), _) => Some(carried),
+        (None, Tool::Remove) => None,
+        // The clone tool draws its own marker — the set's bounds riding the cursor — and a brush
+        // ghost beside it would be a second preview for a click that stamps, not places.
+        (None, Tool::Clone) => None,
+        // Move armed with nothing picked up: the honest preview of "click to pick something up" is
+        // no ghost.
+        (None, Tool::Move) => None,
+        // **A composition outranks the brush**, because `drive_place` stamps it and returns: the
+        // click puts the group down, so previewing the palette piece would be a promise about a
+        // placement that is not going to happen. `drive_stamp_ghost` draws what will land.
+        (None, Tool::Place) if composition_armed => None,
+        // Nothing armed is a real answer: no ghost, because no click is going to place anything.
+        (None, Tool::Place) => brush,
+    }
+}
+
 fn drive_move(
     mut commands: Commands,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -7581,30 +7704,51 @@ fn spawn_target_tile(
 /// Type the reason a cell is pinned.
 /// **Name a composition, and keep it.** `pin_reason_keys`' shape — see `keys::Phase` for why the fields
 /// run before the dispatchers.
-/// **Leaving the Map puts the name prompt down**, so the box being open and the field being live are
-/// one condition rather than two.
-///
-/// `EditorState::grouping` is not mode-scoped, and `chrome::paint_name_box` used to be — it matched on
-/// `Mode::Map`. Clicking the tab strip mid-name therefore hid the box while `group_name_keys` kept the
-/// keyboard: every keystroke vanished, with nothing on screen to say where they were going, until
-/// `Esc`. Two conditions for one question is what made that reachable.
-///
+/// The same refusal applies to the other three fields a Map can hold open — `pinning`, `renaming`
+/// and `SizeEdit::active` — which hide with the tab and would swallow the destination tab's keys the
+/// same way, so this clears whichever one is open.
 /// One owner, watching the mode rather than each of the three ways to change it — number keys, `Tab`,
 /// and a click on the strip — so a fourth cannot reintroduce it. The set stays in hand, exactly as
 /// `Esc` leaves it; only the question is withdrawn.
 fn leaving_a_tab_puts_the_name_prompt_down(
     mode: Res<crate::tiles::Mode>,
     mut state: ResMut<EditorState>,
+    mut size: ResMut<SizeEdit>,
 ) {
-    if !mode.is_changed() || *mode == crate::tiles::Mode::Map || state.grouping.is_none() {
+    if !mode.is_changed() || *mode == crate::tiles::Mode::Map {
         return;
     }
-    state.grouping = None;
-    // An unconfirmed replace is a question about a name that is no longer being asked.
-    state.replacing = None;
-    state
-        .status
-        .note("not named — the set is still in hand".to_owned());
+    // Read, never write, unless something was actually open: `EditorState` is watched by
+    // `rebuild_palette`.
+    //
+    // **Every Map field, not just the name.** `grouping` was the only one cleared here, and the
+    // other three are the same bug this function was written to close: each of them keeps
+    // `sense_context` answering `Typing` after the tab is gone, so every key on the destination tab
+    // is refused with nothing on screen to say where they are going. At most one can be open — the
+    // first to open owns the keyboard — so this clears the one that is.
+    if state.grouping.is_none()
+        && state.pinning.is_none()
+        && state.renaming.is_none()
+        && size.active.is_none()
+    {
+        return;
+    }
+    if state.grouping.take().is_some() {
+        // An unconfirmed replace is a question about a name that is no longer being asked.
+        state.replacing = None;
+        state
+            .status
+            .note("not named — the set is still in hand".to_owned());
+    }
+    if state.pinning.take().is_some() {
+        state.status.note("nothing pinned".to_owned());
+    }
+    if state.renaming.take().is_some() {
+        state.status.note("name unchanged".to_owned());
+    }
+    if size.active.take().is_some() {
+        state.status.note("size unchanged".to_owned());
+    }
 }
 
 fn group_name_keys(
@@ -8336,6 +8480,9 @@ fn drive_ghost(
     keyboard: Res<ButtonInput<KeyCode>>,
     rung: Res<Rung>,
     anchor: Res<FineAnchor>,
+    // The arm `drive_place` honors: a composed set stamped on click outranks the brush, and the
+    // ghost must answer the same question the click will.
+    compose: Res<crate::compose::ComposeState>,
 ) {
     let clear = |commands: &mut Commands| {
         for (e, _) in &ghosts {
@@ -8403,18 +8550,12 @@ fn drive_ghost(
                 // ask for.
                 .map(|ix| (ix, p.yaw, p.tip))
         });
-    let subject = match (carried, state.tool) {
-        (Some(carried), _) => Some(carried),
-        (None, Tool::Remove) => None,
-        // The clone tool draws its own marker — the set's bounds riding the cursor — and a brush
-        // ghost beside it would be a second preview for a click that stamps, not places.
-        (None, Tool::Clone) => None,
-        // Move armed with nothing picked up: the honest preview of "click to pick something up" is
-        // no ghost.
-        (None, Tool::Move) => None,
-        // Nothing armed is a real answer: no ghost, because no click is going to place anything.
-        (None, Tool::Place) => state.brush.map(|ix| (ix, state.brush_yaw, state.brush_tip)),
-    };
+    let subject = brush_ghost_subject(
+        state.tool,
+        carried,
+        state.brush.map(|ix| (ix, state.brush_yaw, state.brush_tip)),
+        compose.armed.is_some(),
+    );
     let Some((brush_ix, want_yaw, want_tip)) = subject else {
         clear(&mut commands);
         return;
@@ -8645,6 +8786,16 @@ fn drive_stamp_ghost(
         return;
     };
 
+    // **The heights the drop will seat these at** — the same call `redraw_stamps` makes, so the
+    // preview and the commit cannot disagree.
+    let Ok(ys) = stamped_heights(&open.map, &project.library, &expansion) else {
+        // A set whose rows will not stand up cannot be stamped either, and `stamp_here` says so by
+        // name on the click. Drawing nothing is the honest preview of a refusal — the same answer
+        // this system already gives when `expand` refuses.
+        clear(&mut commands);
+        return;
+    };
+
     let parent = commands
         .spawn((
             StampGhost { of: armed, yaw, at },
@@ -8653,22 +8804,34 @@ fn drive_stamp_ghost(
         ))
         .id();
     let mut drawn = 0usize;
-    for p in &expansion.placements {
-        let Some(d) = project.library.get(&p.descriptor) else {
+    for (k, p) in expansion.placements.iter().enumerate() {
+        let Some(base) = project.library.get(&p.descriptor) else {
+            continue;
+        };
+        // Patched exactly as the drop patches it: a preview of the unpatched descriptor is a preview
+        // of a different piece.
+        let d = match &p.patch {
+            Some(patch) => base.patched_with(patch),
+            None => base.clone(),
+        };
+        let Some(&y) = ys.get(k) else {
             continue;
         };
         if let Some(e) = spawn_piece(
             &mut commands,
             &assets,
-            d,
+            &d,
             p.at,
             p.yaw,
             p.tip,
             open.map.origin,
-            p.lift,
+            y,
         ) {
             // `Ghost` so `fade_ghost` makes it translucent through the one path that already exists.
             commands.entity(e).insert((Ghost, ChildOf(parent)));
+            if p.paint != 0 {
+                commands.entity(e).insert(emerge_bevy::Paint(p.paint));
+            }
             drawn += 1;
         }
     }
@@ -9175,6 +9338,29 @@ mod tests {
         }
     }
 
+    /// **One preview for one click.** `drive_place` stamps an armed composition and returns, so a
+    /// brush ghost beside `drive_stamp_ghost`'s would be a promise about a placement that is not
+    /// going to happen. A carry outranks both, because the click puts the carried piece down.
+    #[test]
+    fn the_brush_ghost_yields_to_an_armed_composition() {
+        let brush = Some((3, 90.0, (0, 0)));
+        assert_eq!(
+            brush_ghost_subject(Tool::Place, None, brush, true),
+            None,
+            "the composition is what the click stamps, so the palette piece must not preview"
+        );
+        assert_eq!(
+            brush_ghost_subject(Tool::Place, None, brush, false),
+            brush,
+            "with nothing armed the brush is what the click places, and that is the preview"
+        );
+        assert_eq!(
+            brush_ghost_subject(Tool::Place, Some((7, 0.0, (0, 0))), brush, true),
+            Some((7, 0.0, (0, 0))),
+            "a piece in hand outranks both arms — the click puts it down"
+        );
+    }
+
     /// `pub(super)` for `snap_tests`' sake, the same reason [`project`] is: a snap is about a
     /// piece's footprint, so the module testing snapping needs a piece to snap.
     pub(super) fn piece(id: &str, w: f32, d: f32) -> Descriptor {
@@ -9212,6 +9398,8 @@ mod tests {
             project_dir: std::path::PathBuf::from("assets/emerge"),
             maps_dir: std::path::PathBuf::from("assets/emerge/maps"),
             kits: Vec::new(),
+            // A test project declares no combinations; every map in it offers every bound kit.
+            bashes: Vec::new(),
             // These descriptors carry no namespace, so the directory is what a tile is named after.
             namespace: "emerge".to_owned(),
             library_path: std::path::PathBuf::from("assets/emerge/library.ron"),
@@ -9310,6 +9498,52 @@ mod tests {
         let (p, open) = project(vec![vague], vec![at("m1", "mystery", (0.0, 0.0))]);
         // Not covering, and its fallback reach is the minimum cell rather than infinity.
         assert_eq!(pick_at(&p, &open, (9.0, 9.0)), None);
+    }
+
+    /// **Leaving the Map puts down every field, not just the name.**
+    ///
+    /// Each of these keeps `sense_context` answering `Typing`, so one left open on a tab that
+    /// cannot show it swallows every key on the destination tab until the author comes back and
+    /// presses Esc. `grouping` was cleared here and the other three were not.
+    #[test]
+    fn leaving_the_map_puts_every_field_down() {
+        let mut app = App::new();
+        app.init_resource::<crate::tiles::Mode>()
+            .init_resource::<EditorState>()
+            .init_resource::<SizeEdit>()
+            .add_systems(Update, leaving_a_tab_puts_the_name_prompt_down);
+        // Freshly inserted is freshly changed, and the tab is Map: nothing to put down.
+        app.update();
+
+        {
+            let mut state = app.world_mut().resource_mut::<EditorState>();
+            state.pinning = Some((0, String::new()));
+            state.renaming = Some("gal".to_owned());
+            state.grouping = Some("bay".to_owned());
+            state.replacing = Some("bay".to_owned());
+        }
+        app.world_mut().resource_mut::<SizeEdit>().active = Some((Axis::X, "12".to_owned()));
+        // Still on Map — a field open on the tab it belongs to stays open.
+        app.update();
+        assert!(
+            app.world().resource::<EditorState>().pinning.is_some(),
+            "the guard fires on leaving a tab, not on every frame of the one it belongs to"
+        );
+
+        *app.world_mut().resource_mut::<crate::tiles::Mode>() = crate::tiles::Mode::Meshes;
+        app.update();
+        let state = app.world().resource::<EditorState>();
+        assert!(state.pinning.is_none(), "a pin reason cannot outlive its tab");
+        assert!(state.renaming.is_none(), "nor a map rename");
+        assert!(state.grouping.is_none(), "nor a composition name");
+        assert!(
+            state.replacing.is_none(),
+            "and an unconfirmed replace goes with the name it was asked about"
+        );
+        assert!(
+            app.world().resource::<SizeEdit>().active.is_none(),
+            "nor a half-typed map size"
+        );
     }
 }
 

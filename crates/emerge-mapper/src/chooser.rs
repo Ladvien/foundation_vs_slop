@@ -75,12 +75,6 @@ pub enum MapSummary {
         placements: usize,
         stamps: usize,
         bounds: (f32, f32, f32),
-        /// **Which kits this map offers**, by namespace — `Map::palette`. Empty means all of them.
-        palette: Vec<String>,
-        /// **Which kits its content already names**, derived from the placements and from the
-        /// members of anything it stamps. Never stored: this is what decides whether a kit may be
-        /// unticked, and a cached answer to that is an answer that can be wrong.
-        uses: BTreeSet<String>,
     },
     /// **On disk and unreadable, which is a row and not an omission.** A map that fails to parse is
     /// exactly the one an author needs to be told about; dropping it from the list would present a
@@ -131,6 +125,24 @@ pub struct Kit {
 pub struct Catalog {
     pub kits: Vec<Kit>,
     pub maps: Vec<MapEntry>,
+    /// **Which kit new work lands in** — `kits.ron`'s `authoring`, read once at scan. `None` when
+    /// the project has no kits yet, which is the same state as a project that never had one.
+    pub authoring: Option<String>,
+    /// **The named combinations a map can be given** — `kits.ron`'s `bash` names, in file order,
+    /// read in the same breath as the bindings. `B` on a map row cycles through them; a project
+    /// declaring none has nothing to cycle, and `cycle_bash` says so.
+    pub bashes: Vec<String>,
+    /// **Every project beside this one** — the immediate children of `root.parent()` holding
+    /// `assets/emerge`, plus the current root marked `current`.
+    pub projects: Vec<ProjectEntry>,
+}
+/// One project beside this one — a sibling directory holding `assets/emerge`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectEntry {
+    pub name: String,
+    pub dir: PathBuf,
+    /// Whether this is the project the chooser is standing in.
+    pub current: bool,
 }
 
 impl Catalog {
@@ -184,38 +196,81 @@ impl Catalog {
         // **The binding names a kit, and it is the only name a flat library has.** Read after the
         // scan rather than during it: a directory that is a kit and a directory that is *bound* are
         // two questions, and this screen lists the first while the editor loads the second.
-        let bindings = std::fs::read_to_string(base.join(emerge_core::kits::KITS_FILE))
+        let kits_ron = std::fs::read_to_string(base.join(emerge_core::kits::KITS_FILE))
             .ok()
-            .and_then(|t| emerge_core::kits::Kits::parse(&t).ok())
-            .map(|k| k.bind)
+            .and_then(|t| emerge_core::kits::Kits::parse(&t).ok());
+        let bindings = kits_ron
+            .as_ref()
+            .map(|k| k.bind.clone())
             .unwrap_or_default();
         for kit in &mut kits {
             if let Some(b) = bindings.iter().find(|b| Some(b.dir.as_str()) == kit.flag.as_deref()) {
                 kit.namespace = Some(b.namespace.clone());
             }
         }
+        // **Where new work lands**, read in the same breath as the bindings — it is a field of the
+        // same file, and a second read would be a second chance for the two to disagree.
+        let authoring = kits_ron.as_ref().and_then(|k| k.authoring.clone());
+        // **The declared bashes**, from the same parse and in file order — `B` on a map row walks
+        // them in exactly this order, so the screen and the file agree about what "next" is.
+        let bashes = kits_ron
+            .as_ref()
+            .map(|k| k.bash.iter().map(|b| b.name.clone()).collect())
+            .unwrap_or_default();
 
         // **Fixed order, every scan.** See the module note on Sears & Shneiderman: nothing here is
         // sorted by use, and `the_catalog_order_never_moves` is what keeps that true.
         kits.sort_by(|a, b| a.label.cmp(&b.label));
         // One list for the project. `maps/` may not exist yet in a project nobody has saved from,
         // and that is an empty list rather than an error — the `+ new map` row is the instruction.
-        // **The project's compositions, once**, so a stamp can be resolved to the kits its members
-        // come from. A map that stamps a tile uses those kits as surely as one that places the
-        // pieces directly, and a checkbox that could not see that would offer to untick a kit the
-        // map depends on.
-        let comp_path = base.join(Compositions::FILE);
-        let comps = if comp_path.is_file() {
-            let text = std::fs::read_to_string(&comp_path)
-                .map_err(|e| format!("cannot read {}: {e}", comp_path.display()))?;
-            Compositions::parse(&text)
-                .map_err(|e| format!("{}: {e}", comp_path.display()))?
-                .compositions
-        } else {
-            Vec::new()
-        };
-        let maps = read_maps(&base.join(MAPS_DIR), &comps, &kits)?;
-        Ok(Catalog { kits, maps })
+        let maps = read_maps(&base.join(MAPS_DIR))?;
+        // **Every project beside this one**, so the PROJECTS column can name them. A sibling holds
+        // `assets/emerge` or it is not a project; the current root is marked `current`. With no
+        // parent to walk (the root of a drive, or one that cannot be read) there is just the
+        // current project, which is the only one this screen can say anything about.
+        let mut projects = Vec::new();
+        if let Some(parent) = root.parent() {
+            if let Ok(entries) = std::fs::read_dir(parent) {
+                for entry in entries.flatten() {
+                    let dir = entry.path();
+                    if !dir.is_dir() || !dir.join(EMERGE_DIR).is_dir() {
+                        continue;
+                    }
+                    let name = dir
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    projects.push(ProjectEntry {
+                        name,
+                        current: dir == root,
+                        dir,
+                    });
+                }
+            }
+        }
+        if projects.iter().all(|p| !p.current) {
+            projects.push(ProjectEntry {
+                name: root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                dir: root.to_path_buf(),
+                current: true,
+            });
+        }
+        // Fixed order, every scan: the current project first, the rest alphabetical.
+        projects.sort_by(|a, b| {
+            b.current
+                .cmp(&a.current)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        Ok(Catalog {
+            kits,
+            maps,
+            authoring,
+            bashes,
+            projects,
+        })
     }
 }
 
@@ -252,11 +307,7 @@ fn read_kit(dir: &Path, flag: Option<String>) -> Result<Option<Kit>, String> {
 }
 
 /// Every `*.map.ron` beside a kit, alphabetical.
-fn read_maps(
-    dir: &Path,
-    comps: &[emerge_core::composition::Composition],
-    kits: &[Kit],
-) -> Result<Vec<MapEntry>, String> {
+fn read_maps(dir: &Path) -> Result<Vec<MapEntry>, String> {
     const SUFFIX: &str = ".map.ron";
     let mut out = Vec::new();
     // **No `maps/` yet is no maps**, not a broken project: it is made by the first save, and a
@@ -280,38 +331,11 @@ fn read_maps(
             Err(e) => MapSummary::Unreadable(format!("cannot read: {e}")),
             Ok(text) => match Map::parse(&text) {
                 Err(e) => MapSummary::Unreadable(e),
-                Ok(map) => {
-                    let mut uses = BTreeSet::new();
-                    // **Which kit DEFINES it.** Reading a namespace out of the id answers `None`
-                    // for every flat library, so nothing was ever in use and every kit looked
-                    // safe to turn off — the failure `Project::kit_of` records.
-                    let mut add = |id: &str| {
-                        if let Some(k) = kits.iter().find(|k| k.ids.contains(id)) {
-                            uses.insert(k.namespace.clone().unwrap_or_else(|| k.label.clone()));
-                        }
-                    };
-                    for p in &map.placements {
-                        add(&p.descriptor);
-                    }
-                    for stamp in &map.stamps {
-                        let Some(c) = comps.iter().find(|c| c.id == stamp.of) else {
-                            continue;
-                        };
-                        for m in &c.members {
-                            match &m.body {
-                                Body::Descriptor { id, .. } | Body::Composition { id } => add(id),
-                                Body::Slot { .. } => {}
-                            }
-                        }
-                    }
-                    MapSummary::Read {
-                        placements: map.placements.len(),
-                        stamps: map.stamps.len(),
-                        bounds: map.bounds,
-                        palette: map.palette.clone(),
-                        uses,
-                    }
-                }
+                Ok(map) => MapSummary::Read {
+                    placements: map.placements.len(),
+                    stamps: map.stamps.len(),
+                    bounds: map.bounds,
+                },
             },
         };
         out.push(MapEntry {
@@ -565,17 +589,63 @@ pub fn create_kit(root: &Path, raw_name: &str) -> Result<PathBuf, String> {
     bind_kit(root, &name)?;
     Ok(dir)
 }
-
-/// **Write a map's kit selection**, leaving everything else in the file exactly as it was.
+/// **Write a new project beside this one** — the directory that holds kits, maps, compositions and
+/// the vocabulary.
 ///
-/// Parsed, edited, validated and written through the same `Map` schema the editor and the game read,
-/// rather than spliced as text — `map.rs`'s own rule: *"an emerge map is serialized normally and
-/// never text-spliced"*, because every reason a map has lives in a field.
-fn write_palette(path: &Path, palette: &[String]) -> Result<(), String> {
+/// The shape `assets/emerge/` *is* a project (`CLAUDE.md`'s Data model); this is the verb that
+/// makes one. Nothing is opened in-process — switching the live root is a separate change — so the
+/// caller reports `emerge-mapper <dir>` and the author runs it.
+pub fn create_project(parent: &Path, raw_name: &str, vocab_source: &Path) -> Result<PathBuf, String> {
+    let name = naming::to_snake_case(raw_name);
+    if name.is_empty() {
+        return Err(format!(
+            "`{raw_name}` leaves nothing usable as a name. Projects are snake_case — lowercase \
+             letters, digits and single underscores, starting with a letter."
+        ));
+    }
+    let dir = parent.join(&name);
+    if dir.exists() {
+        return Err(format!(
+            "`{name}` already exists beside this project. Pick another name, or open the one that \
+             is there."
+        ));
+    }
+    let emerge = dir.join(EMERGE_DIR);
+    std::fs::create_dir_all(&emerge).map_err(|e| format!("cannot make {}: {e}", emerge.display()))?;
+
+    // **The version comes from the constant, never a literal** — the same rule the chooser's own
+    // fixture records: bumping `KITS_VERSION` must not write a file the schema refuses.
+    let kits = format!(
+        "(version: {}, bind: [], authoring: None, bash: [])",
+        emerge_core::kits::KITS_VERSION
+    );
+    std::fs::write(emerge.join(emerge_core::kits::KITS_FILE), kits)
+        .map_err(|e| format!("{}: {e}", emerge.join(emerge_core::kits::KITS_FILE).display()))?;
+
+    // **Copy the vocabulary byte-for-byte.** A copy preserves the rationale comments; serializing
+    // `Vocabularies` would delete them. The source is the current project's `vocab.ron`, which is
+    // the only vocabulary on hand.
+    std::fs::copy(vocab_source, emerge.join("vocab.ron"))
+        .map_err(|e| format!("cannot copy {} to vocab.ron: {e}", vocab_source.display()))?;
+
+    // **Write nothing else.** No `compositions.ron` (absence and empty are the same state, per
+    // `create_kit`'s own note), no `maps/` (`save_atomic` creates it), no kit — the `+ new kit`
+    // row makes one, and because `create_kit` calls `bind_kit`, that first kit also becomes the
+    // authoring kit with no extra code.
+    Ok(dir)
+}
+
+/// **Write the map's bash**, leaving every other field as it was. Same door `write_settings` uses:
+/// parse, set, validate, serialize, atomic write.
+///
+/// Through the `Map` schema the editor and the game read, rather than spliced as text — `map.rs`'s
+/// own rule: *"an emerge map is serialized normally and never text-spliced"*, because every reason
+/// a map has lives in a field.
+fn write_bash(path: &Path, bash: Option<&str>) -> Result<(), String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let mut map = Map::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-    map.palette = palette.to_vec();
+    map.bash = bash.map(str::to_owned);
     map.validate()?;
     let out = ron::ser::to_string_pretty(&map, ron::ser::PrettyConfig::default())
         .map_err(|e| format!("map: serialize: {e}"))?;
@@ -585,8 +655,19 @@ fn write_palette(path: &Path, palette: &[String]) -> Result<(), String> {
 /// **Add a binding for `name`**, leaving the rest of `kits.ron` as it was.
 fn bind_kit(root: &Path, name: &str) -> Result<(), String> {
     let path = root.join(EMERGE_DIR).join(emerge_core::kits::KITS_FILE);
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    // **A directory that is not a project hits this first** — `+ new kit` in a bare folder has no
+    // `kits.ron` to bind into. A raw io error would read as "the disk failed"; this says what the
+    // directory is and what makes one.
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "{} does not exist — this directory is not a project. Make one with `+ new project`.",
+                path.display()
+            )
+        } else {
+            format!("cannot read {}: {e}", path.display())
+        }
+    })?;
     let mut kits =
         emerge_core::kits::Kits::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     kits.bind.push(emerge_core::kits::Bind {
@@ -599,6 +680,37 @@ fn bind_kit(root: &Path, name: &str) -> Result<(), String> {
     if kits.authoring.is_none() {
         kits.authoring = Some(name.to_owned());
     }
+    let out = kits.to_ron().map_err(|e| format!("{}: {e}", path.display()))?;
+    // Parsed back before it is written, so a binding that would refuse to load is refused here —
+    // where the author is standing — rather than at the next open.
+    emerge_core::kits::Kits::parse(&out).map_err(|e| format!("{}: {e}", path.display()))?;
+    emerge_core::ron_surgery::save_atomic(&path, &out)
+}
+
+/// **Point `authoring` at `name`, leaving the rest of `kits.ron` as it was.**
+///
+/// The same shape as `bind_kit`: parsed, edited, re-parsed before writing, and `save_atomic`'d —
+/// so a file that would refuse to load is refused here, where the author is standing, rather than
+/// at the next open. `name` must be bound; the refusal names the bound kits, because "not bound"
+/// without a list is a search.
+fn set_authoring(root: &Path, name: &str) -> Result<(), String> {
+    let path = root.join(EMERGE_DIR).join(emerge_core::kits::KITS_FILE);
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut kits =
+        emerge_core::kits::Kits::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    if !kits.bind.iter().any(|b| b.dir == name) {
+        return Err(format!(
+            "`{name}` is not bound in {}. The bound kits are: {}.",
+            path.display(),
+            kits.bind
+                .iter()
+                .map(|b| format!("`{}`", b.dir))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    kits.authoring = Some(name.to_owned());
     let out = kits.to_ron().map_err(|e| format!("{}: {e}", path.display()))?;
     // Parsed back before it is written, so a binding that would refuse to load is refused here —
     // where the author is standing — rather than at the next open.
@@ -704,7 +816,7 @@ mod tests {
             std::fs::write(
                 base.join(emerge_core::kits::KITS_FILE),
                 format!(
-                    "(version: {}, bind: [], authoring: None)",
+                    "(version: {}, bind: [], authoring: None, bash: [])",
                     emerge_core::kits::KITS_VERSION
                 ),
             )
@@ -731,6 +843,23 @@ mod tests {
             }
             std::fs::write(&path, k.to_ron().unwrap_or_else(|e| panic!("{e}")))
                 .unwrap_or_else(|e| panic!("{e}"));
+        }
+
+        /// **Declare a bash**, appended in call order — which is the order `B` walks them in.
+        /// Every namespace named must already be bound, or `Kits::validate` refuses the write here
+        /// rather than at the next scan.
+        fn bash(&self, name: &str, kits: &[&str]) {
+            let path = self.0.join(EMERGE_DIR).join(emerge_core::kits::KITS_FILE);
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{e}"));
+            let mut k = emerge_core::kits::Kits::parse(&text).unwrap_or_else(|e| panic!("{e}"));
+            k.bash.push(emerge_core::kits::Bash {
+                name: name.to_owned(),
+                kits: kits.iter().map(|s| (*s).to_owned()).collect(),
+                note: None,
+            });
+            let out = k.to_ron().unwrap_or_else(|e| panic!("{e}"));
+            emerge_core::kits::Kits::parse(&out).unwrap_or_else(|e| panic!("{e}"));
+            std::fs::write(&path, out).unwrap_or_else(|e| panic!("{e}"));
         }
 
         /// A kit directory holding `n` descriptors. `None` writes into the root kit itself.
@@ -896,11 +1025,19 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(maps, vec!["alpha", "mike", "zulu"], "maps are alphabetical");
 
-        // The property, stated as a property: scanning again returns the identical order.
+        // The property, stated as a property: scanning again returns the identical order. (The
+        // `projects` list is *not* compared — it names sibling directories, which parallel tests
+        // may create between the two scans. Order within each scan is what never moves.)
         let again = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let again_kits: Vec<&str> = again.kits.iter().map(|k| k.label.as_str()).collect();
         assert_eq!(
-            first, again,
-            "a second scan must return the identical catalog"
+            labels, again_kits,
+            "a second scan must return the identical kit order"
+        );
+        let again_maps: Vec<&str> = again.maps.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            maps, again_maps,
+            "a second scan must return the identical map order"
         );
     }
 
@@ -965,9 +1102,6 @@ mod tests {
                 placements: 0,
                 stamps: 0,
                 bounds: (12.0, 5.0, 9.0),
-                // A new map offers every kit and uses none, which is where an author starts.
-                palette: Vec::new(),
-                uses: BTreeSet::new(),
             }
         );
     }
@@ -1025,9 +1159,9 @@ mod tests {
         let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
         let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
 
-        // Layer 1 — in a field. Leaving it must not touch anything else.
-        c.section(1);
-        c.section(1);
+        // Layer 1 — in a field. Leaving it must not touch anything else. Which panel is not what
+        // this is about, so it is set rather than walked to.
+        c.focus = Focus::Settings;
         assert_eq!(c.focus, Focus::Settings);
         c.editing = true;
         c.raw.push_str("half-typed");
@@ -1086,7 +1220,8 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
         let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
-        c.section(1);
+        // **MAPS is the column to the right of KITS**, so one crossing reaches it.
+        c.cross(1);
         c.ask_delete().unwrap_or_else(|e| panic!("{e}"));
         // **The hint stands down while a question is up, for both questions.** It used to spell
         // the two answers here — and that was the whole point of this test, back when each prompt
@@ -1190,14 +1325,15 @@ mod tests {
             s.kit_info
         );
 
-        // **The map panel carries the map's properties and none of the kit's.** Which kits it
-        // offers is also a fact about the map — but it is *drawn* on the KITS column, beside the
-        // kits it is about, rather than mirrored here one panel away. See `Chooser::screen`.
+        // **The map panel carries the map's properties and none of the kit's** — the four fields
+        // the arrows edit, then the `bash` fact, which names the combination this map draws on.
         let map_left: Vec<&str> = s.settings.iter().map(|r| r.left.as_str()).collect();
-        assert_eq!(map_left, vec!["NAME", "BOUNDS", "ORIGIN", "NOTE"]);
+        assert_eq!(map_left, vec!["NAME", "BOUNDS", "ORIGIN", "NOTE", "bash"]);
+        // **And a kit row carries no tick.** What a map offers is the bash it names, declared once
+        // in `kits.ron` and shown on the row above — not a per-map list edited from the kit list.
         assert!(
-            s.kits.iter().skip(1).all(|r| r.left.starts_with('[')),
-            "and every kit row carries its state: {:?}",
+            s.kits.iter().skip(1).all(|r| !r.left.starts_with('[')),
+            "a kit row is a kit, not a checkbox: {:?}",
             s.kits
         );
         assert!(
@@ -1237,8 +1373,11 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
         let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
-        c.section(1);
-        c.section(1);
+        // **MAP INFO is the panel under the map list**, so the way in is one crossing to the right
+        // and then down off the end of the list — the arrow pointing at where it is drawn.
+        c.cross(1);
+        assert_eq!(c.focus, Focus::Maps, "one press reaches the column");
+        c.step(1);
         assert_eq!(c.focus, Focus::Settings);
 
         let s = c.screen();
@@ -1250,12 +1389,13 @@ mod tests {
             !c.on_new_row(),
             "no row here makes anything, whichever one the arrows are on"
         );
-        // **A set of properties, not a list of things.** Four of them, and no row here brings a new
-        // thing into being — which is what the two assertions above pin and this one counts.
+        // **A set of properties, not a list of things.** The four editable fields plus the `bash`
+        // fact, and no row here brings a new thing into being — which is what the two assertions
+        // above pin and this one counts.
         assert_eq!(
             s.settings.len(),
-            Field::ALL.len(),
-            "the map's four properties, and nothing that makes anything"
+            Field::ALL.len() + 1,
+            "the map's four properties and the bash it draws on, and nothing that makes anything"
         );
     }
 
@@ -1464,13 +1604,204 @@ mod tests {
             .iter()
             .find(|k| k.label == "site_v3")
             .unwrap_or_else(|| panic!("the new kit did not scan"));
-        assert_eq!(made.pieces, 0, "it starts empty");
-        assert!(catalog.maps.is_empty(), "and the project still has no maps");
         assert_eq!(
             made.flag.as_deref(),
             Some("site_v3"),
             "reachable as --kit site_v3"
         );
+    }
+
+    /// **A new project opens and bootstraps** — the plan's Phase C verification 7. The skeleton is
+    /// `assets/emerge/{kits.ron,vocab.ron}` and nothing else; the copied vocabulary is
+    /// byte-identical to the source's; a fresh scan sees zero kits and zero maps; and the first
+    /// kit made lands in the new project — which used to fail with "kits.ron does not exist" until
+    /// `bind_kit` learned to say what the directory is instead.
+    #[test]
+    fn a_new_project_opens_and_bootstraps() {
+        let root = Root::new("new-project");
+        root.kit(Some("site"), 1);
+        // A vocabulary with a comment, to pin the byte-copy.
+        let vocab = root.0.join(EMERGE_DIR).join("vocab.ron");
+        std::fs::write(
+            &vocab,
+            "(// a comment that must survive\n kind: (tokens: []), effects: (tokens: []), look: (tokens: []), surfaces: (tokens: []), )",
+        )
+        .unwrap_or_else(|e| panic!("{}: {e}", vocab.display()));
+
+        let parent = root.0.parent().unwrap_or_else(|| panic!("temp dir has a parent"));
+        // A sibling the previous run left behind — `Root::new` cleans only its own directory.
+        let _ = std::fs::remove_dir_all(parent.join("porch_kit"));
+        let dir = create_project(parent, "Porch Kit", &vocab).unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            dir.ends_with("porch_kit"),
+            "forced to snake_case: {}",
+            dir.display()
+        );
+        let emerge = dir.join(EMERGE_DIR);
+        assert!(emerge.join(emerge_core::kits::KITS_FILE).is_file(), "kits.ron");
+        assert!(emerge.join("vocab.ron").is_file(), "vocab.ron");
+        assert!(
+            std::fs::read(emerge.join("vocab.ron")).unwrap_or_else(|e| panic!("{e}"))
+                == std::fs::read(&vocab).unwrap_or_else(|e| panic!("{e}")),
+            "the copied vocabulary is byte-identical — comments included"
+        );
+        // Nothing else: no compositions.ron, no maps/, no kit.
+        assert!(!emerge.join("compositions.ron").exists());
+        assert!(!emerge.join("maps").exists());
+
+        let catalog = Catalog::scan(&dir).unwrap_or_else(|e| panic!("{e}"));
+        assert!(catalog.kits.is_empty(), "no kits yet");
+        assert!(catalog.maps.is_empty(), "no maps yet");
+        assert!(catalog.authoring.is_none(), "no authoring kit yet");
+
+        // **The first kit made is the authoring kit.** This call failed before C2 — the new
+        // project's `kits.ron` was not there to bind into, and `bind_kit` said so with a raw io
+        // error instead of an instruction.
+        let kit_dir = create_kit(&dir, "props").unwrap_or_else(|e| panic!("{e}"));
+        assert!(kit_dir.starts_with(&dir), "the kit is inside the project");
+        let catalog = Catalog::scan(&dir).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            catalog.authoring.as_deref(),
+            Some("props"),
+            "bind_kit adopts the first kit"
+        );
+    }
+
+    /// **The whole verb, from the column to the disk** — `N` on PROJECTS, a name, `Enter`.
+    ///
+    /// This is the automated half of the plan's manual Phase C smoke: the draft is a project (not a
+    /// map), the directory lands beside this one, the cursor comes back to the PROJECTS column
+    /// standing on what was just made, and **the status line carries the command that opens it**.
+    /// That last one is the assertion with a history: `keep_field` used to write
+    /// `make_it(..).err()` unconditionally, which wiped the line in the same frame it was written.
+    #[test]
+    fn making_a_project_reports_the_command_that_opens_it() {
+        let root = Root::new("project-flow");
+        root.kit(Some("site"), 1);
+        let vocab = root.0.join(EMERGE_DIR).join("vocab.ron");
+        std::fs::write(&vocab, "(// kept\n)").unwrap_or_else(|e| panic!("{e}"));
+        let parent = root
+            .0
+            .parent()
+            .unwrap_or_else(|| panic!("temp dir has a parent"))
+            .to_path_buf();
+        let _ = std::fs::remove_dir_all(parent.join("porch_flow"));
+
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
+        c.focus = Focus::Projects;
+        c.start_new();
+        assert!(
+            matches!(c.creating, Some(New::Project(_))),
+            "on the projects column, a project"
+        );
+        assert!(c.editing, "straight into the name");
+        assert!(
+            render(&c).contains("NEW PROJECT"),
+            "the settings column says which:\n{}",
+            render(&c)
+        );
+
+        c.raw = "Porch Flow".to_owned();
+        keep_field(&mut c, Field::Name);
+
+        assert!(c.creating.is_none(), "one Enter finishes it");
+        let made = parent.join("porch_flow");
+        assert!(
+            made.join(EMERGE_DIR).join(emerge_core::kits::KITS_FILE).is_file(),
+            "the project landed beside this one: {}",
+            made.display()
+        );
+        let line = c.problem.clone().unwrap_or_default();
+        assert!(
+            line.contains("`porch_flow`") && line.contains("emerge-mapper"),
+            "the status line reports the command: {line}"
+        );
+        assert!(
+            line.contains(&made.display().to_string()),
+            "and names the directory: {line}"
+        );
+        assert_eq!(c.focus, Focus::Projects, "the keyboard comes back to the list");
+        assert_eq!(
+            c.catalog
+                .projects
+                .get(c.project.wrapping_sub(1))
+                .map(|p| p.name.as_str()),
+            Some("porch_flow"),
+            "standing on what was just made: {:?}",
+            c.catalog.projects
+        );
+        // And the current project is still marked, beside it.
+        assert!(
+            c.catalog.projects.iter().any(|p| p.current),
+            "the project this screen is in stays marked: {:?}",
+            c.catalog.projects
+        );
+    }
+
+    /// **Names cannot escape the parent** — the plan's Phase C verification 8. `to_snake_case`
+    /// strips separators and dots, so every hostile name either refuses or lands strictly inside
+    /// the parent; the returned path must start with the parent either way. This pins existing
+    /// behaviour rather than adding a guard.
+    #[test]
+    fn a_project_name_cannot_escape_the_parent() {
+        let root = Root::new("escape");
+        let vocab = root.0.join(EMERGE_DIR).join("vocab.ron");
+        std::fs::write(&vocab, "()").unwrap_or_else(|e| panic!("{e}"));
+        let parent = root.0.parent().unwrap_or_else(|| panic!("temp dir has a parent"));
+
+        for hostile in ["../evil", "foo/bar", "..", "a/../../b"] {
+            match create_project(parent, hostile, &vocab) {
+                Err(e) => assert!(
+                    e.contains("leaves nothing usable") || e.contains("already exists"),
+                    "{hostile:?}: refused with a reason: {e}"
+                ),
+                Ok(dir) => {
+                    assert!(
+                        dir.starts_with(parent),
+                        "{hostile:?} landed outside the parent: {}",
+                        dir.display()
+                    );
+                    assert!(
+                        !dir.to_string_lossy().contains(".."),
+                        "{hostile:?} escaped: {}",
+                        dir.display()
+                    );
+                }
+            }
+        }
+    }
+
+    /// **`set_authoring` re-points `kits.ron`'s `authoring`, and refuses a name that is not bound.**
+    ///
+
+    /// **`set_authoring` re-points `kits.ron`'s `authoring`, and refuses a name that is not bound.**
+    ///
+    /// The refusal names the bound kits, because "not bound" without a list is a search. The
+    /// round-trip is through `Catalog::scan`, which is what the screen reads — so the row an author
+    /// sees is the file an author wrote.
+    #[test]
+    fn authoring_round_trips_and_refuses_unbound_names() {
+        let root = Root::new("authoring");
+        root.kit(Some("a"), 1);
+        root.kit(Some("b"), 1);
+
+        set_authoring(&root.0, "b").unwrap_or_else(|e| panic!("{e}"));
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            catalog.authoring.as_deref(),
+            Some("b"),
+            "the scan reads what the write wrote"
+        );
+
+        let err = set_authoring(&root.0, "nope")
+            .err()
+            .unwrap_or_else(|| panic!("an unbound name must be refused"));
+        assert!(err.contains("`nope`"), "names the offender: {err}");
+        assert!(err.contains("`a`") && err.contains("`b`"), "and the bound kits: {err}");
+        // The refusal wrote nothing.
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(catalog.authoring.as_deref(), Some("b"));
     }
 
     /// An unusable name is refused by name, and a taken one is refused rather than merged into
@@ -1514,7 +1845,8 @@ mod tests {
 
         let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
         let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
-        c.section(1); // into the map panel
+        // **MAPS is the column to the right of KITS**, so one crossing reaches it.
+        c.cross(1);
         c.ask_delete().unwrap_or_else(|e| panic!("{e}"));
 
         assert!(matches!(c.ask, Some(Ask::Delete(_))), "the question is up");
@@ -1542,7 +1874,8 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
         let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
-        c.section(1);
+        // **MAPS is the column to the right of KITS.**
+        c.cross(1);
         c.ask_delete().unwrap_or_else(|e| panic!("{e}"));
 
         c.ask = None; // what Esc does
@@ -1567,7 +1900,8 @@ mod tests {
         }
         let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
         let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
-        c.section(1);
+        // **MAPS is the column to the right of KITS.**
+        c.cross(1);
         c.ask_delete().unwrap_or_else(|e| panic!("{e}")); // asks about `alpha`
 
         c.map = 1; // the selection moves to `beta`
@@ -1627,6 +1961,109 @@ mod tests {
             .unwrap_or_else(|| panic!("must refuse from the settings"));
         assert!(e.contains("Tab to one of those lists"), "{e}");
         assert!(c.ask.is_none());
+    }
+    /// **The POLICY panel lists the kit's entries and removes one through the question.**
+    ///
+    /// `POLICY` is drawn under the kit list, so `down` off the end of that list is the way in, and
+    /// it draws the selected kit's exclusions and patches read from `project.ron`. `Delete` on a
+    /// row asks (nothing goes yet); agreeing splices the line out and leaves the file's comments
+    /// intact.
+    #[test]
+    fn the_policy_panel_lists_and_removes_an_entry() {
+        let root = Root::new("policy-panel");
+        root.kit(Some("site"), 1);
+        // A policy with one exclusion, one patch, and a comment that must survive.
+        let path = root.0.join(EMERGE_DIR).join("site").join(emerge_core::policy::POLICY_FILE);
+        std::fs::write(
+            &path,
+            r#"(
+    version: 2,
+    // A comment that must survive.
+    note: Some("a kit with policy"),
+    exclude: ["characters"],
+    patches: [
+        ( match: Id("wall"), because: "this game's walls are 2.4 m", patch: ( align: ( stretch_y: Some(1.2) ) ) ),
+    ],
+)
+"#,
+        )
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
+
+        // **POLICY is drawn under the kit list**, so `down` off the end of the list is the way in.
+        c.step(1);
+        assert_eq!(c.focus, Focus::Policy, "the panel below the kit list");
+        let s = c.screen();
+        assert!(
+            s.policy.iter().any(|r| r.left == "exclude" && r.right == "characters"),
+            "the exclusion is listed: {:?}",
+            s.policy
+        );
+        assert!(
+            s.policy
+                .iter()
+                .any(|r| r.left == "patch" && r.right.contains("2.4 m")),
+            "the patch is listed with its reason: {:?}",
+            s.policy
+        );
+
+        // Delete on the exclusion row asks, and agreeing removes only that line.
+        c.policy = 0;
+        c.ask_delete().unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            matches!(c.ask, Some(Ask::RemovePolicy { .. })),
+            "the question names a policy removal: {:?}",
+            c.ask
+        );
+        let shown = match &c.ask {
+            Some(Ask::RemovePolicy { shown, .. }) => shown.clone(),
+            _ => String::new(),
+        };
+        assert!(shown.contains("characters"), "the row names the entry: {shown}");
+        c.confirm_delete().unwrap_or_else(|e| panic!("{e}"));
+
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{e}"));
+        assert!(text.contains("// A comment that must survive"), "the comment stands:\n{text}");
+        let policy = emerge_core::policy::Policy::parse(&text).unwrap_or_else(|e| panic!("{e}"));
+        assert!(policy.exclude.is_empty(), "the exclusion is gone");
+        assert_eq!(policy.patches.len(), 1, "the patch is untouched");
+    }
+
+    /// **A kit that excludes nothing and patches nothing has no POLICY panel to stand in**, so the
+    /// walk down the kit column stops at the bottom of the list.
+    ///
+    /// `panel_has_rows` used to answer `current_kit().is_some()` — "could this panel exist" rather
+    /// than "is there anything to stand on". That gap was survivable while the crossing key walked
+    /// *past* an empty panel; `down` walks *into* one, so it would have parked the cursor on a
+    /// blank panel with nothing to press and no hint that would tell the truth.
+    #[test]
+    fn a_kit_with_nothing_in_its_policy_has_no_panel_to_walk_into() {
+        let root = Root::new("policy-empty");
+        root.kit(Some("site"), 2);
+        // *"A project states its policy, even when its policy is nothing"* — the file is here and
+        // it says nothing, which is a different state from the file being missing (that draws an
+        // `unreadable` row, and standing on it is right because it is a problem to read).
+        let path = root.0.join(EMERGE_DIR).join("site").join(emerge_core::policy::POLICY_FILE);
+        std::fs::write(&path, "(\n    version: 2,\n    note: None,\n    patches: [],\n)")
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+
+        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
+        let mut c = Chooser::new(root.0.clone(), catalog, Some("site"));
+        assert!(c.screen().policy.is_empty(), "nothing declared, nothing drawn");
+
+        for _ in 0..6 {
+            c.step(1);
+        }
+        assert_eq!(
+            c.focus,
+            Focus::Kits,
+            "the walk stops at the bottom of the list rather than parking on a blank panel"
+        );
+        // And the column beside it is still one press away.
+        c.cross(1);
+        assert_eq!(c.focus, Focus::Maps);
     }
 
     /// **The question counts in English.** `1 maps` reads as generated rather than written, in the
@@ -1787,218 +2224,103 @@ mod tests {
         );
     }
 
-    /// **A map offers every kit until one is turned off**, and turning one off writes the rest.
+    /// **`B` walks the map through the project's bashes and rounds back to every kit**, writing the
+    /// file each time.
     ///
-    /// Empty means *all*, which is the state a new map starts in — Liapis' *user fatigue* is a named
-    /// failure of tools that need a specific input before they do anything, and ticking four boxes
-    /// to get a palette would be exactly that. So the first untick has to write the full list minus
-    /// one: writing an empty list would mean the opposite of what was asked for.
+    /// Written immediately rather than on some later save, because this panel has no save. The
+    /// assertion re-parses the file rather than reading the summary back: the row is what an author
+    /// sees, and the file is what the editor and the game will open.
     #[test]
-    fn a_map_offers_every_kit_until_one_is_turned_off() {
-        let root = Root::new("kits-toggle");
+    fn cycling_a_bash_writes_the_file_and_rounds_to_every_kit() {
+        let root = Root::new("bash-cycle");
         root.skin("furniture", "furniture", &["bench"]);
-        root.skin("lab", "lab", &["bench"]);
+        root.skin("lab", "lab", &["desk"]);
+        root.bash("hub", &["furniture", "lab"]);
+        root.bash("props", &["furniture"]);
         root.map(&root.0, "hall", &[]);
 
         let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
         let mut c = Chooser::new(root.0.clone(), catalog, None);
         c.focus = Focus::Maps;
         c.map = 1;
-        assert!(
-            matches!(&c.current_map().map(|m| &m.summary), Some(MapSummary::Read { palette, .. }) if palette.is_empty()),
-            "a new map has chosen nothing, which means everything"
-        );
-
-        let lab = c
-            .catalog
-            .kits
-            .iter()
-            .position(|k| k.label == "lab")
-            .unwrap_or_else(|| panic!("lab is listed"));
-        c.toggle_kit(lab).unwrap_or_else(|e| panic!("{e}"));
-
-        let Some(MapSummary::Read { palette, .. }) = c.current_map().map(|m| &m.summary) else {
-            panic!("the map still reads");
+        let path = c
+            .current_map()
+            .map(|m| m.path.clone())
+            .unwrap_or_else(|| panic!("the map row is selected"));
+        let on_disk = |path: &Path| {
+            Map::parse(&std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{e}")))
+                .unwrap_or_else(|e| panic!("{e}"))
+                .bash
         };
-        assert!(
-            !palette.contains(&"lab".to_owned()) && palette.contains(&"furniture".to_owned()),
-            "turning one off names the rest rather than emptying the list: {palette:?}"
-        );
-
-        // **And back on returns to the un-fatiguing default**, so a kit added later is offered
-        // rather than silently absent from a list that happened to name every kit at the time.
-        c.toggle_kit(lab).unwrap_or_else(|e| panic!("{e}"));
-        let Some(MapSummary::Read { palette, .. }) = c.current_map().map(|m| &m.summary) else {
-            panic!("the map still reads");
-        };
-        assert!(
-            palette.is_empty(),
-            "everything on is the same state as nothing chosen: {palette:?}"
-        );
-    }
-
-    /// **Turning off the second-to-last kit does not turn the others back on.**
-    ///
-    /// Walked exactly as it was reported: *"when I turn the test kit off, and then I tried to turn
-    /// the furniture kit off, the test kit comes back on while the furniture kit stays on."*
-    ///
-    /// The cause was a sentinel collision. `[]` is what a map that has never been touched carries
-    /// and `Map::palette` defines it as **every** kit, so removing the last entry wrote the value
-    /// meaning the opposite of the act. **A written palette always names at least one kit** is the
-    /// invariant that closes it, and this is the only place that could break it.
-    #[test]
-    fn turning_off_the_last_kit_is_refused_rather_than_meaning_all_of_them() {
-        let root = Root::new("kits-last");
-        root.skin("furniture", "furniture", &["bench"]);
-        root.skin("test", "test", &["thing"]);
-        root.map(&root.0, "hall", &[]);
-
-        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
-        let mut c = Chooser::new(root.0.clone(), catalog, None);
-        c.focus = Focus::Maps;
-        c.map = 1;
-        let at = |c: &Chooser, label: &str| {
-            c.catalog
-                .kits
+        let shown = |c: &Chooser| {
+            c.screen()
+                .settings
                 .iter()
-                .position(|k| k.label == label)
-                .unwrap_or_else(|| panic!("`{label}` is listed"))
+                .find(|r| r.left == "bash")
+                .map(|r| r.right.clone())
+                .unwrap_or_else(|| panic!("MAP INFO carries a bash row"))
         };
 
-        // First one off: the other is named, so the file says what is on rather than what is not.
-        let t = at(&c, "test");
-        c.toggle_kit(t).unwrap_or_else(|e| panic!("{e}"));
-        let Some(MapSummary::Read { palette, .. }) = c.current_map().map(|m| &m.summary) else {
-            panic!("the map still reads");
-        };
-        assert_eq!(palette, &vec!["furniture".to_owned()]);
+        // A map starts offering every kit, and the row says so in words rather than by being blank.
+        assert_eq!(on_disk(&path), None);
+        assert_eq!(shown(&c), "every kit");
 
-        // Second one off: refused, and nothing on disk moves.
-        let f = at(&c, "furniture");
-        let e = c
-            .toggle_kit(f)
-            .err()
-            .unwrap_or_else(|| panic!("the last kit on must not go"));
-        assert!(e.contains("only kit left on"), "{e}");
-        let Some(MapSummary::Read { palette, .. }) = c.current_map().map(|m| &m.summary) else {
-            panic!("the map still reads");
-        };
-        assert_eq!(
-            palette,
-            &vec!["furniture".to_owned()],
-            "a refused toggle writes nothing — and above all does not write `[]`, which would read \
-             back as every kit and turn the other one on again"
-        );
+        // **File order, not alphabetical** — `hub` is declared first, so it is what the first press
+        // names.
+        for (want, label) in [(Some("hub"), "hub"), (Some("props"), "props"), (None, "every kit")] {
+            c.cycle_bash().unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(on_disk(&path).as_deref(), want, "the file carries it");
+            assert_eq!(shown(&c), label, "and MAP INFO says the same thing");
+        }
 
-        // And the row said so before it was pressed — on the KITS column, which is where the tick
-        // lives now (`Space` flips it there).
-        let rows = c.screen().kits;
+        // **And the screen names the key that does it**, standing where it works. `docs/ui.md`
+        // §4.2 — a verb reachable by keyboard states its key.
+        assert!(c.hint().contains("B bash"), "the hint has to name the verb: {}", c.hint());
+        c.map = 0;
         assert!(
-            rows.iter()
-                .any(|r| r.left.contains("[=] furniture") && r.right.contains("only one on")),
-            "the constraint is drawn, not discovered by pressing: {rows:?}"
-        );
-    }
-
-    /// **The tick lives on the kit row, and `Space` is what the screen says flips it.**
-    ///
-    /// Asked for at the keyboard, 2026-08-16: *"it would feel better if the space bar toggled kits
-    /// on in the kit area."* Before that the state was a mirrored list of the same kits inside MAP
-    /// INFO — visible, which was the point of putting it there, but one panel away from the list it
-    /// described, so an author had two places showing one fact.
-    ///
-    /// Both halves are pinned here because they are the same promise: the row draws its state, and
-    /// the hint names the key that changes it. `docs/ui.md` §4.2 — a verb reachable by mouse is
-    /// reachable by keyboard, and each chip states its key.
-    #[test]
-    fn the_kit_rows_carry_their_own_tick_and_the_hint_names_the_key() {
-        let root = Root::new("kits-ticked");
-        root.skin("furniture", "furniture", &["bench"]);
-        root.skin("site", "site", &["wall"]);
-        root.map(&root.0, "hall", &[]);
-
-        let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
-        let mut c = Chooser::new(root.0.clone(), catalog, None);
-        c.focus = Focus::Maps;
-        c.map = 1;
-
-        // Nothing chosen yet, so every kit is offered — and every row says so rather than reading
-        // blank, which is the state `[ ]` and `[x]` exist to tell apart.
-        let rows = c.screen().kits;
-        assert!(
-            rows.iter().skip(1).all(|r| r.left.starts_with("[x] ")),
-            "an untouched map offers every kit, and each row draws it: {rows:?}"
-        );
-        // The piece count is still there — the fact this screen was built to carry.
-        assert!(
-            rows.iter().skip(1).all(|r| r.right.contains("pieces")),
-            "the tick is added beside the count, not in place of it: {rows:?}"
-        );
-
-        // Turn one off through the same call `Space` makes, and the row follows.
-        let site = c
-            .catalog
-            .kits
-            .iter()
-            .position(|k| k.label == "site")
-            .unwrap_or_else(|| panic!("site is listed"));
-        c.toggle_kit(site).unwrap_or_else(|e| panic!("{e}"));
-        let rows = c.screen().kits;
-        assert!(
-            rows.iter().any(|r| r.left.starts_with("[ ] site")),
-            "the kit turned off draws unticked: {rows:?}"
-        );
-
-        // And the screen says which key does it, standing in the kits column.
-        c.focus = Focus::Kits;
-        c.kit = 1;
-        assert!(
-            c.hint().contains("Space on/off"),
-            "the hint has to name the key that flips the row: {}",
+            !c.hint().contains("B bash"),
+            "and not on the row that makes a map, where there is no file to set: {}",
             c.hint()
         );
     }
 
-    /// **A kit the map is standing on cannot be turned off, and the row says so before it is tried.**
+    /// **A project with no bashes has nothing to cycle, and the refusal says where one is made.**
     ///
-    /// Vicente & Rasmussen's ecological interface design asks that the perceptual cues *"directly
-    /// specify process constraints"* — so `[=] in use` is on screen, and the refusal below is the
-    /// backstop rather than the teaching. Turning it off would hide the palette rows that describe
-    /// pieces already placed: the map would still load and still draw, and the author could not find
-    /// or match what is in front of them.
+    /// A bash is authored by hand in `kits.ron`, the same way that file's `lattice` is — so the
+    /// unmet condition is an instruction (`docs/ui.md` §1.4) rather than a dead key.
     #[test]
-    fn a_kit_the_map_stands_on_cannot_be_turned_off() {
-        let root = Root::new("kits-locked");
+    fn cycling_with_no_bashes_declared_says_where_to_declare_one() {
+        let root = Root::new("bash-none");
         root.skin("furniture", "furniture", &["bench"]);
-        root.skin("site", "site", &["wall"]);
-        root.map(&root.0, "hall", &["site/wall"]);
+        root.map(&root.0, "hall", &[]);
 
         let catalog = Catalog::scan(&root.0).unwrap_or_else(|e| panic!("{e}"));
         let mut c = Chooser::new(root.0.clone(), catalog, None);
         c.focus = Focus::Maps;
-        c.map = 1;
 
-        let site = c
-            .catalog
-            .kits
-            .iter()
-            .position(|k| k.label == "site")
-            .unwrap_or_else(|| panic!("site is listed"));
-
-        // The screen says it first, on the KITS column.
-        let rows = c.screen().kits;
-        assert!(
-            rows.iter()
-                .any(|r| r.left.contains("[=] site") && r.right.contains("in use")),
-            "the constraint is drawn, not discovered by pressing: {rows:?}"
-        );
-
-        // And the press is refused, naming it.
+        // Row 0 makes a map, so there is nothing there to give a bash to.
+        c.map = 0;
         let e = c
-            .toggle_kit(site)
+            .cycle_bash()
             .err()
-            .unwrap_or_else(|| panic!("a kit the map stands on must not go"));
-        assert!(e.contains("site") && e.contains("already on this map"), "{e}");
+            .unwrap_or_else(|| panic!("the `+ new map` row has no map"));
+        assert!(e.contains("no map here"), "{e}");
+
+        c.map = 1;
+        let e = c
+            .cycle_bash()
+            .err()
+            .unwrap_or_else(|| panic!("a project declaring none must refuse"));
+        assert!(e.contains("declares no bashes") && e.contains("kits.ron"), "{e}");
+
+        // And nothing was written: the map still offers every kit.
+        let path = c
+            .current_map()
+            .map(|m| m.path.clone())
+            .unwrap_or_else(|| panic!("the map row is selected"));
+        let map = Map::parse(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{e}")))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(map.bash, None);
     }
 
     /// **A kit something else still names is refused, and the refusal says what.**    /// **A kit something else still names is refused, and the refusal says what.**
@@ -2205,29 +2527,72 @@ use bevy::prelude::*;
 /// the bottom section, but then when I get there, I need to use the arrow keys to move around, not
 /// tab. Tab should move around the different sections."*
 ///
-/// The first version made `Focus::Field(Field)` a variant, so `Tab` meant "next field" in the
+/// The first version made `Focus::Field(Field)` a variant, so one key meant "next field" in the
 /// settings and "go to the settings" everywhere else — one key with two jobs, decided by where you
-/// already were. Now there is one rule with no exceptions: **`Tab` crosses panels, arrows move
-/// inside one.** Typing is a separate flag rather than a fourth variant, because it is a phase this
-/// screen passes through and not a place the arrows can be — the distinction `keys::Stance` exists
-/// to make in the editor.
+/// already were. Typing is a separate flag rather than a variant, because it is a phase this screen
+/// passes through and not a place the arrows can be — the distinction `keys::Stance` makes in the
+/// editor.
+///
+/// # Arrows, and nothing else — the rule the rest of the editor already follows
+///
+/// `Tab` used to cross panels here, and it was the only `KeyCode::Tab` in the crate. Everywhere
+/// else this application navigates with arrows and states the pair outright: the Meshes tab binds
+/// `left`/`right` to [`crate::keys::Action::FocusCandidates`] / `FocusLibrary` to move between its
+/// two side-by-side lists while `up`/`down` walk the one you are in, and Compose says the same
+/// thing in its own words — *"up/down walk the groups, left/right walk the members of the one you
+/// are on"*. A second crossing key on one screen out of six is a dialect.
+///
+/// So: **`left`/`right` cross columns, `up`/`down` walk down the column you are in** — through its
+/// list and on into the panels stacked under it. Both keys mean what their arrow points at, which
+/// is the property the old binding lost: `Policy` is drawn *below* the kit list, and reaching it by
+/// pressing `right` was a horizontal key answering a vertical arrangement. That also cost the two
+/// presses it took to get from KITS to MAPS, because the walk had to pass through it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Focus {
     #[default]
     Kits,
+    /// The selected kit's policy — its exclusions and its patches, read from `project.ron`.
+    ///
+    /// The panel's content depends on the KITS cursor, so with the cursor on `+ new kit` — or in a
+    /// project with no kits at all — it draws no rows and `down` off the end of the kit list has
+    /// nowhere to go, the same rule that already empties KIT INFO on the `+ new kit` row.
+    Policy,
     Maps,
     Settings,
+    /// **Every project beside this one** — the siblings of the current root holding
+    /// `assets/emerge`, plus the current root itself. Row 0 makes a new one; a real row reports
+    /// the command that opens it, because nothing opens in this process.
+    Projects,
 }
 
 impl Focus {
-    /// The panels in the order they are drawn, which is the order `Tab` walks them.
+    /// **The screen, as the one table both arrows read**: three columns left to right, each listing
+    /// its focusable panels top to bottom — exactly what [`spawn_screen`] draws.
     ///
-    /// **Maps, its settings, then kits** — reading order of the columns as they now sit: the maps
-    /// list top-left, the map's own settings under it, the kits list to their right. It was
-    /// kits-first while a map lived inside a kit; the columns swapped on 2026-08-16 and this
-    /// followed them, because the promise in the line above is the whole reason this constant
-    /// exists rather than each caller having its own idea of "next".
-    const ALL: [Focus; 3] = [Focus::Maps, Focus::Settings, Focus::Kits];
+    /// `KIT INFO` is absent because it is inert: facts about the selected kit, with no verb and no
+    /// cursor, so the arrows must not be able to stand in it. `POLICY` is present because `Delete`
+    /// acts on the row the cursor is on, and `MAP INFO` because `Enter` opens a field for typing.
+    ///
+    /// One table rather than a horizontal list and a vertical one: a screen described twice is a
+    /// screen that can disagree with itself, which is how `left` came to reach something drawn
+    /// underneath.
+    const COLUMNS: [&'static [Focus]; 3] = [
+        &[Focus::Projects],
+        &[Focus::Kits, Focus::Policy],
+        &[Focus::Maps, Focus::Settings],
+    ];
+
+    /// Where this panel sits: which column, and how far down it.
+    fn at(self) -> (usize, usize) {
+        for (c, panels) in Focus::COLUMNS.iter().enumerate() {
+            if let Some(r) = panels.iter().position(|p| *p == self) {
+                return (c, r);
+            }
+        }
+        // Unreachable by construction — every variant is in the table above, and
+        // `every_focus_is_somewhere_on_the_screen` is what keeps that true as variants are added.
+        (0, 0)
+    }
 }
 
 /// The four settings the chooser exposes, in the order they are shown and the arrows walk them.
@@ -2267,6 +2632,14 @@ pub struct Chooser {
     pub root: PathBuf,
     pub catalog: Catalog,
     pub kit: usize,
+    /// **The row the arrows are on in the POLICY panel.** Row 0 is the first entry; there is no
+    /// `+ new` row here, because adding a patch is not in this panel's scope — a patch's payload
+    /// is a whole partial `Descriptor`, and the one place descriptor fields are authored is the
+    /// detail pane.
+    pub policy: usize,
+    /// **The row the arrows are on in the PROJECTS panel.** Row 0 is `+ new project`; a real
+    /// project `i` is `i + 1`, the indexing rule every other column uses.
+    pub project: usize,
     pub map: usize,
     pub focus: Focus,
     /// Which settings row the arrows are on, while [`Focus::Settings`] has them.
@@ -2305,8 +2678,29 @@ pub struct Chooser {
 pub enum Ask {
     /// Delete a map. Holds the path it named — see [`Pending`].
     Delete(Pending),
+    /// **Remove one entry from a kit's policy.** Nothing is deleted from the file system — a line
+    /// is spliced out of the kit's `project.ron` — so this carries the row rather than a `Pending`
+    /// path. `shown` is the row's rendered text, so the prompt names the exact entry:
+    /// `docs/ui.md` §1.4's rule that "are you sure?" is not information.
+    RemovePolicy {
+        file: PathBuf,
+        shown: String,
+        row: PolicyRow,
+    },
     /// Leave the chooser.
     Quit,
+}
+
+/// **One entry in a kit's policy, keyed for removal.**
+///
+/// Keyed on the row's ordinal, not on its content: nothing forbids two patches sharing a
+/// `matches` key, so a removal keyed on `matches` is ambiguous by construction.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PolicyRow {
+    /// An exclusion — a mesh path prefix.
+    Exclude(String),
+    /// A patch, by its position within `patches`.
+    Patch(usize),
 }
 
 /// **A destructive act that has been asked for and not yet agreed to.**
@@ -2338,6 +2732,9 @@ pub enum New {
     Kit(String),
     /// A map, with the four settings.
     Map(Draft),
+    /// **A project beside this one.** Only a name is asked for; the skeleton is
+    /// [`create_project`]'s, and it copies this project's vocabulary.
+    Project(String),
 }
 
 impl New {
@@ -2346,6 +2743,7 @@ impl New {
         match self {
             New::Kit(name) => name,
             New::Map(d) => &d.name,
+            New::Project(name) => name,
         }
     }
 }
@@ -2393,6 +2791,8 @@ impl Chooser {
             root,
             catalog,
             kit,
+            policy: 0,
+            project: 0,
             map,
             focus: Focus::Kits,
             field: Field::Name,
@@ -2450,108 +2850,69 @@ impl Chooser {
     }
 
     /// **Every settings row the arrows can reach**, in the order they are drawn — which is
-    /// [`Field::ALL`], and nothing else.
-    ///
-    /// It used to append one row per bound kit, and the leftover of that was an `if` whose body was
-    /// a comment: a branch that still called `current_map()` on every arrow press to enter a block
-    /// that did nothing, under a doc comment promising rows the body no longer produced. **The kit
-    /// ticks live on the KITS column**, where `Space` flips the row that names the kit — one place
-    /// showing one fact, rather than a mirror one panel away from the list it described.
+    /// [`Field::ALL`], and nothing else. MAP INFO's `bash` row is a fact, not a field: the arrows
+    /// walk this list and `B` is what changes the bash.
     pub fn fields(&self) -> Vec<Field> {
         Field::ALL.to_vec()
     }
 
-    /// **Turn one kit's pieces on or off for the selected map**, and write it.
+    /// **Cycle the selected map through the project's bashes**, and round to every-kit.
     ///
-    /// Written immediately rather than on some later save, because this panel has no save: every
-    /// other setting here commits on `Enter` too. Compton's *grokloop* — the shorter the
-    /// try/see/change loop, the faster the learning (Lai et al., `10.1145/3402942.3402946`) — and a
-    /// checkbox whose effect appears two screens later is not a loop at all.
+    /// The order is `None → bashes[0] → … → bashes[n-1] → None`, read from the map file's current
+    /// `bash` so the cycle follows disk rather than a cached position. Written immediately rather
+    /// than on some later save, because this panel has no save: every other setting here commits on
+    /// `Enter` too. Compton's *grokloop* — the shorter the try/see/change loop, the faster the
+    /// learning (Lai et al., `10.1145/3402942.3402946`).
     ///
-    /// **A kit the map already uses is refused, and the row already said so.** The refusal is the
-    /// backstop, not the teaching: `settings_rows` draws it `[=] in use` precisely so nobody has to
-    /// press it to find out.
-    pub fn toggle_kit(&mut self, i: usize) -> Result<(), String> {
-        let Some(kit) = self.catalog.kits.get(i) else {
-            return Err("no such kit".to_owned());
-        };
-        let ns = kit
-            .namespace
-            .clone()
-            .unwrap_or_else(|| kit.label.clone());
+    /// **Selecting is the only bash verb here.** A bash is authored by hand in `kits.ron`, the same
+    /// way its `lattice` is; ticking kits per map would mean editing a shared combination from a map
+    /// row, which silently changes every other map naming it.
+    pub fn cycle_bash(&mut self) -> Result<(), String> {
         let Some(entry) = self.current_map() else {
-            return Err("select a map first — a kit is offered to one map at a time".to_owned());
+            return Err("there is no map here to give a bash to".to_owned());
         };
         let path = entry.path.clone();
-        let MapSummary::Read { palette, uses, .. } = &entry.summary else {
-            return Err("this map will not open, so its kits cannot be set".to_owned());
+        if matches!(entry.summary, MapSummary::Unreadable(_)) {
+            return Err("this map will not open, so its bash cannot be set".to_owned());
+        }
+        if self.catalog.bashes.is_empty() {
+            return Err(
+                "this project declares no bashes — add one to `kits.ron` under `bash`".to_owned(),
+            );
+        }
+        // **Read from the file, not from a summary.** The summary carries what a row shows, and
+        // this verb's whole job is to move a field the row does not carry.
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let map = Map::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let next: Option<&str> = match map.bash.as_deref() {
+            // Every kit is where the cycle starts, so the first press names the first bash.
+            None => self.catalog.bashes.first().map(String::as_str),
+            // A name the project no longer declares lands back at every kit, which is the one
+            // state that is always true — and `OpenMap::open` would refuse the map until it does.
+            Some(current) => match self.catalog.bashes.iter().position(|b| b == current) {
+                Some(i) => self.catalog.bashes.get(i + 1).map(String::as_str),
+                None => None,
+            },
         };
-        if uses.contains(&ns) {
-            return Err(format!(
-                "`{}` is already on this map — turning it off would hide the rows that describe \
-                 pieces already placed.",
-                kit.label
-            ));
-        }
-        // **Empty means all**, so the first untick has to write out the full list minus one rather
-        // than an empty one — which would mean the opposite of what was asked for.
-        let all: Vec<String> = self
-            .catalog
-            .kits
-            .iter()
-            .map(|k| k.namespace.clone().unwrap_or_else(|| k.label.clone()))
-            .collect();
-        let mut next: Vec<String> = if palette.is_empty() {
-            all.clone()
-        } else {
-            palette.clone()
-        };
-        if let Some(at) = next.iter().position(|p| *p == ns) {
-            next.remove(at);
-            // **The last one on cannot be turned off, because empty means ALL.**
-            //
-            // Reported at the keyboard: *"when I turn the test kit off, and then I tried to turn the
-            // furniture kit off, the test kit comes back on."* Exactly so — removing the last entry
-            // wrote `[]`, and `[]` is the value a map that has never been touched carries, which
-            // `Map::palette` defines as every kit. The sentinel for *no choice made* and the state
-            // *nothing chosen* were the same value, so the second untick meant the opposite of
-            // itself.
-            //
-            // Refused rather than re-encoded, because the field's own doc already settled what the
-            // empty palette means: *"Not 'none' — a map offering nothing is a map nobody can
-            // build."* So the invariant is that **a written palette always names at least one kit**,
-            // and this is the one place that could break it.
-            if next.is_empty() {
-                return Err(format!(
-                    "`{}` is the only kit left on — a map that offers nothing cannot be built. \
-                     Turn another on first.",
-                    kit.label
-                ));
-            }
-        } else {
-            next.push(ns.clone());
-        }
-        // Back to the un-fatiguing default when everything is on again: a list naming every kit and
-        // an empty list mean the same thing, and the empty one keeps meaning it when a kit is added.
-        next.sort();
-        let mut sorted_all = all;
-        sorted_all.sort();
-        if next == sorted_all {
-            next.clear();
-        }
-        write_palette(&path, &next)?;
+        write_bash(&path, next)?;
         rescan_keeping_place(self, None);
         Ok(())
     }
 
+    /// **Clamped, like every other panel's cursor.**
+    ///
+    /// It wrapped, on the argument that neither end should be a dead stop. Neither end *is* one any
+    /// more, and for a better reason: MAP INFO is drawn under the map list, so `up` off its first
+    /// field carries on up into the list — [`Self::step`] takes over where this stops. Wrapping
+    /// would swallow that move and trap the cursor in the panel.
     fn step_field(&mut self, delta: i32) {
         let fields = self.fields();
         let i = fields.iter().position(|f| *f == self.field).unwrap_or(0);
-        let n = fields.len();
         let next = if delta < 0 {
-            (i + n - 1) % n
+            i.saturating_sub(1)
         } else {
-            (i + 1) % n
+            (i + 1).min(fields.len().saturating_sub(1))
         };
         self.field = fields.get(next).copied().unwrap_or(Field::Name);
     }
@@ -2577,12 +2938,17 @@ impl Chooser {
         if let Some(New::Kit(name)) = &self.creating {
             return name.clone();
         }
+        if let Some(New::Project(name)) = &self.creating {
+            return name.clone();
+        }
         let (name, bounds, origin, note) = match (&self.creating, self.current_map()) {
             (Some(New::Map(d)), _) => (d.name.clone(), d.bounds, d.origin, d.note.clone()),
             (Some(New::Kit(_)), _) => return String::new(),
+            (Some(New::Project(_)), _) => return String::new(),
             (None, Some(m)) => match &m.summary {
                 MapSummary::Read { bounds, .. } => {
-                    let (origin, note) = read_origin_and_note(&m.path);
+                    // The bash is not a field the arrows edit, so it is dropped here.
+                    let (origin, note, _) = read_map_details(&m.path);
                     (m.name.clone(), *bounds, origin, note)
                 }
                 MapSummary::Unreadable(_) => return String::new(),
@@ -2602,7 +2968,10 @@ impl Chooser {
         match self.focus {
             Focus::Kits => self.kit == 0,
             Focus::Maps => self.map == 0,
-            Focus::Settings => false,
+            // The policy panel has no `+ new` row — adding a patch is not in its scope — and the
+            // settings are properties, not a list of things.
+            Focus::Settings | Focus::Policy => false,
+            Focus::Projects => self.project == 0,
         }
     }
 
@@ -2627,56 +2996,136 @@ impl Chooser {
         was.saturating_sub(1).clamp(Chooser::first_real(n), n)
     }
 
-    /// Move within whichever column has the arrows. Clamped, not wrapped: a list that wraps makes
-    /// "am I at the end" unanswerable without counting.
+    /// **Walk down the column** — `up`/`down`.
+    ///
+    /// Inside a panel the cursor is **clamped, not wrapped**: a list that wraps makes "am I at the
+    /// end" unanswerable without counting. At the edge the walk *continues* into the panel stacked
+    /// next to it in the same column — down from the kit list into POLICY, up from MAP INFO back
+    /// into the map list — which is not the thing clamping guards against. Wrapping loses your
+    /// place; carrying on downward is monotonic, and it is what the eye does with a column.
+    ///
+    /// It never leaves the column. `left`/`right` are what cross, and one key doing both is how
+    /// `right` came to reach POLICY, which is drawn underneath.
     pub fn step(&mut self, delta: i32) {
         self.problem = None;
+        if self.step_within(delta) {
+            return;
+        }
+        // Already at the edge of this panel, so the walk carries on to the next one down (or up)
+        // in this column, skipping any with nothing in it.
+        let (col, row) = self.focus.at();
+        let panels = Focus::COLUMNS[col];
+        let mut i = row;
+        loop {
+            i = match if delta < 0 { i.checked_sub(1) } else { i.checked_add(1) } {
+                Some(next) if next < panels.len() => next,
+                // The top of the first panel or the bottom of the last: there is nowhere further
+                // down this column, and the cursor stays where it is.
+                _ => return,
+            };
+            if self.panel_has_rows(panels[i]) {
+                self.focus = panels[i];
+                // **Enter at the near edge.** Arriving from above lands on the first row, from
+                // below on the last — so the highlight appears where the key was pointing rather
+                // than wherever the panel was left last time.
+                self.enter_panel(delta);
+                return;
+            }
+        }
+    }
+
+    /// Move the cursor inside the focused panel. `true` when it actually moved — `false` means the
+    /// cursor was already at that edge, which is what sends [`Self::step`] on to the next panel.
+    fn step_within(&mut self, delta: i32) -> bool {
         match self.focus {
             Focus::Kits => {
                 // `+ 1` for the `+ new kit` row, which is always there — even in a project whose
                 // every kit was deleted, where it is the only thing left to press.
-                self.kit = clamp_step(self.kit, delta, self.catalog.kits.len() + 1);
+                let was = self.kit;
+                self.kit = clamp_step(was, delta, self.catalog.kits.len() + 1);
                 // **The map selection stays put.** It used to be reset here, because a different
                 // kit meant a different map list and the old index could point past the new one.
                 // There is one list now — the project's — so there is no index to invalidate, and
                 // resetting would move the row an author is reading out from under them while they
                 // change only where new work lands.
+                self.kit != was
             }
             Focus::Maps => {
-                let n = self.catalog.maps.len();
-                self.map = clamp_step(self.map, delta, n + 1);
+                let was = self.map;
+                self.map = clamp_step(was, delta, self.catalog.maps.len() + 1);
+                self.map != was
             }
             // **The arrows walk the settings rows too**, which is the whole of the correction:
             // moving inside a panel is always the arrows, whichever panel it is.
             Focus::Settings => {
+                let was = self.field;
                 self.step_field(delta);
+                self.field != was
+            }
+            // The policy rows are the kit's entries; there is no `+ new` row, so the cursor walks
+            // exactly the entries that exist.
+            Focus::Policy => {
+                let was = self.policy;
+                self.policy = clamp_step(was, delta, self.policy_rows().1.len());
+                self.policy != was
+            }
+            // The projects list always has the `+ new project` row, and the real entries beside
+            // the current root.
+            Focus::Projects => {
+                let was = self.project;
+                self.project = clamp_step(was, delta, self.catalog.projects.len() + 1);
+                self.project != was
             }
         }
     }
 
-    /// **Cross to the next panel, or the previous one** — `Tab`, `Shift+Tab`, and `right`/`left`,
-    /// which are three bindings on one concept rather than three behaviours.
-    ///
-    /// Wraps, and **skips a panel with nothing in it**: the settings have no rows when no map is
-    /// selected and none is being made, and a `Tab` that lands the arrows somewhere they can do
-    /// nothing is the dead key `keys.rs` refuses to ship.
-    pub fn section(&mut self, delta: i32) {
-        self.problem = None;
-        let at = Focus::ALL
-            .iter()
-            .position(|f| *f == self.focus)
-            .unwrap_or(0);
-        for step in 1..=Focus::ALL.len() {
-            let i = if delta < 0 {
-                (at + Focus::ALL.len() * step - step) % Focus::ALL.len()
-            } else {
-                (at + step) % Focus::ALL.len()
-            };
-            let want = Focus::ALL[i];
-            if self.panel_has_rows(want) {
-                self.focus = want;
-                return;
+    /// Put the cursor at the edge of the newly focused panel the arrow was pointing at: the first
+    /// row when arriving from above, the last when arriving from below.
+    fn enter_panel(&mut self, delta: i32) {
+        let down = delta >= 0;
+        match self.focus {
+            Focus::Kits => self.kit = if down { 0 } else { self.catalog.kits.len() },
+            Focus::Maps => self.map = if down { 0 } else { self.catalog.maps.len() },
+            Focus::Projects => {
+                self.project = if down { 0 } else { self.catalog.projects.len() }
             }
+            Focus::Policy => {
+                self.policy = if down {
+                    0
+                } else {
+                    self.policy_rows().1.len().saturating_sub(1)
+                }
+            }
+            Focus::Settings => {
+                let fields = self.fields();
+                self.field = if down {
+                    fields.first().copied().unwrap_or(Field::Name)
+                } else {
+                    fields.last().copied().unwrap_or(Field::Note)
+                }
+            }
+        }
+    }
+
+    /// **Cross to the column on the left or the right** — `left`/`right`, the pair the Meshes tab
+    /// binds to [`crate::keys::Action::FocusCandidates`] / `FocusLibrary` for the same job.
+    ///
+    /// Lands on the **top** panel of that column — its list — because that is what naming a column
+    /// means: `right` from KITS goes to MAPS, not to whatever panel of the maps column the cursor
+    /// was left in. Always one press per column, which is the whole point: it used to be two from
+    /// KITS to MAPS and one from everywhere else, because the walk threaded through POLICY.
+    ///
+    /// Wraps, over three stops — "am I at the end" is answerable at a glance with three columns on
+    /// screen, which is the condition [`Self::step`]'s clamping exists for and does not meet.
+    pub fn cross(&mut self, delta: i32) {
+        self.problem = None;
+        let (at, _) = self.focus.at();
+        let n = Focus::COLUMNS.len();
+        let i = if delta < 0 { (at + n - 1) % n } else { (at + 1) % n };
+        // Every column's top panel is a list, and all three always draw at least their `+ new …`
+        // row — so there is no empty column to skip and no loop to write.
+        if let Some(head) = Focus::COLUMNS[i].first() {
+            self.focus = *head;
         }
     }
 
@@ -2687,7 +3136,116 @@ impl Chooser {
             // map panel always draws a row, the instruction when there are no maps.
             Focus::Kits | Focus::Maps => true,
             Focus::Settings => self.creating.is_some() || self.current_map().is_some(),
+            // **The policy panel depends on the KITS cursor AND on what that kit declares.** With
+            // the cursor on `+ new kit` there is no kit whose policy to show, and a kit that
+            // excludes nothing and patches nothing draws no rows either — the same rule that
+            // already empties KIT INFO on the `+ new kit` row.
+            //
+            // **Its real row count, not `current_kit().is_some()`.** That answered "could this
+            // panel exist" while this function asks "is there anything to stand on", and the gap
+            // between them was survivable while a key walked *past* an empty panel. `down` off the
+            // end of the kit list walks *into* it, so an empty one is a place the cursor gets stuck
+            // with nothing to press — the dead stop `keys.rs` refuses to ship.
+            Focus::Policy => !self.policy_rows().1.is_empty(),
+            // The projects list always draws its `+ new project` row.
+            Focus::Projects => true,
         }
+    }
+
+    /// **The selected kit's policy, as rows** — its exclusions and its patches, read from that
+    /// kit's `project.ron`. Empty when no kit is selected, which is the same rule that empties
+    /// KIT INFO on the `+ new kit` row.
+    ///
+    /// An exclusion renders `exclude  <pack>`; a patch renders `patch  <matches> — <because>`,
+    /// `matches` being `Match::Id(id)` or `Match::Kind(kind)`. The rows carry the [`PolicyRow`]
+    /// that `Delete` removes by ordinal — never by content, because nothing forbids two patches
+    /// sharing a `matches` key.
+    fn policy_rows(&self) -> (String, Vec<Row>) {
+        let Some(k) = self.current_kit() else {
+            return ("POLICY".to_owned(), Vec::new());
+        };
+        let path = k.dir.join(emerge_core::policy::POLICY_FILE);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                return (
+                    "POLICY".to_owned(),
+                    vec![Row {
+                        left: "unreadable".to_owned(),
+                        right: format!("{e}"),
+                        tone: Tone::Problem,
+                    }],
+                );
+            }
+        };
+        let policy = match emerge_core::policy::Policy::parse(&text) {
+            Ok(p) => p,
+            Err(e) => {
+                return (
+                    "POLICY".to_owned(),
+                    vec![Row {
+                        left: "unreadable".to_owned(),
+                        right: e,
+                        tone: Tone::Problem,
+                    }],
+                );
+            }
+        };
+        let mut rows = Vec::new();
+        for pack in &policy.exclude {
+            rows.push(Row {
+                left: "exclude".to_owned(),
+                right: pack.clone(),
+                tone: Tone::Row,
+            });
+        }
+        for patch in &policy.patches {
+            let matches = match &patch.matches {
+                emerge_core::policy::Match::Id(id) => format!("Id({id})"),
+                emerge_core::policy::Match::Kind(kind) => format!("Kind({kind})"),
+            };
+            rows.push(Row {
+                left: "patch".to_owned(),
+                right: format!("{matches} — {}", patch.because),
+                tone: Tone::Row,
+            });
+        }
+        ("POLICY".to_owned(), rows)
+    }
+
+    /// **The projects beside this one, as rows.** Row 0 is `+ new project`; a real project `i`
+    /// is `i + 1`, the indexing rule every other column uses. The current project is marked, so
+    /// the list says which one this screen is standing in — and `Enter` on it does nothing,
+    /// because it is already open.
+    fn projects_rows(&self) -> (String, Vec<Row>) {
+        let mut rows = vec![Row {
+            left: "+ new project".to_owned(),
+            right: "N".to_owned(),
+            tone: if self.focus == Focus::Projects && self.project == 0 {
+                Tone::Selected
+            } else {
+                Tone::Row
+            },
+        }];
+        rows.extend(self.catalog.projects.iter().enumerate().map(|(i, p)| {
+            let selected = self.focus == Focus::Projects && i + 1 == self.project;
+            Row {
+                left: if p.current {
+                    format!("{} (this one)", p.name)
+                } else {
+                    p.name.clone()
+                },
+                right: String::new(),
+                tone: if selected {
+                    Tone::Selected
+                } else if p.current {
+                    Tone::Stocked
+                } else {
+                    Tone::Row
+                },
+            }
+        }));
+        ("PROJECTS".to_owned(), rows)
     }
 
     /// **Start making a new thing in whichever panel the arrows are in.**
@@ -2703,6 +3261,14 @@ impl Chooser {
             // The settings belong to a map, so `N` there means the same as `N` on the map list.
             Focus::Kits => New::Kit(String::new()),
             Focus::Maps | Focus::Settings => New::Map(Draft::default()),
+            // **No `N` on the policy panel.** Adding a patch is not in this panel's scope — a
+            // patch's payload is a whole partial `Descriptor`, and the one place descriptor fields
+            // are authored is the detail pane. The hint does not offer the key, and pressing it
+            // here falls through to the same refusal the other dead keys give.
+            Focus::Policy => New::Map(Draft::default()),
+            // **`N` on the projects column makes a new project beside this one** — the same one
+            // rule as every other column: `N` makes a new one of whatever the column lists.
+            Focus::Projects => New::Project(String::new()),
         });
         self.focus = Focus::Settings;
         // Straight into the name: it is the one thing neither a kit nor a map can be made without.
@@ -2772,12 +3338,95 @@ impl Chooser {
             Focus::Settings => {
                 Err("Delete removes a kit or a map — Tab to one of those lists first".to_owned())
             }
+            // **A project is a whole directory tree.** Nothing here deletes one — the refusal
+            // says what it is and where the author would do it.
+            Focus::Projects => Err(
+                "a project is a whole directory tree — remove it from the file system".to_owned(),
+            ),
+            // **`Delete` on a policy row asks to remove that entry** — an exclusion or a patch —
+            // through the same confirmation the menu gives a directory. A `because` string is
+            // hand-written rationale, and the menu already asks before removing a directory.
+            Focus::Policy => {
+                let k = self
+                    .current_kit()
+                    .ok_or_else(|| "there is no kit here to remove policy from".to_owned())?;
+                let path = k.dir.join(emerge_core::policy::POLICY_FILE);
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+                let policy = emerge_core::policy::Policy::parse(&text)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                let (_, rows) = self.policy_rows();
+                let row = rows
+                    .get(self.policy)
+                    .ok_or_else(|| "there is no policy entry under the cursor".to_owned())?;
+                let shown = format!("{}  {}", row.left, row.right);
+                // The row's ordinal within its own list, not within the rendered rows: exclusions
+                // come first, so a patch's ordinal is its index past them.
+                let policy_row = if self.policy < policy.exclude.len() {
+                    PolicyRow::Exclude(policy.exclude[self.policy].clone())
+                } else {
+                    PolicyRow::Patch(self.policy - policy.exclude.len())
+                };
+                self.ask = Some(Ask::RemovePolicy {
+                    file: path,
+                    shown,
+                    row: policy_row,
+                });
+                Ok(())
+            }
         }
     }
 
     /// **Agree to it.** Removes the file the question named, then rescans so the list is a
     /// description of disk rather than of the edit.
     pub fn confirm_delete(&mut self) -> Result<String, String> {
+        // **A policy removal is not a deletion** — nothing leaves the file system, a line is
+        // spliced out of `project.ron` — so it is answered here, before the `Delete` arm, and
+        // never reaches `remove_file`/`remove_dir_all`.
+        //
+        // **A `take()` in a pattern guard would consume the `Delete` ask too** — the value is
+        // dropped the moment the pattern fails — so the dispatch reads the clone and takes only
+        // when it is a policy removal.
+        if matches!(self.ask, Some(Ask::RemovePolicy { .. })) {
+            let Some(Ask::RemovePolicy { file, row, .. }) = self.ask.take() else {
+                unreachable!("guarded above");
+            };
+            let result = match row {
+                PolicyRow::Exclude(pack) => {
+                    let text = std::fs::read_to_string(&file)
+                        .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+                    let policy = emerge_core::policy::Policy::parse(&text)
+                        .map_err(|e| format!("{}: {e}", file.display()))?;
+                    let mut exclude = policy.exclude.clone();
+                    exclude.retain(|p| p != &pack);
+                    let out = emerge_core::policy::rewrite_exclude(&text, &exclude)
+                        .map_err(|e| format!("{}: {e}", file.display()))?;
+                    emerge_core::ron_surgery::save_atomic(&file, &out)?;
+                    Ok(pack)
+                }
+                PolicyRow::Patch(ordinal) => {
+                    emerge_core::policy::remove_patch(&file, ordinal)?;
+                    Ok(format!("patch #{ordinal}"))
+                }
+            };
+            match result {
+                Ok(what) => {
+                    // The row after the one removed, so the keyboard lands next to it.
+                    let was = self.policy;
+                    rescan_keeping_place(self, None);
+                    self.policy = Chooser::next_to(was, self.policy_rows().1.len());
+                    Ok(what)
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            self.confirm_delete_entry()
+        }
+    }
+
+    /// The `Delete` half of [`Self::confirm_delete`] — a kit or a map, which really does remove
+    /// from the file system.
+    fn confirm_delete_entry(&mut self) -> Result<String, String> {
         let Some(Ask::Delete(pending)) = self.ask.take() else {
             return Err("no deletion was asked about".to_owned());
         };
@@ -2850,6 +3499,27 @@ impl Chooser {
                 flag.clone(),
             ]);
         }
+        // **The policy panel opens the kit it describes** — the same door `Enter` on the kit row
+        // opens, because the policy is the kit's. The panel is a view over `project.ron`, not a
+        // door of its own.
+        if self.focus == Focus::Policy {
+            let kit = self
+                .current_kit()
+                .ok_or_else(|| "no kit selected".to_owned())?;
+            let Some(flag) = &kit.flag else {
+                return Err(format!(
+                    "`{}` is not a bound kit, so there is nothing to open it as.",
+                    kit.label
+                ));
+            };
+            return Ok(vec![
+                root,
+                "--door".to_owned(),
+                Door::Kit.label().to_lowercase(),
+                "--kit".to_owned(),
+                flag.clone(),
+            ]);
+        }
 
         let map = self
             .current_map()
@@ -2904,8 +3574,6 @@ mod screen_tests {
                 placements: 0,
                 stamps: 0,
                 bounds: (10.0, 4.0, 10.0),
-                palette: Vec::new(),
-                uses: BTreeSet::new(),
             },
         )
     }
@@ -2932,6 +3600,9 @@ mod screen_tests {
             // between kits changed which maps were on screen — which is exactly the tie a map no
             // longer has to the kit that drew it.
             maps: vec![ok_map("hall"), ok_map("test1"), ok_map("untitled_map")],
+            authoring: Some("site".to_owned()),
+            bashes: Vec::new(),
+            projects: Vec::new(),
         };
         Chooser::new(PathBuf::from("."), catalog, preselect)
     }
@@ -2995,11 +3666,11 @@ mod screen_tests {
     #[test]
     fn changing_kit_leaves_the_map_selection_alone() {
         let mut c = chooser(Some("site"));
-        c.section(1);
+        c.cross(1); // KITS -> MAPS, one press
         c.step(1);
         assert_eq!(c.map, 2, "row 1 is the first map; row 0 makes a new one");
         let chosen = c.current_map().map(|m| m.name.clone());
-        c.section(-1);
+        c.cross(-1); // MAPS -> KITS
         c.step(1); // -> a different kit
         assert_eq!(c.map, 2, "the map row does not move under the author");
         assert_eq!(
@@ -3009,89 +3680,146 @@ mod screen_tests {
         );
     }
 
-    /// **`Tab` crosses panels; the arrows never do.** The rule asked for at the keyboard: *"tab
-    /// should move around the different sections"*, and inside one, *"I need to use the arrow keys
-    /// to move around, not tab."*
+    /// **The arrows are the only navigation, and each one means what it points at**: `left`/`right`
+    /// cross columns, `up`/`down` walk down the column you are in.
+    ///
+    /// The rule the rest of the editor already follows — the Meshes tab binds `left`/`right` to
+    /// `FocusCandidates`/`FocusLibrary` for exactly this, and Compose says *"up/down walk the
+    /// groups, left/right walk the members"*. `Tab` used to do the crossing here and was the only
+    /// `KeyCode::Tab` in the crate.
+    ///
+    /// **One press per column, from anywhere** — which is the defect this replaced. The old walk
+    /// threaded every panel onto one key, so KITS to MAPS cost two presses (through POLICY, drawn
+    /// *below* the kit list) while every other crossing cost one, and which it was depended on
+    /// where the other columns' cursors happened to be.
     #[test]
-    fn tab_crosses_panels_and_the_arrows_stay_inside_one() {
+    fn left_right_cross_columns_and_up_down_walk_down_one() {
         let mut c = chooser(Some("site"));
         assert_eq!(c.focus, Focus::Kits);
-        c.section(1);
+
+        // **One press each, in both directions, wrapping over the three columns.**
+        c.cross(1);
+        assert_eq!(c.focus, Focus::Maps, "KITS -> MAPS is one press, not two");
+        c.cross(1);
+        assert_eq!(c.focus, Focus::Projects, "and on to the last column");
+        c.cross(1);
+        assert_eq!(c.focus, Focus::Kits, "three columns, so it wraps");
+        c.cross(-1);
+        assert_eq!(c.focus, Focus::Projects, "backwards too");
+        c.cross(-1);
         assert_eq!(c.focus, Focus::Maps);
-        c.section(1);
+
+        // **A crossing lands on the column's LIST**, never on the inspector under it — naming a
+        // column means its head, not wherever that column was left.
+        c.step(1);
+        c.step(1);
+        assert_eq!(c.map, 3, "walked to the last map row");
+        c.cross(-1);
+        c.cross(1);
+        assert_eq!(c.focus, Focus::Maps, "back on the list, not on MAP INFO");
+
+        // **`down` off the end of a list carries on into the panel drawn under it**, and `up`
+        // comes back. That is the vertical arrangement answered by the vertical key.
+        c.step(1);
+        assert_eq!(c.focus, Focus::Settings, "MAP INFO is below the map list");
+        assert_eq!(c.field, Field::Name, "and it is entered at the top");
+        c.step(-1);
+        assert_eq!(c.focus, Focus::Maps, "up comes back out of it");
+        assert_eq!(c.map, 3, "at the row it left from");
+
+        // **And it never leaves the column.** Walking down past the bottom of the last panel in a
+        // column stays put rather than appearing in the next one over.
+        c.step(1);
+        for _ in 0..8 {
+            c.step(1);
+        }
         assert_eq!(
             c.focus,
             Focus::Settings,
-            "the third panel is a panel like the others"
-        );
-        c.section(1);
-        assert_eq!(c.focus, Focus::Kits, "and it wraps");
-        c.section(-1);
-        assert_eq!(c.focus, Focus::Settings, "backwards too");
-
-        // An arrow never changes panel — that was the defect.
-        let before = c.focus;
-        c.step(1);
-        c.step(-1);
-        assert_eq!(
-            c.focus, before,
-            "the arrows move inside the panel, never out of it"
+            "the bottom of the MAPS column is the end of the walk, not the door to another"
         );
     }
 
-    /// **A panel with nothing in it is skipped**, because landing the arrows where they can do
-    /// nothing is the dead key `keys.rs` refuses to ship.
+    /// **A panel with nothing in it is not walked into**, because landing the arrows where they can
+    /// do nothing is the dead stop `keys.rs` refuses to ship.
     ///
-    /// The emptiness that matters moved: maps are the **project's** now, so an empty *kit* has
-    /// nothing to do with whether there is a map to configure. A project with no maps is what leaves
-    /// the settings panel with nothing to show.
+    /// Under the old crossing key this meant *skipped over* — the walk threaded every panel onto
+    /// one key, so an empty one was passed through on the way to the next. `down` walks **into** a
+    /// panel now, so an empty one has to be a place the cursor does not go at all: the walk stops
+    /// at the bottom of the list instead.
     #[test]
-    fn a_panel_with_no_rows_is_skipped() {
+    fn a_panel_with_no_rows_is_not_walked_into() {
         let mut c = Chooser::new(
             PathBuf::from("."),
             Catalog {
                 kits: vec![kit(Some("site_v2"), "site_v2", 0)],
                 maps: Vec::new(),
+                authoring: Some("site_v2".to_owned()),
+                bashes: Vec::new(),
+                projects: Vec::new(),
             },
             Some("site_v2"),
         );
-        c.section(1);
+        assert_eq!(c.focus, Focus::Kits);
+
+        // **No map is selected**, so MAP INFO has nothing to show and `down` off the end of the map
+        // list has nowhere to go.
+        c.cross(1);
         assert_eq!(
             c.focus,
             Focus::Maps,
             "the map panel always draws a row — the instruction"
         );
-        c.section(1);
+        for _ in 0..4 {
+            c.step(1);
+        }
+        assert_eq!(c.focus, Focus::Maps, "there are no settings to walk into");
+
+        // **Crossing is never affected by any of it.** Every column's top panel is a list and all
+        // three always draw at least their `+ new …` row, so there is no empty column to skip.
+        c.cross(1);
         assert_eq!(
             c.focus,
-            Focus::Kits,
-            "no map is selected, so there are no settings to walk into"
+            Focus::Projects,
+            "the projects panel always draws a row — the instruction"
         );
+        c.cross(1);
+        assert_eq!(c.focus, Focus::Kits, "three columns, so it wraps");
     }
 
-    /// The settings rows are walked by the arrows, wrapping, like every other panel.
+    /// The settings rows are walked by the arrows, clamped, like every other panel — and the edge
+    /// is not a dead stop because it leads back up into the map list drawn above.
     #[test]
     fn the_arrows_walk_the_settings_rows() {
         let mut c = chooser(Some("site"));
-        c.section(1);
-        c.section(1);
+        // MAP INFO is under the map list: one crossing, then down off the end of the list.
+        c.cross(1);
+        while c.focus == Focus::Maps {
+            c.step(1);
+        }
         assert_eq!(c.focus, Focus::Settings);
         assert_eq!(c.field, Field::Name);
         c.step(1);
         assert_eq!(c.field, Field::Bounds);
         c.step(-1);
         assert_eq!(c.field, Field::Name);
-        // **Backwards from the first row lands on the last.** The panel is the map's four
-        // properties again: the kit rows moved to the KITS column on 2026-08-16, where `Space`
-        // flips the row that names the kit. Still one cycle with no dead end at either edge, which
-        // is the property this was written for.
+        // **Backwards from the first row leaves the panel** rather than wrapping onto the last.
+        // The panel is the map's four properties and one `bash` fact, drawn under the map list —
+        // so `up` from the top means the list, which is what the arrow is pointing at.
         c.step(-1);
+        assert_eq!(c.focus, Focus::Maps, "up off the top goes back to the list above");
+        // And forwards from the last row is the bottom of the column, so it stays.
+        c.step(1);
+        assert_eq!(c.focus, Focus::Settings);
+        for _ in 0..8 {
+            c.step(1);
+        }
         let last = c
             .fields()
             .last()
             .copied()
             .unwrap_or_else(|| panic!("the panel has rows"));
-        assert_eq!(c.field, last, "and it wraps backwards onto the last row");
+        assert_eq!(c.field, last, "clamped on the last row");
         assert_eq!(last, Field::Note, "which is the last of the map's own properties");
     }
 
@@ -3183,6 +3911,9 @@ mod screen_tests {
             Catalog {
                 kits: vec![kit(Some("site_v2"), "site_v2", 0)],
                 maps: Vec::new(),
+                authoring: Some("site_v2".to_owned()),
+                bashes: Vec::new(),
+                projects: Vec::new(),
             },
             Some("site_v2"),
         );
@@ -3211,6 +3942,9 @@ mod screen_tests {
         let catalog = Catalog {
             kits: vec![kit(Some("site"), "site", 1)],
             maps: vec![entry("broken", MapSummary::Unreadable("map: bad ron".into()))],
+            authoring: Some("site".to_owned()),
+            bashes: Vec::new(),
+            projects: Vec::new(),
         };
         let mut c = Chooser::new(PathBuf::from("."), catalog, None);
         c.focus = Focus::Maps;
@@ -3238,12 +3972,14 @@ mod screen_tests {
         );
     }
 
-    /// The four settings are a fixed cycle in the order they are drawn — walked by the **arrows**,
-    /// since `Tab` crosses panels. Wraps, so neither end is a dead stop.
+    /// The four settings are a fixed run in the order they are drawn, walked by the **arrows** —
+    /// the only navigation this screen has. **Clamped**, like every other panel: the end is not a
+    /// dead stop because the walk carries on out of the panel, and `up` off the top goes back to
+    /// the map list drawn above it. See [`Chooser::step`].
     #[test]
-    fn the_field_cycle_runs_in_the_order_they_are_shown() {
-        // No map selected, so the cycle is the four text settings — the kit rows join it only when
-        // there is a map for them to be about. See `Chooser::fields`.
+    fn the_field_run_goes_in_the_order_they_are_shown() {
+        // No map selected, so the panel is the four text settings and there is no `bash` fact row
+        // — see `Chooser::fields` and `settings_rows`.
         let mut c = chooser(None);
         c.map = 0;
         c.focus = Focus::Settings;
@@ -3253,8 +3989,6 @@ mod screen_tests {
             c.step(1);
             seen.push(c.field);
         }
-        let f = c.field;
-        let _ = f;
         assert_eq!(
             seen,
             vec![
@@ -3262,40 +3996,47 @@ mod screen_tests {
                 Field::Bounds,
                 Field::Origin,
                 Field::Note,
-                Field::Name
+                Field::Note
             ],
-            "four fields, then back to the first"
+            "four fields, then clamped on the last"
+        );
+        assert_eq!(
+            c.focus,
+            Focus::Settings,
+            "MAP INFO is the bottom of its column, so the walk ends there"
         );
     }
 
-    /// The same cycle backwards. Stepping one way then the other must land where you started, which
-    /// is the property an off-by-one in either direction would break.
+    /// The same run backwards, and off the top it leaves the panel — `up` from the first field is
+    /// the map list, which is what is drawn above it.
     #[test]
-    fn the_field_cycle_runs_backwards_too() {
+    fn the_field_run_goes_backwards_and_then_out_of_the_panel() {
         let mut c = chooser(None);
         c.map = 0;
         c.focus = Focus::Settings;
         c.field = Field::Note;
         let mut seen = vec![c.field];
-        for _ in 0..4 {
+        for _ in 0..3 {
             c.step(-1);
             seen.push(c.field);
         }
         assert_eq!(
             seen,
-            vec![
-                Field::Note,
-                Field::Origin,
-                Field::Bounds,
-                Field::Name,
-                Field::Note
-            ],
-            "backwards from the last, wrapping past the first"
+            vec![Field::Note, Field::Origin, Field::Bounds, Field::Name],
+            "backwards from the last to the first"
+        );
+        c.step(-1);
+        assert_eq!(
+            c.focus,
+            Focus::Maps,
+            "and once more leaves the panel for the list above it"
         );
 
-        // Forward then back is where you were, walked through the `Chooser` since the cycle is now
-        // per project — a kit row joins it only when there is a map for it to be about.
-        for f in Field::ALL {
+        // **Forward then back is where you were** — the off-by-one guard, and it is asked of the
+        // interior only. The two ends are precisely where the walk leaves this panel now, so a
+        // round trip across one of them is a question about two panels rather than about the
+        // arithmetic here. `Chooser::step`'s own test covers the crossing.
+        for f in [Field::Bounds, Field::Origin] {
             let mut c = chooser(None);
             c.map = 0;
             c.focus = Focus::Settings;
@@ -3303,9 +4044,11 @@ mod screen_tests {
             c.step(1);
             c.step(-1);
             assert_eq!(c.field, f, "{f:?}: forward then back is where you were");
+            assert_eq!(c.focus, Focus::Settings, "{f:?}: and in the same panel");
             c.step(-1);
             c.step(1);
             assert_eq!(c.field, f, "{f:?}: back then forward is too");
+            assert_eq!(c.focus, Focus::Settings, "{f:?}: and in the same panel");
         }
     }
 }
@@ -3361,10 +4104,19 @@ pub struct Screen {
     /// arrows can enter and do nothing in is the dead stop this screen keeps removing.
     pub kit_header: String,
     pub kit_info: Vec<Row>,
+    /// **The selected kit's policy** — its exclusions and its patches, read from `project.ron`.
+    /// Drawn as its own panel under the kit list, the same way KIT INFO is; the rows carry the
+    /// [`PolicyRow`] that `Delete` removes by ordinal.
+    pub policy_header: String,
+    pub policy: Vec<Row>,
     pub maps_header: String,
     pub maps: Vec<Row>,
     pub settings_header: String,
     pub settings: Vec<Row>,
+    /// **The projects beside this one** — row 0 makes a new one; a real row names the directory
+    /// and the command that opens it.
+    pub projects_header: String,
+    pub projects: Vec<Row>,
     /// A question the screen is waiting on — a pending deletion. Takes the message line, because a
     /// question you have not answered outranks a refusal you already read.
     pub asking: Option<String>,
@@ -3384,49 +4136,22 @@ impl Chooser {
                 Tone::Row
             },
         }];
-        // **What the selected map offers**, so each kit row can say whether it is on. `None` when no
-        // map is selected or the selected one will not parse — then a row carries no mark at all,
-        // because "off" and "there is nothing to be on for" are different states.
-        let offered: Option<(&Vec<String>, &BTreeSet<String>)> = match self.current_map() {
-            Some(MapEntry { summary: MapSummary::Read { palette, uses, .. }, .. }) => {
-                Some((palette, uses))
-            }
-            _ => None,
-        };
+        // **No tick here.** A kit row is a kit, and what a map offers is the bash it names — stated
+        // once on the MAP INFO `bash` row and declared once in `kits.ron`. The tick was a per-map
+        // list edited from the kit list; a combination is shared, so ticking one from a map row
+        // would silently change every other map naming it.
         kits.extend(self.catalog.kits.iter().enumerate().map(|(i, k)| {
             let selected = self.focus == Focus::Kits && i + 1 == self.kit;
-            let ns = k.namespace.as_deref().unwrap_or(k.label.as_str());
-            // **The mark, and the constraint drawn rather than enforced on the press.** `[=]` is a
-            // kit that cannot be turned off — either the map already places its pieces, or it is the
-            // last one on and empty means all. `[x]` is on, `[ ]` is off.
-            let mark = offered.map(|(palette, uses)| {
-                let all = palette.is_empty();
-                let in_use = uses.contains(ns);
-                let on = all || in_use || palette.iter().any(|p| p == ns);
-                let last_on =
-                    !all && !in_use && palette.len() == 1 && palette.iter().any(|p| p == ns);
-                if in_use || last_on {
-                    ("[=] ", if in_use { " · in use" } else { " · only one on" })
-                } else if on {
-                    ("[x] ", "")
-                } else {
-                    ("[ ] ", "")
-                }
-            });
-            let (tick, why) = mark.unwrap_or(("", ""));
             Row {
-                left: format!(
-                    "{tick}{}",
-                    if k.flag.is_none() {
-                        format!("{} (default)", k.label)
-                    } else {
-                        k.label.clone()
-                    }
-                ),
+                left: if k.flag.is_none() {
+                    format!("{} (default)", k.label)
+                } else {
+                    k.label.clone()
+                },
                 // **The piece count stays.** It is the fact this screen was built to carry — on
                 // 2026-08-15 an author could not tell `site` from `site_v2` and relaunched three
-                // times — so the tick is added beside it rather than in place of it.
-                right: format!("{} pieces{why}", k.pieces),
+                // times.
+                right: format!("{} pieces", k.pieces),
                 // **A blank kit reads as blank without being read.** This is the fact the screen
                 // exists to carry: on 2026-08-15 an author could not tell `site` from `site_v2`
                 // and relaunched three times. A count nobody looks at would not have helped.
@@ -3504,14 +4229,20 @@ impl Chooser {
         let (settings_header, settings) = self.settings_rows();
 
         let (kit_header, kit_info) = self.kit_rows();
+        let (policy_header, policy) = self.policy_rows();
+        let (projects_header, projects) = self.projects_rows();
         Screen {
             kits,
             kit_header,
             kit_info,
+            policy_header,
+            policy,
             maps_header,
             maps,
             settings_header,
             settings,
+            projects_header,
+            projects,
             // **The question lives in the modal now**, so this renders nothing. `crate::confirm`
             // owns the wording, the two answers and the keys that give them; a second copy on the
             // chooser's own band is what a capture on 2026-08-19 showed underneath the panel —
@@ -3559,6 +4290,23 @@ impl Chooser {
                 tone: Tone::Empty,
             });
         }
+        // **Where new work lands, and the verb that re-points it.** `kits.ron`'s `authoring` is
+        // what `Project::open` opens when no `--kit` is given, so this row is the one place the
+        // screen says which kit that is. `A` on the kit list flips it; the clickable value is the
+        // mouse half — see `set_authoring`.
+        rows.push(Row {
+            left: "new work lands here".to_owned(),
+            right: if self.catalog.authoring.as_deref() == Some(k.label.as_str()) {
+                "yes".to_owned()
+            } else {
+                "no".to_owned()
+            },
+            tone: if self.catalog.authoring.as_deref() == Some(k.label.as_str()) {
+                Tone::Stocked
+            } else {
+                Tone::Row
+            },
+        });
         // **No `— <name>` after it.** Reported at the keyboard: *"what is the m-dash scratch in the
         // info area? … they should be able to intuit things, not have to read it."* The suffix was
         // added when this was one shared panel that could not say whose settings it held. It now
@@ -3599,7 +4347,25 @@ impl Chooser {
                 }],
             );
         }
-        let (header, name, bounds, origin, note) = match (&self.creating, self.current_map()) {
+        // **A project is one field too** — the name, and `Enter` makes the directory.
+        if let Some(New::Project(name)) = &self.creating {
+            let live = self.focus == Focus::Settings && self.field == Field::Name;
+            return (
+                "NEW PROJECT".to_owned(),
+                vec![Row {
+                    left: Field::Name.label().to_owned(),
+                    right: if live && self.editing {
+                        format!("{}_", self.raw)
+                    } else if name.is_empty() {
+                        "(needs a name)".to_owned()
+                    } else {
+                        clip(name, 18)
+                    },
+                    tone: tone_for(live, name.is_empty()),
+                }],
+            );
+        }
+        let (header, name, bounds, origin, note, bash) = match (&self.creating, self.current_map()) {
             (Some(New::Map(d)), _) => (
                 self.current_kit().map_or_else(
                     || "NEW MAP".to_owned(),
@@ -3609,14 +4375,18 @@ impl Chooser {
                 d.bounds,
                 d.origin,
                 d.note.clone(),
+                // A map is made offering every kit and is given a bash afterwards, with `B` on its
+                // row — so there is nothing to state here and no field to state it in.
+                None,
             ),
             (Some(New::Kit(_)), _) => unreachable!("handled above"),
+            (Some(New::Project(_)), _) => unreachable!("handled above"),
             (None, Some(m)) => match &m.summary {
                 MapSummary::Read { bounds, .. } => {
-                    // Origin and note are not in the summary — the row is about the file, and
+                    // Origin, note and bash are not in the summary — they are about the file, and
                     // reading every map's prose to fill a panel nobody has opened is work for a
                     // list. Selecting one is what asks the question, so it is read here.
-                    let (origin, note) = read_origin_and_note(&m.path);
+                    let (origin, note, bash) = read_map_details(&m.path);
                     (
                         // The map's own name is the first row of this panel, so a name in the header was
                         // saying it twice — see the kit header above for the report behind this.
@@ -3625,6 +4395,7 @@ impl Chooser {
                         *bounds,
                         origin,
                         note,
+                        bash,
                     )
                 }
                 MapSummary::Unreadable(_) => return ("MAP INFO".to_owned(), Vec::new()),
@@ -3642,7 +4413,7 @@ impl Chooser {
                 settled
             }
         };
-        let rows = vec![
+        let mut rows = vec![
             Row {
                 left: Field::Name.label().to_owned(),
                 right: value(
@@ -3679,15 +4450,18 @@ impl Chooser {
                 tone: tone_for(live(Field::Note), false),
             },
         ];
-        let rows = rows;
-        // **The kit ticks are not here.** They were one row per bound kit, in this panel, and that
-        // put a second list of the same kits one screen-region away from the real one — the author
-        // has to learn which of the two to reach for. They live on the KITS column now, where
-        // `Space` flips the row that names the kit. Asked for at the keyboard, 2026-08-16.
+        // **A fact, not a field** — the same shape `kit_rows`' `new work lands here` row has. The
+        // arrows walk `Field::ALL` and this is not in it, and `on_row_click` for `RowPane::Settings`
+        // only moves the focus, so the row is inert: `B` on the map row is the verb.
         //
-        // Vicente & Rasmussen's argument for drawing the constraint rather than refusing on the
-        // press (`10.1109/21.156574` — *"the perceptual cues in the interface should directly
-        // specify process constraints"*) moved with them; see `Chooser::screen`.
+        // Only on an existing map. A draft has no file to carry a bash and no row to press `B` on.
+        if self.creating.is_none() {
+            rows.push(Row {
+                left: "bash".to_owned(),
+                right: bash.clone().unwrap_or_else(|| "every kit".to_owned()),
+                tone: if bash.is_some() { Tone::Stocked } else { Tone::Row },
+            });
+        }
         (header, rows)
     }
 
@@ -3715,16 +4489,26 @@ impl Chooser {
             _ if self.editing && matches!(self.creating, Some(New::Map(_))) => {
                 "type    Enter makes the map    Esc cancel"
             }
+            _ if self.editing && matches!(self.creating, Some(New::Project(_))) => {
+                "type    Enter makes the project    Esc cancel"
+            }
             _ if self.editing => "type    Enter keep    Esc leave the field",
             // Reached by leaving the name field with Esc while still making something. No chord is
             // offered: naming it is what makes it, and there is no second way.
             Focus::Settings if self.creating.is_some() => "Enter name it    Esc cancel",
-            // **The verb names what THIS row does.** `Enter` types into a text field and toggles a
-            // kit, and a hint saying "edit" over a checkbox is the hint that teaches the wrong key.
-            Focus::Settings => "up/down field    Enter edit    Tab panel    Esc quit",
+            // **The verb names what THIS row does.** Every row here is a text field except the
+            // `bash` fact, which `B` on the map row changes. `up` off the top goes back to the map
+            // list, which is the panel above this one — see `Chooser::step`.
+            //
+            // **The two arrows lead, together.** They are one idea — the arrow means what it points
+            // at — so splitting them across the line would read as two unrelated verbs, which is
+            // exactly the confusion the old `Tab` caused.
+            Focus::Settings => "up/down field    left/right column    Enter edit    Esc quit",
             // **Only verbs that would do something right now.** `Enter` opens a map — so it is
             // not offered on a kit with none, nor on the `+ new` row where it makes instead.
-            Focus::Kits if self.kit == 0 => "up/down kit    Enter new kit    Tab panel    Esc quit",
+            Focus::Kits if self.kit == 0 => {
+                "up/down kit    left/right column    Enter new kit    Esc quit"
+            }
             // **`Delete` is listed on the default kit too, even though it refuses there.**
             //
             // It was hidden at first, on the rule that a verb which only produces a refusal should
@@ -3735,21 +4519,46 @@ impl Chooser {
             //
             // The refusal names the reason (every other kit lives inside this one), which is
             // `docs/ui.md` §1.4: an unmet condition is an instruction.
-            // **`Space` is not offered with no map**, because a palette belongs to a map and there
-            // is none to offer the kit to. `toggle_kit` says so if pressed anyway.
             Focus::Kits if self.catalog.maps.is_empty() => {
-                "up/down kit    Tab panel    N new kit    Delete remove    Esc quit"
+                "up/down kit    left/right column    N new kit    Delete remove    Esc quit"
             }
             // **`Enter open kit`, not `Enter open`.** Both list columns offered a bare "open" and
             // they open different doors — so with the columns swapped on 2026-08-16 an author
             // pressed it in the maps column expecting the kit and got the Map door, where the
             // labeler is not even bound. The verb has to name what it opens.
+            //
+            // **`A` makes this kit the authoring kit** — the one new work lands in. Offered only
+            // on a real kit row, never on `+ new kit`, which is the `kit == 0` arm above.
             Focus::Kits => {
-                "up/down kit    Enter open KIT    Space on/off    N new kit    Delete remove    Esc quit"
+                "up/down kit    left/right column    Enter open KIT    A authoring    N new kit    Delete remove    Esc quit"
             }
-            Focus::Maps if self.map == 0 => "up/down map    Enter new map    Tab panel    Esc quit",
+            Focus::Maps if self.map == 0 => {
+                "up/down map    left/right column    Enter new map    Esc quit"
+            }
+            // **`B` names the bash this map draws on** — the combination declared in `kits.ron`,
+            // cycled here and shown on MAP INFO's `bash` row. Only on a real row: row 0 makes a
+            // map, and a map that does not exist yet has no field to set.
             Focus::Maps => {
-                "up/down map    Enter open MAP    Tab panel    Delete remove    Esc quit"
+                "up/down map    left/right column    Enter open MAP    B bash    Delete remove    Esc quit"
+            }
+            // **The policy panel's verbs.** `Delete` removes the highlighted entry — through the
+            // confirmation, because a `because` string is hand-written rationale. `Enter` opens
+            // the kit, the same door the kit row opens. No `N`: adding a patch is not in this
+            // panel's scope.
+            Focus::Policy => {
+                "up/down entry    left/right column    Enter open KIT    Delete remove    Esc quit"
+            }
+            // **The projects column's verbs.** `Enter` on the `+ new project` row makes one; on a
+            // real row it reports the command that opens that project, because nothing opens
+            // in-process. `N` makes a new one from any real row. The current project row offers
+            // neither `Enter` (it is already open) nor `Delete` (a whole directory tree), and the
+            // hint says so by simply not listing them — a verb that would do nothing is not
+            // offered.
+            Focus::Projects if self.project == 0 => {
+                "up/down project    left/right column    Enter new project    Esc quit"
+            }
+            Focus::Projects => {
+                "up/down project    left/right column    N new project    Esc quit"
             }
         }
     }
@@ -3785,14 +4594,15 @@ fn tone_for(live: bool, unset: bool) -> Tone {
     }
 }
 
-/// Origin and note, read from the map file when a row is selected. Failure is silent here on
-/// purpose: the row already carries `Unreadable` when the file cannot be parsed, and a second
-/// refusal in the settings panel would say the same thing twice.
-fn read_origin_and_note(path: &Path) -> ((f32, f32, f32), Option<String>) {
+/// Origin, note and bash, read from the map file when a row is selected — three fields the summary
+/// does not carry, off one parse rather than three. Failure is silent here on purpose: the row
+/// already carries `Unreadable` when the file cannot be parsed, and a second refusal in the
+/// settings panel would say the same thing twice.
+fn read_map_details(path: &Path) -> ((f32, f32, f32), Option<String>, Option<String>) {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|t| Map::parse(&t).ok())
-        .map_or(((0.0, 0.0, 0.0), None), |m| (m.origin, m.note))
+        .map_or(((0.0, 0.0, 0.0), None, None), |m| (m.origin, m.note, m.bash))
 }
 
 fn triple(t: (f32, f32, f32)) -> String {
@@ -3802,17 +4612,32 @@ fn triple(t: (f32, f32, f32)) -> String {
 /// **The screen as flat text** — what the tests read, built from the same [`Screen`] the widgets are.
 pub fn render(c: &Chooser) -> String {
     let s = c.screen();
-    let mut out = String::from("emerge-mapper\n\nKITS\n");
     let line = |r: &Row| {
         let mark = if r.tone == Tone::Selected { ">" } else { " " };
         format!("{mark} {:<28}{}\n", r.left, r.right)
     };
+    // **Left to right, exactly as the columns are drawn** — see `spawn_screen`. A flat rendering
+    // that reordered the panels would be a second opinion about the hierarchy.
+    let mut out = String::from("emerge-mapper\n");
+    if !s.projects.is_empty() {
+        out.push_str(&format!("\n{}\n", s.projects_header));
+        for r in &s.projects {
+            out.push_str(&line(r));
+        }
+    }
+    out.push_str("\nKITS\n");
     for r in &s.kits {
         out.push_str(&line(r));
     }
     if !s.kit_info.is_empty() {
         out.push_str(&format!("\n{}\n", s.kit_header));
         for r in &s.kit_info {
+            out.push_str(&line(r));
+        }
+    }
+    if !s.policy.is_empty() {
+        out.push_str(&format!("\n{}\n", s.policy_header));
+        for r in &s.policy {
             out.push_str(&line(r));
         }
     }
@@ -3863,7 +4688,15 @@ struct SettingsList;
 #[derive(Component)]
 struct SettingsHeader;
 #[derive(Component)]
+struct PolicyList;
+#[derive(Component)]
+struct PolicyHeader;
+#[derive(Component)]
 struct ProblemLine;
+#[derive(Component)]
+struct ProjectList;
+#[derive(Component)]
+struct ProjectHeader;
 #[derive(Component)]
 struct HintLine;
 
@@ -4034,11 +4867,24 @@ fn spawn_screen(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
     });
 
     commands.entity(frame.body).with_children(|row| {
-        // **Maps first, kits second**, asked for at the keyboard on 2026-08-16. The order was
-        // kits-then-maps from when a map lived *inside* a kit and the columns were that containment
-        // made spatial. Maps left the kit directories the same day (`project.rs`), so the nesting
-        // the order was drawing no longer exists: the map is the job and the kit is what it draws
-        // from.
+        // **Left to right IS the data model**: PROJECT owns KITS, and a MAP draws on them.
+        //
+        // The ERD in `CLAUDE.md` is the order. `PROJECT ||--o{ KIT` and `PROJECT ||--o{ MAP` make
+        // the project the root, so it is leftmost; between its two children the cross-edge decides,
+        // and it runs one way — `MAP` names a `BASH`, a `BASH` names `KIT`s, and the build chain is
+        // KIT → DESCRIPTOR → PLACEMENT → MAP. Kits are what a map is made of, so kits come first
+        // and the map is what they add up to.
+        //
+        // **This replaces maps-first**, which was asked for on 2026-08-16 on the argument that
+        // *"the nesting the order was drawing no longer exists"* — true then, because a map had
+        // just left the kit directories and nothing tied the two columns together. A bash ties them
+        // again, in the other direction and one level up: the project declares the combinations, a
+        // map names one. So there is a hierarchy to draw, and this is it.
+        //
+        // **One honest gap.** A Miller column's selection opens the column to its right, and the
+        // KITS→MAPS boundary is that; the PROJECTS→KITS one is not, because nothing opens in this
+        // process — `Enter` on a sibling reports `emerge-mapper <dir>` instead. PROJECTS stands
+        // leftmost for what it *contains*, and the row says so rather than pretending to navigate.
         //
         // **Each column owns what belongs to it.** A map's settings sit under the map list; a kit's
         // facts sit under the kit list. One shared panel could not say whose it was — and worse, it
@@ -4054,6 +4900,34 @@ fn spawn_screen(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
             ..default()
         };
 
+        // **The projects column** — the siblings of this root, plus the verb that makes a new one.
+        // A list like the kits' is: row 0 is `+ new project`, real projects are `i + 1`.
+        row.spawn(column()).with_children(|col| {
+            col.spawn((list_panel(), ListPanel)).with_children(|p| {
+                p.spawn((header("PROJECTS"), ProjectHeader));
+                crate::chrome::scroll_list(p, ProjectList);
+            });
+        });
+
+        row.spawn(column()).with_children(|col| {
+            col.spawn((list_panel(), ListPanel)).with_children(|p| {
+                p.spawn(header("KITS"));
+                crate::chrome::scroll_list(p, KitList);
+            });
+            col.spawn((info_panel(), InfoPanel)).with_children(|p| {
+                p.spawn((header("KIT INFO"), KitInfoHeader));
+                p.spawn((Node::default(), KitInfoList));
+            });
+            // **The selected kit's policy** — its exclusions and its patches, read from
+            // `project.ron`. Drawn as a second inspector under KIT INFO, the way the map's settings
+            // sit under the maps list. A separate panel from KIT INFO because it is a list the
+            // arrows can stand in, and the facts sheet is not.
+            col.spawn((info_panel(), InfoPanel)).with_children(|p| {
+                p.spawn((header("POLICY"), PolicyHeader));
+                p.spawn((Node::default(), PolicyList));
+            });
+        });
+
         row.spawn(column()).with_children(|col| {
             col.spawn((list_panel(), ListPanel)).with_children(|p| {
                 p.spawn((header("MAPS"), MapsHeader));
@@ -4066,17 +4940,6 @@ fn spawn_screen(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
             col.spawn((info_panel(), InfoPanel)).with_children(|p| {
                 p.spawn((header("MAP INFO"), SettingsHeader));
                 p.spawn((Node::default(), SettingsList));
-            });
-        });
-
-        row.spawn(column()).with_children(|col| {
-            col.spawn((list_panel(), ListPanel)).with_children(|p| {
-                p.spawn(header("KITS"));
-                crate::chrome::scroll_list(p, KitList);
-            });
-            col.spawn((info_panel(), InfoPanel)).with_children(|p| {
-                p.spawn((header("KIT INFO"), KitInfoHeader));
-                p.spawn((Node::default(), KitInfoList));
             });
         });
     });
@@ -4222,14 +5085,17 @@ struct ChooserRow {
     index: usize,
 }
 
-/// The three lists a cursor can be in. `KIT INFO` is facts about the selection, not a list you stand
-/// in — it has no [`Focus`], so its rows carry no marker and stay unclickable rather than lighting
-/// under the pointer and doing nothing.
+/// The lists a cursor can be in. `KIT INFO` and `POLICY` are facts about the selection — `KIT
+/// INFO` has no [`Focus`], so its rows carry no marker and stay unclickable rather than lighting
+/// under the pointer and doing nothing; `POLICY` is a panel the arrows can stand in, so its rows
+/// carry the marker and the click selects, exactly as the kits and maps rows do.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RowPane {
     Kits,
+    Policy,
     Maps,
     Settings,
+    Projects,
 }
 
 /// The label column of an inspector row. One number, so `MAP INFO` and `KIT INFO` cannot disagree
@@ -4319,16 +5185,31 @@ fn fill(commands: &mut Commands, at: Entity, rows: &[Row], kind: PanelKind, pane
                 });
             }
             PanelKind::Inspector => {
-                p.spawn(Node {
-                    flex_direction: FlexDirection::Row,
-                    column_gap: Val::Px(crate::chrome::GAP_ROW),
-                    width: Val::Percent(100.0),
-                    ..default()
-                })
-                .with_children(|line| {
-                    crate::chrome::row_label(line, INFO_LABEL_W, &left);
-                    crate::chrome::row_value(line, right.clone(), c, ());
-                });
+                // **The policy panel's rows are selectable** — the arrows and a click can stand on
+                // them, because `Delete` removes the highlighted entry. Every other inspector row is
+                // facts about the selection and stays unclickable.
+                if pane == Some(RowPane::Policy) {
+                    // **Not `list_row`** — see `chrome::quiet_row`. The menu brings its own click
+                    // handler and must stay off the editor's `Activate` bus.
+                    let mut row = crate::chrome::quiet_row(p, selected, ());
+                    row.insert(ChooserRow { pane: RowPane::Policy, index: i });
+                    row.observe(on_row_click);
+                    row.with_children(|line| {
+                        crate::chrome::row_label(line, INFO_LABEL_W, &left);
+                        crate::chrome::row_value(line, right.clone(), c, ());
+                    });
+                } else {
+                    p.spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        column_gap: Val::Px(crate::chrome::GAP_ROW),
+                        width: Val::Percent(100.0),
+                        ..default()
+                    })
+                    .with_children(|line| {
+                        crate::chrome::row_label(line, INFO_LABEL_W, &left);
+                        crate::chrome::row_value(line, right.clone(), c, ());
+                    });
+                }
             }
         });
     }
@@ -4343,18 +5224,20 @@ fn fill(commands: &mut Commands, at: Entity, rows: &[Row], kind: PanelKind, pane
 /// **Keyed on the selection, never on `Res<Chooser>::is_changed`** — `chrome::Follow`'s founding
 /// observation. The resource is written on most frames (a keystroke, a rescan, a message), so
 /// watching it would re-arm this for ever and the scroll would never run. `Follow` also swallows the
-/// first frame after the selection moves, because `ComputedNode` still describes the previous
-/// layout then.
 fn keep_the_chooser_selection_on_screen(
     chooser: Res<Chooser>,
     rows: Query<(&ChooserRow, &ComputedNode, &UiGlobalTransform)>,
     mut maps: Query<
         (&ComputedNode, &UiGlobalTransform, &mut ScrollPosition),
-        (With<MapList>, Without<KitList>, Without<ChooserRow>),
+        (With<MapList>, Without<KitList>, Without<ProjectList>, Without<ChooserRow>),
     >,
     mut kits: Query<
         (&ComputedNode, &UiGlobalTransform, &mut ScrollPosition),
-        (With<KitList>, Without<MapList>, Without<ChooserRow>),
+        (With<KitList>, Without<MapList>, Without<ProjectList>, Without<ChooserRow>),
+    >,
+    mut projects: Query<
+        (&ComputedNode, &UiGlobalTransform, &mut ScrollPosition),
+        (With<ProjectList>, Without<MapList>, Without<KitList>, Without<ChooserRow>),
     >,
     mut follow: Local<crate::chrome::Follow<(usize, usize)>>,
 ) {
@@ -4363,13 +5246,18 @@ fn keep_the_chooser_selection_on_screen(
     let (pane, index) = match chooser.focus {
         Focus::Maps => (0, chooser.map),
         Focus::Kits => (1, chooser.kit),
-        // The settings panel is content-sized and never scrolls; there is nothing to reveal.
-        Focus::Settings => return,
+        Focus::Projects => (2, chooser.project),
+        // The settings and policy panels are content-sized and never scroll; nothing to reveal.
+        Focus::Settings | Focus::Policy => return,
     };
     if !follow.should_scroll(Some((pane, index))) {
         return;
     }
-    let want = if pane == 0 { RowPane::Maps } else { RowPane::Kits };
+    let want = match pane {
+        0 => RowPane::Maps,
+        1 => RowPane::Kits,
+        _ => RowPane::Projects,
+    };
     let Some((row_mid, row_half)) = rows
         .iter()
         .find(|(r, _, _)| r.pane == want && r.index == index)
@@ -4387,13 +5275,21 @@ fn keep_the_chooser_selection_on_screen(
             scroll.0.y = y;
         }
     };
-    if pane == 0 {
-        for (list, tf, mut scroll) in &mut maps {
-            reveal(list, tf, &mut scroll);
+    match pane {
+        0 => {
+            for (list, tf, mut scroll) in &mut maps {
+                reveal(list, tf, &mut scroll);
+            }
         }
-    } else {
-        for (list, tf, mut scroll) in &mut kits {
-            reveal(list, tf, &mut scroll);
+        1 => {
+            for (list, tf, mut scroll) in &mut kits {
+                reveal(list, tf, &mut scroll);
+            }
+        }
+        _ => {
+            for (list, tf, mut scroll) in &mut projects {
+                reveal(list, tf, &mut scroll);
+            }
         }
     }
 }
@@ -4427,11 +5323,19 @@ fn on_row_click(
             chooser.focus = Focus::Kits;
             chooser.kit = row.index;
         }
+        RowPane::Policy => {
+            chooser.focus = Focus::Policy;
+            chooser.policy = row.index;
+        }
         RowPane::Maps => {
             chooser.focus = Focus::Maps;
             chooser.map = row.index;
         }
         RowPane::Settings => chooser.focus = Focus::Settings,
+        RowPane::Projects => {
+            chooser.focus = Focus::Projects;
+            chooser.project = row.index;
+        }
     }
     // **The second click opens it**, through the identical door `Enter` walks — see
     // [`open_the_selection`]. Bevy's `Pointer<Click>` carries `count`, so this needs no timer and
@@ -4453,6 +5357,8 @@ fn paint_chooser(
         Option<&MapList>,
         Option<&SettingsList>,
         Option<&KitInfoList>,
+        Option<&PolicyList>,
+        Option<&ProjectList>,
     )>,
     mut texts: Query<(
         &mut Text,
@@ -4461,26 +5367,36 @@ fn paint_chooser(
         Option<&ProblemLine>,
         Option<&HintLine>,
         Option<&KitInfoHeader>,
+        Option<&PolicyHeader>,
+        Option<&ProjectHeader>,
     )>,
 ) {
     if !chooser.is_changed() {
         return;
     }
     let s = chooser.screen();
-    for (e, kit, map, set, info) in &lists {
+    for (e, kit, map, set, info, policy, project) in &lists {
         if kit.is_some() {
             fill(&mut commands, e, &s.kits, PanelKind::List, Some(RowPane::Kits));
         } else if map.is_some() {
             fill(&mut commands, e, &s.maps, PanelKind::List, Some(RowPane::Maps));
+        } else if project.is_some() {
+            fill(&mut commands, e, &s.projects, PanelKind::List, Some(RowPane::Projects));
         } else if set.is_some() {
             fill(&mut commands, e, &s.settings, PanelKind::Inspector, Some(RowPane::Settings));
+        } else if policy.is_some() {
+            fill(&mut commands, e, &s.policy, PanelKind::Inspector, Some(RowPane::Policy));
         } else if info.is_some() {
             fill(&mut commands, e, &s.kit_info, PanelKind::Inspector, None);
         }
     }
-    for (mut text, maps, settings, problem, hint, kit_info) in &mut texts {
+    for (mut text, maps, settings, problem, hint, kit_info, policy, project) in &mut texts {
         if kit_info.is_some() {
             **text = s.kit_header.clone();
+        } else if policy.is_some() {
+            **text = s.policy_header.clone();
+        } else if project.is_some() {
+            **text = s.projects_header.clone();
         } else if maps.is_some() {
             **text = s.maps_header.clone();
         } else if settings.is_some() {
@@ -4557,15 +5473,18 @@ fn type_into_field(mut events: MessageReader<KeyboardInput>, mut chooser: ResMut
 /// by the same code. The door was not protecting the value; it was only making the author find a
 /// key to get past it.
 ///
-/// So there is one rule for making things, and it is `Enter` on the name. `make_it` already lands
-/// the selection on what it made, so the keyboard comes back to the list with the new row under it.
 fn keep_field(chooser: &mut Chooser, field: Field) {
     if !commit_field(chooser, field) {
         return;
     }
     chooser.editing = false;
     if let Some(new) = chooser.creating.clone() {
-        chooser.problem = make_it(chooser, &new).err();
+        // **Only a refusal overwrites the status line.** `make_it`'s project arm sets the
+        // line itself — `run emerge-mapper <dir> to open it` — and `.err()` unconditionally
+        // would have wiped it the same frame it was written.
+        if let Err(e) = make_it(chooser, &new) {
+            chooser.problem = Some(e);
+        }
     }
 }
 
@@ -4578,6 +5497,20 @@ fn keep_field(chooser: &mut Chooser, field: Field) {
 fn commit_field(chooser: &mut Chooser, field: Field) -> bool {
     let raw = chooser.raw.trim().to_owned();
     // A kit in hand has exactly one field, and it is this one.
+    // A project in hand is the same shape — one name, and `make_it` does the rest.
+    if let Some(New::Project(_)) = &chooser.creating {
+        let name = naming::to_snake_case(&raw);
+        if name.is_empty() {
+            chooser.problem = Some(
+                "a project needs a name — snake_case, starting with a letter".to_owned(),
+            );
+            return false;
+        }
+        chooser.creating = Some(New::Project(name));
+        chooser.raw.clear();
+        chooser.problem = None;
+        return true;
+    }
     if let Some(New::Kit(_)) = &chooser.creating {
         let name = naming::to_snake_case(&raw);
         if name.is_empty() {
@@ -4595,9 +5528,12 @@ fn commit_field(chooser: &mut Chooser, field: Field) -> bool {
     let mut draft = match (&chooser.creating, chooser.current_map()) {
         (Some(New::Map(d)), _) => d.clone(),
         (Some(New::Kit(_)), _) => return false,
+        (Some(New::Project(_)), _) => return false,
         (None, Some(m)) => match &m.summary {
             MapSummary::Read { bounds, .. } => {
-                let (origin, note) = read_origin_and_note(&m.path);
+                // A `Draft` carries the four editable fields; the bash is not one of them, and
+                // `write_settings` leaves it as it was.
+                let (origin, note, _) = read_map_details(&m.path);
                 Draft {
                     name: m.name.clone(),
                     bounds: *bounds,
@@ -4734,6 +5670,35 @@ fn make_it(chooser: &mut Chooser, new: &New) -> Result<(), String> {
             chooser.creating = None;
             rescan_keeping_place(chooser, Some(&name));
             chooser.focus = Focus::Maps;
+        }
+        New::Project(name) => {
+            // **A sibling beside this root** — the parent is where the other projects live, and
+            // the vocabulary is this project's own, copied byte-for-byte.
+            let parent = chooser
+                .root
+                .parent()
+                .ok_or_else(|| "this project has no parent directory to make a sibling in".to_owned())?
+                .to_path_buf();
+            let vocab = chooser.root.join(EMERGE_DIR).join("vocab.ron");
+            let dir = create_project(&parent, name, &vocab)?;
+            chooser.creating = None;
+            rescan_keeping_place(chooser, None);
+            chooser.focus = Focus::Projects;
+            if let Some(i) = chooser
+                .catalog
+                .projects
+                .iter()
+                .position(|p| p.dir == dir)
+            {
+                chooser.project = i + 1;
+            }
+            // **The status line reports the command that opens it** — nothing opens in-process,
+            // so the author's next keystroke is in the other terminal. The name is what was
+            // typed, and the directory is where it landed.
+            chooser.problem = Some(format!(
+                "`{name}` — run `emerge-mapper {}` to open it",
+                dir.display()
+            ));
         }
     }
     Ok(())
@@ -4874,6 +5839,18 @@ fn drive_chooser(
                 "Keep it",
             );
         }
+        // **A policy removal is the same question, asked the same way** — the modal names the
+        // exact entry (`shown`), because a `because` string is hand-written rationale and
+        // `docs/ui.md` §1.4's rule is that "are you sure?" is not information.
+        if let Some(Ask::RemovePolicy { shown, .. }) = chooser.ask.clone() {
+            confirm.ask(
+                crate::confirm::Asked::DeleteEntry,
+                "Remove this policy entry?",
+                format!("`{shown}` is spliced out of the kit's project.ron. The file's comments are kept."),
+                "Remove it",
+                "Keep it",
+            );
+        }
         return;
     }
     // **Arrows move inside a panel. `Tab` crosses between them.** One rule, no exceptions — the
@@ -4892,17 +5869,15 @@ fn drive_chooser(
     if crate::keys::repeating_key(&keyboard, KeyCode::ArrowDown, &mut repeat, dt) {
         chooser.step(1);
     }
-    let shifted = keyboard.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
-    if keyboard.just_pressed(KeyCode::Tab) {
-        chooser.section(if shifted { -1 } else { 1 });
-    }
-    // `left`/`right` are the same verb, not a second one: on a column of rows they have no
-    // inside-the-panel meaning, so they cross, and an author who reaches for them is not wrong.
+    // **`left`/`right` cross columns**, the same pair the Meshes tab uses to move between its two
+    // side-by-side lists (`keys::Action::FocusCandidates` / `FocusLibrary`). There is no `Tab`: it
+    // was the only `KeyCode::Tab` in the crate, and a second crossing key on one screen out of six
+    // is a dialect. See `Focus` for the whole rule.
     if keyboard.just_pressed(KeyCode::ArrowRight) {
-        chooser.section(1);
+        chooser.cross(1);
     }
     if keyboard.just_pressed(KeyCode::ArrowLeft) {
-        chooser.section(-1);
+        chooser.cross(-1);
     }
     // **`N` makes a new one of whatever this column lists** — see `Chooser::start_new`.
     if keyboard.just_pressed(KeyCode::KeyN) {
@@ -4934,25 +5909,34 @@ fn drive_chooser(
             );
         }
     }
-    // **`Space` turns a kit on or off, standing on the kit itself.**
+    // **`B` names the bash the selected map draws on**, cycling the project's declared combinations
+    // and rounding back to every-kit.
     //
-    // Asked for at the keyboard, 2026-08-16: *"it would feel better if the space bar toggled kits on
-    // in the kit area."* It used to be `Enter` on a mirrored list of kit rows inside MAP INFO — the
-    // state was visible, which was the point of putting it there, but it was a second list of the
-    // same kits one panel away from the real one. Now the tick lives on the row that names the kit,
-    // and the key that flips it is pressed where you are already looking.
-    //
-    // It still means *"offer this kit to the selected map"*, because a palette belongs to a map —
-    // `toggle_kit` says so when no map is selected rather than guessing one.
-    if keyboard.just_pressed(KeyCode::Space) && chooser.focus == Focus::Kits {
+    // On the MAPS column, because a bash belongs to a map — the kit ticks that used to live on the
+    // KITS column edited a per-map list, and a combination is shared, so flipping one from a kit row
+    // would silently change every other map naming it. There is no verb here that *makes* a bash: it
+    // is authored by hand in `kits.ron`, the same way that file's `lattice` is.
+    if keyboard.just_pressed(KeyCode::KeyB) && chooser.focus == Focus::Maps {
+        chooser.problem = chooser.cycle_bash().err();
+        return;
+    }
+    // **`A` points `authoring` at the kit under the cursor** — the mouse half is the clickable
+    // `new work lands here` value. Both go through `set_authoring`, and the row repaints because
+    // `rescan_keeping_place` rebuilds the catalog.
+    if keyboard.just_pressed(KeyCode::KeyA) && chooser.focus == Focus::Kits {
         if chooser.on_new_row() {
             chooser.problem =
-                Some("that row makes a new kit — there is nothing yet to turn on".to_owned());
+                Some("that row makes a new kit — there is nothing yet to make authoring".to_owned());
             return;
         }
-        match chooser.kit.checked_sub(1) {
-            Some(i) => chooser.problem = chooser.toggle_kit(i).err(),
-            None => chooser.problem = Some("no kit under the cursor".to_owned()),
+        let Some(kit) = chooser.current_kit() else {
+            chooser.problem = Some("no kit under the cursor".to_owned());
+            return;
+        };
+        let name = kit.label.clone();
+        chooser.problem = set_authoring(&chooser.root, &name).err();
+        if chooser.problem.is_none() {
+            rescan_keeping_place(&mut chooser, None);
         }
         return;
     }
@@ -4995,11 +5979,24 @@ fn open_the_selection(
             chooser.editing = true;
             return;
         }
-        // **`Enter` on a `+ new …` row is the visible half of `N`** — the row an author can see,
-        // doing what the key beside it does.
-        if chooser.on_new_row() {
-            chooser.start_new();
+        if chooser.focus == Focus::Projects {
+            if let Some(p) = chooser
+                .project
+                .checked_sub(1)
+                .and_then(|i| chooser.catalog.projects.get(i))
+            {
+                if p.current {
+                    chooser.problem = None;
+                } else {
+                    chooser.problem = Some(format!(
+                        "`{}` — run `emerge-mapper {}` to open it",
+                        p.name,
+                        p.dir.display()
+                    ));
+                }
+            }
             return;
+        // **Opened here, and the screen only moves once it has.**
         }
         // **Opened here, and the screen only moves once it has.**
         //
@@ -5028,13 +6025,33 @@ mod render_tests {
     use super::*;
 
     fn chooser_with(kits: Vec<Kit>) -> Chooser {
-        Chooser::new(PathBuf::from("."), Catalog { kits, maps: Vec::new() }, None)
+        Chooser::new(
+            PathBuf::from("."),
+            Catalog {
+                kits,
+                maps: Vec::new(),
+                authoring: None,
+                bashes: Vec::new(),
+                projects: Vec::new(),
+            },
+            None,
+        )
     }
 
     /// The same, with the project's maps — which is where they live now, so they are given beside
     /// the kits rather than inside one.
     fn chooser_with_maps(kits: Vec<Kit>, maps: Vec<MapEntry>) -> Chooser {
-        Chooser::new(PathBuf::from("."), Catalog { kits, maps }, None)
+        Chooser::new(
+            PathBuf::from("."),
+            Catalog {
+                kits,
+                maps,
+                authoring: None,
+                bashes: Vec::new(),
+                projects: Vec::new(),
+            },
+            None,
+        )
     }
 
     fn kit(flag: Option<&str>, label: &str, pieces: usize) -> Kit {
@@ -5122,8 +6139,6 @@ mod render_tests {
                     placements: 0,
                     stamps: 0,
                     bounds: (4.0, 3.0, 4.0),
-                    palette: Vec::new(),
-                    uses: BTreeSet::new(),
                 },
             }]);
         let screen = render(&stocked);
@@ -5153,8 +6168,8 @@ mod render_tests {
 
     /// **The settings hint says which key does which job**, because neither has a visual affordance
     /// — ExposeHK's own caveat about techniques with "no visual representation to aid their
-    /// discovery". If the line does not distinguish moving-inside from crossing-between, the
-    /// distinction this panel was just rebuilt around is invisible.
+    /// discovery". Both are arrows now, so the line has to distinguish the two directions: `up`/
+    /// `down` walk this panel's rows, `left`/`right` leave it for the next column.
     #[test]
     fn the_settings_hint_separates_moving_from_crossing() {
         let mut c = chooser_with_maps(vec![kit(Some("site"), "site", 1)], vec![MapEntry {
@@ -5164,8 +6179,6 @@ mod render_tests {
                     placements: 0,
                     stamps: 0,
                     bounds: (4.0, 3.0, 4.0),
-                    palette: Vec::new(),
-                    uses: BTreeSet::new(),
                 },
             }]);
         c.focus = Focus::Settings;
@@ -5176,8 +6189,12 @@ mod render_tests {
             "the arrows are what move here: {hint}"
         );
         assert!(
-            hint.contains("Tab panel"),
-            "and Tab is what crosses: {hint}"
+            hint.contains("left/right column"),
+            "and left/right are what cross: {hint}"
+        );
+        assert!(
+            !hint.contains("Tab"),
+            "there is no Tab on this screen any more — the editor navigates with arrows: {hint}"
         );
     }
 }
@@ -5352,6 +6369,9 @@ fn build_chooser(mut commands: Commands, opening: Res<MenuOpening>, existing: Op
                 Catalog {
                     kits: Vec::new(),
                     maps: Vec::new(),
+                    authoring: None,
+                    bashes: Vec::new(),
+                    projects: Vec::new(),
                 },
                 Some(e),
             )

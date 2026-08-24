@@ -41,6 +41,9 @@ pub struct Fixture {
     /// `.descriptor("site/wall", ..)`, and binding that library as `furniture` is refused at load —
     /// correctly, since the directory says one thing and the ids say another.
     ids: Vec<(String, Vec<String>)>,
+    /// **Named combinations of kits**, as `(bash name, namespaces)` — `kits.ron`'s `bash`. Every
+    /// namespace named must be one this fixture binds, or the write is refused at load.
+    bashes: Vec<(String, Vec<String>)>,
 }
 
 /// Where the workspace lives, for the one file that has to be borrowed.
@@ -202,6 +205,7 @@ impl Fixture {
             compositions: Vec::new(),
             kits: Vec::new(),
             ids: Vec::new(),
+            bashes: Vec::new(),
         }
     }
 
@@ -245,11 +249,21 @@ impl Fixture {
         std::fs::write(
             &path,
             format!(
-                "(version: {}, bind: [{list}], authoring: Some(\"{authoring}\"))",
+                "(version: {}, bind: [{list}], bash: [], authoring: Some(\"{authoring}\"))",
                 emerge_core::kits::KITS_VERSION
             ),
         )
         .unwrap_or_else(|e| panic!("{path:?}: {e}"));
+    }
+
+    /// **A named combination of kits**, declared in call order — which is the order the chooser's
+    /// `B` walks them in. The namespaces are the ones the binding carries, not directory names.
+    pub fn bash(mut self, name: &str, kits: &[&str]) -> Fixture {
+        self.bashes.push((
+            name.to_owned(),
+            kits.iter().map(|s| (*s).to_owned()).collect(),
+        ));
+        self
     }
 
     /// **A descriptor of a stated footprint**, for a test about what the footprint *does*.
@@ -369,6 +383,43 @@ impl Fixture {
         let full = format!("edge: (tokens: [{}]),", rows.join(", "));
         std::fs::write(&at, was.replace(one, &full))
             .unwrap_or_else(|e| panic!("cannot write {at:?}: {e}"));
+        self
+    }
+
+    /// **A `kind` token that brings an `effects` token with it** — the *derived* half of `effects`.
+    ///
+    /// `Vocabularies::implied_effects` resolves the implication, `Vocabularies::masks` folds it into
+    /// the mask, and `labels::settle_library` writes it into the stored list at open. The fixture's
+    /// own vocabulary declares no implication at all, which is right for every other test here and
+    /// is exactly why the settling had nothing to be driven against — the one test that reached it
+    /// read the shipped corpus.
+    ///
+    /// The effect token is declared on the `effects` axis in the same breath, because
+    /// `implied_effects` refuses an implication naming a token that axis does not hold.
+    pub fn kind_implies(self, effect: &str) -> Fixture {
+        let at = self.dir.join("assets/emerge/vocab.ron");
+        let was =
+            std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("cannot read {at:?}: {e}"));
+        let kind = r#"kind: (tokens: [( name: "prop", note: "a thing" )]),"#;
+        let effects = r#"effects: (tokens: [( name: "inert", note: "does nothing" )]),"#;
+        assert!(
+            was.contains(kind) && was.contains(effects),
+            "the fixture's kind and effects axes must be the shipped ones, or this is a no-op"
+        );
+        let text = was
+            .replace(
+                kind,
+                &format!(
+                    r#"kind: (tokens: [( name: "prop", note: "a thing", implies: ["{effect}"] )]),"#
+                ),
+            )
+            .replace(
+                effects,
+                &format!(
+                    r#"effects: (tokens: [( name: "inert", note: "does nothing" ), ( name: "{effect}", note: "follows the kind" )]),"#
+                ),
+            );
+        std::fs::write(&at, text).unwrap_or_else(|e| panic!("cannot write {at:?}: {e}"));
         self
     }
 
@@ -582,10 +633,25 @@ impl Fixture {
             })
             .collect::<Vec<_>>()
             .join(", ");
+        // **The declared combinations, in call order.** Empty is the ordinary fixture: every map
+        // offers every bound kit, which is what `Map::bash: None` means.
+        let bash = self
+            .bashes
+            .iter()
+            .map(|(name, kits)| {
+                let members = kits
+                    .iter()
+                    .map(|k| format!("\"{k}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("(name: \"{name}\", kits: [{members}])")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         std::fs::write(
             emerge.join("kits.ron"),
             format!(
-                "(version: {}, bind: [{bind}], authoring: Some(\"{DEFAULT_KIT}\"))",
+                "(version: {}, bind: [{bind}], bash: [{bash}], authoring: Some(\"{DEFAULT_KIT}\"))",
                 emerge_core::kits::KITS_VERSION
             ),
         )
@@ -610,8 +676,8 @@ impl Fixture {
             maps.join(format!("{map}.map.ron")),
             format!(
                 "(\n    version: 3,\n    name: \"{map}\",\n    origin: (0.0, 0.0, 0.0),\n    \
-                 bounds: (16.0, 3.0, 16.0),\n    placements: [\n{}\n    ],\n    stamps: [],\n    \
-                 locations: [],\n)",
+                 bounds: (16.0, 3.0, 16.0),\n    bash: None,\n    placements: [\n{}\n    ],\n    \
+                 stamps: [],\n    locations: [],\n)",
                 self.placements.join("\n")
             ),
         )

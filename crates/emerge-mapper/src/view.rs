@@ -22,7 +22,7 @@
 
 use std::f32::consts::TAU;
 
-use bevy::input::mouse::AccumulatedMouseScroll;
+use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
 
 use crate::keys::{self, Action};
@@ -56,7 +56,34 @@ pub(crate) const MIN_ZOOM: f32 = 0.25;
 /// The furthest out the rig goes. `pub(crate)` because the Compose sheet has to know it: a gallery
 /// that needs more than this to be seen whole is cropped, and cropped silently reads as complete.
 pub(crate) const MAX_ZOOM: f32 = 80.0;
+/// Metres of viewport height per **line** of wheel — one detent of a notched mouse wheel.
 const ZOOM_STEP: f32 = 2.0;
+
+/// **A wheel notch and a trackpad swipe are not the same number, and the wheel is the one this
+/// editor was tuned for.**
+///
+/// `AccumulatedMouseScroll` carries a [`MouseScrollUnit`] as well as a delta, and on macOS winit
+/// reports a notched wheel as `Line` and a trackpad — anything with precise deltas — as `Pixel`.
+/// That *is* the device check: the platform already knows, so nothing here has to guess from the
+/// shape of the numbers.
+///
+/// Multiplying a pixel delta by [`ZOOM_STEP`] treated every pixel as a detent. A gentle two-finger
+/// swipe accumulates on the order of thirty pixels in a frame, so one frame asked for sixty metres
+/// of viewport height against a range ([`MIN_ZOOM`]..[`MAX_ZOOM`]) that is eighty metres wide —
+/// the whole zoom in a flick. Reported from the keyboard: *"way too sensitive for a touchpad."*
+///
+/// [`MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR`] is the pinned engine's own answer to how many
+/// pixels make a line, so the conversion is Bevy's number rather than one invented here — and both
+/// devices end up asking for the same zoom per unit of intent. `src/camera.rs` does the same, for
+/// the same reason and with the same constant; the two are kept in step by hand, like `PAN_SPEED`.
+fn wheel_lines(scroll: &AccumulatedMouseScroll) -> f32 {
+    match scroll.unit {
+        MouseScrollUnit::Line => scroll.delta.y,
+        MouseScrollUnit::Pixel => {
+            scroll.delta.y / MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR
+        }
+    }
+}
 /// Metres a second, matching the game's `src/camera.rs` so the two feel the same.
 const PAN_SPEED: f32 = 16.0;
 
@@ -216,8 +243,9 @@ fn drive(
     let over_ui = hovered_ui.iter().any(|h| h.0);
     let dt = time.delta_secs();
 
-    if scroll.delta.y != 0.0 && !over_ui {
-        rig.height = (rig.height - scroll.delta.y * ZOOM_STEP).clamp(MIN_ZOOM, MAX_ZOOM);
+    let lines = wheel_lines(&scroll);
+    if lines != 0.0 && !over_ui {
+        rig.height = (rig.height - lines * ZOOM_STEP).clamp(MIN_ZOOM, MAX_ZOOM);
     }
 
     let step = TAU / ROTATION_STEPS as f32;
@@ -444,6 +472,36 @@ pub fn pan_direction(wish: Vec2, yaw: f32) -> Vec3 {
 
 #[cfg(test)]
 mod tests {
+    /// **A trackpad and a wheel ask for the same zoom per unit of intent.**
+    ///
+    /// The device is not guessed: winit reports a notched wheel as `Line` and anything with precise
+    /// deltas — a trackpad, a Magic Mouse — as `Pixel`, and this is only the conversion between
+    /// them. A pixel delta used to be multiplied by `ZOOM_STEP` as if every pixel were a detent,
+    /// which asked for more viewport height in one frame than the whole zoom range holds.
+    #[test]
+    fn a_trackpad_swipe_is_read_in_lines_not_pixels() {
+        use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
+
+        let of = |unit, y| {
+            super::wheel_lines(&AccumulatedMouseScroll { unit, delta: Vec2::new(0.0, y) })
+        };
+        // A wheel is already in lines and is left alone — the tuning this app shipped with.
+        assert_eq!(of(MouseScrollUnit::Line, 1.0), 1.0);
+        assert_eq!(of(MouseScrollUnit::Line, -3.0), -3.0);
+
+        // A frame of trackpad pixels is divided by the engine's own pixels-per-line, so a swipe
+        // that used to cross the entire range now moves a fraction of one detent.
+        let f = MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR;
+        assert_eq!(of(MouseScrollUnit::Pixel, f), 1.0, "one line's worth of pixels is one line");
+        let swipe = of(MouseScrollUnit::Pixel, 30.0);
+        assert!(
+            swipe.abs() < 1.0,
+            "a thirty-pixel frame asked for {swipe} lines; before this it asked for thirty"
+        );
+        // Direction is untouched: scrolling up still zooms the same way on both devices.
+        assert!(of(MouseScrollUnit::Pixel, -f) < 0.0);
+    }
+
     use super::*;
 
     /// **The compass and the pan keys describe one camera** — on the half where they can.

@@ -15,6 +15,7 @@
 - **Setting up a new machine?** `SETUP.md` — prerequisites, the gitignored `.cargo/config.toml` you must write by hand, both test layers, and the agent-debugger install.
 - **Read the vendored Bevy 0.19 source before writing Bevy code** — not bevy.org, which tracks `main`. See "Bevy 0.19" below.
 - Consult Bevy documentation often. It can be found at codex_fs/offline_reference_docs/bevy-0.19-book/
+- Close the Bevy app as soon as you've finished your testing. Do not leave it running.
 
 ## Workspace & crates
 

@@ -68,13 +68,15 @@ use crate::placement::ir::Guard;
 /// read and re-saved here. See the module note on why that is a floor rather than an equality.
 ///
 /// `2` added [`Map::stamps`]. `3` took `face_bands` and `snap_divisor` off the kit's policy, where
-/// they described a lattice a *kit* does not have. `4` added [`Map::palette`], whose empty default
+/// they described a lattice a *kit* does not have. `4` added `palette`, whose empty default
 /// is what every earlier map already meant. **`5` gave the two lattice fields up again**, to
 /// [`crate::kits::Lattice`]: a map does have exactly one lattice, but so does the project, and a
 /// tile's adjacency contract cannot depend on which map happens to be open. That one is a
 /// *removal*, so `deny_unknown_fields` means a map still carrying them is refused by name rather
-/// than read with them ignored — which is the loud failure this schema's rules are for.
-pub const MAP_VERSION: u32 = 5;
+/// than read with them ignored — which is the loud failure this schema's rules are for. **`6`
+/// replaced `palette` with [`Map::bash`]** — the ad-hoc per-map list became a combination declared
+/// once in `kits.ron`, so two maps can draw on the same one and it is validated in one place.
+pub const MAP_VERSION: u32 = 6;
 
 /// One authored world.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -111,28 +113,27 @@ pub struct Map {
     /// things above the floor and the ceiling height is what decides where.
     #[serde(default = "default_bounds")]
     pub bounds: (f32, f32, f32),
-    /// **Which kits' pieces this map offers**, by namespace — the `site` in `site/wall_corner`.
+    /// **The named combination of kits this map offers**, or `None` for every bound kit.
     ///
     /// # A filter on the palette, and never on what loads
     ///
     /// This does **not** decide what the map can resolve. Every kit the project binds is loaded
     /// whatever this says, so a piece already placed always resolves and a composition may still
-    /// seat two kits' pieces. It decides only what an author is *offered* while building.
+    /// cross kits. `OpenMap::palette_namespaces` folds the namespaces the content already names
+    /// back in, so naming a bash cannot strand a placement.
     ///
-    /// That separation is the whole design: a setting that could strand a placement is a setting
-    /// that breaks a map by being edited, and `Project::palette` folds the namespaces the content
-    /// already names back in for exactly that reason. **Unticking a kit cannot break anything**,
-    /// which is what lets it be a checkbox rather than a decision.
+    /// The name is not checked here — a map validates in isolation and cannot see `kits.ron`.
+    /// `OpenMap::open` refuses a name the project does not declare.
     ///
-    /// # Empty means all of them
-    ///
-    /// Not "none" — a map offering nothing is a map nobody can build. Empty is also what every map
-    /// written before this field existed already meant, so the `#[serde(default)]` needs no
-    /// migration, and it is the state a new map starts in: Liapis' *user fatigue* is a named failure
-    /// mode of tools that "require a very specific input" before they do anything
-    /// (`10.1145/3402942.3402946`), and ticking every kit to get a palette would be exactly that.
-    #[serde(default)]
-    pub palette: Vec<String>,
+    /// **No `serde(default)`, and it would change nothing if there were one.** Serde deserializes a
+    /// missing field of `Option` type as `None` (`serde::__private::de::missing_field`, which only
+    /// answers `deserialize_option`), so an omitted `bash` and a written `bash: None` are the same
+    /// value in every format — there is no hook that makes a bare `Option` field required. That is
+    /// survivable here and would not be for [`crate::kits::Kits::bash`]: this field has exactly two
+    /// meanings and the absent spelling maps onto the one that is also the new-map state, while an
+    /// absent list of *declarations* would hide the difference between "none" and "not stated".
+    /// Everything this program writes states it: nothing here is `skip_serializing_if`.
+    pub bash: Option<String>,
     pub placements: Vec<Placed>,
     /// **Compositions this map stamps** — a reference each, never the rows they stand for.
     ///
@@ -164,7 +165,7 @@ impl Default for Map {
             name: String::new(),
             origin: (0.0, 0.0, 0.0),
             bounds: default_bounds(),
-            palette: Vec::new(),
+            bash: None,
             placements: Vec::new(),
             stamps: Vec::new(),
             locations: Vec::new(),
@@ -685,9 +686,43 @@ mod tests {
         let e = Map::parse(stale).err().unwrap_or_default();
         assert!(e.contains("snap_divisor"), "the refusal names the field: {e}");
 
-        // And one written before they ever arrived still opens, meaning exactly what it meant.
-        let before = r#"(version: 2, name: "m", origin: (0.0, 0.0, 0.0), placements: [], locations: [])"#;
+        // And one carrying neither of them still opens, meaning exactly what it meant.
+        let before =
+            r#"(version: 2, name: "m", origin: (0.0, 0.0, 0.0), placements: [], locations: [])"#;
         Map::parse(before).unwrap_or_else(|e| panic!("a pre-lattice map still opens: {e}"));
+    }
+
+    /// **A map states the combination it draws on, and `None` is every bound kit.**
+    ///
+    /// The absent spelling means the same thing, and cannot be made to mean anything else: serde
+    /// answers a missing `Option` field with `None` in every format, so there is no version of this
+    /// field that is both `Option<String>` and required. Pinned here because that is the fact the
+    /// schema doc rests on — everything this program writes states `bash`, and a hand-written file
+    /// that leaves it out has written the new-map state rather than something nobody chose.
+    #[test]
+    fn a_map_names_a_bash_or_says_none_and_none_is_every_bound_kit() {
+        let stated =
+            r#"(version: 6, name: "m", origin: (0.0, 0.0, 0.0), bash: None, placements: [], locations: [])"#;
+        let m = Map::parse(stated).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(m.bash, None, "`None` is every bound kit, and it is written down");
+        assert_eq!(Map::default().bash, None, "a new map starts there too");
+
+        let silent = r#"(version: 6, name: "m", origin: (0.0, 0.0, 0.0), placements: [], locations: [])"#;
+        let m = Map::parse(silent).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(m.bash, None, "and omitting it is the same value, not a second meaning");
+
+        let named =
+            r#"(version: 6, name: "m", origin: (0.0, 0.0, 0.0), bash: Some("hub"), placements: [], locations: [])"#;
+        let m = Map::parse(named).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(m.bash.as_deref(), Some("hub"));
+
+        // **Written back out every time.** No `skip_serializing_if`, so a map saved from this
+        // program always says which combination it draws on.
+        let out = ron::ser::to_string(&Map { bash: Some("hub".into()), ..Map::default() })
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(out.contains("bash:Some(\"hub\")") || out.contains("bash: Some(\"hub\")"), "{out}");
+        let out = ron::ser::to_string(&Map::default()).unwrap_or_else(|e| panic!("{e}"));
+        assert!(out.contains("bash:None") || out.contains("bash: None"), "{out}");
     }
 
     fn table_map() -> Map {
@@ -696,7 +731,7 @@ mod tests {
             name: "galley".into(),
             origin: (0.0, 0.0, 0.0),
             bounds: default_bounds(),
-            palette: Vec::new(),
+            bash: None,
             stamps: Vec::new(),
             placements: vec![
                 Placed {

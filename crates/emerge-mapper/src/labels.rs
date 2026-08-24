@@ -192,9 +192,16 @@ pub struct LabelsPlugin;
 /// the configured model and claims nothing.
 #[derive(Resource, Default)]
 pub struct Labeler {
-    /// Whether the config has been read yet — so a project with no `.env` costs one read, not one
-    /// per frame.
-    read: bool,
+    /// **The project root whose `.env` this state was read for** — so a project with no `.env`
+    /// costs one read, not one per frame, and a *different* project costs a fresh one.
+    ///
+    /// It was a session-wide `read: bool` latch, and that latch outlived the door: nothing actually
+    /// resets a resource on a door change (`screen::OWNERSHIP` classifies this one `Project` and
+    /// says itself the list changes no behaviour), so opening kit B kept kit A's model — and worse,
+    /// kit A's `Link::Live` — on the band: `connected: qwen3-vl` about a project nothing had ever
+    /// dialed, which is the exact invented fact this struct's own doc forbids. Keying the latch on
+    /// the root makes the reset the comparison.
+    read_for: Option<std::path::PathBuf>,
     /// The model named by the config, then by the last answer. `None` means unconfigured.
     pub model: Option<String>,
     pub link: Link,
@@ -229,7 +236,7 @@ impl Labeler {
     /// **What the status band says.** Empty until the config has been read, so the band does not
     /// flicker a claim on its first frame.
     pub fn line(&self) -> String {
-        match (self.read, self.model.as_deref(), self.link) {
+        match (self.read_for.is_some(), self.model.as_deref(), self.link) {
             (false, ..) => String::new(),
             (true, None, _) => "labeler: not configured".to_owned(),
             (true, Some(m), Link::Untried) => format!("labeler: {m}"),
@@ -243,19 +250,22 @@ impl Labeler {
 ///
 /// The read is lazy rather than an `OnEnter` system because it needs the project's root to find the
 /// `.env` beside it, and the project is not there on every frame this could be registered for. One
-/// read per session: `read` latches whether or not a config was found.
+/// read per **project**: `read_for` latches the root it was read for, whether or not a config was
+/// found — and a different root reads again and drops the old project's link evidence with it.
 fn paint_labeler(
     mut labeler: ResMut<Labeler>,
     project: Option<Res<Project>>,
     mut lines: Query<(&mut Text, &mut TextColor), With<crate::chrome::LabelerLine>>,
 ) {
-    if !labeler.read
-        && let Some(project) = project.as_ref()
+    if let Some(project) = project.as_ref()
+        && labeler.read_for.as_deref() != Some(project.root.as_path())
     {
-        labeler.read = true;
+        labeler.read_for = Some(project.root.clone());
         labeler.model = crate::vlm::VlmConfig::load(&project.root)
             .ok()
             .map(|cfg| cfg.model);
+        // Evidence about a round trip belongs to the project the trip was made for.
+        labeler.link = Link::Untried;
     }
     let want = labeler.line();
     let tint = match labeler.link {
@@ -540,9 +550,12 @@ pub(crate) fn poll_tasks(
                 record_proposals(&project.root, &entry, &name);
                 suggestions.insert(&inflight.target, entry);
                 generation.0 = generation.0.wrapping_add(1);
-                state.status.note(format!(
-                    "labels proposed for `{name}` — U applies, Y discards"
-                ));
+                // No key to press: a label applies on arrival (`tiles::apply_what_arrives`), and a
+                // paused batch's staged answers go with `Shift+Y` or resume with it. This line once
+                // advised `U applies, Y discards` — two keys this editor no longer binds.
+                state
+                    .status
+                    .note(format!("labels proposed for `{name}`"));
             }
             // The gate's rejection text (axis + legal tokens) or the transport's complaint,
             // verbatim — the author decides what to do with it.
@@ -1293,6 +1306,27 @@ pub(crate) fn settle_implied_effects(
     d.effects = settled_effects(&d.kind, &d.effects, vocab);
 }
 
+/// **The same settling over a whole library**, answering how many rows moved.
+///
+/// The merged library is *derived*, and it is built in two places — `Project::open` from the bound
+/// kits, and `tiles::commit_measured` from the edited measurements. Both have to normalize, or the
+/// second undoes the first; this is the one definition they share so they cannot drift on what
+/// "settled" means.
+pub(crate) fn settle_library(
+    library: &mut emerge_core::library::Library,
+    vocab: &emerge_core::vocab::Vocabularies,
+) -> usize {
+    let mut settled = 0usize;
+    for d in &mut library.descriptors {
+        let before = d.effects.clone();
+        settle_implied_effects(d, vocab);
+        if d.effects != before {
+            settled += 1;
+        }
+    }
+    settled
+}
+
 /// **The effects a kind implies, folded into a set — as a value, not a mutation.**
 ///
 /// Extracted so the *preview* can answer the same question the apply does. The DOES chips ghost-lit
@@ -1560,7 +1594,7 @@ mod tests {
         let mut l = Labeler::default();
         assert_eq!(l.line(), "", "nothing is claimed before the config is read");
 
-        l.read = true;
+        l.read_for = Some(std::path::PathBuf::from("/kit"));
         assert_eq!(l.line(), "labeler: not configured");
 
         l.model = Some("qwen3-vl".to_owned());
@@ -1582,8 +1616,9 @@ mod tests {
 
     /// **The preview promises what applying will do, including the half the model never proposes.**
     ///
-    /// `IMPLIED_BY_KIND` is deliberately not asked of the model — a bed recharges stamina because
-    /// this game says beds do, and no render can show it. That made the proposal preview *wrong*
+    /// An implied effect (`implies` on a `kind` token in `vocab.ron`) is deliberately not asked of
+    /// the model — a bed recharges stamina because this game says beds do, and no render can show
+    /// it. That made the proposal preview *wrong*
     /// rather than merely quiet: the DOES chips ghost-lit `suggestion.effects`, so a bed read
     /// `effects: []` while applying it wrote `stamina-recharge`. Reported at the keyboard as the
     /// model refusing to acknowledge a bed; it was the preview refusing to admit what the editor

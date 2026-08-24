@@ -4,7 +4,7 @@
       "label": "open the Tiles tab with the site kit",
       "goal": "the site kit is the architectural set, and it is where the solver's content has to come from",
       "do": [
-        "press 3"
+        "press 2"
       ],
       "checkpoint": "the Tiles tab is open",
       "recovery": "if the palette shows fridges and beds you are on the furniture kit: restart with --kit site"
@@ -16,7 +16,7 @@
         "press N for a new tile"
       ],
       "checkpoint": "the open tile is unsaved",
-      "recovery": "if nothing changes you are not on the Tiles tab: press 3 first"
+      "recovery": "if nothing changes you are not on the Tiles tab: press 2 first"
     },
     {
       "label": "build the corner tile",
@@ -51,7 +51,7 @@
         "press N for a new tile"
       ],
       "checkpoint": "the open tile is unsaved",
-      "recovery": "if nothing changes you are not on the Tiles tab: press 3 first"
+      "recovery": "if nothing changes you are not on the Tiles tab: press 2 first"
     },
     {
       "label": "build the low wall tile",

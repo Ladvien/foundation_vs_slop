@@ -50,7 +50,7 @@
     {
       "label": "open the Tiles tab and start the corner",
       "goal": "now the tiles. A corner is where two solid sides meet -- without one a kit can only make corridors, because there is no way to close a room off",
-      "do": ["press 3", "press N for a new tile", "type a name like corner", "press Enter"],
+      "do": ["press 2", "press N for a new tile", "type a name like corner", "press Enter"],
       "checkpoint": "the open tile is unsaved",
       "recovery": "if the list on this tab is empty, the meshes did not import -- go back to 2 and check the IN LIBRARY side"
     },

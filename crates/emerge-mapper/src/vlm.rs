@@ -477,6 +477,32 @@ fn mount_meaning(m: &Mount) -> &'static str {
     }
 }
 
+/// **The wire shape the prompt offers for one mount** — the one place a mount's JSON example is
+/// written.
+///
+/// It was written twice: here, for the prompt, and again inside
+/// `every_offered_mount_round_trips_through_its_own_token`, which is the test that exists to prove
+/// the offered set and the accepted set agree. The copies disagreed — the test's had an `OnFace`
+/// arm and the prompt's did not — so the prompt advertised `{"on": "face"}`, a shape
+/// [`valid_mount`] refuses for want of both its payloads, and the test went on passing. One
+/// function, read by both, is the only arrangement in which that cannot recur.
+fn mount_shape(m: &Mount) -> String {
+    let token = mount_token(m);
+    match m {
+        Mount::OnSurface { class } => format!(r#"{{"on": "{token}", "class": "{class}"}}"#),
+        // A face carries both halves — the class saying which face, the height saying how far up
+        // it — and `valid_mount` demands both rather than inventing either.
+        Mount::OnFace { class, height } => {
+            format!(r#"{{"on": "{token}", "class": "{class}", "height_m": {height}}}"#)
+        }
+        Mount::OnWall { height }
+        | Mount::Decal {
+            on: DecalHost::Wall { height },
+        } => format!(r#"{{"on": "{token}", "height_m": {height}}}"#),
+        _ => format!(r#"{{"on": "{token}"}}"#),
+    }
+}
+
 fn mount_lines(surfaces: &[String]) -> String {
     let mut out = String::from(
         "mount - what kind of support THIS asset needs (exactly one object, or null when unclear).\n\
@@ -484,18 +510,7 @@ fn mount_lines(surfaces: &[String]) -> String {
          judge it by what the object IS.\n",
     );
     for m in mount_options(surfaces) {
-        let token = mount_token(&m);
-        // Only the shape of the EXTRA fields is per-variant now; the name comes from one table.
-        let json = match &m {
-            Mount::OnSurface { class } => format!(r#"{{"on": "{token}", "class": "{class}"}}"#),
-            Mount::OnWall { .. }
-            | Mount::Decal {
-                on: DecalHost::Wall { .. },
-            } => {
-                format!(r#"{{"on": "{token}", "height_m": 1.8}}"#)
-            }
-            _ => format!(r#"{{"on": "{token}"}}"#),
-        };
+        let json = mount_shape(&m);
         // The editor's own terse label AND what it means — the first is what the author sees in
         // the panel, the second is what the model needs to choose between two words that describe
         // the same photograph.
@@ -782,11 +797,17 @@ fn valid_axis(axis: &str, proposed: &[String], v: &Vocabulary) -> Result<Vec<Str
 const WALL_HEIGHT_RANGE: std::ops::RangeInclusive<f32> = 0.1..=4.0;
 
 fn valid_mount(raw: &RawMount, surfaces: &Vocabulary) -> Result<Mount, String> {
-    let wall_height = |h: Option<f32>| -> Result<f32, String> {
-        let h = h.ok_or("mount on `wall` needs `height_m`")?;
+    let mount_height = |h: Option<f32>| -> Result<f32, String> {
+        let h = h.ok_or_else(|| {
+            format!(
+                "mount on `{}` needs `height_m` — a height in {WALL_HEIGHT_RANGE:?} m",
+                raw.on
+            )
+        })?;
         if !WALL_HEIGHT_RANGE.contains(&h) {
             return Err(format!(
-                "wall height {h} m is outside {WALL_HEIGHT_RANGE:?}"
+                "mount on `{}` at {h} m is outside {WALL_HEIGHT_RANGE:?}",
+                raw.on
             ));
         }
         Ok(h)
@@ -797,7 +818,12 @@ fn valid_mount(raw: &RawMount, surfaces: &Vocabulary) -> Result<Mount, String> {
             let class = raw
                 .class
                 .clone()
-                .ok_or("mount on `surface` needs `class`")?;
+                .ok_or_else(|| {
+                    format!(
+                        "mount on `surface` needs `class` — the class is one of: {}",
+                        surfaces.names().collect::<Vec<_>>().join(", ")
+                    )
+                })?;
             if !surfaces.contains(&class) {
                 let hint = nearest(surfaces, &class)
                     .map(|n| format!(" (did you mean `{n}`?)"))
@@ -812,7 +838,12 @@ fn valid_mount(raw: &RawMount, surfaces: &Vocabulary) -> Result<Mount, String> {
         // not declared, or a height nobody stated, would be a guess written into a library entry —
         // so both are demanded rather than defaulted, exactly as `surface` demands its class.
         "face" => {
-            let class = raw.class.clone().ok_or("mount on `face` needs `class`")?;
+            let class = raw.class.clone().ok_or_else(|| {
+                format!(
+                    "mount on `face` needs `class` — the class is one of: {}",
+                    surfaces.names().collect::<Vec<_>>().join(", ")
+                )
+            })?;
             if !surfaces.contains(&class) {
                 let hint = nearest(surfaces, &class)
                     .map(|n| format!(" (did you mean `{n}`?)"))
@@ -823,11 +854,11 @@ fn valid_mount(raw: &RawMount, surfaces: &Vocabulary) -> Result<Mount, String> {
             }
             Ok(Mount::OnFace {
                 class,
-                height: wall_height(raw.height_m)?,
+                height: mount_height(raw.height_m)?,
             })
         }
         "wall" => Ok(Mount::OnWall {
-            height: wall_height(raw.height_m)?,
+            height: mount_height(raw.height_m)?,
         }),
         "ceiling" => Ok(Mount::OnCeiling),
         "tiled" => Ok(Mount::Tiled),
@@ -837,7 +868,7 @@ fn valid_mount(raw: &RawMount, surfaces: &Vocabulary) -> Result<Mount, String> {
         }),
         "decal_wall" => Ok(Mount::Decal {
             on: DecalHost::Wall {
-                height: wall_height(raw.height_m)?,
+                height: mount_height(raw.height_m)?,
             },
         }),
         "decal_ceiling" => Ok(Mount::Decal {
@@ -1719,40 +1750,28 @@ mod tests {
         }
     }
 
-    /// **Every mount the prompt OFFERS is one the parser ACCEPTS**, walked from `mount_options`
-    /// rather than from a list written beside it.
+    /// **Every mount the prompt OFFERS is one the parser ACCEPTS**, walked from `mount_options` and
+    /// read from the prompt's own [`mount_shape`] rather than from a copy written beside it.
     ///
-    /// The hand-written cases below are worth keeping — they pin the exact wire shapes, including
-    /// the `height_m` and `class` payloads. What they cannot do is notice a *new* `Mount` variant:
-    /// they would go on passing while the model was offered a token nothing parses, and the reprompt
-    /// would argue with it about a word neither side could win on. This walks the offered set, so a
-    /// variant added tomorrow fails here until its token exists on both sides.
+    /// The copy is what let this pass while the prompt advertised `{"on": "face"}` — no `class`, no
+    /// `height_m`, refused by [`valid_mount`] every time, so every face-mounted mesh in a batch was
+    /// lost to a reprompt arguing about a shape the model had been handed. Asserting `contains` on
+    /// the assembled prompt is what makes "offered" mean offered.
     ///
-    /// The assertion is on the **token**, not the value: `mount_options` supplies representative
-    /// heights and this must not be coupled to which ones.
+    /// The identity assertion is on the **token**, not the value: `mount_options` supplies
+    /// representative heights and this must not be coupled to which ones.
     #[test]
     fn every_offered_mount_round_trips_through_its_own_token() {
         let v = vocab();
+        let (system, _) = build_prompt(&v, &ctx());
         let surfaces: Vec<String> = v.surfaces.tokens.iter().map(|t| t.name.clone()).collect();
         for m in mount_options(&surfaces) {
-            let token = mount_token(&m);
-            let json = match &m {
-                Mount::OnSurface { class } => {
-                    format!(r#"{{"on": "{token}", "class": "{class}"}}"#)
-                }
-                // A face needs both halves — the class saying which face, the height saying how far
-                // up it — and the parser demands both rather than inventing either.
-                Mount::OnFace { class, .. } => {
-                    format!(r#"{{"on": "{token}", "class": "{class}", "height_m": 1.8}}"#)
-                }
-                Mount::OnWall { .. }
-                | Mount::Decal {
-                    on: DecalHost::Wall { .. },
-                } => {
-                    format!(r#"{{"on": "{token}", "height_m": 1.8}}"#)
-                }
-                _ => format!(r#"{{"on": "{token}"}}"#),
-            };
+            let json = mount_shape(&m);
+            assert!(
+                system.contains(&json),
+                "the prompt does not offer `{json}`, so the shape this test proves is not the \
+                 shape the model is shown"
+            );
             let full = format!(r#"{{"what": "a thing", "mount": {json}}}"#);
             let got = validate(raw(&full), &v)
                 .unwrap_or_else(|e| {
@@ -1762,7 +1781,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("`{json}` parsed to no mount at all"));
             assert_eq!(
                 mount_token(&got),
-                token,
+                mount_token(&m),
                 "`{json}` came back as a different mount than the one it names"
             );
         }
@@ -1819,6 +1838,31 @@ mod tests {
             let full = format!(r#"{{"what": "a thing", "mount": {bad}}}"#);
             assert!(validate(raw(&full), &v).is_err(), "accepted {bad}");
         }
+    }
+
+    /// **A missing class names the classes that exist** — the reprompt's only chance to correct.
+    ///
+    /// The gate's rejection is fed back to the model verbatim, so a message that says what is
+    /// missing without saying what to put there ("mount on `surface` needs `class`") leaves a small
+    /// model nothing to correct with, and the second answer fails identically. The `valid_axis`
+    /// rejections already list the legal tokens; the mount arms must do the same.
+    #[test]
+    fn a_missing_mount_class_names_the_legal_classes() {
+        let v = vocab();
+        let e = validate(
+            raw(r#"{"what": "a plant", "mount": {"on": "surface"}}"#),
+            &v,
+        )
+        .err()
+        .unwrap_or_else(|| panic!("accepted a classless surface mount"));
+        assert!(
+            e.contains("support") && e.contains("worktop"),
+            "the rejection must name the legal classes: {e}"
+        );
+        assert!(
+            e.contains("needs `class`"),
+            "the rejection must still say what is missing: {e}"
+        );
     }
 
     /// Orientation judgements: every face round-trips, junk faces reject, and `needs_turn` takes

@@ -4,10 +4,21 @@
       "label": "open the Tiles tab",
       "goal": "tile authoring lives there, and the key list changes with the tab. The tab opens a blank tile for you, already named after the kit",
       "do": [
-        "press 3"
+        "press 2"
       ],
       "checkpoint": "the Tiles tab is open",
       "recovery": "if a text field has the keyboard the number types into it: press Escape first"
+    },
+    {
+      "label": "start a tile",
+      "goal": "nothing is open until you ask: N names a new tile, Enter on a row reopens an old one. Naming is how a tile gets its name — the editor stopped guessing names for you",
+      "do": [
+        "press N for a new tile",
+        "type a name like tile_a",
+        "press Enter"
+      ],
+      "checkpoint": "a tile is open",
+      "recovery": "Escape closes the name prompt without starting the tile"
     },
     {
       "label": "bring a floor in",
@@ -101,7 +112,12 @@
         "press right again to open it"
       ],
       "checkpoint": "the tile contains",
-      "with": { "ids": ["site/wall_low"], "n": 1 },
+      "with": {
+        "ids": [
+          "site/wall_low"
+        ],
+        "n": 1
+      },
       "recovery": "Escape backs out of the kit list; if right does nothing, you are still holding a piece"
     },
     {

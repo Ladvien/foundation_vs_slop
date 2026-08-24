@@ -1,5 +1,5 @@
 {
-  "_": "The Meshes tab after the 2026-08-20 tag-block work: the vocabulary narrows by typing, Enter takes the one match, and U/Y walk a batch. Most steps are judgement calls on purpose — the objective ones are the two that ask whether a token actually landed.",
+  "_": "The Meshes tab after the 2026-08-20 tag-block work: the vocabulary narrows by typing, Enter takes the one match, and a batch labels itself — Shift+Y abandons it. Most steps are judgement calls on purpose — the objective ones are the two that ask whether a token actually landed.",
   "steps": [
     {
       "label": "look at the tag block before touching it",

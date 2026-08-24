@@ -62,6 +62,10 @@ assets/config/bake_history/
 .claude/*
 !.claude/settings.json
 
+# omp per-project session state (plans, transcripts, artifacts) — never commit. Same rationale as
+# `.claude/*` above: this is one machine's conversation with an agent, not project content.
+.omp/
+
 # Per-developer Cargo overrides (e.g. a machine-specific build.target-dir for local build isolation).
 # MUST NOT be committed: a hardcoded absolute path broke CI on ubuntu-latest for every commit
 # ("failed to create directory /Users/…: Permission denied"). Each machine keeps its own local copy.

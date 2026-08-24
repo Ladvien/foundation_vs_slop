@@ -556,6 +556,46 @@ pub fn rewrite_exclude(text: &str, exclude: &[String]) -> Result<String, String>
     Ok(out)
 }
 
+/// **Drop the patch at `ordinal` within `patches`, preserving every comment in the file.**
+///
+/// Keyed on position, not on `matches`: nothing forbids two patches sharing a `matches` key, so a
+/// key-based removal is ambiguous by construction. The same line-splice shape as
+/// [`rewrite_exclude`] — a serialize-and-write would destroy the file, whose patches carry
+/// paragraphs explaining why each one exists — and the result is re-parsed before it is returned,
+/// so a splice that produced something the game could not read is an error here rather than a
+/// broken kit on disk.
+///
+/// An `ordinal` past the end refuses rather than writing.
+pub fn remove_patch(path: &Path, ordinal: usize) -> Result<(), String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let policy = Policy::parse(&text)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if ordinal >= policy.patches.len() {
+        return Err(format!(
+            "policy: no patch at index {ordinal} — {} holds {}.",
+            path.display(),
+            policy.patches.len()
+        ));
+    }
+
+    // **Locate the `patches: [` list and splice out the record at `ordinal`.**
+    //
+    // `LineDoc` scans the list's records and keeps every comment and blank line inside it, which is
+    // the whole point of the module — a record's trailing `// why` and the prose above it survive.
+    // The list is a `[` list, not a `( … )` block, so `LineDoc` scans the whole file for the
+    // `patches: [` header directly.
+    let mut doc = crate::ron_surgery::LineDoc::parse(&text, &["patches"])
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    doc.remove("patches", ordinal)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let out = doc.render();
+
+    // The splice is only correct if the file still reads. Checked here so a bad edit cannot land.
+    Policy::parse(&out).map_err(|e| format!("policy: removing the patch broke the file: {e}"))?;
+    crate::ron_surgery::save_atomic(path, &out)
+}
+
 /// The byte span of an `exclude: [ … ]` field, quote-aware so a `]` inside a path cannot end it
 /// early, and comment-aware so a line mentioning the field in prose is not mistaken for it.
 fn find_exclude(text: &str) -> Option<std::ops::Range<usize>> {
@@ -669,4 +709,67 @@ mod exclude_write_tests {
             vec!["characters".to_owned()]
         );
     }
+}
+
+#[cfg(test)]
+/// A temp file for the splice tests, unique per test name and process.
+fn temp_policy(name: &str, text: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("emerge-policy-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("cannot make {dir:?}: {e}"));
+    let path = dir.join("project.ron");
+    std::fs::write(&path, text).unwrap_or_else(|e| panic!("cannot write {path:?}: {e}"));
+    path
+}
+
+/// **The right patch is removed.** A file with a comment, one exclusion and **two patches sharing
+/// `Match::Id("crate_b")`** but different `because` strings: `remove_patch(path, 0)` leaves exactly
+/// the second one, the exclusion untouched and the comment present. The shared key is the point —
+/// it is what makes a `matches`-keyed removal wrong.
+#[test]
+fn removing_a_patch_takes_the_ordinal_and_keeps_everything_else() {
+    let text = r#"(
+    version: 2,
+    // A comment that must survive, because this file is read by people.
+    note: Some("SCP-9191 containment site."),
+    exclude: ["characters"],
+    patches: [
+        ( match: Id("crate_b"), because: "the first reason", patch: ( align: ( stretch_y: Some(1.2) ) ) ),
+        ( match: Id("crate_b"), because: "the second reason", patch: ( align: ( stretch_y: Some(1.4) ) ) ),
+    ],
+)
+"#;
+    let path = temp_policy("shared-key", text);
+    remove_patch(&path, 0).unwrap_or_else(|e| panic!("{e}"));
+
+    let out = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{e}"));
+    assert!(out.contains("// A comment that must survive"), "the comment stands:\n{out}");
+    let policy = Policy::parse(&out).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(policy.exclude, vec!["characters".to_owned()], "the exclusion is untouched");
+    assert_eq!(policy.patches.len(), 1, "exactly one patch left:\n{out}");
+    assert_eq!(
+        policy.patches[0].because, "the second reason",
+        "the SECOND patch survives — removal is by ordinal, not by key"
+    );
+}
+
+/// An `ordinal` past the end refuses and leaves the file byte-identical.
+#[test]
+fn removing_a_patch_past_the_end_refuses_without_writing() {
+    let text = r#"(
+    version: 2,
+    note: Some("a policy with one patch"),
+    patches: [
+        ( match: Id("crate_a"), because: "the only reason", patch: ( align: ( stretch_y: Some(1.2) ) ) ),
+    ],
+)
+"#;
+    let path = temp_policy("past-end", text);
+    let before = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{e}"));
+    let err = remove_patch(&path, 7)
+        .err()
+        .unwrap_or_else(|| panic!("an ordinal past the end must be refused"));
+    assert!(err.contains("7"), "names the ordinal: {err}");
+    let after = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(before, after, "nothing was written: {err}");
 }

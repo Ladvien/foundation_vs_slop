@@ -1,0 +1,104 @@
+{
+  "steps": [
+    {
+      "label": "open the Tiles tab",
+      "goal": "tile authoring lives there, and the key list changes with the tab. Arriving lands on the Tiles page — the authored tiles and a New Tile + row; nothing is open until you ask",
+      "do": [
+        "press 2"
+      ],
+      "checkpoint": "the Tiles tab is open",
+      "recovery": "if a text field has the keyboard the number types into it: press Escape first"
+    },
+    {
+      "label": "start a tile",
+      "goal": "a usable tile is a floor and two walls meeting at a corner. N names a new tile — the editor stopped guessing names for you",
+      "do": [
+        "press N for a new tile",
+        "type a name like corner_a",
+        "press Enter"
+      ],
+      "checkpoint": "a tile is open",
+      "recovery": "Escape closes the name prompt without starting the tile"
+    },
+    {
+      "label": "bring a floor in",
+      "goal": "a tile with nothing in it has no size and no edges, so the floor comes first — and the floor fills the cell, so it is the one piece the arrows cannot move",
+      "do": [
+        "walk the library with up and down",
+        "press Enter on a floor piece"
+      ],
+      "checkpoint": "the tile has a piece in it",
+      "recovery": "if the list is empty a filter is hiding it: press Backspace until the filter clears"
+    },
+    {
+      "label": "the floor should be in hand",
+      "goal": "Enter both drops the piece and hands it to the arrows — the held piece carries a subtle brightness lift that resolves to its true colours on Escape. If the arrows walk the library instead, that is the bug back",
+      "do": [
+        "nothing to press — look at the floor in the 3d view"
+      ],
+      "checkpoint": "a piece is in hand",
+      "recovery": "press Escape and then Enter again; if the arrows still walk the list, that is the finding"
+    },
+    {
+      "label": "bring a wall in",
+      "goal": "two pieces is where a tile stops being a mesh with extra steps. The arrows will not walk the library while a piece is in hand — that is the door, and this step is a question about it: does Escape feel like the right way back to the list?",
+      "do": [
+        "press Escape to put the floor down",
+        "walk to a wall with up and down",
+        "press Enter"
+      ],
+      "checkpoint": "the tile has two pieces",
+      "recovery": "if the arrows move the piece instead of the list, Escape did not land: the panel says which of the two states the tab is in"
+    },
+    {
+      "label": "turn the second wall a quarter",
+      "goal": "two walls side by side are a doubled wall; two walls meeting at right angles are a corner. R turns the focused member a quarter, which is what makes a room possible at all",
+      "do": [
+        "press R"
+      ],
+      "checkpoint": "the tile has turns",
+      "with": { "n": 2 },
+      "recovery": "if the same wall turns again, it is the focused one — use , and . to step the focus to the other wall, then press R"
+    },
+    {
+      "label": "flush both walls against their edges",
+      "goal": "a wall floating in the middle derives no edge, and this is the corner the kit's own tiles ship with: each wall hard against its edge, the two meeting at the join. Watch whether the flush lands cleanly and the corner closes without a gap or an overlap",
+      "do": [
+        "press Shift and an arrow to flush one wall to its edge",
+        "use , or . to focus the other wall",
+        "flush it against the other edge, so the two meet at the corner"
+      ],
+      "checkpoint": null,
+      "recovery": "if the panel says nothing moved, the piece already fills that axis and it names the axis that would — a wall's thin axis is the one that travels"
+    },
+    {
+      "label": "is the tile still one cell",
+      "goal": "only a one-cell tile is a solver prototype — and a wall flushed to its edge still fits, because centre-to-edge is half a cell and the wall is a tenth of one. If the size line says 1 x 1, this is the smallest usable room-maker the kit can hold",
+      "do": [
+        "read the size line at the top of the panel",
+        "if it is bigger than 1 x 1, the line under it names the piece"
+      ],
+      "checkpoint": "the tile is one cell",
+      "recovery": "focus that piece with , and . and walk it back toward the middle with the plain arrows — not Shift, which flushes it to the edge and grows the tile"
+    },
+    {
+      "label": "save it",
+      "goal": "the kit gains a corner tile and the Map palette can stamp it — this is the moment a sketch becomes usable",
+      "do": [
+        "press Cmd+S"
+      ],
+      "checkpoint": "the tile is saved",
+      "recovery": "an empty tile is refused by name; so is an id the vocabulary does not accept"
+    },
+    {
+      "label": "does the corner tile read as a real tile",
+      "goal": "the last question no checkpoint can answer. You just built the smallest thing a room is made of — floor, two walls, a corner — and saved it where the Map can use it. Now the feedback: what was smooth, what was friction, and what would you change about tile creation — keys, panels, flow, anything",
+      "do": [
+        "look at the tile in the 3d view",
+        "then say what you want changed"
+      ],
+      "checkpoint": null,
+      "recovery": "there is nothing to recover here: an answer is the finding"
+    }
+  ]
+}

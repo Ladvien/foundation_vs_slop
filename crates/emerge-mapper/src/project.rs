@@ -107,6 +107,13 @@ pub struct Project {
     /// other kits off disk — `commit_measured` validates before it writes, so the file it would
     /// re-read is still the old one at the moment the merge is needed.
     pub kits: Vec<emerge_core::kits::KitLayer>,
+    /// **The named combinations a map may draw on** — `kits.ron`'s `bash`, in file order.
+    ///
+    /// Held beside [`Self::kits`] because it is read at the same two moments: `OpenMap::open`
+    /// refuses a map naming one this project does not declare, and `palette_namespaces` resolves
+    /// the name a map does carry. A bash names namespaces, and `Kits::validate` has already refused
+    /// one naming a namespace nothing binds — so every name in here is loaded.
+    pub bashes: Vec<emerge_core::kits::Bash>,
     /// Per-descriptor token masks, in library order — resolved once at load so the palette and the
     /// placement rules never re-resolve the same strings.
     pub masks: Vec<Masks>,
@@ -204,7 +211,8 @@ impl Project {
 
         // **The derived half of `effects` is settled over the whole set, at open.**
         //
-        // `labels::IMPLIED_BY_KIND` says these tokens follow the kind and are not hand-authorable —
+        // `implies` on a `kind` token (`vocab.ron`, resolved by `Vocabularies::implied_effects`)
+        // says these tokens follow the kind and are not hand-authorable —
         // *"set the kind and the effect follows, which is what makes them trustworthy to read"*. That
         // was true of every row written after the rule landed and false of every row written before
         // it, because the only two places that settled were applying a suggestion and clicking a KIND
@@ -214,17 +222,14 @@ impl Project {
         // `stamina-recharge`.
         //
         // Here rather than at the write, on the same argument `library.resolve` below makes: the
-        // moment to reconcile the whole set is when the whole set is in hand. In memory only — the
-        // merged library spans several kits and their files, so the correction reaches disk through
-        // the ordinary `write_library` path the next time a row is saved.
-        let mut settled = 0usize;
-        for d in &mut library.descriptors {
-            let before = d.effects.clone();
-            crate::labels::settle_implied_effects(d, &vocab);
-            if d.effects != before {
-                settled += 1;
-            }
-        }
+        // moment to reconcile the whole set is when the whole set is in hand.
+        //
+        // **This corrects the derived view, and only the derived view.** `measured` and each kit's
+        // layer keep the lists as authored, so every rebuild of the merge starts from the unsettled
+        // rows again — which is why `tiles::commit_measured` settles too, through the same
+        // `settle_library`. It is not a write-back: the disk copy is corrected a row at a time, as
+        // rows are edited, by the settle inside `labels::apply_fields` and the KIND chip.
+        let settled = crate::labels::settle_library(&mut library, &vocab);
         if settled > 0 {
             info!("{settled} library row(s) had derived effects out of step with their kind");
         }
@@ -304,6 +309,7 @@ impl Project {
             emerge_dir,
             namespace,
             lattice: kits.lattice,
+            bashes: kits.bash,
             kits: layers,
             library_path,
             vocab,
@@ -328,6 +334,27 @@ impl Project {
         d: &emerge_core::descriptor::Descriptor,
     ) -> Result<(u32, u32, u32), String> {
         emerge_core::descriptor::divisions(d, self.lattice.face_bands)
+    }
+
+    /// Re-read `assets/emerge/vocab.ron` and re-resolve the masks. Adopts only on success.
+    ///
+    /// The editor holds a parsed copy of the vocabulary and the resolved masks, so a token appended
+    /// on disk (by [`emerge_core::vocab::append_token`]) is invisible until this runs. Appending
+    /// never changes an existing bit, so already-resolved masks stay correct — the re-resolve is
+    /// for the new token's own mask, and the swap is all-or-nothing so a bad file cannot leave the
+    /// project half-updated.
+    pub fn reload_vocab(&mut self) -> Result<(), String> {
+        let path = self.root.join(VOCAB);
+        let text = read(&path)?;
+        let vocab = Vocabularies::parse(&text)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let masks = self
+            .library
+            .resolve(&vocab)
+            .map_err(|e| format!("{}: {e}", self.library_path.display()))?;
+        self.vocab = vocab;
+        self.masks = masks;
+        Ok(())
     }
 
     /// **The merged library, with the authoring kit's layer swapped for `layered`.**
@@ -587,6 +614,29 @@ impl OpenMap {
             }
         };
 
+        // **A map names a bash the project declares, or it does not open.** The name is not checked
+        // by `Map::validate` — a map validates in isolation and cannot see `kits.ron` — so this is
+        // the one door where both halves are in hand. Refused by name rather than resolved to
+        // every-kit, because a silent fallback is a palette nobody chose.
+        if let Some(name) = map.bash.as_deref()
+            && !project.bashes.iter().any(|b| b.name == name)
+        {
+            let declared = if project.bashes.is_empty() {
+                "none".to_owned()
+            } else {
+                project
+                    .bashes
+                    .iter()
+                    .map(|b| b.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            return Err(format!(
+                "{}: names bash `{name}`, which `kits.ron` does not declare. Declared: {declared}.",
+                map_path.display()
+            ));
+        }
+
         let counted = emerge_core::census::of_map(&map);
         info!(
             "map: {} — {} placement(s), {} stamp(s)",
@@ -673,23 +723,28 @@ impl OpenMap {
     }
 
 
-    /// **What the palette offers**: the author's choice, plus whatever the map already uses.
+    /// **What the palette offers**: the bash the map names, plus whatever the map already uses.
     ///
-    /// [`emerge_core::map::Map::palette`] empty means *all bound kits* — the state a new map starts
-    /// in, and what every map written before the field existed already meant.
+    /// [`emerge_core::map::Map::bash`] `None` means *all bound kits* — the state a new map starts
+    /// in, and the state a project declaring no bashes leaves every map in.
     ///
-    /// **The union with [`Self::namespaces_in_use`] is what makes this safe to edit.** Unticking a
-    /// kit whose pieces are already on the map would otherwise hide the rows that describe them: the
-    /// map would still load and still draw, and the author would be unable to find, re-place or
-    /// match the pieces in front of them. Folding the in-use set back in means the checkbox cannot
-    /// do damage, which is the whole reason it is allowed to be a checkbox.
+    /// **The union with [`Self::namespaces_in_use`] is what makes this safe to edit.** Naming a
+    /// bash that leaves out a kit whose pieces are already on the map would otherwise hide the rows
+    /// that describe them: the map would still load and still draw, and the author would be unable
+    /// to find, re-place or match the pieces in front of them. Folding the in-use set back in means
+    /// a bash cannot strand a placement, which is the whole reason it is allowed to be a filter.
     pub fn palette_namespaces(&self, project: &Project) -> std::collections::BTreeSet<String> {
-        if self.map.palette.is_empty() {
+        let Some(name) = self.map.bash.as_deref() else {
             return project.kits.iter().map(|k| k.namespace.clone()).collect();
-        }
-
-        let mut out: std::collections::BTreeSet<String> =
-            self.map.palette.iter().cloned().collect();
+        };
+        // Present by construction — `OpenMap::open` refuses a map naming a bash the project does
+        // not declare, so an open map's name always resolves.
+        let mut out: std::collections::BTreeSet<String> = project
+            .bashes
+            .iter()
+            .find(|b| b.name == name)
+            .map(|b| b.kits.iter().cloned().collect())
+            .unwrap_or_default();
         out.extend(self.namespaces_in_use(project));
         out
     }

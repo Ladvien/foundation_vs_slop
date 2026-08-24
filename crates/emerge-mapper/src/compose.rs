@@ -1055,12 +1055,9 @@ const LABEL_DROP: f32 = 4.0;
 /// not divide, so reading it back is not the shortcut it looks like.
 const LABEL_PX: (f32, f32) = (crate::chrome::text::BODY, crate::chrome::text::HINT);
 
-/// Advance of one glyph at `LABEL_PX.0`, in logical pixels.
-///
-/// The shipped face is `FiraMono-Regular.ttf` — **monospace** — so a string's width is its length
-/// times this, and centring needs no text-layout round trip. If the face is ever changed to a
-/// proportional one, labels drift off-centre; they do not break.
-const LABEL_CHAR_W: f32 = 6.6;
+/// Advance of one glyph at `LABEL_PX.0` — the one measurement, stated beside the size it
+/// belongs to. See [`crate::chrome::BODY_CHAR_W`] for why it lives there.
+const LABEL_CHAR_W: f32 = crate::chrome::BODY_CHAR_W;
 
 /// **Stand the focal group up, with its neighbours either side, each through `composition::expand`.**
 ///
@@ -1149,7 +1146,7 @@ fn restage_group(
             // to stand the group up exactly as stamping it would; the grid it is read on is the
             // project's, passed to `interface` and `pitch` directly rather than smuggled through
             // a map that would then be a second place to state it.
-            palette: Vec::new(),
+            bash: None,
             placements: Vec::new(),
             stamps: Vec::new(),
             locations: Vec::new(),
@@ -2585,7 +2582,7 @@ mod paint_tests {
             name: "m".to_owned(),
             origin: (0.0, 0.0, 0.0),
             bounds: (8.0, 2.4, 8.0),
-            palette: Vec::new(),
+            bash: None,
             placements: Vec::new(),
             stamps: Vec::new(),
             locations: Vec::new(),

@@ -49,6 +49,15 @@ fn name_the_tile(app: &mut App, name: &str) {
     }
 }
 
+/// **Open a named blank tile, the way an author does** — `N`, the prompt, `Enter`. The Tiles tab
+/// no longer opens a tile on arrival (the Tiles page is what arrival shows), so every test that
+/// drops or nudges must open one first; this is the one path, driven through the same keys and the
+/// same message stream the guide scripts use.
+fn open_tile(app: &mut App, name: &str) {
+    press_once(app, emerge_mapper::keys::binding(emerge_mapper::keys::Action::BuildNew).key);
+    name_the_tile(app, name);
+}
+
 /// **One keystroke, the way a field really receives it** — a press and a release written to the
 /// `KeyboardInput` message stream, then a frame.
 ///
@@ -1390,25 +1399,28 @@ mod stepped {
     }
 }
 
-/// **A map's kit selection narrows the palette, and cannot narrow it into a lie.**
+/// **A map's bash narrows the palette, and cannot narrow it into a lie.**
 ///
-/// The other half of the checkbox: turning a kit off has to actually stop offering its pieces, and
-/// turning off a kit the map is *standing on* must not hide the rows that describe what is already
-/// there. `Project::palette_namespaces` folds the in-use set back in for exactly that, which is what
-/// lets the control be a checkbox rather than a decision with consequences.
+/// The other half of naming a combination: leaving a kit out has to actually stop offering its
+/// pieces, and leaving out a kit the map is *standing on* must not hide the rows that describe what
+/// is already there. `OpenMap::palette_namespaces` folds the in-use set back in for exactly that,
+/// which is what lets a bash be a filter rather than a decision with consequences.
 ///
 /// **The library is untouched either way.** Every bound kit still loads, so a placement always
 /// resolves and a composition may still seat two kits' pieces — this is a filter on what an author
 /// is *offered*, never on what a map can mean.
 #[test]
-fn the_maps_kit_selection_narrows_the_palette_but_never_hides_what_is_placed() {
-    use emerge_mapper::editor::{palette_indices, EditorState};
+fn the_maps_bash_narrows_the_palette_but_never_hides_what_is_placed() {
+    use emerge_mapper::editor::{palette_indices, Folded};
     use emerge_mapper::filter::Filters;
     use emerge_mapper::project::{OpenMap, Project};
 
-    let root = Fixture::new("map-palette")
+    let root = Fixture::new("map-bash")
         .descriptor("bench", "props")
         .kit("site", "ozea", &["site/wall"])
+        // Two combinations, each leaving the other kit out — one namespaced, one flat.
+        .bash("only_furniture", &["furniture"])
+        .bash("only_site", &["site"])
         .build("m");
     let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
     app.update();
@@ -1417,57 +1429,57 @@ fn the_maps_kit_selection_narrows_the_palette_but_never_hides_what_is_placed() {
         let world = app.world_mut();
         let project = world.resource::<Project>();
         let open = world.resource::<OpenMap>();
-        let state = world.resource::<EditorState>();
+        let fold = world.resource::<Folded>();
         let filters = world.resource::<Filters>();
-        palette_indices(project, open, state, filters)
+        palette_indices(project, open, fold, filters)
             .into_iter()
             .filter_map(|i| project.library.descriptors.get(i).map(|d| d.id.clone()))
             .collect()
     };
 
-    // Nothing chosen means everything offered.
+    // No bash named means every bound kit offered.
     let all = offered(&mut app);
     assert!(
         all.iter().any(|id| id == "bench") && all.iter().any(|id| id == "site/wall"),
-        "an empty selection offers every bound kit: {all:?}"
+        "a map naming no bash offers every bound kit: {all:?}"
     );
 
-    // Turn `site` off: its pieces stop being offered, the furniture kit's do not.
-    app.world_mut().resource_mut::<OpenMap>().map.palette = vec!["furniture".to_owned()];
+    // Name one that leaves `site` out: its pieces stop being offered, the furniture kit's do not.
+    app.world_mut().resource_mut::<OpenMap>().map.bash = Some("only_furniture".to_owned());
     app.update();
     let narrowed = offered(&mut app);
     assert!(
         narrowed.iter().any(|id| id == "bench"),
-        "the kit that is still on keeps its rows: {narrowed:?}"
+        "the kit the bash names keeps its rows: {narrowed:?}"
     );
     assert!(
         !narrowed.iter().any(|id| id == "site/wall"),
-        "and the one turned off loses them: {narrowed:?}"
+        "and the one it leaves out loses them: {narrowed:?}"
     );
     // **But the library still has it**, which is why a placement cannot be stranded.
     assert!(
         app.world().resource::<Project>().library.get("site/wall").is_some(),
-        "the selection filters the palette, never what the map can resolve"
+        "a bash filters the palette, never what the map can resolve"
     );
 
     // **Now the other direction, which is where this was broken.**
     //
-    // Turning off the kit whose ids are **flat** — the shape every shipped kit has. The first
+    // Leaving out the kit whose ids are **flat** — the shape every shipped kit has. The first
     // version read the namespace out of the id, so `bench` belonged to no kit, matched no
-    // selection, and was offered whatever was ticked: the control was inert on the only project
-    // that matters and the test above still passed, because it only ever turned off a *namespaced*
+    // selection, and was offered whatever was named: the control was inert on the only project
+    // that matters and the test above still passed, because it only ever left out a *namespaced*
     // kit. Driving the shipped project is what found it.
-    app.world_mut().resource_mut::<OpenMap>().map.palette = vec!["site".to_owned()];
+    app.world_mut().resource_mut::<OpenMap>().map.bash = Some("only_site".to_owned());
     app.update();
     let flat_off = offered(&mut app);
     assert!(
         !flat_off.iter().any(|id| id == "bench"),
-        "a kit with flat ids turns off like any other — `Project::kit_of` asks which library \
+        "a kit with flat ids is left out like any other — `Project::kit_of` asks which library \
          defines a piece, never what its id spells: {flat_off:?}"
     );
     assert!(
         flat_off.iter().any(|id| id == "site/wall"),
-        "and the one still on keeps its rows: {flat_off:?}"
+        "and the one the bash names keeps its rows: {flat_off:?}"
     );
 
     // In use protects a flat kit too, for the same reason.
@@ -1482,16 +1494,16 @@ fn the_maps_kit_selection_narrows_the_palette_but_never_hides_what_is_placed() {
     app.update();
     assert!(
         offered(&mut app).iter().any(|id| id == "bench"),
-        "a placed flat piece keeps its palette row whatever the selection says"
+        "a placed flat piece keeps its palette row whatever the bash says"
     );
     {
         let mut open = app.world_mut().resource_mut::<OpenMap>();
         open.map.placements.clear();
-        open.map.palette = vec!["furniture".to_owned()];
+        open.map.bash = Some("only_furniture".to_owned());
     }
     app.update();
 
-    // Now place one of its pieces and the row comes back, still with `site` turned off.
+    // Now place one of its pieces and the row comes back, still with `site` out of the bash.
     {
         let mut open = app.world_mut().resource_mut::<OpenMap>();
         open.map.placements.push(emerge_core::map::Placed {
@@ -1504,8 +1516,179 @@ fn the_maps_kit_selection_narrows_the_palette_but_never_hides_what_is_placed() {
     let with_placement = offered(&mut app);
     assert!(
         with_placement.iter().any(|id| id == "site/wall"),
-        "a kit the map stands on is offered whatever the selection says — otherwise the author \
+        "a kit the map stands on is offered whatever the bash says — otherwise the author \
          cannot find, match or re-place the pieces in front of them: {with_placement:?}"
+    );
+}
+
+/// **The menu's columns run left to right in the order the data model nests: PROJECTS, KITS, MAPS.**
+///
+/// `PROJECT ||--o{ KIT` and `PROJECT ||--o{ MAP` (the ERD in `CLAUDE.md`) make the project the root,
+/// and the one cross-edge between its children runs `MAP → BASH → KIT` — a map is made of kits, so
+/// kits come first and the map is what they add up to.
+///
+/// **Read off the spawned hierarchy, not off `render()`.** `Screen` carries rows and headers and
+/// says nothing about geometry, so the flat rendering cannot see a column order at all — the only
+/// place it exists is the child order under `chrome::Frame::body`, which is what this walks. That
+/// is also the half a green suite missed for as long as it did: `Focus::ALL` walked
+/// projects→kits→policy→maps→settings while the columns read `MAPS | KITS | PROJECTS`, so one `Tab`
+/// meant right, then left, then right, and every test still passed.
+#[test]
+fn the_menu_columns_run_project_then_kits_then_maps() {
+    let root = Fixture::new("column-order")
+        .descriptor("bench", "props")
+        .kit("site", "ozea", &["site/wall"])
+        .build("m");
+
+    let mut app = harness::build_headless(&root, "m", None)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    // **Into the menu.** The harness opens straight into a door, because that is the entry point it
+    // exists to serve; the chooser is the other screen and its plugin is added here.
+    app.add_plugins(emerge_mapper::chooser::ChooserPlugin {
+        root: root.clone(),
+        preselect: None,
+    });
+    app.world_mut()
+        .resource_mut::<NextState<emerge_mapper::screen::Screen>>()
+        .set(emerge_mapper::screen::Screen::Menu);
+    for _ in 0..4 {
+        app.update();
+    }
+
+    let body = app.world().resource::<emerge_mapper::chrome::Frame>().body;
+    // The first `Text` in a column's subtree is its list heading — `spawn_screen` spawns the header
+    // before the list under each panel.
+    let first_text = |world: &World, at: Entity| -> Option<String> {
+        let mut stack = vec![at];
+        while let Some(e) = stack.pop() {
+            if let Some(t) = world.get::<Text>(e) {
+                return Some(t.0.clone());
+            }
+            if let Some(children) = world.get::<Children>(e) {
+                for c in children.iter().rev() {
+                    stack.push(c);
+                }
+            }
+        }
+        None
+    };
+    let world = app.world();
+    let columns: Vec<String> = world
+        .get::<Children>(body)
+        .map(|c| c.iter().collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|col| first_text(world, col))
+        .collect();
+
+    assert_eq!(
+        columns,
+        vec!["PROJECTS".to_owned(), "KITS".to_owned(), "MAPS".to_owned()],
+        "the columns are the hierarchy, left to right"
+    );
+
+    // **And `left`/`right` walk them in that order**, one press per column, so the key and the
+    // layout cannot come to disagree again. There is no `Tab`: the rest of the editor navigates
+    // with arrows and nothing else — see `Focus`.
+    use emerge_mapper::chooser::Focus;
+    let mut chooser = app.world_mut().resource_mut::<emerge_mapper::chooser::Chooser>();
+    chooser.focus = Focus::Projects;
+    let mut walk = vec![chooser.focus];
+    for _ in 0..3 {
+        chooser.cross(1);
+        walk.push(chooser.focus);
+    }
+    assert_eq!(
+        walk,
+        vec![Focus::Projects, Focus::Kits, Focus::Maps, Focus::Projects],
+        "one press per column, in the order they are drawn, wrapping over the three"
+    );
+}
+
+/// **A map naming a bash the project does not declare is refused by name at the door.**
+///
+/// Not resolved to every-kit, which is the only other thing it could do and is a palette nobody
+/// chose. `Map::validate` cannot make this call — a map validates in isolation and never sees
+/// `kits.ron` — so `OpenMap::open` is the one place both halves are in hand, and the refusal names
+/// what was declared so the next keystroke is obvious.
+#[test]
+fn a_map_naming_an_undeclared_bash_will_not_open() {
+    use emerge_mapper::project::{OpenMap, Project};
+
+    let root = Fixture::new("bash-undeclared")
+        .descriptor("bench", "props")
+        .bash("hub", &["furniture"])
+        .build("m");
+    let maps = root.join("assets/emerge/maps");
+    std::fs::write(
+        maps.join("wrong.map.ron"),
+        "(version: 6, name: \"wrong\", origin: (0.0, 0.0, 0.0), bounds: (8.0, 3.0, 8.0), \
+         bash: Some(\"nope\"), placements: [], stamps: [], locations: [])",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+
+    let project = Project::open(&root, None).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        project.bashes.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+        vec!["hub"],
+        "the project carries what `kits.ron` declares"
+    );
+
+    let e = OpenMap::open(&project, "wrong")
+        .err()
+        .unwrap_or_else(|| panic!("an undeclared name must not open"));
+    assert!(e.contains("nope"), "the refusal names what the map asked for: {e}");
+    assert!(e.contains("Declared: hub"), "and what it could have asked for: {e}");
+
+    // The map that names a declared one opens, so the refusal is about the name and nothing else.
+    std::fs::write(
+        maps.join("right.map.ron"),
+        "(version: 6, name: \"right\", origin: (0.0, 0.0, 0.0), bounds: (8.0, 3.0, 8.0), \
+         bash: Some(\"hub\"), placements: [], stamps: [], locations: [])",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let open = OpenMap::open(&project, "right").unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(open.map.bash.as_deref(), Some("hub"));
+}
+
+/// **A bash cannot strand a placement**, which is the guarantee the whole design rests on.
+///
+/// A map may name a combination that leaves out a kit whose pieces are already on it — by being
+/// given the bash after the fact, or by the bash being edited in `kits.ron` afterwards. Every bound
+/// kit loads either way, so the placement still resolves and still draws; what would break is the
+/// palette, which would stop offering the rows that describe what the author is looking at.
+/// `OpenMap::palette_namespaces` folds the in-use set back in, so it cannot.
+#[test]
+fn a_bash_that_leaves_out_a_placed_kit_still_offers_it() {
+    use emerge_mapper::project::{OpenMap, Project};
+
+    let root = Fixture::new("bash-strand")
+        .descriptor("bench", "props")
+        .kit("a", "packa", &["a/one"])
+        .kit("b", "packb", &["b/two"])
+        .bash("only_a", &["a"])
+        .place("b/two", (2.0, 2.0))
+        .build("m");
+
+    let project = Project::open(&root, None).unwrap_or_else(|e| panic!("{e}"));
+    let mut open = OpenMap::open(&project, "m").unwrap_or_else(|e| panic!("{e}"));
+
+    // Naming nothing offers every bound kit, which is where a map starts.
+    assert_eq!(
+        open.palette_namespaces(&project).into_iter().collect::<Vec<_>>(),
+        vec!["a".to_owned(), "b".to_owned(), "furniture".to_owned()]
+    );
+
+    open.map.bash = Some("only_a".to_owned());
+    assert_eq!(
+        open.palette_namespaces(&project).into_iter().collect::<Vec<_>>(),
+        vec!["a".to_owned(), "b".to_owned()],
+        "`only_a` names one kit and the map stands on the other, so both are offered — \
+         `furniture`, which it neither names nor stands on, is not"
+    );
+    assert!(
+        project.library.get("b/two").is_some(),
+        "and the library is untouched: a bash filters the palette, never what a map can resolve"
     );
 }
 
@@ -1763,6 +1946,71 @@ mod compose {
             "redo did not put the stamp back"
         );
         assert_eq!(open.map.stamps[0].of, "break_table");
+    }
+
+    /// **The preview places where the commit will land.** `drive_stamp_ghost` and the commit used to
+    /// disagree: the drop seated a stamped set through `stack::resolve_y` while the ghost spawned
+    /// its rows at the authored `lift`, so a sinking member previewed on the floor and then landed
+    /// 6 cm down. `stamped_heights` is the single owner both read — this pins what it answers for a
+    /// sunk member, and that the authored lift is not it.
+    #[test]
+    fn a_stamp_previews_at_the_height_it_will_land_at() {
+        use emerge_mapper::compose::ComposeState;
+        use emerge_mapper::project::{OpenMap, Project};
+
+        let root = Fixture::new("stamp-sunk")
+            .sunk_descriptor("floor", "alpha", -0.06)
+            .bounded_composition("room", (2.0, 2.0, 1.0), &[("floor", "floor", (0.0, 0.0))])
+            .build("m");
+        let mut app = emerge_mapper::harness::build_headless(&root, "m", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        for _ in 0..3 {
+            app.update();
+        }
+
+        // Through the same call the click makes.
+        {
+            let world = app.world_mut();
+            world.resource_scope(|world, mut project: bevy::prelude::Mut<Project>| {
+                world.resource_scope(|world, mut open: bevy::prelude::Mut<OpenMap>| {
+                    let mut state = world.resource_mut::<emerge_mapper::editor::EditorState>();
+                    let mut compose = ComposeState {
+                        armed: Some("room".to_owned()),
+                        ..Default::default()
+                    };
+                    emerge_mapper::editor::stamp_here_for_test(
+                        &mut project,
+                        &mut open,
+                        &mut state,
+                        &mut compose,
+                        (2.0, 2.0),
+                    );
+                });
+            });
+        }
+        app.update();
+
+        let project = app.world().resource::<Project>();
+        let open = app.world().resource::<OpenMap>();
+        assert_eq!(open.map.stamps.len(), 1, "no stamp landed");
+        let expansion = emerge_core::composition::expand(
+            &open.map,
+            &open.map.stamps,
+            &project.compositions.compositions,
+            &project.library,
+        )
+        .unwrap_or_else(|e| panic!("the stamped set must expand: {e}"));
+        assert_eq!(
+            expansion.placements[0].lift, 0.0,
+            "the authored lift is what the preview used to draw — and it is not where the piece lands"
+        );
+        let ys = emerge_mapper::editor::stamped_heights(&open.map, &project.library, &expansion)
+            .unwrap_or_else(|e| panic!("the stamped rows must resolve: {e}"));
+        assert_eq!(ys.len(), 1, "one member, one height");
+        assert!(
+            (ys[0] + 0.06).abs() < 1e-4,
+            "the sunk member must seat 6 cm below the floor, where the drop puts it: {ys:?}"
+        );
     }
 
     /// **The composition grammar, driven from the editor** — FVS-R-7's remaining half.
@@ -2098,14 +2346,14 @@ mod compose {
             );
         }
 
-        // Delete, through the call the click makes.
+        // Delete, through the call the click makes — and with nothing touching `Project`, because
+        // `drive_removal` does not. This scope used to take a `Mut<Project>` it never used, which
+        // marked the resource changed and let the redraw fire for a reason the app has not got.
         {
             let world = app.world_mut();
-            world.resource_scope(|world, _project: bevy::prelude::Mut<Project>| {
-                world.resource_scope(|world, mut open: bevy::prelude::Mut<OpenMap>| {
+            world.resource_scope(|world, mut open: bevy::prelude::Mut<OpenMap>| {
                 let mut state = world.resource_mut::<emerge_mapper::editor::EditorState>();
                 emerge_mapper::editor::delete_stamp_for_test(&stamp_id, &mut open, &mut state);
-                });
             });
         }
         for _ in 0..3 {
@@ -2638,6 +2886,116 @@ fn the_open_name_box_answers_the_over_ui_question() {
         panel_has_hovered,
         "the visible dialog carries no `Hovered`, so every over-UI test reads it as open world and \
          a scroll over it zooms the map behind it"
+    );
+}
+
+/// **The open journal is UI, and it is opaque — so the pointer gates have to see it.**
+///
+/// It is a solid 80%x76% panel over the viewport, and it carried `Pickable::IGNORE` and no
+/// `Hovered` at all. Both ways of asking *"is the pointer on the interface"* look only at the nodes
+/// that carry one — `view::over_ui` filters the query, the mouse verbs read a true value — so with
+/// the journal open, a click on it stamped or removed a placement on the map **behind** it, unseen
+/// under a solid panel, and the wheel zoomed the world instead of scrolling this list.
+///
+/// The same pair `the_open_name_box_answers_the_over_ui_question` pins one panel along, and the same
+/// pair `chrome::panel_root`'s own note records from when only the *rows* carried `Hovered`.
+///
+/// Asked of the rects rather than of `Hovered`'s value, for the reason
+/// `the_pointer_is_over_the_panel_when_it_is_over_a_row` gives: `bevy_picking` writes that value
+/// from the window's cursor, which no headless test has.
+#[test]
+fn the_open_journal_answers_the_over_ui_question() {
+    use bevy::ui::{ComputedNode, UiGlobalTransform};
+    use emerge_mapper::keys::{Action, MOD_KEYS, binding};
+
+    let root = Fixture::new("journalui")
+        .descriptor("floor", "alpha")
+        .build("m");
+    let mut app = harness::build_headless(&root, "m", None).unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..3 {
+        app.update();
+    }
+
+    // The panel's own rect, whether it is showing or not — `over_ui` is fed every node carrying
+    // `Hovered`, so this is the entity the question now reaches.
+    let panel_rect = |app: &mut App| -> Option<(Vec2, Vec2)> {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(&ComputedNode, &UiGlobalTransform), (
+                bevy::prelude::With<emerge_mapper::chrome::JournalPanel>,
+                bevy::prelude::With<bevy::picking::hover::Hovered>,
+            )>();
+        q.iter(app.world())
+            .map(|(n, tf)| (n.size(), tf.translation))
+            .next()
+    };
+    assert!(
+        panel_rect(&mut app).is_some(),
+        "the journal panel carries no `Hovered`, so every over-UI gate reads the open journal as \
+         open world — a click on it lands on the map underneath"
+    );
+
+    // **Shut, it is a zero rect**, which both the picking backend and `over_ui` skip. That is what
+    // makes carrying `Hovered` safe on a panel that is absent from almost every frame.
+    let over = |app: &mut App, at: Vec2| -> bool {
+        let nodes: Vec<(ComputedNode, UiGlobalTransform)> = {
+            let mut q = app
+                .world_mut()
+                .query_filtered::<(&ComputedNode, &UiGlobalTransform), bevy::prelude::With<bevy::picking::hover::Hovered>>();
+            q.iter(app.world())
+                .map(|(n, tf)| (n.clone(), *tf))
+                .collect()
+        };
+        let borrowed: Vec<(&ComputedNode, &UiGlobalTransform)> =
+            nodes.iter().map(|(n, tf)| (n, tf)).collect();
+        emerge_mapper::view::over_ui(Some(at), 1.0, borrowed.iter().copied())
+    };
+    let (shut_size, _) = panel_rect(&mut app).unwrap_or_else(|| panic!("the panel must exist"));
+    assert_eq!(
+        shut_size,
+        Vec2::ZERO,
+        "a `Display::None` journal must occupy nothing, or it answers for the window while away"
+    );
+
+    // Cmd+E, the key an author presses.
+    let once = |app: &mut App, chord: Vec<KeyCode>| {
+        app.add_systems(
+            Update,
+            IntoScheduleConfigs::before(
+                move |mut keys: ResMut<bevy::input::ButtonInput<KeyCode>>,
+                      mut done: bevy::prelude::Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        for k in &chord {
+                            keys.press(*k);
+                        }
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    };
+    once(&mut app, vec![MOD_KEYS[0], binding(Action::ShowErrors).key]);
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let (size, centre) =
+        panel_rect(&mut app).unwrap_or_else(|| panic!("the panel must still exist"));
+    assert!(
+        size.x > 1.0 && size.y > 1.0,
+        "the journal did not open, so this test would prove nothing — it measures {size:?}"
+    );
+    assert!(
+        over(&mut app, centre),
+        "a pointer on the open journal's own centre must read as over the interface — it is a \
+         solid panel, and a click falling through it edits the map nobody can see"
+    );
+    assert!(
+        !over(&mut app, Vec2::new(-5000.0, -5000.0)),
+        "and a pointer nowhere near a panel is still the world"
     );
 }
 
@@ -3412,6 +3770,8 @@ fn dropping_an_oversized_mesh_grows_the_tile() {
     let mut app = harness::build_headless_at(&root, "test_map", None, emerge_mapper::tiles::Mode::Tiles)
         .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
     app.update();
+    // The tab opens on the Tiles page — name a tile into existence before any drop.
+    open_tile(&mut app, "tile");
 
     fn once(app: &mut App, key: KeyCode) {
         app.add_systems(
@@ -3431,12 +3791,12 @@ fn dropping_an_oversized_mesh_grows_the_tile() {
         app.update();
     }
 
-    let before = match app.world().resource::<emerge_mapper::build::Build>().open {
-        Some(ref c) => match c.envelope {
+    let before = match &app.world().resource::<emerge_mapper::build::Build>().open {
+        Some(c) => match c.envelope {
             emerge_core::composition::Envelope::Bounded { size } => size,
             _ => panic!("a tile claims a tile"),
         },
-        None => panic!("arriving opens a tile"),
+        None => panic!("a tile must be open before a drop"),
     };
     assert_eq!(
         (before.0, before.2),
@@ -3444,7 +3804,8 @@ fn dropping_an_oversized_mesh_grows_the_tile() {
         "an empty tile is one cell"
     );
 
-    once(&mut app, binding(Action::BuildArm).key);
+    // **Enter is the drop AND the hold** — `Space` arms, but `Enter` is `Idle`-scoped, so the
+    // old arm-then-drop pair is refused by the census. The drop alone arms (`placing = true`).
     once(&mut app, binding(Action::BuildDrop).key);
     app.update();
 
@@ -3524,6 +3885,8 @@ fn shift_arrow_flushes_the_mesh_and_the_bare_arrow_still_nudges() {
     let mut app = harness::build_headless_at(&root, "test_map", None, emerge_mapper::tiles::Mode::Tiles)
         .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
     app.update();
+    // The tab opens on the Tiles page — a tile must be named into existence before any drop.
+    open_tile(&mut app, "tile");
 
     fn once(app: &mut App, chord: Vec<KeyCode>) {
         app.add_systems(
@@ -3554,7 +3917,8 @@ fn shift_arrow_flushes_the_mesh_and_the_bare_arrow_still_nudges() {
             .unwrap_or_else(|| panic!("a member must be in the tile"))
     };
 
-    once(&mut app, vec![binding(Action::BuildArm).key]);
+    // **Enter is the drop AND the hold** — `Space` arms, but `Enter` is `Idle`-scoped, so the
+    // old arm-then-drop pair is refused by the census. The drop alone arms.
     once(&mut app, vec![binding(Action::BuildDrop).key]);
     assert_eq!(at(&app), (0.0, 0.0), "brought in centred");
 
@@ -3568,7 +3932,7 @@ fn shift_arrow_flushes_the_mesh_and_the_bare_arrow_still_nudges() {
     assert_ne!(nudged, (0.0, 0.0), "the unshifted arrow must still nudge");
     assert!(
         nudged.1.abs() < 0.4,
-        "one stop at depth 1 is a third of the span, not the edge — got {nudged:?}"
+        "one stop at the ladder is a third of the span, not the edge — got {nudged:?}"
     );
 
     // Shifted: straight to the edge, wherever it was.
@@ -3586,11 +3950,11 @@ fn shift_arrow_flushes_the_mesh_and_the_bare_arrow_still_nudges() {
         "and it must not move the axis the nudge moved: {flush:?} from {nudged:?}"
     );
 
-    // **The tile did not grow to hold it.** Flush is the extreme position that still fits, so an
+    // The tile did not grow to hold it. Flush is the extreme position that still fits, so an
     // envelope that fits its contents must stay exactly one cell — a grow here would mean the verb
     // had overshot the edge it was aiming at.
-    let size = match app.world().resource::<emerge_mapper::build::Build>().open {
-        Some(ref c) => match c.envelope {
+    let size = match &app.world().resource::<emerge_mapper::build::Build>().open {
+        Some(c) => match c.envelope {
             emerge_core::composition::Envelope::Bounded { size } => size,
             _ => panic!("a tile claims a tile"),
         },
@@ -3625,6 +3989,9 @@ fn undo_steps_back_through_the_meshes_brought_into_a_tile() {
     let mut app = harness::build_headless_at(&root, "test_map", None, emerge_mapper::tiles::Mode::Tiles)
         .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
     app.update();
+
+    // The tab opens on the Tiles page now — no tile in hand until one is named.
+    open_tile(&mut app, "tile");
 
     fn once(app: &mut App, chord: Vec<KeyCode>) {
         app.add_systems(
@@ -3664,9 +4031,11 @@ fn undo_steps_back_through_the_meshes_brought_into_a_tile() {
     let first_in = members(&app);
     assert_eq!(first_in.len(), 1, "one mesh is in: {first_in:?}");
     // A different piece, so the two steps are distinguishable by name rather than by count alone.
-    once(&mut app, vec![binding(Action::BuildArm).key]);
+    // **Drop is `Idle`-scoped now** — Enter on the Tiles page is `TileOpen`, so a drop while
+    // holding (after `Space`) is refused by stance, which is the census's rule. The honest loop:
+    // release with `Esc`, walk to the next row at Idle, drop again.
+    once(&mut app, vec![binding(Action::Cancel).key]);
     once(&mut app, vec![binding(Action::BuildBack).key]);
-    once(&mut app, vec![binding(Action::BuildArm).key]);
     once(&mut app, vec![binding(Action::BuildDrop).key]);
     let two = members(&app);
     assert_eq!(two.len(), 2, "two meshes are in the tile: {two:?}");
@@ -3748,6 +4117,9 @@ fn a_tile_survives_a_save_and_a_reopen() {
     let mut app = harness::build_headless_at(&root, "test_map", None, emerge_mapper::tiles::Mode::Tiles)
         .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
     app.update();
+    // The tab opens on the Tiles page — name the tile into existence, which lands on the Meshes
+    // page ready for drops. The tile is named here, so `Cmd+S` writes under this id directly.
+    open_tile(&mut app, "tile_1");
 
     fn once(app: &mut App, chord: Vec<KeyCode>) {
         app.add_systems(
@@ -3771,19 +4143,19 @@ fn a_tile_survives_a_save_and_a_reopen() {
 
     // A floor, a wall a cell away, and a hole above the wall — the shape the author described:
     // "floor mesh at the lowest, a wall mesh over it, a wall mounted light fixture on the wall mesh".
-    // `Space` takes the piece in hand — the arrows steer the tile while it is held and the library
-    // list while it is not, which is the whole reason the door exists. Dropping does not put it
-    // back, so several pieces go down without re-arming.
-    once(&mut app, vec![binding(Action::BuildArm).key]);
+    // **Each drop is a hold.** `Enter` drops the picked mesh and leaves it in hand (`placing`),
+    // `Esc` puts it back, `down` walks the library at Idle — so the honest rhythm is
+    // drop / release / walk / drop.
     once(&mut app, vec![binding(Action::BuildDrop).key]);
-    once(&mut app, vec![binding(Action::BuildArm).key]);
-    once(&mut app, vec![binding(Action::BuildBack).key]);
-    once(&mut app, vec![binding(Action::BuildArm).key]);
+    once(&mut app, vec![binding(Action::Cancel).key]);
+    once(&mut app, vec![binding(Action::TileListNext).key]);
     once(&mut app, vec![binding(Action::BuildDrop).key]);
     // The wall lands centred like everything else, then moves — which is the model: bring it in,
     // then adjust it.
     once(&mut app, vec![binding(Action::BuildBack).key]);
     once(&mut app, vec![binding(Action::BuildUp).key]);
+    // The slot is its own verb: `Shift+Enter`, Idle-scoped like the drop — release the wall first.
+    once(&mut app, vec![binding(Action::Cancel).key]);
     once(
         &mut app,
         vec![KeyCode::ShiftLeft, binding(Action::BuildSlot).key],
@@ -3812,11 +4184,10 @@ fn a_tile_survives_a_save_and_a_reopen() {
         &mut app,
         vec![KeyCode::SuperLeft, binding(Action::Save).key],
     );
-    // Saving a tile the editor named raises the name prompt (2026-08-15): a provisional
-    // `<kit>/tile_n` must not reach the kit, because the KIT list is where it would be read back.
-    name_the_tile(&mut app, "tile_1");
+    // The tile was named when it was opened (`open_tile` above), so the save writes under that id
+    // directly — no name prompt.
     // **Refusals only.** The status also carries the size notice — a tile bigger than one cell is
-    // not solver content and says so — which is information rather than a failure, so asserting "no
+    // not solver content and says so — which is that rather than a refusal, so asserting "no
     // problems at all" would make this test fail for the tile being large.
     assert!(
         !app.world()
@@ -3988,8 +4359,17 @@ fn the_arrows_walk_the_library_from_the_tiles_tab() {
         .resource::<emerge_mapper::tiles::ImportState>()
         .selected_library_id
         .clone();
+    assert!(
+        first.is_some(),
+        "arriving on the Tiles tab must arm a piece, or the first `down` after the drill refuses"
+    );
 
-    once(&mut app, vec![binding(Action::BuildBack).key]);
+    // **The walk lives on the Meshes page.** On the Tiles page, `down` walks the tile rows
+    // (`TileNext` at `Stance::Browsing`); the library is the Meshes page's list (`TileListNext` at
+    // `Stance::Idle`). `right` flips the page — with nothing authored yet it still flips, noting
+    // that there is nothing to open, because the author came to pick meshes.
+    once(&mut app, vec![binding(Action::PageEnter).key]);
+    once(&mut app, vec![binding(Action::TileListNext).key]);
     let after = app
         .world()
         .resource::<emerge_mapper::tiles::ImportState>()
@@ -3998,7 +4378,7 @@ fn the_arrows_walk_the_library_from_the_tiles_tab() {
 
     assert_ne!(
         first, after,
-        "an arrow on the Tiles tab must move the piece in hand — it is the verb the loop repeats most"
+        "a down arrow on the Meshes page must move the piece in hand — it is the verb the loop repeats most"
     );
     assert!(
         after.is_some(),
@@ -4201,6 +4581,10 @@ fn the_tiles_tab_opens_a_tile_and_walks_its_grid() {
         .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
     app.update();
 
+    // The tab opens on the Tiles page — name the tile into existence before walking its grid.
+    // `open_tile` lands on the Meshes page with the tile in hand.
+    open_tile(&mut app, "tile");
+
     // Onto the Tiles tab, then into BUILD.
     // **One shot, and that matters more than it looks.** A system added here runs every frame
     // forever, so a helper that merely presses would hold the key down — and `Space` re-toggling
@@ -4233,7 +4617,7 @@ fn the_tiles_tab_opens_a_tile_and_walks_its_grid() {
     let comp = build
         .open
         .as_ref()
-        .unwrap_or_else(|| panic!("entering BUILD with nothing in hand must open a blank tile"));
+        .unwrap_or_else(|| panic!("the named tile must be in hand after opening"));
     // Cell-sized in plan, or the solver can never place it — `from_compositions` refuses any other
     // width by name.
     let emerge_core::composition::Envelope::Bounded { size } = comp.envelope else {
@@ -4245,8 +4629,9 @@ fn the_tiles_tab_opens_a_tile_and_walks_its_grid() {
     );
     // **A brought-in mesh lands centred, and the arrows move *it*.** There is no cursor: the member
     // is the selection, so the thing on screen and the thing the keys act on are the same object.
+    // **`Enter` is the drop AND the hold** — `Space` arms, but `Enter` is `Idle`-scoped, so the
+    // old arm-then-drop pair is refused by the census. The drop alone arms.
     let key = |a| emerge_mapper::keys::binding(a).key;
-    before(&mut app, key(emerge_mapper::keys::Action::BuildArm));
     before(&mut app, key(emerge_mapper::keys::Action::BuildDrop));
 
     let placed = |app: &bevy::prelude::App| -> (f32, f32) {
@@ -4349,6 +4734,8 @@ fn a_dropped_piece_is_staged_and_takes_the_focus() {
     let mut app = harness::build_headless_at(&root, "test_map", None, emerge_mapper::tiles::Mode::Tiles)
         .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
     app.update();
+    // The tab opens on the Tiles page — a tile must be named into existence before any drop.
+    open_tile(&mut app, "tile");
 
     // **One-shot, and it releases first.** The idiom elsewhere in this file adds a system that
     // presses every frame, which fires exactly once — *"pressing an already-pressed key does not
@@ -4365,6 +4752,9 @@ fn a_dropped_piece_is_staged_and_takes_the_focus() {
         k.press(emerge_mapper::keys::binding(action).key);
     }
     fn to_tiles(_done: bevy::prelude::Local<bool>, mut _k: Keys) {
+    }
+    fn release(mut done: bevy::prelude::Local<bool>, mut k: Keys) {
+        once(&mut done, &mut k, emerge_mapper::keys::Action::Cancel);
     }
     fn drop_a(mut done: bevy::prelude::Local<bool>, mut k: Keys) {
         once(&mut done, &mut k, emerge_mapper::keys::Action::BuildDrop);
@@ -4405,6 +4795,9 @@ fn a_dropped_piece_is_staged_and_takes_the_focus() {
     // `floor`. With one member the assertion would pass on the default and prove nothing.
     pick(&mut app, "floor");
     step(&mut app, drop_a);
+    // A drop leaves the piece in hand (`placing = true`), and `Enter` is `Idle`-scoped — release
+    // with `Esc` before the second drop, which is the census's shape for two drops in a row.
+    step(&mut app, release);
     pick(&mut app, "wall");
     step(&mut app, drop_b);
     // One more frame: the drop writes `Build`, and the stage is rebuilt by a system reading it.
@@ -4813,6 +5206,9 @@ fn a_dropped_member_moves_under_the_arrows_without_space_first() {
         .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
     app.update();
 
+    // The tab opens on the Tiles page — a tile has to be named into existence before any drop.
+    open_tile(&mut app, "tile");
+
     let step = |app: &mut bevy::prelude::App, key: bevy::prelude::KeyCode| {
         app.add_systems(
             bevy::prelude::Update,
@@ -4890,6 +5286,8 @@ fn a_flush_along_the_axis_a_piece_already_fills_says_why_nothing_moved() {
     let mut app = harness::build_headless_at(&root, "test_map", None, emerge_mapper::tiles::Mode::Tiles)
         .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
     app.update();
+    // The tab opens on the Tiles page — name the tile before the drop, which lands on Meshes.
+    open_tile(&mut app, "tile");
 
     fn once(app: &mut App, chord: Vec<KeyCode>) {
         app.add_systems(
@@ -4920,7 +5318,7 @@ fn a_flush_along_the_axis_a_piece_already_fills_says_why_nothing_moved() {
             .unwrap_or_else(|| panic!("a member must be in the tile"))
     };
 
-    once(&mut app, vec![binding(Action::BuildArm).key]);
+    // **Enter is the drop AND the hold** — the arm-then-drop pair is refused by the census.
     once(&mut app, vec![binding(Action::BuildDrop).key]);
 
     // Along the wall's length: it already spans the tile on Z, so there is nowhere to go.
@@ -4980,6 +5378,8 @@ fn undo_after_two_drops_removes_the_second_mesh() {
     let mut app =
         emerge_mapper::harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Tiles).unwrap_or_else(|e| panic!("{e}"));
     app.update();
+    // The tab opens on the Tiles page — name the tile before the drops, which lands on Meshes.
+    open_tile(&mut app, "tile");
 
     let step = |app: &mut bevy::prelude::App, chord: Vec<bevy::prelude::KeyCode>| {
         app.add_systems(
@@ -5162,6 +5562,8 @@ fn undo_removes_the_most_recent_drop_not_the_first_row() {
     let mut app =
         emerge_mapper::harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Tiles).unwrap_or_else(|e| panic!("{e}"));
     app.update();
+    // The tab opens on the Tiles page — name the tile before the drops, which lands on Meshes.
+    open_tile(&mut app, "tile");
 
     let step = |app: &mut bevy::prelude::App, chord: Vec<bevy::prelude::KeyCode>| {
         app.add_systems(
@@ -5270,6 +5672,8 @@ fn a_tile_survives_being_emptied_and_refilled() {
     let mut app =
         emerge_mapper::harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Tiles).unwrap_or_else(|e| panic!("{e}"));
     app.update();
+    // The tab opens on the Tiles page — name the tile before the drops, which lands on Meshes.
+    open_tile(&mut app, "tile");
 
     let step = |app: &mut bevy::prelude::App, chord: Vec<bevy::prelude::KeyCode>| {
         app.add_systems(
@@ -5455,6 +5859,8 @@ fn a_new_tile_does_not_undo_into_the_one_before_it() {
     let mut app =
         emerge_mapper::harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Tiles).unwrap_or_else(|e| panic!("{e}"));
     app.update();
+    // The tab opens on the Tiles page — name the tile before the drops, which lands on Meshes.
+    open_tile(&mut app, "tile");
 
     let step = |app: &mut bevy::prelude::App, chord: Vec<bevy::prelude::KeyCode>| {
         app.add_systems(
@@ -5549,7 +5955,9 @@ fn no_reachable_tiles_state_leaves_the_arrows_doing_nothing() {
     #[derive(Debug, PartialEq, Clone)]
     struct Observable {
         row: Option<String>,
+        page: Option<usize>,
         at: Option<(f32, f32)>,
+        focus: Option<usize>,
         members: usize,
     }
 
@@ -5561,11 +5969,17 @@ fn no_reachable_tiles_state_leaves_the_arrows_doing_nothing() {
                 .resource::<ImportState>()
                 .selected_library_id
                 .clone(),
+            page: build.browsing,
             at: build
                 .open
                 .as_ref()
                 .and_then(|c| c.members.get(build.focus))
                 .map(|m| m.at),
+            // **Focus itself is observable.** `MemberPrev`/`MemberNext` move it, and when two
+            // members sit at the same coordinates (the floor's home and the drop's home are both
+            // the tile's centre here) the `at` readout cannot see the walk — the amber marker is
+            // what the key moved, and a marker is a real thing.
+            focus: build.open.as_ref().map(|c| c.members.len().min(build.focus)),
             members: build.open.as_ref().map_or(0, |c| c.members.len()),
         }
     };
@@ -5593,33 +6007,63 @@ fn no_reachable_tiles_state_leaves_the_arrows_doing_nothing() {
     };
     let key = |a| emerge_mapper::keys::binding(a).key;
 
-    // Every state named by the sequence that reaches it — so a state that stops being reachable
-    // fails here rather than quietly dropping out of coverage.
+    // **Every state named by the sequence that reaches it.** The first two are the Tiles page
+    // itself: arrival lands on it with the cursor at row 0, and the page's own arrows walk the
+    // tile list. The rest open the tile (the `PageEnter` prologue) and work on the Meshes page —
+    // which is where the arrows mean the library or the piece.
+    //
+    // `BuildNew` is absent from these paths: `N` opens the name PROMPT, a typing state in which
+    // the census offers nothing and this invariant does not apply.
+    // **Every state named by the sequence that reaches it.** The first two are the Tiles page
+    // itself: arrival lands on it with the cursor at row 0, and the page's own arrows walk the
+    // tile list. The rest drill with `PageEnter` — which opens the tile AND lands on the Meshes
+    // page. Opening a tile that already has a member leaves it in hand (Holding), so each state
+    // releases with `Esc` first where the drop must fire at Idle: the tile's own floor member is
+    // what `open_saved` holds, and that is the reachable truth of this tab.
+    //
+    // `BuildNew` is absent from these paths: `N` opens the name PROMPT, a typing state in which
+    // the census offers nothing and this invariant does not apply.
     let states: Vec<(&str, Vec<Action>)> = vec![
         ("arrived on the door", vec![]),
-        // `BuildNew` is deliberately absent from these paths: arriving on the tab already opens a
-        // blank tile, and since naming became explicit (2026-08-15) `N` opens the name PROMPT — a
-        // typing state, in which the census offers nothing and this invariant does not apply.
-        ("a blank tile", vec![]),
         (
-            "blank, piece taken",
-            vec![Action::BuildArm],
+            "the Tiles page, tile selected",
+            vec![Action::TileNext, Action::TilePrev],
+        ),
+        (
+            "reopened tile, on the Meshes page",
+            vec![Action::PageEnter],
+        ),
+        (
+            "reopened, piece taken",
+            vec![Action::PageEnter, Action::BuildArm],
         ),
         (
             "one member, just dropped",
-            vec![Action::BuildDrop],
+            vec![Action::PageEnter, Action::Cancel, Action::BuildDrop],
         ),
         (
             "one member, released with Esc",
-            vec![Action::BuildDrop, Action::Cancel],
+            vec![
+                Action::PageEnter,
+                Action::Cancel,
+                Action::BuildDrop,
+                Action::Cancel,
+            ],
         ),
         (
             "emptied again",
-            vec![Action::BuildDrop, Action::BuildDropMember],
+            vec![
+                Action::PageEnter,
+                Action::Cancel,
+                Action::BuildDrop,
+                Action::BuildDropMember,
+            ],
         ),
         (
             "two members",
             vec![
+                Action::PageEnter,
+                Action::Cancel,
                 Action::BuildDrop,
                 Action::Cancel,
                 Action::TileListNext,
@@ -5627,8 +6071,13 @@ fn no_reachable_tiles_state_leaves_the_arrows_doing_nothing() {
             ],
         ),
         (
-            "undone back to blank",
-            vec![Action::BuildDrop, Action::UndoBuild],
+            "undone back to the floor member",
+            vec![
+                Action::PageEnter,
+                Action::Cancel,
+                Action::BuildDrop,
+                Action::UndoBuild,
+            ],
         ),
     ];
 
@@ -5644,8 +6093,33 @@ fn no_reachable_tiles_state_leaves_the_arrows_doing_nothing() {
         // characterises — it walks the states an author reaches, and the state it was written for
         // is a focus with somewhere to step back to.
         let root = Fixture::new(&format!("matrix-{}", name.replace(' ', "-")))
+            // **Oldest first.** Newest-defined is row 0, so `base_floor` — the tiles' own floor —
+            // sits at the BOTTOM of the library list and the arrows never walk onto it; `alpha_one`
+            // is row 0 and `beta_two` row 1, exactly as the comment below this loop describes.
+            .sized_descriptor("base_floor", "beta", 0.2, 0.2)
             .sized_descriptor("beta_two", "beta", 0.2, 0.2)
             .sized_descriptor("alpha_one", "alpha", 0.2, 0.2)
+            // **Two tiles, one per page-walk direction.** The page's up/down pair needs a second
+            // row to move to — one tile saturates both directions and the census would offer a
+            // key that cannot move, which is exactly the dead-key this test exists to catch.
+            // The composition schema refuses an empty one ("stamps nothing, which looks exactly
+            // like a stamp that failed"), so each carries its own floor.
+            //
+            // **The floor is named `zz_floor`, sorting AFTER `alpha_one`/`beta_two`.** `place`
+            // inserts by id and the drop sets `focus` to the insert index, so a floor named
+            // `floor` would put the FIRST drop at index 0 and the second at 1 — where `MemberPrev`
+            // from the second saturates at 0 and the walk looks dead. The drops must be the FIRST
+            // members, and the name sorts them there.
+            .bounded_composition(
+                "alpha/tile_1",
+                (1.0, 4.0, 1.0),
+                &[("zz_floor", "base_floor", (0.0, 0.0))],
+            )
+            .bounded_composition(
+                "alpha/tile_2",
+                (1.0, 4.0, 1.0),
+                &[("zz_floor", "base_floor", (0.0, 0.0))],
+            )
             .build("m");
         let mut app = emerge_mapper::harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Tiles)
             .unwrap_or_else(|e| panic!("{e}"));
@@ -5677,18 +6151,42 @@ fn no_reachable_tiles_state_leaves_the_arrows_doing_nothing() {
         // which is a property of the schedule and not a bug in the tab.
         app.update();
         let live = *app.world().resource::<emerge_mapper::keys::Live>();
-        // `MemberPrev` rather than `MemberNext`: a drop focuses the member it just added, which on
-        // a sorted list is often the last one — so `next` saturates there for the same reason `up`
+        // **What the arrows mean here, asked of the stance.** On the Tiles page the up/down pair
+        // walks the tile list (`TilePrev`/`TileNext`); on the Meshes page it walks the library
+        // (`TileListPrev`/`TileListNext`), or moves the piece when one is in hand.
+        //
+        // `MemberPrev` rather than `MemberNext`: a drop focuses the most recent member, which on a
+        // sorted list is often the last — so `next` saturates there for the same reason `up`
         // saturates at row 0. Walking *back* can always move while there is more than one member,
         // and with one member both directions saturate, which is checked below rather than here.
+        // **What the arrows mean here, asked of the stance.** On the Tiles page the up/down pair
+        // walks the tile list; on the Meshes page it walks the library (`TileList*`) or moves the
+        // piece when one is in hand.
         //
-        // And only where there is somewhere to walk: with a single member both directions saturate,
-        // which is the same legitimate no-op as `up` at row 0 of the library. The verb is still
-        // covered — the `two members` state below is where it has to move.
-        let mut probes = vec![Action::TileListNext, Action::BuildBack];
-        if read(&app).members > 1 {
-            probes.push(Action::MemberPrev);
-        }
+        // Only the *down* direction is probed on the page: `TilePrev` at row 0 saturates — the
+        // same legitimate no-op the library's `up` at row 0 makes, which the original sweep
+        // excluded by always probing `next`. Two tiles sit in the kit, so `TileNext` can always
+        // move.
+        let probes = match live.1 {
+            emerge_mapper::keys::Stance::Browsing => vec![Action::TileNext],
+            _ => {
+                let mut p = vec![Action::TileListNext, Action::BuildBack];
+                // **The member walk, probed in the direction that has room.** A drop lands at the
+                // insert index, which is 0 when the dropped id sorts before the tile's own floor —
+                // so `MemberPrev` there saturates by design, the same legitimate no-op the
+                // original sweep excluded at the other end. Asking the focus where it can go keeps
+                // the probe honest: the amber marker must move, whichever way that is.
+                if read(&app).members > 1 {
+                    let focus = app.world().resource::<Build>().focus;
+                    p.push(if focus > 0 {
+                        Action::MemberPrev
+                    } else {
+                        Action::MemberNext
+                    });
+                }
+                p
+            }
+        };
         let claimed: Vec<Action> = probes
             .into_iter()
             .filter(|a| {
@@ -5771,6 +6269,8 @@ fn the_focus_walks_the_members_and_shift_delete_empties_the_tile() {
     let mut app =
         emerge_mapper::harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Tiles).unwrap_or_else(|e| panic!("{e}"));
     app.update();
+    // The tab opens on the Tiles page — name the tile before the drops, which lands on Meshes.
+    open_tile(&mut app, "tile");
 
     let press = |app: &mut bevy::prelude::App, chord: Vec<bevy::prelude::KeyCode>| {
         app.add_systems(
@@ -5885,6 +6385,10 @@ fn a_refused_mount_names_a_piece_that_would_hold_it() {
     let mut app =
         emerge_mapper::harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Tiles).unwrap_or_else(|e| panic!("{e}"));
     app.update();
+    // The tab opens on the Tiles page — name the tile into existence first. `Enter` on the Tiles
+    // page opens a row (`TileOpen`), not a drop; the Meshes page is where drops happen, and that
+    // is where `open_tile` lands.
+    open_tile(&mut app, "tile");
 
     let press = |app: &mut bevy::prelude::App, chord: Vec<bevy::prelude::KeyCode>| {
         app.add_systems(
@@ -5992,7 +6496,13 @@ fn every_checkpoint_a_shipped_guide_names_is_registered_and_runs() {
     chooser_app
         .insert_resource(emerge_mapper::chooser::Chooser::new(
             std::path::PathBuf::from("."),
-            emerge_mapper::chooser::Catalog { kits: Vec::new(), maps: Vec::new() },
+            emerge_mapper::chooser::Catalog {
+                kits: Vec::new(),
+                maps: Vec::new(),
+                authoring: None,
+                bashes: Vec::new(),
+                projects: Vec::new(),
+            },
             None,
         ))
         .add_plugins(emerge_mapper::chooser::ChooserGuidePlugin);
@@ -6347,11 +6857,16 @@ fn the_tile_authoring_script_can_actually_be_followed() {
             // **Saving a never-named tile asks for a name** (2026-08-15), so a script's `Cmd+S`
             // step is two acts: the key, then the answer. Handled at the press rather than in an
             // arm of `keystrokes`, because it is a property of the door and not of any one script.
-            if app
-                .world()
-                .resource::<emerge_mapper::build::Build>()
-                .naming
-                .is_some()
+            //
+            // **Except the `start a tile` step, whose prompt this test's own special block owns.**
+            // `N` raised it and the block below types the name and presses Enter; answering here
+            // first would close the prompt and leave that Enter to fall through to a drop.
+            if label != "start a tile"
+                && app
+                    .world()
+                    .resource::<emerge_mapper::build::Build>()
+                    .naming
+                    .is_some()
             {
                 name_the_tile(&mut app, "named_by_the_test");
             }
@@ -6360,6 +6875,10 @@ fn the_tile_authoring_script_can_actually_be_followed() {
         // `ButtonInput` — the distinction `bevy_debugger/input` exists to honour, and the reason an
         // agent could press keys but not type into them until it wrote the stream. This is what
         // `{"kind":"Keyboard","text":"kit/tile_a"}` followed by `{"key":"Enter"}` does over BRP.
+        //
+        // **The auto-answer above skips this step on purpose.** `N` raised the prompt and the
+        // block below owns the answer: it types the name and presses Enter itself, and answering
+        // the prompt in the chord loop would leave this Enter to fall through to a drop.
         if label == "start a tile" {
             let mut tap = |logical: bevy::input::keyboard::Key, code: KeyCode| {
                 for state in [
@@ -6516,6 +7035,9 @@ fn the_tile_feedback_script_can_actually_be_followed() {
         match label {
             // Nothing to press: the door IS the tab, chosen on the way in.
             "open the Tiles tab" => vec![],
+            // `N` opens the name field; the field is typed into and committed by the loop's own
+            // auto-answer, because text is a message stream rather than a key press.
+            "start a tile" => vec![vec![Action::BuildNew]],
             // **The walk is part of the step**, and leaving it out is what made this test green
             // for the wrong reason. The script says *"walk the library with up and down — press
             // Enter on site/floor"*; driving only the Enter left nothing picked in the library, so
@@ -6534,21 +7056,20 @@ fn the_tile_feedback_script_can_actually_be_followed() {
             ],
             "is the tile still one cell" => vec![],
             "save it" => vec![vec![Action::Save]],
-            // `Esc` releases the piece first — `KitEnter` is bound at `Stance::Idle` — then right
-            // opens the KIT tab, three steps walk tile_1 → tile_4, and right again opens it.
-            // **Four walks, not three.** The save two steps earlier put a NAMED tile in the kit
-            // (naming became explicit 2026-08-15), and `commit_composition` sorts by id — so
-            // `site/named_by_the_test` lands ahead of `site/tile_1` and every row moved down one.
-            // The script's prose says "walk down to site/tile_4", which is still what an author
-            // does; only the count a machine needs is different.
+            // **The save left the author on the Meshes page with the piece still in hand.** `Esc`
+            // puts it back (the stance the arrows answer from), `left` ascends to the Tiles page,
+            // then four walks to tile_4 — the save two steps earlier put a NAMED tile in the kit,
+            // so `site/named_by_the_test` lands ahead of `site/tile_1` and every row moved down
+            // one — and `Enter` reopens it, landing back on the Meshes page where the flush step's
+            // arrows work.
             "reopen tile_4 from the kit" => vec![
                 vec![Action::Cancel],
-                vec![Action::KitEnter],
-                vec![Action::KitNext],
-                vec![Action::KitNext],
-                vec![Action::KitNext],
-                vec![Action::KitNext],
-                vec![Action::KitOpen],
+                vec![Action::PageLeave],
+                vec![Action::TileNext],
+                vec![Action::TileNext],
+                vec![Action::TileNext],
+                vec![Action::TileNext],
+                vec![Action::TileOpen],
             ],
             // Members sort by id — floor, then wall_low — and `open_saved` lands focus at 0, so
             // one step of `.` reaches the low wall; Shift+right flushes its 0.2 m to x = 0.4.
@@ -6640,6 +7161,166 @@ fn the_tile_feedback_script_can_actually_be_followed() {
     }
     assert!(
         reached >= 9,
+        "only {reached} checkpointed steps were driven"
+    );
+}
+
+/// **The corner-tile feedback script, driven — the smallest usable room-maker, walked.**
+///
+/// The second feedback exercise ships in `guides/corner_tile_feedback.json`: floor, two walls, the
+/// second turned a quarter, both flushed — the tile a room is made of — with the judgement steps a
+/// machine cannot answer left as `checkpoint: null`, exactly like its older sibling
+/// `tile_feedback.json`. This walks it the way the authoring driver does: press what an author
+/// following the card would press, and assert each step's checkpoint goes **false to true at that
+/// step**. The two `null` steps are passed over the way the app passes over them.
+///
+/// The fixture defines the wall before the floor, so the library reads newest-first and `floor`
+/// lands on row 0 — which is the walk the card's prose assumes.
+#[cfg(feature = "debugger")]
+#[test]
+fn the_corner_tile_feedback_script_can_actually_be_followed() {
+    use bevy_debugger_bevy::Checkpoints;
+    use emerge_mapper::keys::Action;
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(emerge_mapper::guided::GUIDES_DIR)
+        .join("corner_tile_feedback.json");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let script: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("bad JSON: {e}"));
+    let empty = vec![];
+    let steps = script["steps"].as_array().unwrap_or(&empty);
+
+    // **Defined back to front, so the rows come out front to back.** The library list is
+    // newest-defined first since 2026-08-20, and the walk counts below are written against the
+    // card's prose — "walk to a wall" is one `down` from the armed floor.
+    let root = Fixture::new("corner_feedback")
+        .descriptor("wall", "kit")
+        .descriptor("floor", "kit")
+        .build("m");
+    let mut app = harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Tiles).unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let key = |a| emerge_mapper::keys::binding(a).key;
+    let press = |app: &mut App, chord: Vec<KeyCode>| {
+        app.add_systems(
+            Update,
+            IntoScheduleConfigs::before(
+                move |mut keys: ResMut<bevy::input::ButtonInput<KeyCode>>,
+                      mut done: Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        for k in &chord {
+                            keys.press(*k);
+                        }
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    };
+
+    /// What an author does at each step, by label — sequences, not single keys.
+    fn keystrokes(label: &str) -> Vec<Vec<Action>> {
+        match label {
+            // Nothing to press: the door IS the tab, chosen on the way in.
+            "open the Tiles tab" => vec![],
+            // `N` opens the name field; the field is typed into and committed by the loop's own
+            // auto-answer, because text is a message stream rather than a key press.
+            "start a tile" => vec![vec![Action::BuildNew]],
+            // One `TileListNext` from nothing picked lands on the first row, `floor` — the same
+            // arm the arrival seed makes — and Enter drops it.
+            "bring a floor in" => vec![vec![Action::TileListNext], vec![Action::BuildDrop]],
+            // Observation: the drop is what put a piece in hand. Nothing to press.
+            "the floor should be in hand" => vec![],
+            // `Esc` puts the floor down (the walk is `Idle`-scoped), one step to the wall, drop.
+            "bring a wall in" => vec![
+                vec![Action::Cancel],
+                vec![Action::TileListNext],
+                vec![Action::BuildDrop],
+            ],
+            // One quarter turn of the focused member — the wall just dropped.
+            "turn the second wall a quarter" => vec![vec![Action::BuildTurn]],
+            "is the tile still one cell" => vec![],
+            "save it" => vec![vec![Action::Save]],
+            _ => vec![],
+        }
+    }
+
+    let mut reached = 0;
+    for step in steps {
+        let label = step["label"].as_str().unwrap_or("");
+        let Some(name) = step["checkpoint"].as_str() else {
+            // A step only a person can judge. Nothing to drive and nothing to assert.
+            continue;
+        };
+        let Some(id) = app.world().resource::<Checkpoints>().get(name) else {
+            panic!("`{name}` is not registered — the other test should have caught this");
+        };
+
+        // An *action* step must find its checkpoint false on arrival, or it measures nothing; an
+        // *observation* step presses nothing, and its checkpoint being true IS the pass.
+        let strokes = keystrokes(label);
+        if !strokes.is_empty() {
+            let before = app
+                .world_mut()
+                .run_system_with(
+                    id,
+                    step.get("with").cloned().unwrap_or(serde_json::Value::Null),
+                )
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(
+                !before,
+                "step `{label}` watches `{name}`, which was ALREADY true before the step ran. An \
+                 action step whose condition already holds measures nothing"
+            );
+        }
+
+        for chord in strokes {
+            let mut codes: Vec<KeyCode> = chord.iter().copied().map(key).collect();
+            if chord
+                .iter()
+                .any(|a| emerge_mapper::keys::binding(*a).needs_mod)
+            {
+                codes.push(emerge_mapper::keys::MOD_KEYS[0]);
+            }
+            press(&mut app, codes);
+            // The name prompt from `N` is answered out of band, like every drive test: text is a
+            // message stream rather than a key press.
+            if app
+                .world()
+                .resource::<emerge_mapper::build::Build>()
+                .naming
+                .is_some()
+            {
+                name_the_tile(&mut app, "named_by_the_test");
+            }
+        }
+        for _ in 0..3 {
+            app.update();
+        }
+
+        let after = app
+            .world_mut()
+            .run_system_with(
+                id,
+                step.get("with").cloned().unwrap_or(serde_json::Value::Null),
+            )
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(
+            after,
+            "step `{label}` says pressing {:?} makes `{name}` true, and it did not. An author \
+             following this script stops here.",
+            keystrokes(label)
+        );
+        reached += 1;
+    }
+    assert!(
+        reached >= 6,
         "only {reached} checkpointed steps were driven"
     );
 }
@@ -7041,11 +7722,11 @@ fn all_four_arrows_step_the_piece_in_four_different_directions() {
 /// `site/tile_4` with its low wall in the middle of the tile instead of flush against an edge, and
 /// the only way to fix it was to hand-edit `compositions.ron`.
 ///
-/// The verbs cost no new key. `left`/`right` were this tab's one unbound pair at `Idle`, and
-/// `docs/tiles_tab_contract.md` recorded why: *"There is one list on this tab, so there is nothing to
-/// switch between."* There are two now.
+/// The Tiles page is the tab's first page: every authored tile, one row each, `New Tile +` at the
+/// top. `right` drills to the Meshes page (opening the tile under the cursor on the way), `left`
+/// comes back, and `Enter` reopens the tile under the cursor without drilling.
 #[test]
-fn the_kit_can_be_walked_and_a_saved_tile_reopened() {
+fn the_tiles_page_lists_authored_tiles_and_reopening_works() {
     use emerge_mapper::build::Build;
     use emerge_mapper::keys::{Action, Stance, binding};
 
@@ -7096,12 +7777,12 @@ fn the_kit_can_be_walked_and_a_saved_tile_reopened() {
         }
     }
 
-    // `right` opens the kit, and that IS the stance — so the key list changes with it.
-    press(&mut app, key(Action::KitEnter));
+    // **The tab opens on the Tiles page** — arrival seeds the cursor at row 0, which is what the
+    // strip now shows, and that IS the stance: `Browsing` is the page's own key set.
     assert_eq!(
         app.world().resource::<Build>().browsing,
         Some(0),
-        "right shows the kit"
+        "arrival lands on the Tiles page, cursor at the top"
     );
     // One more tick before reading the stance: `census` reads `Build` in the same frame the key
     // handler writes it, so the list it draws is one frame behind the flag. Imperceptible to a
@@ -7113,29 +7794,30 @@ fn the_kit_can_be_walked_and_a_saved_tile_reopened() {
         "and the census follows, or the key list would be describing the wrong state"
     );
 
-    press(&mut app, key(Action::KitNext));
+    press(&mut app, key(Action::TileNext));
     assert_eq!(
         app.world().resource::<Build>().browsing,
         Some(1),
-        "down walks it"
+        "down walks the tiles"
     );
     // Saturating at the end, like the member walk: holding an arrow should stop, not wrap.
-    press(&mut app, key(Action::KitNext));
+    press(&mut app, key(Action::TileNext));
     assert_eq!(
         app.world().resource::<Build>().browsing,
         Some(1),
         "and stops at the end"
     );
 
-    // `right` again descends into the tile — the verb the tab never had.
-    press(&mut app, key(Action::KitOpen));
+    // **`right` opens the tile under the cursor AND drills into the Meshes page** — the author's
+    // shape for the tab: *"push right arrow with a tile selected to add/move to the Meshes tab."*
+    press(&mut app, key(Action::PageEnter));
     let build = app.world().resource::<Build>();
     assert_eq!(
         build.open.as_ref().map(|c| c.id.as_str()),
         Some("kit/two"),
-        "the selected tile is open for editing"
+        "the tile under the cursor is open for editing"
     );
-    assert_eq!(build.browsing, None, "and the list closes behind it");
+    assert_eq!(build.browsing, None, "and the page flipped to Meshes");
     // **Reopening lands you able to edit**, which is the whole reason the verb exists. This
     // asserted the opposite for an hour: `open_saved` cleared `placing`, so an author who reopened a
     // tile got `Stance::Idle` -- arrows walking the library, `,`/`.` not bound at all -- with the
@@ -7146,9 +7828,13 @@ fn the_kit_can_be_walked_and_a_saved_tile_reopened() {
         "reopening a tile is holding it: there is nothing else to pick up"
     );
 
-    // `Esc` backs out of the list without opening anything — invariant 2, one stance further.
-    press(&mut app, key(Action::KitEnter));
-    assert!(app.world().resource::<Build>().browsing.is_some());
+    // **`left` comes back to the Tiles page**, and `Esc` backs out of the page entirely.
+    press(&mut app, key(Action::PageLeave));
+    assert_eq!(
+        app.world().resource::<Build>().browsing,
+        Some(0),
+        "left returns to the Tiles page, cursor where the drill left it"
+    );
     press(&mut app, key(Action::Cancel));
     assert_eq!(
         app.world().resource::<Build>().browsing,
@@ -7312,6 +7998,9 @@ fn the_j_ladder_cycles_three_depths_and_a_new_tile_resets_it() {
         .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
     app.update();
 
+    // The tab opens on the Tiles page — a tile is named into existence before the ladder exists.
+    open_tile(&mut app, "tile");
+
     let press = |app: &mut App, key: KeyCode| {
         app.add_systems(
             Update,
@@ -7375,6 +8064,8 @@ fn the_held_member_carries_the_highlight_marker_until_released() {
     let mut app = harness::build_headless_at(&root, "test_map", None, emerge_mapper::tiles::Mode::Tiles)
         .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
     app.update();
+    // The tab opens on the Tiles page — name the tile before the drop, which lands on Meshes.
+    open_tile(&mut app, "tile");
 
     let press = |app: &mut App, key: KeyCode| {
         app.add_systems(
@@ -7437,6 +8128,8 @@ fn an_arrow_on_a_piece_that_fills_the_axis_says_so() {
     let mut app = harness::build_headless_at(&root, "test_map", None, emerge_mapper::tiles::Mode::Tiles)
         .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
     app.update();
+    // The tab opens on the Tiles page — name the tile before the drop, which lands on Meshes.
+    open_tile(&mut app, "tile");
 
     let press = |app: &mut App, key: KeyCode| {
         app.add_systems(
@@ -7529,38 +8222,98 @@ fn the_picked_mesh_ghosts_before_enter() {
             .count()
     };
 
-    // Arriving on the tab arms the first library row — nothing taken, nothing dropped — and that
-    // selection alone is what the ghost previews.
-    for _ in 0..3 {
-        app.update();
-    }
-    assert_eq!(
-        ghosts(&mut app),
-        1,
-        "the armed selection ghosts before any Enter"
-    );
-
-    // Browsing the kit hides it: the cursor there is on a tile, and a mesh ghost under it would be
-    // previewing the wrong kind of thing.
-    press(&mut app, key(emerge_mapper::keys::Action::KitEnter));
+    // **The Tiles page is up on arrival, and a tile cursor is not a mesh selection** — no ghost.
     for _ in 0..3 {
         app.update();
     }
     assert_eq!(
         ghosts(&mut app),
         0,
-        "no mesh ghost while the kit list is up"
+        "no mesh ghost on the Tiles page: the cursor there is on a tile"
     );
 
-    // And Esc backs out of the kit, so the preview returns with the library list.
-    press(&mut app, key(emerge_mapper::keys::Action::Cancel));
+    // `right` drills into the Meshes page (and opens the tile under the cursor), so the armed
+    // selection — the first library row, armed on arrival — is what the ghost previews.
+    press(&mut app, key(emerge_mapper::keys::Action::PageEnter));
     for _ in 0..3 {
         app.update();
     }
     assert_eq!(
         ghosts(&mut app),
         1,
-        "backing out of the kit brings the preview back"
+        "the armed selection ghosts on the Meshes page, before any Enter"
+    );
+
+    // **`left` ascends only at Idle.** The drill opened a tile with a member in it, so the piece
+    // is in hand and `left` moves it — the door idiom: `Esc` puts the piece back, then `left`
+    // goes up a page. The ghost goes with the Meshes page either way.
+    press(&mut app, key(emerge_mapper::keys::Action::Cancel));
+    press(&mut app, key(emerge_mapper::keys::Action::PageLeave));
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(
+        ghosts(&mut app),
+        0,
+        "no mesh ghost on the Tiles page: the cursor there is on a tile"
+    );
+
+    // And `right` again brings both back — the pair is a drill, not a toggle.
+    press(&mut app, key(emerge_mapper::keys::Action::PageEnter));
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(
+        ghosts(&mut app),
+        1,
+        "returning to the Meshes page brings the preview back"
+    );
+
+    // **And the preview is actually translucent — the ask this feature is named for** ("a
+    // semitransparent rendering ... like a placeholder"). The fixture's glb carries no material
+    // and scene assets never finish loading in this deviceless harness, so the ghost's mesh child
+    // never gains one here — what is under test is what `fade_ghost` DOES to a material, so the
+    // ghost root is handed a real one and the editor's own system is left to fade it.
+    let mat = app
+        .world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial::default());
+    let ghost_root = app
+        .world_mut()
+        .query_filtered::<Entity, (
+            With<emerge_mapper::build::StagedTile>,
+            With<emerge_mapper::editor::Ghost>,
+        )>()
+        .iter(app.world())
+        .next()
+        .expect("the ghost is on screen");
+    app.world_mut().entity_mut(ghost_root).insert(MeshMaterial3d(mat));
+    // `fade_ghost` runs unconditionally in the editor now — not behind the map door, which was the
+    // defect: on the kit door the pair never ran, so the staged piece rendered solid and
+    // shadow-casting, indistinguishable from a committed member.
+    for _ in 0..3 {
+        app.update();
+    }
+    let faded = app
+        .world()
+        .get::<MeshMaterial3d<StandardMaterial>>(ghost_root)
+        .and_then(|m| app.world().resource::<Assets<StandardMaterial>>().get(&m.0))
+        .expect("the ghost root carries the faded material");
+    assert_eq!(
+        faded.alpha_mode,
+        AlphaMode::Blend,
+        "the ghost renders with blend alpha — a solid ghost is a committed member"
+    );
+    assert!(
+        (faded.base_color.alpha() - 0.45).abs() < 1e-3,
+        "the ghost sits at GHOST_ALPHA (0.45) times the base alpha — got {}",
+        faded.base_color.alpha()
+    );
+    assert!(
+        app.world()
+            .get::<bevy::light::NotShadowCaster>(ghost_root)
+            .is_some(),
+        "the ghost casts no shadow — a shadow-carrying preview reads as already-drawn"
     );
 }
 
@@ -7589,6 +8342,25 @@ fn the_list_tab_strip_sits_outside_the_scroll_container() {
         app.update();
     }
 
+    // The drill to the Meshes page is a real key press — the page pair is the strip's promise.
+    let press = |app: &mut App, key: KeyCode| {
+        app.add_systems(
+            Update,
+            IntoScheduleConfigs::before(
+                move |mut keys: ResMut<bevy::input::ButtonInput<KeyCode>>,
+                      mut done: bevy::prelude::Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        keys.press(key);
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    };
+
     let scrolled = |app: &mut App, needle: &str| -> Option<bool> {
         let text_entity = app
             .world_mut()
@@ -7611,24 +8383,34 @@ fn the_list_tab_strip_sits_outside_the_scroll_container() {
         Some(inside_scroll)
     };
 
-    // `KIT (` rather than `MESHES`: the top tab bar has a MESHES chip of its own, and a needle
-    // matching two texts asserts about whichever the query happens to iterate first.
+    // **The Tiles page's chip, not the tab bar's.** The top bar has a TILES chip of its own too, so
+    // the needle carries the count only the panel strip shows.
     assert_eq!(
-        scrolled(&mut app, "KIT ("),
+        scrolled(&mut app, "TILES ("),
         Some(false),
-        "the tab strip must have no scrolling ancestor — frozen above the list"
+        "the page strip must have no scrolling ancestor — frozen above the list"
     );
     // **The row MARKER, not a string.** This looked for the `IN LIBRARY` heading, which is gone —
     // the shelf is a chip in the strip now and it carries the count, so saying it twice was the
     // drift `chrome.rs` exists to stop. Re-pointing it at the row's text was the obvious fix and the
     // wrong one: a descriptor id appears in the detail pane too, and the helper takes whichever the
     // query reaches first. `LibraryRow` is what a row IS.
+    //
+    // **Drilled to the Meshes page first**: the Tiles page is the authored tiles, and the library
+    // rows are the Meshes page's — the drill is part of what the strip promises.
+    press(
+        &mut app,
+        emerge_mapper::keys::binding(emerge_mapper::keys::Action::PageEnter).key,
+    );
+    for _ in 0..3 {
+        app.update();
+    }
     let row = app
         .world_mut()
         .query_filtered::<Entity, With<emerge_mapper::tiles::LibraryRow>>()
         .iter(app.world())
         .next()
-        .expect("the library shelf draws rows on the Tiles tab");
+        .expect("the Meshes page draws library rows");
     let mut e = row;
     let mut inside_scroll = false;
     while let Some(child_of) = app.world().get::<ChildOf>(e) {
@@ -7788,15 +8570,17 @@ fn the_repair_script_can_actually_be_followed() {
     };
 
     walk(&mut app, "open the Tiles tab", vec![]);
+    // **The Tiles page is already up** — the tab opened on it. Three walks reach tile_4 (rows
+    // 0..3 are tile_1..tile_3, this fixture has no `named_*` tile ahead of them), and `Enter`
+    // reopens it, landing on the Meshes page where the flush step's arrows work.
     walk(
         &mut app,
         "reopen tile_4 from the kit",
         vec![
-            vec![Action::KitEnter],
-            vec![Action::KitNext],
-            vec![Action::KitNext],
-            vec![Action::KitNext],
-            vec![Action::KitOpen],
+            vec![Action::TileNext],
+            vec![Action::TileNext],
+            vec![Action::TileNext],
+            vec![Action::TileOpen],
         ],
     );
     // `.` reaches the low wall (members sort floor, wall_low); the plain arrow's last stop IS flush.
@@ -8081,6 +8865,57 @@ fn the_tiles_palette_lists_only_judged_meshes() {
     let _ = Mode::Tiles;
 }
 
+/// **The definition bench shows the kit being authored, and the composing palette shows the merge.**
+///
+/// The report that started this: opening a brand-new kit showed 90 rows it does not own, cannot
+/// edit and did not make — `Project::open` merges every bound kit into `project.library`, and the
+/// Meshes shelf listed that merge. A new kit has to read as empty, because it is.
+///
+/// **The merge is untouched**, which is the other half. `project.library` is what a map resolves
+/// against and what a tile is composed from — a tile may seat two kits' pieces — so the Tiles tab
+/// still asks for all of them. Only the bench narrows.
+#[test]
+fn the_definition_bench_lists_one_kit_and_the_composing_palette_lists_the_merge() {
+    use emerge_mapper::filter::Filters;
+    use emerge_mapper::tiles::library_ids_for_test;
+
+    // The authoring kit (`furniture`, where the unnamed descriptors land) defines one piece; the
+    // kit beside it defines two.
+    let root = Fixture::new("bench-one-kit")
+        .descriptor("bench", "alpha")
+        .kit("site", "ozea", &["site/wall", "site/floor"])
+        .build("m");
+    let app = harness::build_headless(&root, "m", None)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    let project = app.world().resource::<emerge_mapper::project::Project>();
+    let filters = Filters::default();
+
+    assert_eq!(
+        project.namespace, "furniture",
+        "the kit being authored is the one `kits.ron` names"
+    );
+    assert_eq!(
+        project.library.descriptors.len(),
+        3,
+        "the merge still holds every bound kit's pieces"
+    );
+
+    let bench = library_ids_for_test(project, &filters, false, None);
+    assert_eq!(
+        bench,
+        vec!["bench".to_owned()],
+        "the Meshes tab lists the kit being authored and nothing else: {bench:?}"
+    );
+
+    let mut composing = library_ids_for_test(project, &filters, true, None);
+    composing.sort();
+    assert_eq!(
+        composing,
+        vec!["bench".to_owned(), "site/floor".to_owned(), "site/wall".to_owned()],
+        "and the Tiles tab still composes from every bound kit: {composing:?}"
+    );
+}
+
 /// **A mesh with a proposal still waiting is not composable — completed AND confirmed.**
 ///
 /// Asked for at the keyboard, 2026-08-15: *"before any mesh shows up there, make sure its labels
@@ -8280,11 +9115,17 @@ fn a_tile_takes_the_name_its_author_types() {
     for _ in 0..2 {
         app.update();
     }
-    // The tab still opens something immediately — an editor that demanded a name before it would
-    // show you anything would be worse — but that name is the editor's, and it is marked as such.
+    // **Arrival is the Tiles page, not a tile.** Nothing is open until the author asks: `N` names
+    // a new tile and `Enter` on a row reopens an old one. An editor that forced a blank tile open
+    // the moment the tab appeared was the thing the page replaced.
     assert!(
-        app.world().resource::<Build>().provisional,
-        "the arrival tile is the editor's guess"
+        app.world().resource::<Build>().open.is_none(),
+        "arriving must not open a tile — the Tiles page is what an arrival shows"
+    );
+    assert_eq!(
+        app.world().resource::<Build>().browsing,
+        Some(0),
+        "and the cursor is on the page's first row"
     );
 
     // **`N` asks, and asking is all it does.** The tile arrives on `Enter`, under the typed name.
@@ -8306,9 +9147,10 @@ fn a_tile_takes_the_name_its_author_types() {
         "furniture/corner_north",
         "the tile takes the name that was typed, under the namespace its kit implements"
     );
-    assert!(
-        !app.world().resource::<Build>().provisional,
-        "and it is the author's name now"
+    assert_eq!(
+        app.world().resource::<Build>().browsing,
+        None,
+        "naming lands on the Meshes page — the point of naming is to start filling the tile"
     );
     assert_eq!(
         app.world()
@@ -8320,8 +9162,7 @@ fn a_tile_takes_the_name_its_author_types() {
         "`N` opened a BLANK tile — the earlier one was not renamed out from under the author"
     );
 
-    // **A tile the editor named cannot reach the kit unasked.** `Cmd+S` raises the same prompt with
-    // a different intent, and answering it names and saves in one act.
+    // **A second tile, named the same way.** Nothing to do but name it — the prompt is the door.
     press(&mut app, vec![key(Action::BuildNew)]);
     name_the_tile(&mut app, "corner_south");
     press(&mut app, vec![key(Action::BuildDrop)]);
@@ -8348,6 +9189,113 @@ fn a_tile_takes_the_name_its_author_types() {
             .iter()
             .any(|c| c.id == "furniture/corner_south"),
         "and it lands in the kit under the author's name, in the namespace that kit implements"
+    );
+}
+
+/// **A named tile is a row on the Tiles page before it is saved** — the draft.
+///
+/// Reported at the keyboard, 2026-08-23: *"when I make a new tile it doesn't work as expected. I
+/// expect a new entry under 'Tiles' with the name I gave the tile."* The name is given the moment
+/// `N`'s prompt is answered, so the row must exist the moment the name exists — not only once
+/// `Cmd+S` commits it. The page count, the chip count and the walk all include the draft, and
+/// `Esc` back to the page can stand on it.
+#[test]
+fn a_named_tile_is_a_row_on_the_tiles_page_before_it_is_saved() {
+    use emerge_mapper::build::{Build, page_len};
+    use emerge_mapper::keys::Action;
+
+    let root = Fixture::new("draft-row")
+        .sized_descriptor("wall", "alpha", 0.2, 0.2)
+        .build("m");
+    let mut app = harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Tiles)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    app.update();
+
+    let press = |app: &mut App, chord: Vec<KeyCode>| {
+        app.add_systems(
+            Update,
+            IntoScheduleConfigs::before(
+                move |mut keys: ResMut<bevy::input::ButtonInput<KeyCode>>,
+                      mut done: Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        for k in &chord {
+                            keys.press(*k);
+                        }
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    };
+    let key = |a| emerge_mapper::keys::binding(a).key;
+
+    // Name a tile; nothing is saved yet.
+    press(&mut app, vec![key(Action::BuildNew)]);
+    name_the_tile(&mut app, "corner_east");
+    for _ in 0..2 {
+        app.update();
+    }
+
+    // **The draft is a page row from the moment it has a name.**
+    let build = app.world().resource::<Build>();
+    assert_eq!(
+        build.open.as_ref().map(|c| c.id.as_str()),
+        Some("furniture/corner_east"),
+        "the named tile is in hand"
+    );
+    assert_eq!(
+        page_len(&app.world().resource::<emerge_mapper::project::Project>(), build),
+        1,
+        "the page counts the draft — the walk clamps to it and the chip shows it"
+    );
+    let kit = emerge_core::census::of_catalog(
+        &app.world().resource::<emerge_mapper::project::Project>().library,
+        &app.world().resource::<emerge_mapper::project::Project>().compositions.compositions,
+    )
+    .compositions;
+    assert_eq!(kit, 0, "and nothing is committed yet — the draft is a row, not a save");
+
+    // **A wall goes in first** — an empty tile is refused at save by name, and the draft needs
+    // a member to be commit-able at all. The arrival seed armed the first library row, so one
+    // Enter drops it.
+    press(&mut app, vec![key(Action::BuildDrop)]);
+    for _ in 0..2 {
+        app.update();
+    }
+
+    // **The walk can stand on the draft row.** The drop left the wall in hand, and `left` is
+    // Idle-scoped — release with `Esc` first, the same door the committed-row drill uses. Then
+    // `left` back to the page (the draft is open, so the drill just flips) leaves the cursor on
+    // the single row the page holds.
+    press(&mut app, vec![key(Action::Cancel)]);
+    press(&mut app, vec![key(Action::PageLeave)]);
+    assert_eq!(
+        app.world().resource::<Build>().browsing,
+        Some(0),
+        "the page walk can stand on the draft row"
+    );
+
+    // **`Cmd+S` commits it** and the row stays, now as a committed tile.
+    press(&mut app, vec![key(Action::Save), emerge_mapper::keys::MOD_KEYS[0]]);
+    for _ in 0..2 {
+        app.update();
+    }
+    assert!(
+        app.world()
+            .resource::<emerge_mapper::project::Project>()
+            .compositions
+            .compositions
+            .iter()
+            .any(|c| c.id == "furniture/corner_east"),
+        "Cmd+S commits the draft — the row survives, the draft marker does not"
+    );
+    assert_eq!(
+        page_len(&app.world().resource::<emerge_mapper::project::Project>(), &app.world().resource::<Build>()),
+        1,
+        "after the save it is still one row — the committed tile the draft was"
     );
 }
 
@@ -8471,19 +9419,203 @@ fn f_focuses_the_filter_and_enter_hands_the_keyboard_back() {
     );
 }
 
-/// **`right` goes into the kit and `left` comes back out** — the column browser, both directions.
+/// **The filter box owns the letters and the list keeps walking** — the arrow this whole feature
+/// exists for. Reported at the keyboard, 2026-08-23: typing into the box killed the up/down walk
+/// of the list it was narrowing, so an author who typed `w`, saw the row, and pressed `down` got
+/// nothing — the filter had narrowed the list the arrows no longer walked.
+///
+/// [`keys::Context::Filter`] is the one deliberate hole in the focus guard: the walk rows the box
+/// narrows stay live, and everything else (the drop, the tabs, the letters) stays suppressed —
+/// which is also what makes the final `Enter` hand the keyboard back WITHOUT falling through to a
+/// drop, the way it does in [`f_focuses_the_filter_and_enter_hands_the_keyboard_back`].
+#[test]
+fn the_list_still_walks_while_its_filter_box_holds_the_keys() {
+    use bevy::input::keyboard::KeyboardInput;
+    use emerge_mapper::filter::{Filters, Pane};
+    use emerge_mapper::keys::Action;
+
+    // Three rows so the filter actually narrows and the arrival seed ("floor", newest-first)
+    // gets filtered out from under the cursor — the walk then has to RE-ARM onto the first row
+    // the filter shows, which is the silent no-op this test pins. No authored tiles: `right`
+    // flips to the Meshes page noting there is nothing to open, so the arrows are Idle — the
+    // stance the walk is bound at.
+    let root = Fixture::new("filter-walk")
+        .sized_descriptor("wall", "alpha", 0.2, 0.2)
+        .sized_descriptor("wainscot", "alpha", 0.2, 0.2)
+        .sized_descriptor("floor", "beta", 0.2, 0.2)
+        .build("m");
+    let mut app = harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Tiles)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    app.update();
+
+    let press = |app: &mut App, key: KeyCode| {
+        app.add_systems(
+            Update,
+            IntoScheduleConfigs::before(
+                move |mut keys: ResMut<bevy::input::ButtonInput<KeyCode>>,
+                      mut done: Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        keys.press(key);
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    };
+    let key = |a| emerge_mapper::keys::binding(a).key;
+    let selected = |app: &App| {
+        app.world()
+            .resource::<emerge_mapper::tiles::ImportState>()
+            .selected_library_id
+            .clone()
+    };
+    let rows = |app: &App| {
+        emerge_mapper::tiles::library_ids_for_test(
+            app.world().resource::<emerge_mapper::project::Project>(),
+            app.world().resource::<Filters>(),
+            true,
+            None,
+        )
+    };
+    let members = |app: &App| {
+        app.world()
+            .resource::<emerge_mapper::build::Build>()
+            .open
+            .as_ref()
+            .map_or(0, |c| c.members.len())
+    };
+    let tap = |app: &mut App, logical: bevy::input::keyboard::Key, code: KeyCode| {
+        for state in [
+            bevy::input::ButtonState::Pressed,
+            bevy::input::ButtonState::Released,
+        ] {
+            app.world_mut()
+                .write_message(KeyboardInput {
+                    key_code: code,
+                    logical_key: logical.clone(),
+                    state,
+                    text: None,
+                    repeat: false,
+                    window: Entity::PLACEHOLDER,
+                });
+        }
+        app.update();
+    };
+
+    for _ in 0..2 {
+        app.update();
+    }
+    // The box the report named is the one under "Meshes" — the drill's list. `right` takes the
+    // Meshes page; with nothing authored it still flips, noting there is nothing to open.
+    press(&mut app, key(Action::PageEnter));
+    for _ in 0..2 {
+        app.update();
+    }
+    press(&mut app, key(Action::FocusFilter));
+    for _ in 0..2 {
+        app.update();
+    }
+    assert_eq!(
+        app.world().resource::<Filters>().focus_pane(),
+        Some(Pane::Candidates),
+        "`F` puts the cursor in the box"
+    );
+    // The drain frame — the keystroke that opens a field must not become its first character.
+    app.update();
+
+    tap(
+        &mut app,
+        bevy::input::keyboard::Key::Character("w".into()),
+        KeyCode::KeyW,
+    );
+    assert_eq!(
+        app.world().resource::<Filters>().text(Pane::Candidates),
+        "w",
+        "the box takes the key"
+    );
+    assert_eq!(
+        rows(&app),
+        vec!["wainscot".to_owned(), "wall".to_owned()],
+        "the filter narrowed the list to the two rows that contain `w`"
+    );
+    // **The filter re-seats the selection on the first row it shows** — the arrival seed ("floor",
+    // newest-first) is gone from the list, and `keep_library_selection_visible` puts the cursor on
+    // what the author can see, so a half-typed filter never leaves the selection on a hidden row.
+    // It fires on the change-detection frame after the keystroke's, so a few frames settle it.
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(
+        selected(&app).as_deref(),
+        Some("wainscot"),
+        "the filter re-seats the cursor on its first row — the old seed was filtered out"
+    );
+
+    // **The walk fires through the open box** — the bug reported at the keyboard. One `down`
+    // reaches the second row the filter shows; before `Context::Filter` existed, the box holding
+    // the keys suppressed the arrows entirely and the author was stranded on the first row.
+    press(&mut app, key(Action::TileListNext));
+    for _ in 0..2 {
+        app.update();
+    }
+    assert_eq!(
+        selected(&app).as_deref(),
+        Some("wall"),
+        "one `down` while the box owns the keyboard must walk to the next row the filter shows"
+    );
+    // And back up again — the pair is a walk in both directions.
+    press(&mut app, key(Action::TileListPrev));
+    for _ in 0..2 {
+        app.update();
+    }
+    assert_eq!(
+        selected(&app).as_deref(),
+        Some("wainscot"),
+        "and one `up` walks back to the first row the filter shows"
+    );
+
+    // **`Enter` still hands the keyboard back** — the walk exemption is the only hole in the
+    // filter focus guard, so the same Enter that blurs the box must not fall through to a drop.
+    let before = members(&app);
+    tap(&mut app, bevy::input::keyboard::Key::Enter, KeyCode::Enter);
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(
+        app.world().resource::<Filters>().focus_pane(),
+        None,
+        "`Enter` hands the keyboard back to the tab"
+    );
+    assert_eq!(
+        app.world().resource::<Filters>().text(Pane::Candidates),
+        "w",
+        "and keeps the filter — `Esc` is the key that throws it away"
+    );
+    assert_eq!(
+        members(&app),
+        before,
+        "and that same Enter must NOT fall through to the drop: leaving a field is one act"
+    );
+}
+
+/// **`right` goes into the Meshes page and `left` comes back to Tiles** — the column browser, both
+/// directions.
 ///
 /// This key has now been wrong twice in opposite ways, which is why it is pinned rather than
 /// trusted. The KIT strip shipped promising *"right reopens / left back"* over an **unbound**
 /// `left`; the first fix reworded the strip to name `Esc`, making the prose honest and leaving the
 /// author pressing a dead key anyway. Reported at the keyboard, 2026-08-15: *"I would expect left
-/// to move back to meshes, but it doesn't."* The promise was right and the binding was missing.
+/// to move back to meshes, but it doesn't."* The promise was right and the binding was missing —
+/// and the two-page drill keeps it, with the page pair as the promise.
 ///
 /// `Esc` still backs out — it backs out of everything, and `no_reachable_tiles_state_leaves_the_
-/// arrows_doing_nothing` covers that — so this asserts the direction the idiom implies, in both
-/// directions, against `Build::browsing` itself.
+/// arrows_doing_nothing` covers — so this pins the direction the idiom implies, in both directions,
+/// against `Build::browsing` itself.
 #[test]
-fn the_kit_list_is_entered_with_right_and_left_comes_back() {
+fn right_enters_the_meshes_page_and_left_comes_back_to_tiles() {
     use emerge_mapper::keys::Action;
 
     let root = Fixture::new("kit-left-back")
@@ -8522,51 +9654,51 @@ fn the_kit_list_is_entered_with_right_and_left_comes_back() {
             .browsing
     };
 
-    // The tab opens holding the piece it armed, and the kit is an `Idle` verb — `Esc` puts it down.
-    press(&mut app, key(Action::Cancel));
+    // **The tab opens on the Tiles page** — arrival seeds the cursor at the top. `right` drills
+    // into the Meshes page and opens the tile under the cursor on the way; `left` comes back.
+    assert_eq!(
+        browsing(&app),
+        Some(0),
+        "the tab opens on the Tiles page — arrival seeds the cursor at the top"
+    );
+
+    press(&mut app, key(Action::PageEnter));
     for _ in 0..2 {
         app.update();
     }
     assert_eq!(
         browsing(&app),
         None,
-        "the tab does not open on the kit list"
+        "`right` drills into the Meshes page — opening the tile under the cursor"
     );
 
-    press(&mut app, key(Action::KitEnter));
+    // **`left` ascends only at Idle — with a member in hand the arrows move the piece.** The
+    // door idiom: `Esc` puts the piece back, then `left` goes up a page. The strip says "left
+    // goes back", which is the promise; the stance decides when the key answers.
+    press(&mut app, key(Action::Cancel));
+    press(&mut app, key(Action::PageLeave));
     for _ in 0..2 {
         app.update();
     }
     assert_eq!(
         browsing(&app),
         Some(0),
-        "`right` shows the kit, cursor at the top"
+        "`left` must come back to the Tiles page — the strip has promised this since the kit shipped"
     );
 
-    press(&mut app, key(Action::KitLeave));
-    for _ in 0..2 {
-        app.update();
-    }
-    assert_eq!(
-        browsing(&app),
-        None,
-        "`left` must come back to the meshes — the strip has promised this since the kit shipped"
-    );
-
-    // And the two are different keys doing different things, not one key toggling: `right` from
-    // the kit reopens a tile rather than leaving it.
-    press(&mut app, key(Action::KitEnter));
-    press(&mut app, key(Action::KitOpen));
+    // And the two are different keys doing different things, not one key toggling: `Enter` opens
+    // the tile under the cursor and lands on the Meshes page too, without the strip having moved.
+    press(&mut app, key(Action::TileOpen));
     for _ in 0..3 {
         app.update();
     }
-    assert_eq!(browsing(&app), None, "reopening also leaves the list");
+    assert_eq!(browsing(&app), None, "opening also lands on the Meshes page");
     assert!(
         app.world()
             .resource::<emerge_mapper::build::Build>()
             .open
             .is_some(),
-        "but it leaves with a tile open, which is what tells the two apart"
+        "and it leaves with a tile open, which is what tells the two apart"
     );
 }
 
@@ -8713,14 +9845,22 @@ fn the_room_script_can_actually_be_followed() {
     // and `3` was what reached the Tiles tab. The Kit door opens on Meshes and holds Tiles one key
     // away, so what this step now asserts is that the panel the guide names is one this door has —
     // which is the fact worth checking, and the only one still available.
-    settle(&mut app);
-    let (name, with) = guide_step(file, "open the Tiles tab");
-    press(&mut app, vec![key(emerge_mapper::keys::Action::TabSlot2)]);
-    settle(&mut app);
-    assert!(
-        checkpoint(&mut app, &name, with),
-        "the Kit door's second panel is Tiles"
-    );
+    // **Start the corner tile, for real** — the card's `N` + name + Enter. The tile half of this
+    // test is real key presses, and a blank tile in hand is the state the member writes below
+    // describe (the card's "walk to site/floor" wording depends on list order, which is a
+    // property of the corpus, so the three Enters and one R are stood in for directly — but the
+    // tile they land in must be one the editor actually opened).
+    {
+        let (start, _) = guide_step(file, "start the corner tile");
+        assert!(
+            !checkpoint(&mut app, &start, serde_json::Value::Null),
+            "`start the corner tile` must begin false — no tile is open on arrival"
+        );
+        press(&mut app, vec![key(emerge_mapper::keys::Action::BuildNew)]);
+        settle(&mut app);
+        name_the_tile(&mut app, "corner");
+        settle(&mut app);
+    }
 
     // **The corner.** Two walls, the second turned a quarter — which is what makes it a corner and
     // not a doubled wall, and is exactly what `the tile has turns` is counting.
@@ -9201,10 +10341,11 @@ fn the_first_arrow_press_lands_on_the_first_piece() {
     use emerge_mapper::keys::{Action, binding};
 
     // Two pieces, and the assertion is about which of them a single press reaches.
-    // The pack matters: with no candidates at all the tab picks the first library row on arrival,
-    // and the press this test is about never happens. A real kit always has unimported meshes.
+    // **The old premise is gone: arrival seeds the first library row** (2026-08-23 — the Tiles
+    // page seed arms a piece so the first `Enter` after the drill is a drop rather than a
+    // refusal). The press this test is about is the one that *walks*: it must land on the SECOND
+    // row, never re-establish the first. No pack here — a focused candidate would block the seed.
     let root = Fixture::new("first_press")
-        .pack("alpha/scan", &["spare"])
         .descriptor("alpha/floor", "alpha")
         .descriptor("alpha/wall", "alpha")
         .build("test_map");
@@ -9213,51 +10354,65 @@ fn the_first_arrow_press_lands_on_the_first_piece() {
             .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
     app.update();
 
-    assert!(
-        app.world()
-            .resource::<emerge_mapper::tiles::ImportState>()
-            .selected_library_id
-            .is_none(),
-        "arriving picks nothing — that is the state this test is about"
+    let rows = |app: &App| {
+        emerge_mapper::tiles::library_ids_for_test(
+            app.world().resource::<emerge_mapper::project::Project>(),
+            app.world().resource::<emerge_mapper::filter::Filters>(),
+            true,
+            None,
+        )
+    };
+
+    // **Arrival arms the first row — no press did it.** This is the half the old bug was about:
+    // the press that establishes the selection must not also walk it.
+    let armed = app
+        .world()
+        .resource::<emerge_mapper::tiles::ImportState>()
+        .selected_library_id
+        .clone();
+    assert_eq!(
+        armed.as_deref(),
+        rows(&app).first().map(String::as_str),
+        "arriving must arm the FIRST row — it armed {armed:?}, the list reads {:?}",
+        rows(&app)
     );
 
-    let key = binding(Action::TileListNext).key;
-    app.add_systems(
-        Update,
-        IntoScheduleConfigs::before(
-            move |mut keys: ResMut<ButtonInput<KeyCode>>, mut done: bevy::prelude::Local<bool>| {
-                if !*done {
-                    keys.release_all();
-                    keys.press(key);
-                    *done = true;
-                }
-            },
-            emerge_mapper::keys::Phase::Act,
-        ),
-    );
-    app.update();
+    // **The walk lives on the Meshes page**: on the Tiles page, `down` walks tile rows
+    // (`TileNext` at `Stance::Browsing`). `right` flips the page — with nothing authored it still
+    // flips, noting that there is nothing to open, because the author came to pick meshes. Then
+    // one `down` must land on the SECOND row, never re-establish the first.
+    let press = |app: &mut App, key: KeyCode| {
+        app.add_systems(
+            Update,
+            IntoScheduleConfigs::before(
+                move |mut keys: ResMut<ButtonInput<KeyCode>>, mut done: bevy::prelude::Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        keys.press(key);
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    };
+    press(&mut app, binding(Action::PageEnter).key);
+    press(&mut app, binding(Action::TileListNext).key);
 
     let picked = app
         .world()
         .resource::<emerge_mapper::tiles::ImportState>()
         .selected_library_id
         .clone();
-    // **Asked of the list rather than named**, because which id is row 0 is not what this test is
-    // about — it is about the press that establishes a selection not also stepping past it. Naming
-    // the id here made the test go red for the 2026-08-20 reversal, which changed nothing it cares
-    // about.
-    let want = emerge_mapper::tiles::library_ids_for_test(
-        app.world().resource::<emerge_mapper::project::Project>(),
-        app.world().resource::<emerge_mapper::filter::Filters>(),
-        true,
-        None,
-    )
-    .first()
-    .cloned();
+    // **Asked of the list rather than named**, because which id is row 1 is not what this test is
+    // about — it is about the press that walks not also re-establishing the seed. Naming the id
+    // here made the test go red for the 2026-08-20 reversal, which changed nothing it cares about.
+    let want = rows(&app).get(1).cloned();
     assert_eq!(
         picked, want,
-        "one press of `{}` must land on the FIRST piece. Landing on the second means the press \
-         that establishes the selection also walked it, and the first row is unreachable going down.",
+        "one press of `{}` must land on the SECOND row — the seed was already on the first. \
+         Landing on the first means the press that walks also re-armed the selection.",
         binding(Action::TileListNext).chord
     );
 }
@@ -10342,83 +11497,11 @@ fn a_badge_lights_while_its_key_is_down() {
     );
 }
 
-/// **A control that carries badges says so itself.**
-///
-/// The badge sits beside its control — the placement that covers nothing — so ownership is
-/// proximity, and in a dock of stacked rows proximity is deniable. While `K` is held, every control
-/// that anchors a cluster carries a one-pixel accent outline; the pair reads as one thing. Off `K`
-/// everything rests — an always-on halo would be one more thing to habituate past (Lewandowska,
-/// Dziśko & Jankowski 2022, `10.1038/s41598-022-16284-2`).
-#[test]
-fn an_anchored_control_lights_while_k_is_held() {
-    use bevy::ui::{ComputedNode, Outline};
-    use emerge_mapper::badges::BadgeCluster;
-    use emerge_mapper::chrome::Control;
-    use emerge_mapper::keys::{ControlId, Home};
-
-    let root = Fixture::new("badgehalo")
-        .descriptor("floor", "alpha")
-        .place("alpha/floor", (0.0, 0.0))
-        .build("m");
-    let mut app = badges_up(&root, emerge_mapper::tiles::Mode::Map);
-
-    let want: Vec<ControlId> = {
-        let mut q = app.world_mut().query::<&BadgeCluster>();
-        q.iter(app.world())
-            .filter_map(|c| match c.0 {
-                Home::Control(id) => Some(id),
-                Home::Legend => None,
-            })
-            .collect()
-    };
-    // The negative half below leans on a control that is laid out here and anchors nothing: the
-    // Map's filter box. If a Map verb ever homes there, pick a different bystander.
-    assert!(
-        !want.contains(&ControlId::Filter),
-        "this test assumes no Map binding homes at Filter; its negative case needs a new bystander"
-    );
-
-    let mut lit = 0usize;
-    let mut bystanders = 0usize;
-    {
-        let mut q = app
-            .world_mut()
-            .query::<(&Control, &ComputedNode, Option<&Outline>)>();
-        for (control, node, outline) in q.iter(app.world()) {
-            if node.size() == Vec2::ZERO {
-                continue;
-            }
-            let on = outline.is_some_and(|o| o.color == emerge_mapper::chrome::ACCENT);
-            if want.contains(&control.0) {
-                assert!(on, "{:?} anchors a cluster and carries no lit outline", control.0);
-                lit += 1;
-            } else {
-                assert!(!on, "{:?} anchors nothing and is lit anyway", control.0);
-                bystanders += 1;
-            }
-        }
-    }
-    // Anti-vacuity, both halves. Map's floor is at least: the frame's four, the status pane, the
-    // palette, and the two readout rows the drain added.
-    assert!(lit >= 8, "only {lit} controls lit on Map — the halo is not reaching the anchors");
-    assert!(bystanders >= 1, "no unanchored control was on screen, so the negative half checked nothing");
-
-    // Release: everything rests the same frame the clusters go.
-    app.world_mut()
-        .resource_mut::<bevy::input::ButtonInput<bevy::prelude::KeyCode>>()
-        .release_all();
-    for _ in 0..3 {
-        app.update();
-    }
-    let still: Vec<ControlId> = {
-        let mut q = app.world_mut().query::<(&Control, &Outline)>();
-        q.iter(app.world())
-            .filter(|(_, o)| o.color != bevy::prelude::Color::NONE)
-            .map(|(c, _)| c.0)
-            .collect()
-    };
-    assert!(still.is_empty(), "the key is up and these are still lit: {still:?}");
-}
+// **`an_anchored_control_lights_while_k_is_held` lived here.** It pinned a one-pixel `ACCENT`
+// outline on every control that anchored a cluster while `K` was held — a second way to say
+// "this box is that control's", built before the leaders were. Removed with the system: twenty-odd
+// glowing rectangles are the wrong ground to read a hairline against, and
+// `every_control_cluster_is_tied_to_its_anchor` is the tie that remains.
 
 /// **The chord is body-size ink; the description stays a footnote.**
 ///
@@ -10475,9 +11558,7 @@ fn a_badge_chord_reads_at_body_size() {
 fn a_held_piece_carries_its_badges_on_the_member_list() {
     use bevy::input::ButtonInput;
     use bevy::prelude::{IntoScheduleConfigs, KeyCode, Local, ResMut, Update};
-    use bevy::ui::Outline;
     use emerge_mapper::badges::{Badge, BadgeCluster};
-    use emerge_mapper::chrome::Control;
     use emerge_mapper::keys::{Action, ControlId, Home, Stance, binding};
 
     let root = Fixture::new("badgehold")
@@ -10486,6 +11567,9 @@ fn a_held_piece_carries_its_badges_on_the_member_list() {
     let mut app = harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Tiles)
         .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
     app.update();
+
+    // The tab opens on the Tiles page — name a tile into existence before anything can be held.
+    open_tile(&mut app, "tile");
 
     let once = |app: &mut App, chord: Vec<KeyCode>| {
         app.add_systems(
@@ -10505,18 +11589,10 @@ fn a_held_piece_carries_its_badges_on_the_member_list() {
         );
         app.update();
     };
-    let probe = |app: &App, tag: &str| {
-        let b = app.world().resource::<emerge_mapper::build::Build>();
-        eprintln!(
-            "PROBE {tag}: placing={} open={} members={} focus={} browsing={}",
-            b.placing,
-            b.open.is_some(),
-            b.open.as_ref().map(|c| c.members.len()).unwrap_or(0),
-            b.focus,
-            b.browsing.is_some(),
-        );
-    };
-    once(&mut app, vec![binding(Action::BuildArm).key]);
+    // **A drop IS the hold** — Enter brings the piece in and leaves `placing` true, which is what
+    // this stance is about. `Space` first would arm it, but `Enter` is `Idle`-scoped and Space
+    // lands in Holding, so the old arm-then-drop pair is refused by the census — the drop alone
+    // is the honest path.
     once(&mut app, vec![binding(Action::BuildDrop).key]);
     app.world_mut()
         .resource_mut::<ButtonInput<KeyCode>>()
@@ -10571,30 +11647,33 @@ fn a_held_piece_carries_its_badges_on_the_member_list() {
         assert!(actions.contains(&a), "{a:?} is live while holding and not on the member list");
     }
 
-    // And the list itself is lit as the owner.
-    let members_lit = {
-        let mut q = app.world_mut().query::<(&Control, &Outline)>();
-        q.iter(app.world())
-            .any(|(c, o)| c.0 == ControlId::Members && o.color == emerge_mapper::chrome::ACCENT)
-    };
-    assert!(members_lit, "the member list anchors the hold's badges and is not lit");
+    // The clause that checked the MEMBERS list was *lit* went with the accent halo; what makes the
+    // hold's badges legible is the leader, and `every_control_cluster_is_tied_to_its_anchor` holds
+    // that across every tab rather than once here.
 }
 
-/// **A control's badge sits beside it, not on it.**
+/// **A badge stands on ground nothing else uses.**
 ///
 /// The rule started as *"the gutter on the leading edge, and onto that edge when there is no room"*,
 /// and a capture showed what the second half costs at the window's own edge: `Cmd+O` drawn over
 /// `‹ ki`, `1, 2, 3` over `M`, `Cmd+C` over `TILE`. A badge that hides the label identifying the
-/// control it names has undone its own job, so it goes to the **trailing** side instead.
+/// control it names has undone its own job.
 ///
-/// The invariant is the one the author asked for and not the arithmetic that delivers it: a cluster
-/// is entirely to one side of its anchor's horizontal span. It is checked only where the window has
-/// room for that — an anchor as wide as the window (the door strip, the chrome bar) has no side to
-/// go to, and there an edge is the honest last answer.
+/// **This was "beside its anchor's horizontal span", and that measured the wrong thing.** It was a
+/// proxy for "not on the words", chosen when the only ground a box could stand on was the stage —
+/// so *beside* and *clear* were the same answer. They are not any more: a pane's empty middle is
+/// inside its anchor's span and covers nothing, and it is the placement the whole free-ground search
+/// exists to reach. Meanwhile the proxy never guarded a single row of a list, because a list row is
+/// named by no `ControlId`.
+///
+/// So the invariant is stated directly, against the editor's own census
+/// (`badges::ink_now`): **no cluster covers ink**, its own anchor's words included. That is strictly
+/// stronger than what it replaces — everything the old rule caught, this catches, plus everything on
+/// screen the census never named.
 #[test]
-fn a_controls_badge_sits_beside_it_and_not_on_it() {
+fn a_badge_stands_on_ground_nothing_else_uses() {
     use bevy::ui::{ComputedNode, UiGlobalTransform};
-    use emerge_mapper::badges::{BadgeCluster, BadgeLayer};
+    use emerge_mapper::badges::BadgeCluster;
     use emerge_mapper::keys::Home;
 
     let root = Fixture::new("badgeside")
@@ -10606,27 +11685,10 @@ fn a_controls_badge_sits_beside_it_and_not_on_it() {
     let mut checked = 0usize;
     for mode in TABS {
         let mut app = badges_up(&root, mode);
-        let window = {
-            let mut q = app
-                .world_mut()
-                .query_filtered::<(&ComputedNode, &UiGlobalTransform), With<BadgeLayer>>();
-            q.iter(app.world())
-                .map(|(n, tf)| Rect::from_center_size(tf.translation, n.size()))
-                .find(|r| r.size() != Vec2::ZERO)
-        };
-        let Some(window) = window else { continue };
-
-        // The anchors, read the way `badges::anchor` reads them: the one laid-out node per id.
-        let anchors: Vec<(emerge_mapper::keys::ControlId, Rect)> = {
-            let mut q = app
-                .world_mut()
-                .query::<(&emerge_mapper::chrome::Control, &ComputedNode, &UiGlobalTransform)>();
-            q.iter(app.world())
-                .filter(|(_, n, _)| n.size() != Vec2::ZERO)
-                .map(|(c, n, tf)| (c.0, Rect::from_center_size(tf.translation, n.size())))
-                .collect()
-        };
-
+        // **No window clause.** The old rule needed one — an anchor as wide as the window has no
+        // side to go to, so "beside it" had to be waived there. Covering nothing has no such
+        // exception: there is always somewhere on a screen that is not ink, and if there genuinely
+        // is not, that is the finding.
         let clusters: Vec<(Home, Rect)> = {
             let mut q = app
                 .world_mut()
@@ -10636,112 +11698,39 @@ fn a_controls_badge_sits_beside_it_and_not_on_it() {
                 .map(|(c, n, tf, _)| (c.0, Rect::from_center_size(tf.translation, n.size())))
                 .collect()
         };
+        let ink = emerge_mapper::badges::ink_now(app.world_mut());
 
         for (home, rect) in clusters {
-            let Home::Control(id) = home else { continue };
-            let Some((_, anchor)) = anchors.iter().find(|(a, _)| *a == id) else {
-                continue;
-            };
-            // Nowhere to go: the anchor plus the badge does not fit across the window.
-            if anchor.width() + rect.width() >= window.width() {
-                continue;
-            }
             checked += 1;
-            let beside = rect.max.x <= anchor.min.x + 0.5 || rect.min.x >= anchor.max.x - 0.5;
-            if !beside {
-                covered.push(format!(
-                    "{} {id:?}: badge {rect:?} overlaps its own anchor {anchor:?}",
-                    mode.label()
-                ));
+            for used in &ink {
+                let hit = rect.intersect(*used);
+                // A pixel of touching is two things side by side; anything with area is one drawn
+                // through the other.
+                if hit.width() > 1.0 && hit.height() > 1.0 {
+                    covered.push(format!(
+                        "{} {home:?}: badge {rect:?} covers {:.0}x{:.0} px of ink at {:?}",
+                        mode.label(),
+                        hit.width(),
+                        hit.height(),
+                        used.min
+                    ));
+                }
             }
         }
     }
+    covered.sort();
+    covered.dedup();
     assert!(
         covered.is_empty(),
-        "these badges are drawn across the control they name, hiding the label that identifies \
-         it:\n  {}",
+        "these badges are drawn over something on screen, so a verb or the thing it names is \
+         unreadable:\n  {}",
         covered.join("\n  ")
     );
     // The companion assertion: every clause above is a filter, so a layer that stopped being laid
     // out would make this pass having measured nothing.
     assert!(
         checked >= TABS.len(),
-        "only {checked} control badge(s) were measured across {} tabs; the rule is being enforced \
-         against nothing",
-        TABS.len()
-    );
-}
-
-/// **A control the census calls paned really is inside a pane.**
-///
-/// `keys::ControlId::in_a_pane` decides whether a chord may sit beside its control or has to say
-/// itself in the legend, and it is a *stated* fact about the editor's shape. A stated fact drifts:
-/// move a row out of the detail pane and the flag goes on claiming it is content, so its badge flips
-/// to a pane's far edge and floats in the viewport attached to nothing — which is exactly the report
-/// this whole rule came from.
-///
-/// So it is checked against the tree. `chrome::scroll_list` is the only thing in this editor that
-/// carries `ScrollArea`, and "inside a pane" means a **strict** ancestor: a list that *is* the
-/// scrolling node is a whole control with open ground beside it, not a row within one.
-#[test]
-fn a_paned_control_really_is_inside_a_pane() {
-    use bevy::ui::ComputedNode;
-
-    let root = Fixture::new("badgepane")
-        .descriptor("floor", "alpha")
-        .place("alpha/floor", (0.0, 0.0))
-        .build("m");
-
-    let mut wrong = Vec::new();
-    let mut seen = 0usize;
-    for mode in TABS {
-        let mut app = badges_up(&root, mode);
-        let found: Vec<(emerge_mapper::keys::ControlId, Entity)> = {
-            let mut q = app
-                .world_mut()
-                .query::<(Entity, &emerge_mapper::chrome::Control, &ComputedNode)>();
-            q.iter(app.world())
-                .filter(|(_, _, n)| n.size() != Vec2::ZERO)
-                .map(|(e, c, _)| (c.0, e))
-                .collect()
-        };
-        for (id, entity) in found {
-            seen += 1;
-            // Strictly above: start at the parent, so a node that IS the `ScrollArea` does not count
-            // as being inside one.
-            let inside = {
-                let world = app.world();
-                let mut at = world.get::<ChildOf>(entity).map(|p| p.parent());
-                let mut found_fold = false;
-                while let Some(e) = at {
-                    if world.get::<bevy::ui_widgets::ScrollArea>(e).is_some() {
-                        found_fold = true;
-                        break;
-                    }
-                    at = world.get::<ChildOf>(e).map(|p| p.parent());
-                }
-                found_fold
-            };
-            if inside != id.in_a_pane() {
-                wrong.push(format!(
-                    "{}: {id:?} says in_a_pane() == {}, and the tree says {inside}",
-                    mode.label(),
-                    id.in_a_pane()
-                ));
-            }
-        }
-    }
-    wrong.sort();
-    wrong.dedup();
-    assert!(
-        wrong.is_empty(),
-        "`ControlId::in_a_pane` no longer describes where these controls are, so their badges will \
-         be placed against the wrong ground:\n  {}",
-        wrong.join("\n  ")
-    );
-    assert!(
-        seen >= TABS.len(),
-        "only {seen} laid-out control(s) were checked across {} tabs; the flag is being enforced \
+        "only {checked} cluster(s) were measured across {} tabs; the rule is being enforced \
          against nothing",
         TABS.len()
     );
@@ -11093,6 +12082,8 @@ fn the_tile_refits_while_another_tab_is_open() {
         harness::build_headless_at(&root, "test_map", None, emerge_mapper::tiles::Mode::Tiles)
             .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
     app.update();
+    // The tab opens on the Tiles page — name the tile before the drop, which lands on Meshes.
+    open_tile(&mut app, "tile");
 
     let once = |app: &mut App, chord: Vec<KeyCode>| {
         app.add_systems(
@@ -11113,12 +12104,12 @@ fn the_tile_refits_while_another_tab_is_open() {
         );
         app.update();
     };
-    once(&mut app, vec![binding(Action::BuildArm).key]);
+    // **Enter is the drop AND the hold** — the arm-then-drop pair is refused by the census.
     once(&mut app, vec![binding(Action::BuildDrop).key]);
 
     let size = |app: &App| -> (f32, f32, f32) {
-        match app.world().resource::<emerge_mapper::build::Build>().open {
-            Some(ref c) => match c.envelope {
+        match &app.world().resource::<emerge_mapper::build::Build>().open {
+            Some(c) => match c.envelope {
                 emerge_core::composition::Envelope::Bounded { size } => size,
                 _ => panic!("a tile claims a tile"),
             },
@@ -11430,8 +12421,16 @@ fn a_row_beyond_the_fold_is_pointed_at_from_its_pane() {
     );
 }
 
-/// **Nothing covers anything: no box over a box, no box over a control, no box over another's
-/// line.** This is the arithmetic the overlay kept losing, now stated as the packer's contract.
+/// **Nothing covers anything a reader needs: no box over a box, no box over ink, no box over
+/// another's line.** This is the arithmetic the overlay kept losing, now stated as the packer's
+/// contract.
+///
+/// **"Ink" replaced "a `chrome::Control` rect", and that was a strengthening.** The nineteen named
+/// controls are the anchors the census can *point at*; they are not the set of things a reader
+/// reads. Half of what is on screen — every row of a list, every heading, every field, the map's
+/// own triangle count — is named by no `ControlId` at all and was unguarded, while a whole detail
+/// pane counted as covered when a badge stood on its empty middle, which is the one placement this
+/// overlay most wants. `badges::ink_now` is the editor's own answer to both.
 ///
 /// It used to be a trade-off — `step_clear` moved the loser until its bound ran out and then *let
 /// the overlap show*, and the first capture on a real window priced that: the legend under the
@@ -11448,6 +12447,11 @@ fn no_badge_cluster_draws_through_another() {
     use bevy::ui::{ComputedNode, UiGlobalTransform};
     use emerge_mapper::badges::{BadgeCluster, Lead, LeadSeg};
 
+    // **Not `crowded_root`, and that is a stated gap rather than an oversight.** Pointed at a
+    // populated kit this rule reports thirteen boxes standing on ink or on each other — and it
+    // reports fourteen with the placement this commit replaced, so it is describing a defect that
+    // is older than the crossing fix and separate from it. Widening the fixture here would turn one
+    // red suite into the record of two different bugs. `BACKLOG.md` carries it with its output.
     let root = Fixture::new("badgeoverlap")
         .descriptor("floor", "alpha")
         .place("alpha/floor", (0.0, 0.0))
@@ -11491,17 +12495,13 @@ fn no_badge_cluster_draws_through_another() {
                     })
                     .collect()
             };
-            let controls_drawn: Vec<(String, Rect)> = {
-                let mut q = app
-                    .world_mut()
-                    .query::<(&emerge_mapper::chrome::Control, &ComputedNode, &UiGlobalTransform)>();
-                q.iter(app.world())
-                    .filter(|(_, n, _)| n.size() != Vec2::ZERO)
-                    .map(|(c, n, tf)| {
-                        (format!("{:?}", c.0), Rect::from_center_size(tf.translation, n.size()))
-                    })
-                    .collect()
-            };
+            // **The interface as laid out, through the editor's own census.** This used to be the
+            // nineteen `chrome::Control` rects, which was the wrong set in both directions: it
+            // missed every row, heading and field that is not a named control, and it counted a
+            // whole pane whose fill carries nothing to read. `badges::ink_now` is
+            // `badges::place_badges`' own answer, `pub` for exactly the reason `badges::resolve` is
+            // — a test that restated the rule would pass while the editor used a different one.
+            let ink_drawn: Vec<Rect> = emerge_mapper::badges::ink_now(app.world_mut());
             let segs_drawn: Vec<(usize, Rect)> = {
                 let mut owner_of: std::collections::HashMap<Entity, usize> = Default::default();
                 for (i, (.., lead)) in drawn.iter().enumerate() {
@@ -11545,10 +12545,14 @@ fn no_badge_cluster_draws_through_another() {
                         ));
                     }
                 }
-                for (c_name, c) in &controls_drawn {
+                for c in &ink_drawn {
                     if covers(*a, *c) {
+                        let hit = a.intersect(*c);
                         through.push(format!(
-                            "{tag}: {a_name} covers the control {c_name}"
+                            "{tag}: {a_name} covers {:.0}x{:.0} px of ink at {:?}",
+                            hit.width(),
+                            hit.height(),
+                            c.min
                         ));
                     }
                 }
@@ -11577,6 +12581,456 @@ fn no_badge_cluster_draws_through_another() {
          enforced against nothing",
         TABS.len()
     );
+}
+
+/// **The ground a badge stands on is ground the interface left, and some badge actually takes it.**
+///
+/// The companion to `a_badge_stands_on_ground_nothing_else_uses`, which is a *negative*: a packer
+/// that hid every box would satisfy it perfectly. This is the positive half — on a real tab, with a
+/// piece staged, at least one cluster stands **inside a dock**, which is ground no box could reach
+/// before this existed. It is the whole change in one assertion.
+///
+/// The number that made it worth doing: on a 2560×1406 window the Map tab's left dock carries a
+/// panel about 460 px shorter than the column it sits in, and every one of those pixels used to be
+/// unreachable — a box could stand only in `frame.viewport`, so it hugged the dock's outer edge and
+/// landed on the map instead.
+#[test]
+fn a_badge_takes_the_ground_a_dock_leaves() {
+    use bevy::ui::{ComputedNode, UiGlobalTransform};
+    use emerge_mapper::badges::BadgeCluster;
+
+    let root = Fixture::new("badgedock")
+        .descriptor("floor", "alpha")
+        .place("alpha/floor", (0.0, 0.0))
+        .build("m");
+
+    let mut inside = Vec::new();
+    for mode in TABS {
+        let mut app = badges_up(&root, mode);
+        stage_a_piece(&mut app);
+        let docks: Vec<Rect> = {
+            let frame = app
+                .world()
+                .get_resource::<emerge_mapper::chrome::Frame>()
+                .map(|f| [f.left, f.right]);
+            let Some(docks) = frame else { continue };
+            let mut q = app.world_mut().query::<(&ComputedNode, &UiGlobalTransform)>();
+            docks
+                .into_iter()
+                .filter_map(|e| q.get(app.world(), e).ok())
+                .filter(|(n, _)| n.size() != Vec2::ZERO)
+                .map(|(n, tf)| Rect::from_center_size(tf.translation, n.size()))
+                .collect()
+        };
+        let mut q = app
+            .world_mut()
+            .query::<(&BadgeCluster, &ComputedNode, &UiGlobalTransform, &Visibility)>();
+        for (cluster, node, tf, vis) in q.iter(app.world()) {
+            if *vis == Visibility::Hidden || node.size() == Vec2::ZERO {
+                continue;
+            }
+            let rect = Rect::from_center_size(tf.translation, node.size());
+            if docks
+                .iter()
+                .any(|d| rect.min.x >= d.min.x - 0.5 && rect.max.x <= d.max.x + 0.5)
+            {
+                inside.push(format!("{} {:?}", mode.label(), cluster.0));
+            }
+        }
+    }
+    assert!(
+        !inside.is_empty(),
+        "no badge on any of the {} tabs stands inside a dock, so the free-ground search is finding \
+         nothing and every box is back on the rail beside the map",
+        TABS.len()
+    );
+}
+
+/// **While the shortcuts key is held, the grounds step back — and every word on them does not.**
+///
+/// The other half of letting a badge stand on a panel's empty middle: a `PANEL_BG` box on a
+/// `PANEL_BG` panel is one shape with a line through it. `chrome::GROUND_HELD` is what separates
+/// them by depth, and this pins both ends of it — the drop while held, and the exact restore on
+/// release, which is what `chrome::Ground` carries its colour for.
+#[test]
+fn the_grounds_step_back_while_the_shortcut_key_is_held() {
+    let root = Fixture::new("groundheld")
+        .descriptor("floor", "alpha")
+        .place("alpha/floor", (0.0, 0.0))
+        .build("m");
+
+    let mut app = badges_up(&root, emerge_mapper::tiles::Mode::Map);
+    let held: Vec<(f32, f32)> = {
+        let mut q = app
+            .world_mut()
+            .query::<(&emerge_mapper::chrome::Ground, &BackgroundColor)>();
+        q.iter(app.world())
+            .map(|(g, bg)| (g.0.alpha(), bg.0.alpha()))
+            .collect()
+    };
+    assert!(
+        !held.is_empty(),
+        "no node carries `chrome::Ground`, so nothing steps back and — worse — `badges::ink` sees \
+         every panel's fill as something to read"
+    );
+    for (rest, now) in &held {
+        assert!(
+            (now - rest * emerge_mapper::chrome::GROUND_HELD).abs() < 0.001,
+            "a ground rests at {rest} and reads {now} with the key down; it should be \
+             {}",
+            rest * emerge_mapper::chrome::GROUND_HELD
+        );
+    }
+
+    app.world_mut()
+        .resource_mut::<bevy::input::ButtonInput<bevy::prelude::KeyCode>>()
+        .release_all();
+    for _ in 0..4 {
+        app.update();
+    }
+    let mut q = app
+        .world_mut()
+        .query::<(&emerge_mapper::chrome::Ground, &BackgroundColor)>();
+    for (ground, bg) in q.iter(app.world()) {
+        assert_eq!(
+            bg.0, ground.0,
+            "a ground did not come back to the colour it was spawned with"
+        );
+    }
+}
+
+/// **Every panel and both bands are ground, or their fill reads as something to look at.**
+///
+/// `badges::ink` subtracts a `chrome::Ground` node from the census and keeps every child of it, so a
+/// panel that forgets the marker is a panel whose whole rect goes dead — several hundred square
+/// pixels of placeable ground silently lost, with every test green. The two 26-px bands are in the
+/// list for a different reason: the banded pass puts a bare chord *inside* a band beside its
+/// control, and without the marker every one of those would read as a badge covering ink.
+///
+/// Checked against the real tree rather than against `chrome.rs`, in the spirit of
+/// `a_control_in_a_band_really_is_in_one`: what matters is what got spawned.
+#[test]
+fn every_panel_and_band_is_ground() {
+    use bevy::ui::ComputedNode;
+
+    let root = Fixture::new("grounded")
+        .descriptor("floor", "alpha")
+        .place("alpha/floor", (0.0, 0.0))
+        .build("m");
+
+    let mut bare = Vec::new();
+    let mut checked = 0usize;
+    for mode in TABS {
+        let mut app = badges_up(&root, mode);
+        stage_a_piece(&mut app);
+        let frame = app
+            .world()
+            .get_resource::<emerge_mapper::chrome::Frame>()
+            .map(|f| (f.left, f.right, f.chrome_bar, f.status));
+        let Some((left, right, bar, status)) = frame else {
+            continue;
+        };
+        // Every direct child of a dock is a `chrome::panel_root`, and both bands are their own.
+        let panels: Vec<Entity> = {
+            let mut q = app.world_mut().query::<(Entity, &ChildOf)>();
+            q.iter(app.world())
+                .filter(|(_, p)| p.parent() == left || p.parent() == right)
+                .map(|(e, _)| e)
+                .chain([bar, status])
+                .collect()
+        };
+        let mut q = app
+            .world_mut()
+            .query::<(&ComputedNode, Option<&emerge_mapper::chrome::Ground>)>();
+        for entity in panels {
+            let Ok((node, ground)) = q.get(app.world(), entity) else {
+                continue;
+            };
+            // A `Display::None` panel belongs to a tab nobody is on; it has no fill on screen to
+            // classify. That is the same "laid out" test the whole overlay uses.
+            if node.size() == Vec2::ZERO {
+                continue;
+            }
+            checked += 1;
+            if ground.is_none() {
+                bare.push(format!("{} {entity:?}", mode.label()));
+            }
+        }
+    }
+    assert!(
+        bare.is_empty(),
+        "these panels carry no `chrome::Ground`, so their fill counts as ink and the ground inside \
+         them is unreachable:\n  {}",
+        bare.join("\n  ")
+    );
+    assert!(
+        checked >= TABS.len(),
+        "only {checked} panel(s) were measured across {} tabs; the rule is being enforced against \
+         nothing",
+        TABS.len()
+    );
+}
+
+/// **No leader touches another leader.**
+///
+/// One corridor per rail was crossing-free by construction — boxes packed in their anchors' order is
+/// exactly the condition under which right-angle leaders cannot cross (Bekos, Kaufmann, Symvonis &
+/// Wolff 2007) — and it was also unreadable: six runs down one strip is one line with tick marks,
+/// not six lines. Reported from the keyboard, twice: *"prevent lines from crossing over each
+/// other"*, and *"if two lines have a ninety degree angle close to each other, we should stagger
+/// those apart."*
+///
+/// Lanes answer the second and reopen the first, because a reach now has to pass every lane inside
+/// its own. `badges::lanes_for` closes it again by walking outward from the analytic preference; this
+/// is what says it worked, on a real layout rather than on the four-leader case a unit test can hold.
+///
+/// **Touching, not merely crossing**: two runs lying along each other read as one line, which is the
+/// same failure seen end-on.
+#[test]
+fn no_two_leaders_cross() {
+    use bevy::ui::{ComputedNode, UiGlobalTransform};
+    use emerge_mapper::badges::{BadgeCluster, Lead, LeadSeg};
+
+    let root = crowded_root("leadercross");
+
+    let mut met = Vec::new();
+    let mut checked = 0usize;
+    for surface in CROWDED_SHAPES {
+        for mode in TABS {
+            let mut app = badges_up(&root, mode);
+            stage_a_piece(&mut app);
+            if let Some((w, h)) = surface {
+                harness::resize_surface(&mut app, w, h).unwrap_or_else(|e| panic!("{e}"));
+                for _ in 0..8 {
+                    app.update();
+                }
+            }
+            let tag = match surface {
+                None => mode.label().to_owned(),
+                Some((w, h)) => format!("{} at {w}x{h}", mode.label()),
+            };
+
+            // Each cluster's own segments, by the `Lead` that owns them.
+            let owned: Vec<(String, [Entity; 3])> = {
+                let mut q = app
+                    .world_mut()
+                    .query::<(&BadgeCluster, &Lead, &Visibility)>();
+                q.iter(app.world())
+                    .filter(|(_, _, v)| **v != Visibility::Hidden)
+                    .map(|(c, l, _)| (format!("{:?}", c.0), l.0))
+                    .collect()
+            };
+            let rect_of = {
+                let mut q = app.world_mut().query_filtered::<(
+                    Entity,
+                    &ComputedNode,
+                    &UiGlobalTransform,
+                    &Visibility,
+                ), With<LeadSeg>>();
+                let map: std::collections::HashMap<Entity, Rect> = q
+                    .iter(app.world())
+                    .filter(|(_, n, _, v)| n.size() != Vec2::ZERO && **v != Visibility::Hidden)
+                    .map(|(e, n, tf, _)| (e, Rect::from_center_size(tf.translation, n.size())))
+                    .collect();
+                map
+            };
+            let leaders: Vec<(String, Vec<Rect>)> = owned
+                .into_iter()
+                .map(|(name, segs)| {
+                    (name, segs.iter().filter_map(|e| rect_of.get(e).copied()).collect())
+                })
+                .filter(|(_, segs): &(String, Vec<Rect>)| !segs.is_empty())
+                .collect();
+
+            checked += leaders.len();
+            for (i, (a_name, a_segs)) in leaders.iter().enumerate() {
+                for (b_name, b_segs) in leaders.iter().skip(i + 1) {
+                    for p in a_segs {
+                        for q in b_segs {
+                            let hit = p.intersect(*q);
+                            if hit.width() > 0.0 && hit.height() > 0.0 {
+                                met.push(format!(
+                                    "{tag}: {a_name}'s leader meets {b_name}'s at {:?}",
+                                    hit.min
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    met.sort();
+    met.dedup();
+    assert!(
+        met.is_empty(),
+        "these leaders cross or lie along one another, so a reader cannot follow either to its \
+         control:\n  {}",
+        met.join("\n  ")
+    );
+    assert!(
+        checked >= TABS.len() * CROWDED_SHAPES.len(),
+        "only {checked} leader(s) were measured across {} shapes of {} tabs; the rule is being \
+         enforced against nothing",
+        CROWDED_SHAPES.len(),
+        TABS.len()
+    );
+}
+
+/// **Zooming the view does not move a single badge or a single leader.**
+///
+/// Every key stays live while `K` is held — that is deliberate, and it is what makes the overlay a
+/// rehearsal rather than a mode (this crate's `badges.rs` header, on Kurtenbach via ExposeHK). The
+/// cost was that the wheel, `W A S D` and `Q E` all still drove the camera, and `place_badges`
+/// re-projected the world's envelope through that camera **every frame** to decide what ground a
+/// badge must dodge. So reading the overlay and nudging the view at the same time reflowed the
+/// whole thing under the author's eyes. Reported from the keyboard: *"I don't think the lines and
+/// the keyboard legends should change based on Zoom, should they?"*
+///
+/// They should not, and the reason is the premise of the design: ExposeHK works by **spatial
+/// rehearsal** — you learn where a badge is and reach for it next time. A layout that moves when the
+/// camera does is one nobody can learn, and it moves during exactly the seconds the key is held.
+///
+/// The first fix latched the projection for the length of a hold. The second went further and
+/// deleted the reason it existed: badges do not dodge the world at all any more — it is **faded**
+/// while the key is held (`chrome::WORLD_HELD`) instead of routed around, because the detour cost
+/// more ground than it saved. So `place_badges` now reads no camera and no world geometry, and the
+/// guarantee is structural rather than maintained.
+///
+/// This still earns its keep: it is what would catch a future edit that reintroduces either.
+/// Asserted to the pixel, because "barely moves" is the bug in its quiet form.
+#[test]
+fn zooming_the_view_moves_no_badge_and_no_leader() {
+    use bevy::ui::{ComputedNode, UiGlobalTransform};
+    use emerge_mapper::badges::{BadgeCluster, LeadSeg};
+
+    let root = crowded_root("badgezoom");
+
+    // The Map draws a bounds cube and the Tiles tab a tile envelope; Meshes stands a mesh on a
+    // stage. All three are tabs where a camera move changes the projection.
+    for mode in [
+        emerge_mapper::tiles::Mode::Map,
+        emerge_mapper::tiles::Mode::Tiles,
+        emerge_mapper::tiles::Mode::Meshes,
+    ] {
+        let mut app = badges_up(&root, mode);
+        stage_a_piece(&mut app);
+        for _ in 0..8 {
+            app.update();
+        }
+
+        // Every cluster and every leader segment, by the entity that owns it, before the zoom.
+        let census = |app: &mut App| -> Vec<(String, Rect)> {
+            let mut out: Vec<(String, Rect)> = {
+                let mut q = app
+                    .world_mut()
+                    .query::<(&BadgeCluster, &ComputedNode, &UiGlobalTransform)>();
+                q.iter(app.world())
+                    .map(|(c, n, tf)| {
+                        (
+                            format!("{:?}", c.0),
+                            Rect::from_center_size(tf.translation, n.size()),
+                        )
+                    })
+                    .collect()
+            };
+            let mut segs: Vec<(String, Rect)> = {
+                let mut q = app.world_mut().query_filtered::<(
+                    Entity,
+                    &ComputedNode,
+                    &UiGlobalTransform,
+                ), With<LeadSeg>>();
+                q.iter(app.world())
+                    .map(|(e, n, tf)| {
+                        (
+                            format!("leader {e:?}"),
+                            Rect::from_center_size(tf.translation, n.size()),
+                        )
+                    })
+                    .collect()
+            };
+            out.append(&mut segs);
+            // `Query` order is not stable across frames any more than across `App`s, so the
+            // comparison needs a stated order rather than the iteration's.
+            out.sort_by(|a, b| a.0.cmp(&b.0));
+            out
+        };
+
+        let before = census(&mut app);
+        assert!(
+            !before.is_empty(),
+            "{}: nothing is drawn, so this proves nothing about what moves",
+            mode.label()
+        );
+
+        // **Zoom, exactly the way the wheel does** — `Rig::height` is the orthographic viewport
+        // height in metres, and it is the whole of what zooming means here (`view.rs`).
+        {
+            let mut rig = app
+                .world_mut()
+                .get_resource_mut::<emerge_mapper::view::Rig>()
+                .expect("the editor carries a camera rig");
+            rig.height *= 2.0;
+        }
+        for _ in 0..8 {
+            app.update();
+        }
+
+        let after = census(&mut app);
+        let moved: Vec<String> = before
+            .iter()
+            .zip(after.iter())
+            .filter(|((_, a), (_, b))| a.min.distance(b.min) > 0.5 || a.max.distance(b.max) > 0.5)
+            .map(|((name, a), (_, b))| format!("{name}: {a:?} -> {b:?}"))
+            .collect();
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "{}: the zoom changed how many badges there are, which is a different bug again",
+            mode.label()
+        );
+        assert!(
+            moved.is_empty(),
+            "{}: zooming moved the overlay, so the layout cannot be learned:\n  {}",
+            mode.label(),
+            moved.join("\n  ")
+        );
+    }
+}
+
+/// **The window shapes the crossing rules are enforced at.**
+///
+/// One shape proves almost nothing here. Which rung of the placement ladder a box lands on is a
+/// function of how much free ground the docks leave, and that is a function of the window: the same
+/// tab that packs every badge beside its own row at 2560 wide has to send half of them to the rail
+/// at 1280. `None` is the harness default; the rest are real laptop shapes, narrowest last, because
+/// the narrow ones are where the ladder is actually forced.
+const CROWDED_SHAPES: [Option<(u32, u32)>; 4] = [
+    None,
+    Some((2560, 1406)),
+    Some((1680, 1050)),
+    Some((1280, 800)),
+];
+
+/// **A project with enough in it to fill the docks** — which is the state every badge rule has to
+/// hold in and the one the fixtures were not reaching.
+///
+/// A one-descriptor fixture leaves both docks nearly empty, so every badge hugs its own row on the
+/// first rung of the ladder and the hard rungs — the rail, the unconditional floor — are never
+/// climbed. That is how a crossing shipped under a green `no_two_leaders_cross`: the rule was true
+/// of a layout no author ever sees. The real kit this editor opens carries 689 meshes; forty is
+/// enough to make the piece list scroll, the detail pane fill and the free ground run out, which is
+/// all this needs to exercise.
+fn crowded_root(name: &str) -> std::path::PathBuf {
+    let ids: Vec<String> = (0..40).map(|i| format!("piece_{i:02}")).collect();
+    let mut fixture = Fixture::new(name);
+    for id in &ids {
+        fixture = fixture.descriptor(id, "alpha");
+    }
+    fixture
+        .place("alpha/piece_00", (0.0, 0.0))
+        .place("alpha/piece_01", (2.0, 0.0))
+        .build("m")
 }
 
 /// **Every control's badges are tied to it** — at least one hairline segment, connected at both
@@ -12037,6 +13491,108 @@ fn enter_in_the_tag_box_takes_the_one_match_and_refuses_a_tie() {
     );
 }
 
+/// **The open settles the derived half of `effects`, and the first save must not undo it.**
+///
+/// `Project::open` reconciles `implies` across the whole merged library — *"the moment to reconcile
+/// the whole set is when the whole set is in hand"* — because a row written before the rule landed
+/// carries the kind without the effect it implies. That correction landed on `project.library`, the
+/// **derived** view, and on nothing else: `measured` and each kit's layer keep the authored lists.
+///
+/// So the first save of anything rebuilt the merge from those unsettled layers and put every row
+/// back. Not the row being edited — *every* row, including the ones nobody had touched, until the
+/// project was reopened. `changed_ids` then read that settled-against-unsettled difference as news
+/// and marked them all for a Map redraw, which is why the second assertion compares a whole
+/// descriptor rather than one field: an untouched row that differs at all is a row this door has
+/// just claimed was edited.
+///
+/// The save is driven through the tag box because that is an author's ordinary write — a real
+/// `commit_measured`, not a call to it.
+#[test]
+fn a_settled_effect_survives_the_next_save() {
+    use emerge_mapper::keys::{Action, binding};
+
+    let root = Fixture::new("settlesave")
+        .kind_implies("powered")
+        .descriptor("floor", "alpha")
+        .descriptor("bench", "alpha")
+        .build("m");
+    let mut app = harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Meshes)
+        .unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let row = |app: &App, id: &str| {
+        app.world()
+            .resource::<emerge_mapper::project::Project>()
+            .library
+            .descriptors
+            .iter()
+            .find(|d| d.id == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("the fixture must carry `{id}`"))
+    };
+
+    // Both rows are `kind: ["prop"]`, `effects: ["inert"]` on disk. The open is the only thing that
+    // can have put `powered` on them, so this is the state the save has to preserve.
+    for id in ["floor", "bench"] {
+        assert!(
+            row(&app, id).effects.iter().any(|e| e == "powered"),
+            "the open did not settle `{id}` — this test would prove nothing about the save. It \
+             holds {:?}",
+            row(&app, id).effects
+        );
+    }
+    let bench_before = row(&app, "bench");
+
+    // An ordinary write to ONE row: focus the tag box, type the one token that matches, take it.
+    app.world_mut()
+        .resource_mut::<emerge_mapper::tiles::ImportState>()
+        .selected_library_id = Some("floor".to_owned());
+    for _ in 0..4 {
+        app.update();
+    }
+    press_once(&mut app, binding(Action::FocusTagFilter).key);
+    for _ in 0..2 {
+        app.update();
+    }
+    app.update();
+    for (logical, code) in [
+        ("w", KeyCode::KeyW),
+        ("o", KeyCode::KeyO),
+        ("r", KeyCode::KeyR),
+        ("k", KeyCode::KeyK),
+    ] {
+        tap_key(
+            &mut app,
+            bevy::input::keyboard::Key::Character(logical.into()),
+            code,
+        );
+    }
+    tap_key(&mut app, bevy::input::keyboard::Key::Enter, KeyCode::Enter);
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(
+        row(&app, "floor").offers.surfaces,
+        vec!["worktop".to_owned()],
+        "the save did not happen, so nothing below is about a rebuild"
+    );
+
+    assert!(
+        row(&app, "floor").effects.iter().any(|e| e == "powered"),
+        "the edited row lost the effect its kind implies when the library was rebuilt — it holds \
+         {:?}",
+        row(&app, "floor").effects
+    );
+    assert_eq!(
+        row(&app, "bench"),
+        bench_before,
+        "a save to another piece rewrote `bench`, which nobody edited — the rebuild dropped the \
+         settling the open did, and `changed_ids` will report this row as news and redraw it"
+    );
+}
+
 /// **A label that arrives applies itself, with nobody pressing anything.**
 ///
 /// The verbs that used to answer a proposal — `U` to apply, `Y` to discard — retired on 2026-08-20.
@@ -12306,5 +13862,86 @@ fn the_library_reads_newest_first_and_remembers_the_row_you_left() {
         Some("oldest"),
         "a piece that was edited does not jump to the top — the order is definition order, and \
          reshuffling under an author's hand is what `docs/ui.md` §3.5 is against"
+    );
+}
+
+/// **The vocabulary prompt swallows its keystrokes.**
+///
+/// While `TokenPrompt::open` is set, the Meshes tab's own key handlers must not act — or typing a
+/// name containing `n` would rotate the mesh. `N` is `Action::RotateMeshX` on this tab, so the
+/// test types a name with an `n` in it and asserts the piece did not turn and the draft's name
+/// field now holds the letter. Without the guard in `editor::not_typing`/`sense_context`, `N` is
+/// `RotateMeshX` and typing a name turns the mesh.
+#[test]
+fn the_token_prompt_swallows_the_keys_that_would_rotate_the_mesh() {
+    use emerge_mapper::token_prompt::{Field, TokenPrompt};
+
+    let root = Fixture::new("token-prompt-guard")
+        .descriptor("floor", "alpha")
+        .build("m");
+    let mut app = harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Meshes)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    for _ in 0..3 {
+        app.update();
+    }
+    let id = app
+        .world()
+        .resource::<emerge_mapper::project::Project>()
+        .library
+        .descriptors
+        .first()
+        .map(|d| d.id.clone())
+        .unwrap_or_else(|| panic!("the fixture must carry a descriptor"));
+    app.world_mut()
+        .resource_mut::<emerge_mapper::tiles::ImportState>()
+        .selected_library_id = Some(id.clone());
+    for _ in 0..4 {
+        app.update();
+    }
+
+    let rotate_of = |app: &App| {
+        app.world()
+            .resource::<emerge_mapper::project::Project>()
+            .measured
+            .get(&id)
+            .and_then(|d| d.align.rotate)
+    };
+    assert_eq!(rotate_of(&app), None, "the piece starts unturned");
+
+    // Open the prompt the way `Shift+T` does.
+    app.world_mut()
+        .resource_mut::<TokenPrompt>()
+        .open = Some(emerge_mapper::token_prompt::Draft {
+        axis: emerge_mapper::token_prompt::Axis::Kind,
+        name: String::new(),
+        note: String::new(),
+        field: Field::Name,
+        problem: None,
+    });
+    for _ in 0..2 {
+        app.update();
+    }
+
+    // Type `n` into the name field — the letter that is `RotateMeshX` on this tab.
+    tap_key(
+        &mut app,
+        bevy::input::keyboard::Key::Character("n".into()),
+        KeyCode::KeyN,
+    );
+    for _ in 0..2 {
+        app.update();
+    }
+
+    assert_eq!(
+        rotate_of(&app),
+        None,
+        "typing `n` into the prompt must not rotate the mesh — the guard in \
+         `editor::not_typing`/`sense_context` is what makes the context read `Typing`"
+    );
+    let draft = app.world().resource::<TokenPrompt>().open.clone();
+    assert_eq!(
+        draft.map(|d| d.name),
+        Some("n".to_owned()),
+        "and the letter lands in the draft's name field"
     );
 }

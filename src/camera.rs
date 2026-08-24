@@ -5,7 +5,7 @@
 //! `selection`).
 
 use bevy::camera::{Hdr, ScalingMode};
-use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
+use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::light::ShadowFilteringMethod;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
@@ -36,7 +36,30 @@ const VIEWPORT_HEIGHT: f32 = 12.0;
 /// whole zoom range (see `mycelia::perceptual`).
 pub const MIN_ZOOM: f32 = 5.0;
 pub const MAX_ZOOM: f32 = 34.0;
+/// Metres of viewport height per **line** of wheel — one detent of a notched mouse wheel.
 const ZOOM_STEP: f32 = 2.0;
+
+/// **A wheel notch and a trackpad swipe are not the same number.**
+///
+/// `AccumulatedMouseScroll` carries a [`MouseScrollUnit`], and on macOS winit reports a notched
+/// wheel as `Line` and a trackpad as `Pixel` — the platform already knows which device it is, so
+/// nothing here guesses from the size of the numbers.
+///
+/// Multiplying a pixel delta by [`ZOOM_STEP`] treated every pixel as a detent: a two-finger swipe
+/// accumulates tens of pixels in one frame, which asked for more metres of viewport height than the
+/// whole [`MIN_ZOOM`]..[`MAX_ZOOM`] range holds. [`MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR`]
+/// is the pinned engine's own pixels-per-line, so this is Bevy's number and not an invented one.
+///
+/// `crates/emerge-mapper/src/view.rs` carries the same correction against the same constant, kept in
+/// step by hand exactly as `PAN_SPEED` is — the two applications are meant to feel the same.
+fn wheel_lines(scroll: &AccumulatedMouseScroll) -> f32 {
+    match scroll.unit {
+        MouseScrollUnit::Line => scroll.delta.y,
+        MouseScrollUnit::Pixel => {
+            scroll.delta.y / MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR
+        }
+    }
+}
 const PAN_SPEED: f32 = 16.0;
 const DRAG_SCALE: f32 = 0.03;
 /// Discrete rotation detents in a full turn — Q/E snap the yaw by `TAU / ROTATION_STEPS` per press
@@ -328,7 +351,7 @@ fn drive_camera(
     }
 
     if scroll.delta.y != 0.0 && !hovered_ui.iter().any(|h| h.0) {
-        rig.height = (rig.height - scroll.delta.y * ZOOM_STEP).clamp(MIN_ZOOM, MAX_ZOOM);
+        rig.height = (rig.height - wheel_lines(&scroll) * ZOOM_STEP).clamp(MIN_ZOOM, MAX_ZOOM);
     }
 
     // Q/E rotate the whole view in discrete detents around the focus. Each press snaps the goal by
@@ -434,6 +457,36 @@ fn drive_camera(
 
 #[cfg(test)]
 mod tests {
+    /// **A trackpad and a wheel ask for the same zoom per unit of intent.**
+    ///
+    /// The device is not guessed: winit reports a notched wheel as `Line` and anything with precise
+    /// deltas — a trackpad, a Magic Mouse — as `Pixel`, and this is only the conversion between
+    /// them. A pixel delta used to be multiplied by `ZOOM_STEP` as if every pixel were a detent,
+    /// which asked for more viewport height in one frame than the whole zoom range holds.
+    #[test]
+    fn a_trackpad_swipe_is_read_in_lines_not_pixels() {
+        use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
+
+        let of = |unit, y| {
+            super::wheel_lines(&AccumulatedMouseScroll { unit, delta: Vec2::new(0.0, y) })
+        };
+        // A wheel is already in lines and is left alone — the tuning this app shipped with.
+        assert_eq!(of(MouseScrollUnit::Line, 1.0), 1.0);
+        assert_eq!(of(MouseScrollUnit::Line, -3.0), -3.0);
+
+        // A frame of trackpad pixels is divided by the engine's own pixels-per-line, so a swipe
+        // that used to cross the entire range now moves a fraction of one detent.
+        let f = MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR;
+        assert_eq!(of(MouseScrollUnit::Pixel, f), 1.0, "one line's worth of pixels is one line");
+        let swipe = of(MouseScrollUnit::Pixel, 30.0);
+        assert!(
+            swipe.abs() < 1.0,
+            "a thirty-pixel frame asked for {swipe} lines; before this it asked for thirty"
+        );
+        // Direction is untouched: scrolling up still zooms the same way on both devices.
+        assert!(of(MouseScrollUnit::Pixel, -f) < 0.0);
+    }
+
     use super::*;
 
     /// The dialog glide must *never jar the player* (the request that motivated it): it approaches

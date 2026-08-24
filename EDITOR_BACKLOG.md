@@ -79,7 +79,60 @@ Unchanged, and every item below is judged against them.
 
 ## 3. Open
 
-**Nothing.** Every `FVS-S-*` item is closed — see `BACKLOG_ARCHIVE.md` § *"`emerge-mapper` UI — the
+### FVS-S-51 — a crowded kit can still stand a banded badge on ink
+
+**Found by measurement, 2026-08-22, while fixing the leader crossings — and it is older than that
+fix.** Pointing `no_badge_cluster_draws_through_another` at a populated project instead of the
+one-descriptor fixture it has always used reports **fourteen** boxes standing on ink or on one another
+with the pre-2026-08-22 placement, and **three** with the current one. So this is a real defect that
+predates the crossing work, not a regression from it, and it is why that ratchet was left on its
+original fixture rather than widened with `no_two_leaders_cross`: widening it would make one red suite
+the record of two unrelated bugs.
+
+Reproduce by swapping the fixture in `no_badge_cluster_draws_through_another`
+(`crates/emerge-mapper/tests/headless.rs`) for `crowded_root("badgeoverlap")` and the surface list for
+`CROWDED_SHAPES`. What comes back, at the time of writing:
+
+```
+MESHES at 1280x800: Legend and Control(CellGrid) overlap by 16x126 px
+TILES  at 1280x800: Control(Pieces) and Control(Detail) overlap by 134x65 px
+TILES  at 1280x800: Control(Pieces) and Control(Grid)   overlap by 35x31 px
+MESHES: Control(Title) covers 57x16 px of ink at Vec2(1218.0, -5.0)      (x7, all tabs/shapes)
+```
+
+**Most of this is now closed** (2026-08-22, same day it was filed). Releasing the pane's ground —
+a control inside a scrolling pane may put its badge in its own dock — and dropping the world-dodge
+in favour of fading the envelope took the Tiles and Meshes tabs to zero overlaps on the real
+furniture kit, verified in captures. What is left is the first of the two causes below.
+
+Two distinct causes, and they wanted different answers:
+
+- **The banded pass does no ground test at all.** `Control(Title)`'s box is placed level with its
+  control at `a.at.min.x - size.x - reach`, falling back to the other side only if that leaves the
+  window — `FreeGround` is never consulted, so a banded badge covers whatever is beside it. The
+  negative `y` in the report is real: the ink it covers is partly above the window. Cheapest of the
+  two to fix, and probably just the ladder's ground test applied to the banded branch.
+- ~~**The stage genuinely runs out.**~~ **Closed.** It was true, and the cause was not the width of
+  the boxes: badges were detouring around the box the *world* draws. On Tiles the tile envelope is a
+  1 × 4 × 1 m box that projects to a tall rectangle down the middle of the stage; the filter's badge
+  detoured 530 px below its own row to clear it, that dragged the side's floor with it, and the
+  piece list's badge then had nowhere to stand but on its neighbour. One detour, three displaced
+  boxes. Fixed by fading the envelope while the key is held (`chrome::WORLD_HELD`) instead of
+  routing around it — the author's call: *"we should use fading of certain UI elements to ensure
+  what we are visually communicating to users instead."* `WorldInk`, `WorldOnScreen`,
+  `sense_world_ink`, `project_envelope`, `world_ink` and `world_ink_now` are deleted with it.
+
+The `settle_past(..).clamp(top, bottom - size.y)` arm still exists and still knowingly pulls a box
+back **up onto another** rather than let it leave the stage. It is now unreached on every tab that
+has been measured, but it is the last "let the overlap show" fallback in the module and the module's
+own header argues against exactly this shape. Removing it needs an answer to *what a badge does when
+there is genuinely nowhere* — most likely sending its chords to the legend the way `badges::resolve`
+already does for an off-screen control, which is a rebuild-time decision informed by a
+placement-time fact, so it is not a small change.
+
+---
+
+Every other `FVS-S-*` item is closed — see `BACKLOG_ARCHIVE.md` § *"`emerge-mapper` UI — the
 editor overhaul"*, which carries the reasoning and the commit for each, including the four closed by
 measurement rather than by building.
 

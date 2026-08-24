@@ -82,6 +82,44 @@ pub const SCRIM: Color = Color::srgba(0.0, 0.0, 0.0, 0.55);
 /// exists to catch.
 pub const VEIL: Color = Color::srgba(0.0, 0.0, 0.0, 0.35);
 
+/// **How far a ground fill steps back while the shortcuts key is held.**
+///
+/// A panel's fill is the ground its rows stand on ([`Ground`]), and while `K` is down that ground is
+/// also what a badge may stand on. At full opacity the badge and the panel are two opaque boxes of
+/// the same colour meeting at a border; at this alpha the [`VEIL`] and the world read faintly
+/// through the ground, so the badge is plainly the nearest thing and the panel is plainly behind it.
+///
+/// **Only the fill.** Rows, fields, chips and every word keep their own opacity — a badge points at
+/// words, and dimming those in the instant they are being read is the opposite of the point.
+pub const GROUND_HELD: f32 = 0.55;
+
+/// **How far the world's own wireframe steps back while the shortcut key is held.**
+///
+/// Deeper than [`GROUND_HELD`], because a panel's fill is a flat wash a badge sits on and the
+/// world's envelope is a *line* crossing the same ground a badge stands on. On the Tiles tab a
+/// 1 x 4 x 1 m tile projects to three near-full-height verticals that run straight through the
+/// badge stack, and at full strength they read as leaders — which is the one thing on this screen a
+/// hairline is supposed to mean. Reported from the keyboard: *"the tiles tab is super muddy."*
+///
+/// It is a fade and not a hide: the envelope is what the author is building, and a box that
+/// vanished when they reached for a key would be a different confusion. `badges::WorldOnScreen`
+/// still keeps boxes off it either way — this is about reading, not about placement.
+pub const WORLD_HELD: f32 = 0.25;
+
+/// A world gizmo's colour, faded while the shortcut key is held. See [`WORLD_HELD`].
+///
+/// A free function rather than a resource because the drawers are ordinary `Update` systems with no
+/// stated order against anything in `badges`, and a resource written in one phase and read in
+/// another would be a frame stale on some runs and not others — the trap `sense_world_ink`'s own
+/// header records paying for.
+pub fn stepped_back(color: Color, held: bool) -> Color {
+    if held {
+        color.with_alpha(color.alpha() * WORLD_HELD)
+    } else {
+        color
+    }
+}
+
 /// It has to stay visible, because a mesh that has silently vanished looks identical to one that was
 /// never scanned — but it must not compete with rows an author can actually act on.
 pub const MUTED: Color = Color::srgb(0.34, 0.32, 0.31);
@@ -350,6 +388,15 @@ pub mod text {
     pub const HINT: f32 = 9.0;
 }
 
+/// **One glyph's advance at [`text::BODY`], logical pixels.** The shipped face is
+/// `FiraMono-Regular.ttf` — monospace — so `chars * BODY_CHAR_W` is exact, not an estimate, and a
+/// string can be measured without a text-layout round trip. Stated once, beside the scale it
+/// belongs to (and outside it — this is a metric of the face, not a type role, and the census that
+/// keeps the scale short counts the module): it was measured independently in `badges` (chord
+/// columns) and `compose` (centred slot labels), and two hand-copied 6.6s drift the day the face or
+/// the size changes. If the face ever goes proportional, layouts drift; they do not break.
+pub const BODY_CHAR_W: f32 = 6.6;
+
 // ── spacing ──────────────────────────────────────────────────────────────────────────────────────
 //
 // **A scale, used as a set.** van den Berg, Cornelissen & Roerdink 2009 (`10.1167/9.4.24`) find that
@@ -457,7 +504,7 @@ pub fn panel_root<'a>(
         Side::Right => frame.right,
     };
     let panel = commands
-        .spawn((node, BackgroundColor(PANEL_BG), Hovered::default()))
+        .spawn((node, BackgroundColor(PANEL_BG), Ground(PANEL_BG), Hovered::default()))
         .id();
     commands.entity(dock).add_child(panel);
     commands.entity(panel)
@@ -552,6 +599,20 @@ pub struct FrameSystems;
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Control(pub keys::ControlId);
 
+/// **This node's fill is ground, not ink — and this is the colour it rests at.**
+///
+/// A panel's [`PANEL_BG`] and a band's [`BAR_BG`] are what their rows and words *stand on*. They
+/// carry no information of their own, so a badge parked on bare ground covers nothing a reader
+/// needs — which is the whole difference between an overlay that has somewhere to go and one that
+/// hugs a dock edge and lands on the map. `badges::ink` reads this to subtract a container from the
+/// occupancy census while keeping every child in it.
+///
+/// **The colour is carried rather than recomputed**, the way `badges::BadgeRest` is: [`dim_the_ground`]
+/// restores exactly what was spawned, so it is not a second place that decides what a panel is
+/// coloured, and a panel that changes its fill cannot drift out of sync with the system that dims it.
+#[derive(Component)]
+pub struct Ground(pub Color);
+
 /// Height of the two bars. Fixed, because a bar that changed height as its content changed would
 /// move the viewport under the author's hands.
 const BAR_H: f32 = 26.0;
@@ -582,6 +643,7 @@ pub fn spawn_frame(mut commands: Commands) {
                 ..default()
             }),
             BackgroundColor(BAR_BG),
+            Ground(BAR_BG),
             BorderColor::all(BAR_EDGE),
             bevy::picking::Pickable::IGNORE,
         ))
@@ -662,6 +724,7 @@ pub fn spawn_frame(mut commands: Commands) {
                 ..default()
             }),
             BackgroundColor(BAR_BG),
+            Ground(BAR_BG),
             BorderColor::all(BAR_EDGE),
             bevy::picking::Pickable::IGNORE,
         ))
@@ -1011,13 +1074,13 @@ pub struct ProblemBanner(pub &'static [crate::tiles::Mode]);
 ///
 /// A problem in this editor is **sticky by design** — it is a state, not an event — and a toast that
 /// fades would normally throw that away. It does not here, because the sticky half already exists
-/// somewhere better: [`problem_log`] sits at the foot of every tab's own panel and lists the whole
-/// run. The two were always meant to answer different questions, and the banner's own note said so —
-/// *the banner answers "what just happened", the log answers "what has gone wrong here"*. Fading is
-/// what makes the first of those honest: an event that never leaves is not an event.
+/// somewhere better: the session [`Journal`] behind `Cmd+E` keeps every refusal, across tabs, out
+/// of `Esc`'s reach. The two answer different questions — *the toast answers "what just happened",
+/// the journal answers "what has gone wrong at all"* — and fading is what makes the first of those
+/// honest: an event that never leaves is not an event.
 ///
 /// So the toast shows the newest problem for a few seconds and stands down, and nothing is lost:
-/// `notice::paint_notices` writes both, and the log keeps every line until the tab is left.
+/// `notice::record_problems` has already written the journal's copy before the toast ever fades.
 ///
 /// # Where it goes
 ///
@@ -1111,10 +1174,22 @@ pub fn journal_panel(mut commands: Commands, frame: Res<Frame>) {
             BackgroundColor(PANEL_BG),
             BorderColor::all(KEY),
             JournalPanel,
-            // So `Cmd+C` carries it: `notice::copy_out` harvests the TEXT of whatever pane is on
-            // screen, which is why the journal needs no copy verb of its own.
-            crate::notice::CopyPane(ALL_TABS),
-            bevy::picking::Pickable::IGNORE,
+            // No `CopyPane` marker: `notice::copy_out` harvests the TEXT of every visible node by
+            // walking the roots, so an open journal is carried by `Cmd+C` already — the marker
+            // decides nothing there any more, and stamping it here would read as a second path.
+            //
+            // **`Hovered`, and deliberately not `Pickable::IGNORE`** — the rule [`panel_root`]
+            // states, for a panel that is not in a dock. This was an opaque 80%x76% box that no
+            // "is the pointer on UI" gate could see: neither `view::over_ui`, which filters to the
+            // nodes carrying `Hovered`, nor the mouse verbs, which read a true one. So a click on
+            // the open journal stamped or deleted a placement on the map behind it — invisibly,
+            // under a solid panel — and the wheel zoomed the world instead of scrolling this list.
+            // Exactly the pair the name box's inner box carries a `Hovered` to close, and the same
+            // pair `panel_root`'s own note records from when only the rows had one.
+            //
+            // Nothing changes while it is away: a `Display::None` node has a zero rect, which both
+            // the picking backend and `over_ui` skip for the same reason.
+            Hovered::default(),
         ))
         .id();
     commands.entity(panel).with_children(|p| {
@@ -1348,14 +1423,6 @@ pub fn scroll_list<'a>(
     parent: &'a mut ChildSpawnerCommands,
     marker: impl Bundle,
 ) -> EntityCommands<'a> {
-    scroll_inner(parent, marker, None)
-}
-
-fn scroll_inner<'a>(
-    parent: &'a mut ChildSpawnerCommands,
-    marker: impl Bundle,
-    height: Option<f32>,
-) -> EntityCommands<'a> {
     let viewport = parent
         .commands_mut()
         .spawn((
@@ -1412,13 +1479,8 @@ fn scroll_inner<'a>(
     let wrapper = parent
         .spawn(Node {
             flex_direction: FlexDirection::Column,
-            flex_grow: if height.is_some() { 0.0 } else { 1.0 },
+            flex_grow: 1.0,
             min_height: Val::Px(0.0),
-            max_height: height.map_or(Val::Auto, Val::Px),
-            // A stated height has to be a *height*, not a maximum: the wrapper's own content is the
-            // absolutely-positioned track, which measures nothing, so `max_height` alone leaves it at
-            // zero and clips the viewport out of existence.
-            height: height.map_or(Val::Auto, Val::Px),
             ..default()
         })
         .id();
@@ -1874,14 +1936,7 @@ fn paint_name_box(
                 (
                     "NAME THIS TILE",
                     format!("{}_", emerge_core::naming::to_snake_case(&prompt.raw)),
-                    match prompt.then {
-                        crate::build::NameThen::Open => {
-                            "Enter opens it.   Esc leaves things as they are.".to_owned()
-                        }
-                        crate::build::NameThen::Save => {
-                            "Enter names and saves it.   Esc goes back.".to_owned()
-                        }
-                    },
+                    "Enter opens it.   Esc leaves things as they are.".to_owned(),
                 )
             })
         });
@@ -1993,7 +2048,7 @@ impl Plugin for ChromePlugin {
                     .run_if(in_state(crate::screen::Screen::Editor)),
             )
             .add_systems(Update,
-                (light_the_back_button, stand_down_the_back_chord)
+                (light_the_back_button, stand_down_the_back_chord, dim_the_ground)
                     .run_if(in_state(crate::screen::Screen::Editor)),
             );
     }
@@ -2483,6 +2538,39 @@ fn stand_down_the_back_chord(
     for mut node in &mut chords {
         if node.display != want {
             node.display = want;
+        }
+    }
+}
+
+/// **While the shortcuts key is held, the grounds step back and the badges are the nearest thing.**
+///
+/// This is the other half of letting a badge stand on a panel's empty middle. `badges::ink` reads
+/// [`Ground`] to say that a container's fill carries nothing a reader needs, so the ground under a
+/// short list is placeable — but a badge is itself a [`PANEL_BG`] box, and an opaque box on an
+/// opaque box of the same colour reads as one shape with a line through it. Dropping the ground to
+/// [`GROUND_HELD`] lets the [`VEIL`] and the window behind it show through, and the badge — which
+/// keeps its own opacity — separates by depth rather than by its border alone.
+///
+/// **Fill only, and restored from the carried colour.** Every row, field, chip and word inside the
+/// panel keeps its opacity, because those are exactly what the badges are pointing at.
+///
+/// Compares before writing: `BackgroundColor` is change-detected, and touching every panel every
+/// frame would mark the whole interface dirty sixty times a second for one held key
+/// (`tests/no_system_writes_every_frame.rs`).
+fn dim_the_ground(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<keys::Live>,
+    mut grounds: Query<(&Ground, &mut BackgroundColor)>,
+) {
+    let held = keys::pressed(&keyboard, *live, keys::Action::Shortcuts);
+    for (ground, mut bg) in &mut grounds {
+        let want = if held {
+            ground.0.with_alpha(ground.0.alpha() * GROUND_HELD)
+        } else {
+            ground.0
+        };
+        if bg.0 != want {
+            bg.0 = want;
         }
     }
 }

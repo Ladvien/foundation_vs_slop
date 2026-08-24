@@ -232,6 +232,7 @@ pub const OWNERSHIP: &[(&str, Ownership)] = &[
     ("emerge_mapper::editor::Proposal", Ownership::Door),
     ("emerge_mapper::editor::Rung", Ownership::Door),
     ("emerge_mapper::editor::SizeEdit", Ownership::Door),
+    ("emerge_mapper::editor::Folded", Ownership::Door),
     ("emerge_mapper::editor::StampPicture", Ownership::Door),
     ("emerge_mapper::editor::TargetLock", Ownership::Door),
     ("emerge_mapper::editor::UnderCursor", Ownership::Door),
@@ -270,7 +271,14 @@ pub const OWNERSHIP: &[(&str, Ownership)] = &[
     // built for has to go with them — a stale key would suppress the first rebuild on the next
     // kit and the badges would simply never appear.
     ("emerge_mapper::badges::ShowingFor", Ownership::Door),
+    // What the live tab is drawing into the viewport, re-derived every frame in `Phase::Sense` —
+    // so a stale value survives no frame and this classification changes nothing. `Door` all the
+    // same: it describes the door's own world, and a resource that says "the Map's cube is here"
+    // while the Kit door is open would be a lie for exactly as long as it took to notice.
     ("emerge_mapper::view::Rig", Ownership::Door),
+    // A half-typed token draft is the door's working state — a draft naming a token for one
+    // kit's vocabulary is meaningless standing in another.
+    ("emerge_mapper::token_prompt::TokenPrompt", Ownership::Door),
 
     // ── True for as long as the application runs ────────────────────────────────────────────────
     // The surface is how this application DRAWS — see `crate::surface`, and `scene_roots`, which

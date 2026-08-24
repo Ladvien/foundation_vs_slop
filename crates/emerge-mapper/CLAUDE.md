@@ -76,6 +76,71 @@ Scripts live in `guides/` as JSON, not as constants in the source: an agent post
 - **`Single<..>` silently skips its system on a non-unique match**, so any second camera breaks every `Single<.., With<Camera3d>>`. Filter positively on a named marker.
 - **No `unwrap()`.** Everything here is user input or a file on disk.
 - **One path per feature.** No fallbacks, no legacy shims, no stub placeholders. Staged edits go through the commit door; nothing writes a degraded result behind it.
+## Data model
+
+**A project is implicit — it is just a directory.** Nothing on disk declares "this is a project"; the shape `assets/emerge/` *is* it. The project owns the vocabulary, the kit bindings, the compositions, and the maps. The menu can create kits and maps but nothing can create the root that holds them — that is the gap a "new project" verb would fill (write `assets/emerge/` with `vocab.ron`, `kits.ron` with an empty bind and no authoring, and `maps/`; then `+ new kit` / `+ new map` take over).
+
+The relationships, as an ERD. **This is also the order the menu's columns are drawn in** — PROJECT
+is the root so it is leftmost, and between its two children the cross-edge decides: a MAP names a
+BASH, a BASH names KITs, and the build chain runs KIT → DESCRIPTOR → PLACEMENT → MAP. So the screen
+reads `PROJECTS | KITS | MAPS`, left to right; `left`/`right` cross those columns one press each and
+`up`/`down` walk down the one you are in, through the panels stacked under its list
+(`chooser.rs` `spawn_screen`, `Focus::COLUMNS`). Arrows only — there is no `Tab`, the same rule the
+Meshes and Compose tabs already follow.
+
+```mermaid
+erDiagram
+    PROJECT ||--o{ KIT : "binds (kits.ron: namespace ↔ dir)"
+    PROJECT ||--|| VOCABULARY : "owns (vocab.ron)"
+    PROJECT ||--o{ BASH : "declares (kits.ron: bash)"
+    PROJECT ||--o{ COMPOSITION : "owns (compositions.ron)"
+    PROJECT ||--o{ MAP : "owns (maps/<name>.map.ron)"
+
+    KIT ||--o{ DESCRIPTOR : "library.ron"
+    KIT ||--|| POLICY : "project.ron (exclude + patches)"
+
+    BASH }o--o{ KIT : "names (namespaces, each bound)"
+
+    DESCRIPTOR ||--|| MESH : "mesh path (1:1 — scan skips known meshes)"
+    MESH ||--o| CANDIDATE : "measured, not in library"
+    DESCRIPTOR ||--o{ PLACEMENT : "placed on maps"
+    DESCRIPTOR ||--o{ MEMBER : "composed into tiles"
+    DESCRIPTOR ||--|| LABEL_ORIGIN : "labels (per-axis by/model/date)"
+
+    COMPOSITION ||--o{ MEMBER : "members"
+    COMPOSITION ||--o{ STAMP : "stamped on maps"
+
+    MAP ||--o{ PLACEMENT : "placements"
+    MAP ||--o{ STAMP : "stamps (expand to placements)"
+    MAP }o--o| BASH : "draws on (None = every bound kit)"
+
+    VOCABULARY ||--o{ DESCRIPTOR : "masks (tokens per axis)"
+```
+
+Four facts that trip people up:
+
+- **Kit ≠ mesh folder.** A kit is a *bound* directory (`kits.ron` maps namespace ↔ dir) holding `library.ron` (descriptors) + `project.ron`. The raw GLB packs under `assets/` are just meshes — they become **candidates** when scanned and **descriptors** when imported. One mesh → one descriptor: `emerge_core::import::scan` skips any mesh the library already has, so a candidate and a library entry can never name the same file (`tiles.rs:3238`).
+- **Compositions and maps are project-level, not per-kit.** A tile can seat two kits' pieces, so it cannot live in either kit; a map resolves against the merged library. Both hang off Project, not Kit (`chooser.rs` "The maps are the project's, not a kit's").
+- **Labels are two things.** The durable `LabelOrigin` record on each descriptor (who wrote each axis, which model, when — `descriptor.rs:123`), and the ephemeral suggestion cache at `target/vlm_suggestions.ron` (gitignored) that stages model answers before apply (`labels.rs:39`). The cache is keyed by id for library entries, mesh path for candidates — never an index.
+- **A bash filters what is offered, never what loads.** `bound_library` merges *every* bound kit whatever a map says, so a placement can never be stranded and a composition may still cross kits. `Map::bash` decides only what the palette offers, and `OpenMap::palette_namespaces` unions the namespaces the map already uses back in — which is why naming one cannot break a map. A bash is hand-authored in `kits.ron`; `B` on a map row only picks between the ones declared there.
+
+### UI surfaces
+
+How each entity is reached, refined and linked in the editor today. Each step of the alignment work
+updates its own row, so this table is correct after every step rather than only at the end.
+
+| Entity | Navigate | Refine | Link | Holes |
+|---|---|---|---|---|
+| PROJECT | PROJECTS column (`chooser.rs` `projects_rows`) — siblings holding `assets/emerge`, current marked | create via `N` / `Enter` on `+ new project` (`create_project`: kits.ron + byte-copied vocab) | `Enter` on a non-current row reports `emerge-mapper <dir>`; the first kit made becomes the authoring kit | cannot be renamed or deleted — a refusal says to remove the tree from the file system |
+| VOCABULARY | tag chips draw the table (`tiles.rs` ~8020) | `+` chip per axis row + `Shift+T` → `token_prompt` (comment-preserving `append_token`) | `toggle_tag` (`tiles.rs:5592`) | `capabilities`/`edge`/`slot` axes drawn by no UI |
+| KIT | KITS column | create + delete; no rename; `A` / click sets authoring (`set_authoring`) | bound in `kits.ron`; a bash names it (`Bash::kits`) | cannot be renamed; a bash is hand-authored in `kits.ron`, with no UI that makes one |
+| POLICY | POLICY panel under the kit list (`chooser.rs` `policy_rows`) | `Delete` removes exclusions and patches by ordinal, through the confirmation | n/a | a patch can be removed but not added |
+| DESCRIPTOR | MESHES shelf | id, note, size, mount, 4 tag axes, subgrid | present | — |
+| MESH | NOT IMPORTED shelf | — | import; path shown in the detail pane (`tiles.rs` mesh row) | — |
+| LABEL_ORIGIN | detail pane `labels` row — model/hand + date (`tiles.rs`) | implicit | — | — |
+| COMPOSITION | Compose tab | create/save (`project.rs:497`); no delete/rename | members on Tiles tab | cannot be deleted or renamed |
+| PLACEMENT / STAMP | Map tab | present | `send_to_tiles` back-nav (`editor.rs:6763`) | — |
+| MAP | MAPS column | Name/Bounds/Origin/Note | `B` on the row cycles `Map::bash` through the project's declared bashes (`cycle_bash` → `write_bash`); MAP INFO's `bash` row shows it | a bash cannot be created or edited from the editor |
 
 ## In the monorepo
 

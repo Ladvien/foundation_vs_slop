@@ -99,23 +99,20 @@ pub struct Build {
     /// composition prompt — `chrome::paint_name_box`'s own doc asks for exactly this: *"if a second
     /// tab ever asks again the answer is another field, not another condition on this one."*
     ///
-    /// Tiles used to be named FOR the author (`kit/tile_1`, `tile_2`, …) with no way to say
+    /// Tiles used to be named for the author (`kit/tile_1`, `tile_2`, …) with no way to say
     /// otherwise, which was tolerable while they were invisible and stopped being so the moment the
-    /// KIT list showed them. Asked for at the keyboard, 2026-08-15: naming should be explicit.
+    /// Tiles page showed them. Asked for at the keyboard, 2026-08-15: naming should be explicit.
     pub naming: Option<NamePrompt>,
-    /// **Whether the open tile still carries the name the EDITOR gave it.**
+    /// **Which page of the right panel the Tiles tab is showing**, and where the tile cursor is in
+    /// it.
     ///
-    /// Set only by [`open_blank`], cleared by every other opener. A fact recorded where it happens,
-    /// rather than deduced from the id's shape — the first version matched `tile_<digits>` and was
-    /// wrong the moment a tile legitimately called `tile_4` was reopened from disk: it read as
-    /// provisional forever, so every save of it asked for a name again. A tile that came off disk is
-    /// named by definition, whatever it is called.
-    pub provisional: bool,
-    /// **Whether the kit list is showing**, and where the cursor is in it.
+    /// `Some(row)` is the Tiles page — the authored tiles, one row each, `New Tile +` at the top —
+    /// with the cursor at `row`. `None` is the Meshes page, where the library and the candidates
+    /// are picked from. `right` on the Tiles page drills to the Meshes page and opens the tile
+    /// under the cursor; `left` on the Meshes page comes back.
     ///
-    /// `Some(row)` is `Stance::Browsing`. Kept here rather than in a resource of its own because it
-    /// is the same kind of fact as `placing` — what the arrows are for — and the stance already reads
-    /// this struct to decide.
+    /// Kept here rather than in a resource of its own because it is the same kind of fact as
+    /// `placing` — what the arrows are for — and the stance already reads this struct to decide.
     pub browsing: Option<usize>,
 }
 
@@ -138,8 +135,6 @@ pub struct NamePrompt {
 pub enum NameThen {
     /// `N` — open a new blank tile under this name.
     Open,
-    /// `Cmd+S` — the open tile has never been named; name it and write it.
-    Save,
 }
 
 /// The ladder depth a tile opens at: the span itself, so the first press from centre lands flush.
@@ -1174,12 +1169,19 @@ pub fn build_keys(
     // The right-hand list's filter, so arriving on the tab arms a piece that is actually on screen.
     filters: Res<crate::filter::Filters>,
     suggestions: Res<crate::labels::Suggestions>,
-    // **`ResMut`, dereferenced mutably only in the save branch.** Bevy flags a resource changed when
-    // a system *dereferences* `ResMut`, not when it mutates — and `editor::redraw_stamps` is gated on
-    // `Project::is_changed()`, so a keystroke that correctly does nothing would otherwise tear down
-    // and rebuild every stamped row in the map. That defect is on the record (2026-08-11 inspection,
-    // D3: eighteen rebuilds of an identical picture in one session).
+    // **Edited by `ResMut`, dereferenced mutably only in the save branch.** Bevy flags a resource
+    // changed when a system *dereferences* `ResMut`, not when it mutates — and
+    // `editor::redraw_stamps` is gated on `Project::is_changed()`, so a keystroke that correctly
+    // does nothing would otherwise tear down and rebuild every stamped row in the map. That defect
+    // is on the record (2026-08-11 inspection, D3: eighteen rebuilds of an identical picture in
+    // one session).
     mut project: ResMut<crate::project::Project>,
+    // **Which mode this system last saw.** The arrival seed below must fire exactly once per tab
+    // entry, and `Mode::is_changed()` cannot answer that deterministically: the flag is consumed
+    // by whichever system reads it first in a frame, so a `sense`-phase reader can eat the edge
+    // before this system (Act phase) ever sees it. Comparing the value across frames is immune to
+    // ordering, and `None` covers the first frame of the app.
+    mut seen: Local<Option<crate::tiles::Mode>>,
 ) {
     use crate::keys::{Action, just_pressed};
     if *mode != crate::tiles::Mode::Tiles {
@@ -1187,43 +1189,187 @@ pub fn build_keys(
     }
     let pressed = |a: Action| just_pressed(&keyboard, *live, a);
 
-    // **Arriving on the tab opens a tile**, so the first keystroke does something rather than asking
-    // for another. This hung off a mode key until the tab existed; the tab becoming live is the same
-    // moment, and one fewer thing to press.
-    if build.open.is_none() {
-        // **As tall as the space it fills**, taken from the map rather than from a constant. A number
-        // here would be one facility's ceiling height baked into the editor — the mistake
-        // `stack::datum` records fixing, where `OnCeiling` was hardcoded 2.4 m and hung the lights of
-        // a 3.5 m room in mid-air. The map states its own height; that is the only number entitled to
-        // answer this.
-        open_blank(&mut build, &project);
-        // **Arrive with something in hand.** Only fires when nothing was ever picked — the selection
-        // otherwise persists — and without it the first `Enter` is a refusal, which is the worst
-        // possible first impression of a tab. Liapis names the failure: a tool that will not let the
-        // designer converge is where user fatigue starts.
-        //
-        // **From the list as it is filtered**, which is what every other selection path walks
-        // (`tiles::library_ids`). Taking `descriptors.first()` armed a piece the filter was hiding:
-        // no row highlighted, `keep_library_selection_visible` unable to correct it, and the first
-        // Enter dropping something the author never saw and did not choose.
-        if state.editing(&project.library).is_none()
-            && let Some(first) =
-                crate::tiles::library_ids(&project, &filters, true, Some(&suggestions))
-                    .into_iter()
-                    .next()
-        {
-            state.selected_library_id = Some(first);
+    // The one count every branch below reads: how many tiles are in the kit.
+    let kit = project.compositions.compositions.len();
+    // **The page's row count includes the draft** — a tile named this session and not yet saved
+    // is a row the author can come back to, and the walk below clamps to this, not to `kit`.
+    let page = page_len(&project, &build);
+
+    // **Arriving on the tab lands on the Tiles page** — the authored tiles, `New Tile +` at the
+    // top, cursor at row 0. The old arrival opened a blank tile, and an author who came here to
+    // reopen a saved one was handed a new blank instead: a tile saved wrong stayed wrong, and the
+    // list that would have shown it was never the first thing on screen. The page is the fix, and
+    // an arrival that skipped it would skip the fix.
+    //
+    // Fires on the first frame `seen` does not match — the one moment that IS "arrived on this
+    // tab" — so `Esc`ping back from the Meshes page (which only touches `browsing`) does not
+    // re-seed on the next frame, and switching away and back does. Deterministic where
+    // `is_changed()` is not: that flag is consumed by whichever system reads it first, and this
+    // system runs in Act, after `sense_context`.
+    //
+    // **Arrive with something in hand, from the list as it is filtered.** Only fires when nothing
+    // was ever picked — the selection otherwise persists — and without it the first `Enter` after
+    // the drill is a refusal, which is the worst possible first impression of a tab. Liapis names
+    // the failure: a tool that will not let the designer converge is where user fatigue starts.
+    //
+    // **From the list as it is filtered**, which is what every other selection path walks
+    // (`tiles::library_ids`). Taking `descriptors.first()` armed a piece the filter was hiding:
+    // no row highlighted, `keep_library_selection_visible` unable to correct it, and the first
+    // Enter dropping something the author never saw and did not choose.
+    if *seen != Some(*mode) {
+        *seen = Some(*mode);
+        if build.open.is_none() {
+            if state.editing(&project.library).is_none()
+                && let Some(first) =
+                    crate::tiles::library_ids(&project, &filters, true, Some(&suggestions))
+                        .into_iter()
+                        .next()
+            {
+                state.selected_library_id = Some(first);
+            }
+            build.browsing = Some(0);
+            if kit == 0 {
+                state.status.note(
+                    "no tiles in the kit yet — New Tile +, or build and press Cmd+S".to_owned(),
+                );
+            } else {
+                state.status.note(format!(
+                    "{kit} tile(s) — Enter opens one, right drills to the meshes"
+                ));
+            }
+            return;
         }
-        let id = build
-            .open
-            .as_ref()
-            .map(|c| c.id.clone())
-            .unwrap_or_default();
-        // Named keys only if they are live on this tab — `T F G H` stood here for two commits after
-        // the tab split moved them to the Meshes lattice, which is a status line teaching dead keys.
-        state.status.note(format!(
-            "building `{id}` — up/down walk the library, Enter drops, Cmd+S saves"
-        ));
+    }
+
+    // ── the tiles page ────────────────────────────────────────────────────────────────────────
+    //
+    // Walking a list and opening from it. The Tiles page is the right panel's first page — the
+    // authored tiles, one row each, with `New Tile +` at the top. `Enter` reopens the tile under
+    // the cursor, `right` drills to the Meshes page to pick its members, and `left` at idle comes
+    // back from it. `Esc` still backs out of everything.
+    //
+    // Runs before the size guard below: there is no tile in hand while the page is being walked,
+    // and the first `right`/`Enter` is what puts one in hand.
+    if let Some(row) = build.browsing {
+        let step = |row: usize, by: i32| -> usize {
+            // Saturating, like the member walk: an author holding an arrow at the end of a list
+            // should stop there rather than wrap to the other end of it.
+            (row as i32 + by).clamp(0, page.saturating_sub(1) as i32) as usize
+        };
+        if pressed(Action::TilePrev) {
+            build.browsing = Some(step(row, -1));
+        }
+        if pressed(Action::TileNext) {
+            build.browsing = Some(step(row, 1));
+        }
+        // **`right` opens the tile under the cursor and drills into the Meshes page.** The
+        // author's shape for the tab: *"push right arrow with a tile selected to add/move to the
+        // Meshes tab."* Opening and drilling are one — the whole point of a `right` here is to
+        // start filling the tile — and `open_saved` clears `browsing` anyway, which is what lands
+        // on the Meshes page. If the tile is already in hand (re-entering after `left`), just
+        // return to the Meshes page without reopening it, so an undo stack is not a collateral
+        // casualty.
+        if pressed(Action::PageEnter) {
+            // **The draft row is the one case the kit has no tile for** — a named, unsaved tile
+            // in hand is a row the author walked to, and it opens by re-arming the page: the
+            // draft is already open, so this is the `already` branch below doing the drill alone.
+            // A kit with nothing in it has the same shape: nothing to open, and the drill is
+            // still the drill — the author came to pick meshes, and the Meshes page is where the
+            // picking happens. Both refuse by flipping the page instead of panicking or
+            // dead-ending, because the author's request (drill to Meshes) needs no tile.
+            let Some(comp) = project
+                .compositions
+                .compositions
+                .get(row)
+                .cloned()
+                .or_else(|| draft(&build, &project).cloned())
+            else {
+                build.browsing = None;
+                state
+                    .status
+                    .note("nothing to open yet — New Tile +, then right again".to_owned());
+                return;
+            };
+            let already = build
+                .open
+                .as_ref()
+                .is_some_and(|c| c.id == comp.id);
+            if !already {
+                let id = comp.id.clone();
+                let n = comp.members.len();
+                open_saved(&mut build, comp);
+                state.status.note(format!(
+                    "`{id}` opened — {n} member(s), Cmd+S saves over it"
+                ));
+            }
+            build.browsing = None;
+            return;
+        }
+        if pressed(Action::TileOpen) {
+            // The draft is the last row of the page, and it is in hand by construction — the
+            // row the author just named. Committed rows come from the kit.
+            match project
+                .compositions
+                .compositions
+                .get(row)
+                .cloned()
+                .or_else(|| draft(&build, &project).cloned())
+            {
+                Some(comp) => {
+                    let id = comp.id.clone();
+                    let n = comp.members.len();
+                    open_saved(&mut build, comp);
+                    state.status.note(format!(
+                        "`{id}` opened — {n} member(s), Cmd+S saves over it"
+                    ));
+                }
+                // The row is drawn from this same source this indexes, so this is unreachable
+                // rather than unlikely — said out loud because the alternative is an `unwrap`.
+                None => state
+                    .status
+                    .problem(format!("no tile at row {row}; the page has {page}")),
+            }
+            return;
+        }
+    } else if pressed(Action::PageLeave) {
+        // **`left` walks back to the Tiles page** from the Meshes page. A note, not a problem,
+        // when nothing is authored yet: the answer is to make one, and the `New Tile +` row is
+        // where that starts.
+        if page == 0 {
+            state
+                .status
+                .note("no tiles in the kit yet — New Tile +, or build and press Cmd+S".to_owned());
+        } else {
+            build.browsing = Some(0);
+        }
+        return;
+    }
+
+    // **`Esc` leaves the Tiles page** — the "always backs out" promise, extended one page
+    // further. The old kit-list arm lived below the size guard and cleared `browsing`; the page
+    // must be escapable with no tile open too, so this sits above the guard like the rest of the
+    // page arms. A tile already open is untouched — `Esc` puts a held piece back, it does not
+    // close the tile.
+    if build.browsing.is_some() && just_pressed(&keyboard, *live, Action::Cancel) {
+        build.browsing = None;
+        state.status.note("the meshes".to_owned());
+        return;
+    }
+
+    // **A fresh tile, and it is named before it exists.**
+    //
+    // `N` names a new blank tile — the keyboard half of the `New Tile +` row. The prompt is
+    // `chrome::NameBox` and `naming_keys` below owns the keystrokes; the tile is opened by `Enter`,
+    // not by this press. Reachable with no tile in hand: the page is where the author decides
+    // between reusing one and making a new one.
+    if pressed(Action::BuildNew) {
+        build.naming = Some(NamePrompt {
+            raw: String::new(),
+            then: NameThen::Open,
+        });
+        state
+            .status
+            .note("name the tile — Enter opens it, Esc leaves things as they are".to_owned());
         return;
     }
 
@@ -1244,12 +1390,6 @@ pub fn build_keys(
         } else {
             "arrows walk the library".to_owned()
         });
-        return;
-    }
-    // **`Esc` leaves the kit list**, which is invariant 2 of `docs/tiles_tab_contract.md` -- "Esc
-    // always returns to Choosing" -- extended one stance further rather than given a second key.
-    if build.browsing.is_some() && just_pressed(&keyboard, *live, Action::Cancel) {
-        build.browsing = None;
         return;
     }
     if build.placing && just_pressed(&keyboard, *live, Action::Cancel) {
@@ -1676,20 +1816,6 @@ pub fn build_keys(
     // **Independently, and both reported.** They are two files and neither one's refusal is a reason
     // to withhold the other: a tile that will not validate must not also cost the map its save.
     if pressed(Action::Save) {
-        // **A tile the author never named asks before it is written.** `open_blank` still mints a
-        // provisional id so the tab is usable the moment it opens — an editor that demanded a name
-        // before it would show you anything would be worse — but a provisional name must not reach
-        // the kit, because the KIT list is where it would be read back.
-        if build.provisional && build.open.is_some() {
-            build.naming = Some(NamePrompt {
-                raw: String::new(),
-                then: NameThen::Save,
-            });
-            state.status.note(
-                "name this tile before it is saved — Enter saves it, Esc goes back".to_owned(),
-            );
-            return;
-        }
         // **Saving a tile saves the tile.** It used to save the open map in the same breath, back
         // when every door had one behind it — a convenience for an author who had just stamped the
         // thing they were editing. The Tiles door has no map, so the second half of that pair has
@@ -1702,82 +1828,6 @@ pub fn build_keys(
         return;
     }
 
-    // **A fresh tile, and it is named before it exists.**
-    //
-    // `N` used to mint `<kit>/tile_N` and open it, so every tile an author made was named by the
-    // editor and there was no verb to say otherwise. That is fine while tiles are invisible and
-    // wrong the moment the KIT list shows them back: a list of `tile_1 … tile_9` is a list nobody
-    // can navigate. Asked for at the keyboard, 2026-08-15 — naming should be explicit.
-    //
-    // The prompt is `chrome::NameBox`, the same centred field the Map names a composition in, and
-    // `naming_keys` below owns the keystrokes. The tile is opened by `Enter`, not by this press.
-    if pressed(Action::BuildNew) {
-        build.naming = Some(NamePrompt {
-            raw: String::new(),
-            then: NameThen::Open,
-        });
-        state
-            .status
-            .note("name the tile — Enter opens it, Esc leaves things as they are".to_owned());
-        return;
-    }
-
-    // ── the kit ──────────────────────────────────────────────────────────────────────────────
-    //
-    // Walking a list and opening from it. The tab could make tiles and never show them, so an
-    // author had no way to see the kit, reopen a tile to correct it, or notice they had built the
-    // same thing twice.
-    let kit = project.compositions.compositions.len();
-    if pressed(Action::KitEnter) {
-        if kit == 0 {
-            // A note, not a problem: an empty kit is where every project starts, and the answer is
-            // to make one rather than to fix anything.
-            state
-                .status
-                .note("no tiles in the kit yet — build one and press Cmd+S".to_owned());
-        } else {
-            build.browsing = Some(0);
-        }
-    }
-    if let Some(row) = build.browsing {
-        let step = |row: usize, by: i32| -> usize {
-            // Saturating, like the member walk: an author holding an arrow at the end of a list
-            // should stop there rather than wrap to the other end of it.
-            (row as i32 + by).clamp(0, kit.saturating_sub(1) as i32) as usize
-        };
-        if pressed(Action::KitPrev) {
-            build.browsing = Some(step(row, -1));
-        }
-        if pressed(Action::KitNext) {
-            build.browsing = Some(step(row, 1));
-        }
-        // **`left` goes back to the mesh list**, the ascend half of the column browser. `Esc` still
-        // does it too and always did — that is the tab's global "not that" — but an author reaching
-        // for `left` after `right` brought them in is following the idiom, not looking for a second
-        // escape hatch.
-        if pressed(Action::KitLeave) {
-            build.browsing = None;
-            state.status.note("back to the meshes".to_owned());
-            return;
-        }
-        if pressed(Action::KitOpen) {
-            match project.compositions.compositions.get(row).cloned() {
-                Some(comp) => {
-                    let id = comp.id.clone();
-                    let n = comp.members.len();
-                    open_saved(&mut build, comp);
-                    state.status.note(format!(
-                        "`{id}` opened — {n} member(s), Cmd+S saves over it"
-                    ));
-                }
-                // The list is drawn from the same slice this indexes, so this is unreachable rather
-                // than unlikely — said out loud because the alternative is an `unwrap`.
-                None => state
-                    .status
-                    .problem(format!("no tile at row {row}; the kit has {kit}")),
-            }
-        }
-    }
 }
 
 /// **The keystrokes of the tile name prompt.**
@@ -1792,7 +1842,7 @@ pub fn naming_keys(
     mut events: bevy::prelude::MessageReader<bevy::input::keyboard::KeyboardInput>,
     mode: Res<crate::tiles::Mode>,
     mut build: ResMut<Build>,
-    mut project: ResMut<crate::project::Project>,
+    project: ResMut<crate::project::Project>,
     mut state: ResMut<crate::tiles::ImportState>,
 ) {
     if build.naming.is_none() || *mode != crate::tiles::Mode::Tiles {
@@ -1824,20 +1874,8 @@ pub fn naming_keys(
                     return;
                 }
                 build.naming = None;
-                // **What the author asked for, not what the state looks like** — see [`NameThen`].
-                if prompt.then == NameThen::Save {
-                    if let Some(open) = build.open.as_mut() {
-                        open.id = id.clone();
-                    }
-                    build.provisional = false;
-                    match save(&build, &mut project) {
-                        Ok(said) => state.status.note(said),
-                        Err(e) => state.status.problem(format!("TILE NOT SAVED: {e}")),
-                    }
-                } else {
-                    open_named(&mut build, &project, &id);
-                    state.status.note(format!("building `{id}`"));
-                }
+                                open_named(&mut build, &project, &id);
+                state.status.note(format!("building `{id}`"));
                 return;
             }
             bevy::input::keyboard::Key::Escape => {
@@ -1864,33 +1902,44 @@ pub fn naming_keys(
     }
 }
 
-/// **Open a blank tile at the default rung.**
-///
-/// Both places that open one go through here, so "what state does a new tile start in" has one
-/// answer rather than two that drift.
-fn open_blank(build: &mut Build, project: &crate::project::Project) {
-    let comp = blank(&next_tile_id(project), project.lattice.cell_height);
-    // The editor chose this name, so the save door will ask before it reaches the kit.
-    build.provisional = true;
+/// **Open a blank tile under the name the author just typed.**
+fn open_named(build: &mut Build, project: &crate::project::Project, id: &str) {
+    let comp = blank(id, project.lattice.cell_height);
     build.depth = DEFAULT_DEPTH;
     build.open = Some(comp);
     build.focus = 0;
-    // The one place a different tile becomes the open one, so the one place the boundary is marked.
+    // A freshly named tile lands on the Meshes page, exactly like a reopened one — the naming
+    // prompt was raised from the Tiles page, and the point of naming is to start filling it.
+    build.placing = false;
+    build.browsing = None;
     build.opened = build.opened.wrapping_add(1);
 }
 
-/// **Open a blank tile under the name the author just typed.**
+/// **The tile in hand that is not yet in the kit** — the draft.
 ///
-/// `open_blank`'s twin, and it goes through the same fields for the same reason: "what state does a
-/// new tile start in" has one answer rather than two that drift.
-fn open_named(build: &mut Build, project: &crate::project::Project, id: &str) {
-    let comp = blank(id, project.lattice.cell_height);
-    build.provisional = false;
-    build.depth = DEFAULT_DEPTH;
-    build.open = Some(comp);
-    build.focus = 0;
-    build.placing = false;
-    build.opened = build.opened.wrapping_add(1);
+/// `N`/`+ New Tile` name a blank tile and open it for filling, and the author expects to see it
+/// under TILES the moment it has a name — not only once `Cmd+S` has committed it. The draft is
+/// `build.open` whose id no committed composition carries: a reopened or already-saved tile is not
+/// a draft, and saving is what ends the draft (the id enters `compositions.ron` and the row keeps
+/// its name, dropping the draft marker).
+pub fn draft<'a>(build: &'a Build, project: &crate::project::Project) -> Option<&'a Composition> {
+    build.open.as_ref().filter(|c| {
+        !project
+            .compositions
+            .compositions
+            .iter()
+            .any(|s| s.id == c.id)
+    })
+}
+
+/// **How many rows the Tiles page draws**: the kit's committed tiles plus the draft in hand.
+///
+/// Every walk on the Tiles page — the up/down clamp, `Enter`'s row, `right`'s drill, `left`'s
+/// landing — indexes this many rows, so the draft the author just named is reachable by the same
+/// keys as a committed tile. The chip count reads the same number, so the strip never shows a
+/// count the list does not have.
+pub fn page_len(project: &crate::project::Project, build: &Build) -> usize {
+    project.compositions.compositions.len() + usize::from(draft(build, project).is_some())
 }
 
 /// **Reopen an authored tile for editing.**
@@ -1903,8 +1952,6 @@ fn open_named(build: &mut Build, project: &crate::project::Project, id: &str) {
 /// document by exactly the argument that field carries: an undo that crossed the boundary would
 /// write one tile's members under another's name.
 pub fn open_saved(build: &mut Build, comp: Composition) {
-    // Off disk, therefore named — whatever it is called.
-    build.provisional = false;
     build.depth = DEFAULT_DEPTH;
     build.open = Some(comp);
     build.focus = 0;
@@ -1920,24 +1967,6 @@ pub fn open_saved(build: &mut Build, comp: Composition) {
     build.placing = true;
     build.browsing = None;
     build.opened = build.opened.wrapping_add(1);
-}
-
-/// The next unused `<namespace>/tile_n` id, so a new tile opens rather than asking for a name first.
-///
-/// A composition id shares a descriptor id's shape — namespace and all — and a tile that does not
-/// carry its kit's namespace is one nobody can find later. **The namespace is `Project::namespace`,
-/// resolved once at open**, which is where the rule and its refusals live; this used to derive it
-/// here *and* in `kit_namespace`, both reading `descriptors.first()` and both substituting the
-/// literal `"kit"` — two copies of one answer, and an answer that depended on sort order.
-fn next_tile_id(project: &crate::project::Project) -> String {
-    let kit = &project.namespace;
-    for n in 1..=project.compositions.compositions.len() + 1 {
-        let id = format!("{kit}/tile_{n}");
-        if !project.compositions.compositions.iter().any(|c| c.id == id) {
-            return id;
-        }
-    }
-    format!("{kit}/tile")
 }
 
 /// One member of the tile as it currently stands on the stage.
@@ -2012,7 +2041,7 @@ pub fn drive_build_preview(
     // the ghost after a piece was taken and never while one was being picked — exactly backwards:
     // asked for at the keyboard, 2026-08-14: *"when I select a mesh, but haven't yet hit enter ...
     // there should be a semitransparent rendering of the mesh selected. Like a preview."* The one
-    // stance it stays out of is Browsing — the kit list selects a tile, not a mesh, and a mesh
+    // stance it stays out of is Browsing — the Tiles page selects a tile, not a mesh, and a mesh
     // ghost under a tile cursor would be previewing the wrong kind of thing.
     if build.browsing.is_none()
         && let Some(d) = state
@@ -2144,12 +2173,28 @@ pub fn drive_build_preview(
     }
 }
 
+/// **The open tile's envelope in world space** — centre, then size — or `None` with no tile open.
+///
+/// Extracted for the same reason as `editor::map_bounds`: the wireframe an author sees and the rect
+/// `badges::sense_world_ink` keeps clear are one expression, so they cannot drift apart.
+pub(crate) fn tile_envelope(build: &Build) -> Option<(Vec3, Vec3)> {
+    let Envelope::Bounded { size } = build.open.as_ref().map(|c| c.envelope)? else {
+        return None;
+    };
+    Some((
+        crate::stages::TILE + Vec3::new(0.0, size.1 * 0.5, 0.0),
+        Vec3::new(size.0, size.1, size.2),
+    ))
+}
+
 /// **The tile's box, its grid, and the cell the cursor is on.**
 ///
 /// Gizmos rather than meshes: they are drawn per frame and need no despawning, which is right for
 /// something that moves every keystroke. The cursor is the thing an author steers by — without it,
 /// walking the grid moves a number in a panel and nothing on the stage.
 pub fn draw_build_grid(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<crate::keys::Live>,
     mode: Res<crate::tiles::Mode>,
     build: Res<Build>,
     project: Res<crate::project::Project>,
@@ -2158,16 +2203,19 @@ pub fn draw_build_grid(
     if *mode != crate::tiles::Mode::Tiles {
         return;
     }
-    let Some(Envelope::Bounded { size }) = build.open.as_ref().map(|c| c.envelope) else {
+    let Some((centre, size)) = tile_envelope(&build) else {
         return;
     };
     let stage = crate::stages::TILE;
-    let centre = stage + Vec3::new(0.0, size.1 * 0.5, 0.0);
+    let size = (size.x, size.y, size.z);
 
     // The envelope. `cube` takes a transform whose SCALE is the size — 0.19 spells it that way.
+    // Faded while the shortcut key is held — see [`crate::chrome::WORLD_HELD`]. This box projects
+    // to the full-height verticals that made the Tiles overlay unreadable.
+    let held = crate::keys::pressed(&keyboard, *live, crate::keys::Action::Shortcuts);
     gizmos.cube(
         Transform::from_translation(centre).with_scale(Vec3::new(size.0, size.1, size.2)),
-        crate::chrome::DIM,
+        crate::chrome::stepped_back(crate::chrome::DIM, held),
     );
 
     // A third of a cell — the old unit rung, kept as the orientation grid and as the box drawn for

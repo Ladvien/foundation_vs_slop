@@ -4,7 +4,7 @@
       "label": "open the Tiles tab",
       "goal": "the kit lives on the tile tab's list, and the key list changes with the tab",
       "do": [
-        "press 3"
+        "press 2"
       ],
       "checkpoint": "the Tiles tab is open",
       "recovery": "if a text field has the keyboard the number types into it: press Escape first"
@@ -13,13 +13,12 @@
       "label": "reopen tile_4 from the kit",
       "goal": "tile_4 ships wrong: its low wall sits dead centre, so all four edges derive open and the solver treats it as a second floor tile",
       "do": [
-        "press right to show the KIT tab -- Escape first if a piece is in hand",
-        "walk down to site/tile_4",
-        "press right again to open it"
+        "walk down the tiles list to site/tile_4 -- Escape first if a piece is in hand",
+        "press Enter to open it"
       ],
       "checkpoint": "the tile contains",
       "with": { "ids": ["site/wall_low"], "n": 1 },
-      "recovery": "Escape backs out of the kit list; if right does nothing, you are still holding a piece"
+      "recovery": "Escape backs out to the meshes page; if Enter opens nothing you are not on the tiles page -- press left"
     },
     {
       "label": "flush the low wall against a side",

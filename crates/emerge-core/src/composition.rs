@@ -1506,7 +1506,7 @@ pub fn interface(
         // at `MAP_VERSION` 5, precisely so a tile's faces cannot be read on a different lattice from
         // the map it will be stamped onto. This map exists only to give `stack::resolve_y` a floor
         // and a ceiling to answer mounts against.
-        palette: Vec::new(),
+        bash: None,
         placements: Vec::new(),
         stamps: Vec::new(),
         locations: Vec::new(),
@@ -1938,7 +1938,7 @@ mod tests {
             name: "scratch".to_owned(),
             origin: (0.0, 0.0, 0.0),
             bounds: (32.0, 4.0, 32.0),
-            palette: Vec::new(),
+            bash: None,
             placements: Vec::new(),
             stamps: Vec::new(),
             locations: Vec::new(),

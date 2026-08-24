@@ -2,12 +2,23 @@
   "steps": [
     {
       "label": "open the Tiles tab",
-      "goal": "everything below happens there, and the key list changes with the tab. The tab opens a blank tile for you, already named after the kit -- N starts another",
+      "goal": "everything below happens there, and the key list changes with the tab. Arriving lands on the Tiles page — the authored tiles and a New Tile + row; nothing is open until you ask",
       "do": [
-        "press 3"
+        "press 2"
       ],
       "checkpoint": "the Tiles tab is open",
       "recovery": "if a text field has the keyboard the number types into it: press Escape first"
+    },
+    {
+      "label": "start a tile",
+      "goal": "nothing is open until you ask: N names a new tile, Enter on a row reopens an old one. The naming prompt is how a tile gets its name — the editor stopped guessing names for you",
+      "do": [
+        "press N for a new tile",
+        "type a name like tile_a",
+        "press Enter"
+      ],
+      "checkpoint": "a tile is open",
+      "recovery": "Escape closes the name prompt without starting the tile"
     },
     {
       "label": "bring a floor in",
