@@ -300,7 +300,7 @@ fn the_editor_plugin_registers_the_tool_resources_its_systems_take() {
 #[test]
 fn opening_a_piece_to_be_defined_is_the_modified_remove_key() {
     use emerge_mapper::keys::{
-        Action, Context, Live, MOD_KEYS, REMOVE_KEY, Stance, binding, just_pressed,
+        Action, Context, Holder, Live, MOD_KEYS, REMOVE_KEY, Stance, binding, just_pressed,
     };
 
     let send = binding(Action::EditTile);
@@ -315,12 +315,12 @@ fn opening_a_piece_to_be_defined_is_the_modified_remove_key() {
     input.press(REMOVE_KEY);
     assert!(just_pressed(
         &input,
-        Live(Context::Meshes, Stance::Idle),
+        Live(Context::Meshes, Stance::Idle, Holder::Tab),
         Action::RemoveTile
     ));
     assert!(!just_pressed(
         &input,
-        Live(Context::Meshes, Stance::Idle),
+        Live(Context::Meshes, Stance::Idle, Holder::Tab),
         Action::EditTile
     ));
 
@@ -331,13 +331,13 @@ fn opening_a_piece_to_be_defined_is_the_modified_remove_key() {
     input.press(REMOVE_KEY);
     assert!(just_pressed(
         &input,
-        Live(Context::Map, Stance::Idle),
+        Live(Context::Map, Stance::Idle, Holder::Tab),
         Action::EditTile
     ));
     assert!(
         !just_pressed(
             &input,
-            Live(Context::Meshes, Stance::Idle),
+            Live(Context::Meshes, Stance::Idle, Holder::Tab),
             Action::RemoveTile
         ),
         "the modified chord must not also remove, or one press would do two things"

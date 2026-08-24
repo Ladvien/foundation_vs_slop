@@ -38,6 +38,33 @@ pub enum Pane {
     Tags,
 }
 
+impl Pane {
+    /// **Every pane**, so adding one costs a decision in [`Pane::walk`] and in the ratchet that
+    /// reads it.
+    pub const ALL: [Pane; 4] = [Pane::Palette, Pane::Candidates, Pane::Rigs, Pane::Tags];
+
+    /// **The list walk this box's rows answer to**, or empty for the one pane that narrows a grid.
+    ///
+    /// Stated here because it is a fact about the pane rather than about the census, and stated at
+    /// all because forgetting it is silent: `PrevRig`/`NextRig` are [`Pane::Rigs`]' walk and shipped
+    /// without `keys::Draft::also_filtered`, so clicking the Rigs box killed the rig walk — the exact
+    /// defect the exemption exists to close, missed on the fourth pane and caught by nothing.
+    /// `every_filtered_pane_keeps_its_own_walk` reads this.
+    pub const fn walk(self) -> &'static [crate::keys::Action] {
+        use crate::keys::Action::*;
+        match self {
+            Pane::Palette => &[PalettePrev, PaletteNext],
+            // **Four, because one node serves two tabs.** `CandidateList` is the Meshes candidates
+            // and the Tiles kit walk, so the box above it narrows rows both pairs step through.
+            Pane::Candidates => &[PrevCandidate, NextCandidate, TileListPrev, TileListNext],
+            Pane::Rigs => &[PrevRig, NextRig],
+            // The tag block is a grid of chips, not a list with a cursor: its `Enter` takes the one
+            // match rather than committing a walk. See the variant's own note.
+            Pane::Tags => &[],
+        }
+    }
+}
+
 /// The filter text of each list, and which box is taking keys.
 ///
 /// **Its own resource, and deliberately not a field on `EditorState`.** `rebuild_palette` runs on

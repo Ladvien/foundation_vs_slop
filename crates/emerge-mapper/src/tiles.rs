@@ -1743,7 +1743,11 @@ fn accept_derived_edges(
     mut derived: ResMut<DerivedEdges>,
 ) {
     let accept = keys::just_pressed(&keyboard, *live, Action::AcceptEdges);
-    let discard = keys::just_pressed(&keyboard, *live, Action::Cancel);
+    // **The tab is named, because `Action::Cancel` is `Context::Global`.** Its sibling `AcceptEdges`
+    // is already `Context::Meshes` at `Stance::Proposed`, so this only says the same thing out loud —
+    // and without it an `Esc` meant for the journal or a filter box threw the proposal away.
+    let discard = live.0 == crate::keys::Context::Meshes
+        && keys::just_pressed(&keyboard, *live, Action::Cancel);
     if !accept && !discard {
         return;
     }

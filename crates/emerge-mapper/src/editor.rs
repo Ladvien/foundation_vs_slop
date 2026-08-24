@@ -2404,55 +2404,71 @@ fn refresh_status(
     }
 }
 
-/// While a name is being typed, every other key belongs to the name.
-///
-/// `Option<Res<_>>` is not needed here because `EditorState` is `init_resource`d by this same plugin
-/// — but every run condition IS evaluated in Bevy 0.19, with no short-circuit, so a condition reading
-/// a resource some *other* plugin owns must take the option. Worth stating next to the one place that
-/// legitimately does not.
-/// **Nothing that reads a tab's keys may fire while a field is taking them.**
+/// **Every text field that can be taking raw keys, in one parameter.**
 ///
 /// This is [`crate::keys::Context::Typing`] in the census's terms — the context that overlaps every
 /// other one and suppresses all of them.
 ///
-/// **One condition, every field.** There were two (`not_typing` here and `not_renaming_candidate` in
-/// `tiles.rs`), each knowing about the fields of its own tab, and a filter box would have made three:
-/// a system gated on the wrong one fires while you type, which is how `2` in a text box lands you on
-/// another tab. Every field is listed here and nowhere else, so adding one is adding a line.
+/// **One list, and now one type.** There were two (`not_typing` and `tiles.rs`'s
+/// `not_renaming_candidate`), each knowing about the fields of its own tab, and a filter box would
+/// have made three: a system gated on the wrong one fires while you type, which is how `2` in a text
+/// box lands you on another tab. Then [`not_typing`] and [`sense_context`] each grew their own copy
+/// of the list, which is the same drift one level up — and the second copy hit Bevy's sixteen-parameter
+/// limit the moment the journal had to be asked as well. One bundle, read by both.
 ///
 /// The buffers stay with their fields — a name, a pin's reason, an axis, a candidate id and a filter
-/// hold different things and commit differently. That is five kinds of state, not one fact written
-/// five times, so this reads them rather than owning them.
-pub fn not_typing(
-    state: Res<EditorState>,
-    edit: Res<SizeEdit>,
-    import: Res<crate::tiles::ImportState>,
-    filters: Res<crate::filter::Filters>,
-    cell: Res<crate::tiles::CellEdit>,
-    note: Res<crate::tiles::NoteEdit>,
-    width: Res<crate::tiles::ScaleEdit>,
-    height: Res<crate::tiles::HeightEdit>,
-    // The tile name prompt, added when naming became explicit (2026-08-15). Adding a field here is
-    // the line this doc comment promises it would be — and leaving it out is not cosmetic: the
-    // `Enter` that confirms a name is also `BuildDrop`, so without this the same keypress named the
-    // tile and dropped a piece into it.
-    build: Res<crate::build::Build>,
-    // The vocabulary prompt, added with the tag block's `+` chip (2026-08-22). While it is open,
-    // typing a name containing `n` must not rotate the mesh — the guard this list exists to give.
-    token: Res<crate::token_prompt::TokenPrompt>,
-) -> bool {
-    state.renaming.is_none()
-        && state.pinning.is_none()
-        && state.grouping.is_none()
-        && edit.active.is_none()
-        && import.renaming.is_none()
-        && build.naming.is_none()
-        && token.open.is_none()
-        && !filters.typing()
-        && !cell.typing()
-        && !note.typing()
-        && !width.typing()
-        && !height.typing()
+/// hold different things and commit differently. That is several kinds of state, not one fact written
+/// several times, so this reads them rather than owning them. The fields are `pub` because
+/// [`sense_context`] also asks `build` what is in hand.
+///
+/// **The filter boxes are deliberately absent.** A filter box is a text field, but it is the one that
+/// keeps its own list walking — see [`keys::Holder::Filter`] — so the caller folds `Filters` in
+/// itself and says what it bought.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct Fields<'w> {
+    pub state: Res<'w, EditorState>,
+    pub size: Res<'w, SizeEdit>,
+    pub import: Res<'w, crate::tiles::ImportState>,
+    pub cell: Res<'w, crate::tiles::CellEdit>,
+    pub note: Res<'w, crate::tiles::NoteEdit>,
+    pub width: Res<'w, crate::tiles::ScaleEdit>,
+    pub height: Res<'w, crate::tiles::HeightEdit>,
+    /// The tile name prompt, added when naming became explicit (2026-08-15). Leaving it out is not
+    /// cosmetic: the `Enter` that confirms a name is also `BuildDrop`, so without it the same
+    /// keypress named the tile and dropped a piece into it.
+    pub build: Res<'w, crate::build::Build>,
+    /// The vocabulary prompt, added with the tag block's `+` chip (2026-08-22). While it is open,
+    /// typing a name containing `n` must not rotate the mesh — the guard this list exists to give.
+    pub token: Res<'w, crate::token_prompt::TokenPrompt>,
+}
+
+impl Fields<'_> {
+    /// Is one of them taking keys right now? Adding a field is adding a line, here and nowhere else.
+    pub fn typing(&self) -> bool {
+        self.state.renaming.is_some()
+            || self.state.pinning.is_some()
+            // **`grouping` was missing here**, so naming a captured composition also dispatched Map
+            // actions for every letter typed — `corner` fired aim, turn, rename-map and turn-view.
+            || self.state.grouping.is_some()
+            || self.size.active.is_some()
+            || self.import.renaming.is_some()
+            || self.cell.typing()
+            || self.note.typing()
+            || self.width.typing()
+            || self.height.typing()
+            || self.build.naming.is_some()
+            || self.token.open.is_some()
+    }
+}
+
+/// While a name is being typed, every other key belongs to the name.
+///
+/// `Option<Res<_>>` is not needed here because every resource in [`Fields`] is `init_resource`d by
+/// this same plugin — but every condition in a `.run_if(..)` chain IS evaluated in Bevy 0.19, so a
+/// condition reading a resource some *other* plugin owns must take the option. Worth stating next to
+/// the one place that legitimately does not.
+pub fn not_typing(fields: Fields, filters: Res<crate::filter::Filters>) -> bool {
+    !fields.typing() && !filters.typing()
 }
 
 /// **Decide who owns the keyboard, once, before anything reads a key.**
@@ -2467,46 +2483,25 @@ pub fn not_typing(
 /// somebody else has to remember to consult.
 pub fn sense_context(
     mode: Res<crate::tiles::Mode>,
-    state: Res<EditorState>,
-    edit: Res<SizeEdit>,
-    import: Res<crate::tiles::ImportState>,
+    fields: Fields,
     filters: Res<crate::filter::Filters>,
-    cell: Res<crate::tiles::CellEdit>,
-    note: Res<crate::tiles::NoteEdit>,
-    width: Res<crate::tiles::ScaleEdit>,
-    height: Res<crate::tiles::HeightEdit>,
-    build: Res<crate::build::Build>,
-    token: Res<crate::token_prompt::TokenPrompt>,
     move_drag: Res<MoveDrag>,
     clone_drag: Res<CloneDrag>,
     proposal: Res<Proposal>,
     derived: Res<crate::tiles::DerivedEdges>,
     mut live: ResMut<keys::Live>,
+    // The panel, so the journal can be told it owns the keyboard. A `Query` rather than a resource
+    // because `Display::None` on the node *is* the open/closed state — `notice::toggle_journal`
+    // writes exactly that, and a second flag beside it would be a second answer.
+    journal: Query<&Node, With<crate::chrome::JournalPanel>>,
 ) {
-    // **The filter box is its own context, not a member of `typing`.** Every other field makes the
-    // whole census quiet ([`keys::Context::Typing`]); a filter box narrows a list that must keep
-    // walking while it holds the keys ([`keys::Context::Filter`]), so it is split out of the one
-    // big disjunction and folded into `Live` separately below. The box is still a text field —
-    // letters go to it, not to the verbs — only the list's own walk keys stay live.
+    // **The filter box is a text field with a named exemption, not a context of its own.** Every
+    // other field here makes the whole census quiet ([`keys::Context::Typing`]); a filter box narrows
+    // a list that must keep walking while it holds the keys, so it also sets [`keys::Holder::Filter`]
+    // below. It used to be a `Context`, which threw the tab away and fired every tab's walk on one
+    // arrow — see [`keys::Holder`].
     let filter_typing = filters.typing();
-    let typing = state.renaming.is_some()
-        || state.pinning.is_some()
-        // **`grouping` was missing here**, so naming a captured composition also dispatched Map
-        // actions for every letter typed — `corner` fired aim, turn, rename-map and turn-view. It was
-        // added alongside Compose's own name field; that tab no longer has one, and this is now the
-        // only text field that can be open while the Map holds the keyboard.
-        || state.grouping.is_some()
-        || edit.active.is_some()
-        || import.renaming.is_some()
-        || cell.typing()
-        || note.typing()
-        || width.typing()
-        || height.typing()
-        // The tile name prompt — the same key that confirms a tile is `BuildDrop`, so the Tiles tab
-        // must stop dispatching while it is open.
-        || build.naming.is_some()
-        // The vocabulary prompt — typing a token name must not rotate the mesh.
-        || token.open.is_some();
+    let typing = fields.typing();
     // **What is in hand, asked of the tab that can be holding something.** Two tabs can, and they hold
     // different things: the assembler has a piece taken with `Space`, the map has one picked up in
     // Move or a set captured in Clone. Both answer the same question — *do the arrows move a thing, or
@@ -2536,8 +2531,8 @@ pub fn sense_context(
         // **The Tiles page outranks a held piece**, and cannot honestly collide with it: `TileOpen`
         // and `PageEnter` are bound at `Browsing`, so the page's keys are what a held piece cannot
         // swallow — and opening from the page clears `placing` and `browsing` together.
-        keys::Context::Tiles if build.browsing.is_some() => keys::Stance::Browsing,
-        keys::Context::Tiles if build.placing && crate::build::focused(&build) => {
+        keys::Context::Tiles if fields.build.browsing.is_some() => keys::Stance::Browsing,
+        keys::Context::Tiles if fields.build.placing && crate::build::focused(&fields.build) => {
             keys::Stance::Holding
         }
         // **A proposal outranks a held piece**, because it is the more consequential thing waiting
@@ -2553,16 +2548,21 @@ pub fn sense_context(
         }
         _ => keys::Stance::Idle,
     };
-    let want = if filter_typing {
-        // The filter box holds the keys: the census answers [`keys::Context::Filter`], which keeps
-        // the list's own walk live and suppresses everything else. The stance is whatever the tab
-        // computed — the Tiles page keeps `Browsing` so its page-walk pair still passes
-        // `stance_ok` — because [`keys::live`] keeps the stance for Filter the way it does for a
-        // tab.
-        keys::Live(keys::Context::Filter, stance)
+    // **Journal over filter over tab**, because that is the drawing order. The tab is carried in
+    // every case now; only the holder changes — that is the whole of the fix, and it is why
+    // `keys::Context::Filter` no longer exists.
+    let holder = if journal.iter().any(|n| n.display != Display::None) {
+        keys::Holder::Journal
+    } else if filter_typing {
+        keys::Holder::Filter
     } else {
-        keys::live(mode.context(), typing, stance)
+        keys::Holder::Tab
     };
+    // A filter box **is** a text field, so it sets `typing` as well: letters go to the box, not to
+    // the verbs. What `Holder::Filter` buys is the exemption for that pane's own list walk, and
+    // `keys::allowed` consults the tab through the row's own context — so the walk that stays live is
+    // the one belonging to the tab the box is on, and no other.
+    let want = keys::live(mode.context(), typing || filter_typing, stance, holder);
     // Written through the change detector only when it actually moves, so `Live` staying put does not
     // wake every `resource_changed` reader in the editor on every frame.
     if *live != want {
@@ -4911,12 +4911,13 @@ fn keys(
     // out which of four states they are in — and pressing it twice from the move tool leaves them
     // with a clear palette rather than doing nothing the second time.
     //
-    // **`*mode == Map` is a real guard here and not a second census.** `Action::Cancel` is
-    // `Context::Global` now, because a problem can be raised on any of the four tabs and every one
-    // of them needs a key that means "I have read that". The *peel* below is still map-only, so this
-    // one branch does need to know which tab is live — and `crate::notice::dismiss` handles the
-    // other three so no tab is without it.
-    if **mode == crate::tiles::Mode::Map && keys::just_pressed(&keyboard, *live, Action::Cancel) {
+    // **The context, not the mode, and that is the crate's single answer.** `Action::Cancel` is
+    // `Context::Global` because a problem can be raised on any of the four tabs and every one needs a
+    // key that means "I have read that". The *peel* below is still map-only, so this branch does need
+    // to know who owns the keyboard — and it asks `Live`, which is the one thing that knows. Reading
+    // `Mode` instead was a second census: it says nothing about a filter box or an open journal, so
+    // one `Esc` with the journal up closed the journal *and* peeled a map layer.
+    if live.0 == keys::Context::Map && keys::just_pressed(&keyboard, *live, Action::Cancel) {
         // The outermost layer. Cleared here rather than in `notice::dismiss` so a single press
         // cannot both take the block down and peel a tool — the promise this comment makes.
         if state.status.has_problem() {

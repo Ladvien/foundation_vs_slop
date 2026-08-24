@@ -1388,7 +1388,13 @@ pub fn build_keys(
     // must be escapable with no tile open too, so this sits above the guard like the rest of the
     // page arms. A tile already open is untouched — `Esc` puts a held piece back, it does not
     // close the tile.
-    if build.browsing.is_some() && just_pressed(&keyboard, *live, Action::Cancel) {
+    // **The tab is named, because `Action::Cancel` is `Context::Global`.** Without it one `Esc` with
+    // the journal open left the Tiles page as well as closing the journal — four consumers of one
+    // key, each guessing at the tab from its own state. `Live.0` is the crate's single answer.
+    if live.0 == crate::keys::Context::Tiles
+        && build.browsing.is_some()
+        && just_pressed(&keyboard, *live, Action::Cancel)
+    {
         build.browsing = None;
         state.status.note("the meshes".to_owned());
         return;
@@ -1430,7 +1436,12 @@ pub fn build_keys(
         });
         return;
     }
-    if build.placing && just_pressed(&keyboard, *live, Action::Cancel) {
+    // Same reason as the branch above: the tab is asked of `Live`, so an `Esc` that belongs to the
+    // journal or a filter box does not put the held piece down as well.
+    if live.0 == crate::keys::Context::Tiles
+        && build.placing
+        && just_pressed(&keyboard, *live, Action::Cancel)
+    {
         build.placing = false;
         state.status.note("arrows walk the library".to_owned());
         return;

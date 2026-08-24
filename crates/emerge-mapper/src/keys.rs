@@ -30,7 +30,7 @@
 //! `docs/research/2026-08-18-reusable-scroll-and-tab-widgets.md` §3.5 assumes the other model: it
 //! routes keyboard paging to *"the scroll view that currently owns focus"*. **This editor does not
 //! work that way and is not going to.** `just_pressed(&ButtonInput, Live, Action)` is a *pull*
-//! helper each consumer polls, and `Live(Context, Stance)` is an ambient pair — there is no focused
+//! helper each consumer polls, and `Live(Context, Stance, Holder::Tab)` is an ambient pair — there is no focused
 //! widget, and `InputFocus`/`TabIndex` appear nowhere in `src/`.
 //!
 //! Introducing focus *as a second routing model* was the alternative and it is the one thing this
@@ -79,18 +79,11 @@ pub enum Context {
     /// Liapis names *"too many options"* as a cause of the user fatigue this is all shaped to avoid.
     Tiles,
     /// A text field is taking raw keys. Overlaps everything, and suppresses everything.
-    Typing,
-    /// **A list filter box is taking keys, and the list's own walk stays live.**
     ///
-    /// The same *phase* as [`Context::Typing`] — not a tab — with one deliberate difference: while a
-    /// filter box owns the keyboard, the rows the box narrows must keep walking, or narrowing a
-    /// 318-candidate list would strand the author with no way to reach the row the filter just
-    /// showed them. Reported at the keyboard, 2026-08-23: typing into the box killed the up/down
-    /// walk of the Meshes list. The exemption is per-binding ([`Binding::while_filtering`]) and the
-    /// census test [`only_the_list_walks_fire_while_a_filter_box_holds_the_keys`] asserts it over
-    /// the whole table — `Context::Filter` is not a hole in the focus guard, it is the same guard
-    /// with a named exception.
-    Filter,
+    /// **A filter box sets this too**, and says so a second way: `Live.2` carries
+    /// [`Holder::Filter`], which is what keeps the box's own list walking. There is no `Filter`
+    /// context — there was, and it threw the tab away, firing every tab's walk on one arrow.
+    Typing,
 }
 
 impl Context {
@@ -100,11 +93,6 @@ impl Context {
         match (self, other) {
             // Typing shadows every other context by construction — that is what makes it the guard.
             (Typing, _) | (_, Typing) => true,
-            // Filter is the same phase wearing a per-tab face: the box is live *alongside* its tab
-            // (the walk keys stay live), so it overlaps everything the way Typing does. No binding
-            // carries `Filter` as its context — the collision test never sees it — and the arm is
-            // still stated rather than left to the catch-all, so a future context costs a decision.
-            (Filter, _) | (_, Filter) => true,
             (Global, _) | (_, Global) => true,
             // **A tab overlaps only itself.** Five arms rather than a `self == other` catch-all,
             // because the catch-all would also make a *new* context overlap only itself by default —
@@ -727,13 +715,20 @@ pub struct Binding {
     pub home: Home,
     /// **The one deliberate hole in the filter focus guard.**
     ///
-    /// `false` for every row except the list walks ([`Draft::also_filtered`]); while the live
-    /// context is [`Context::Filter`], only these fire. Everything else — `Enter`, `Esc`, `Space`,
-    /// letters, the tab chords, `Cmd+S` — stays suppressed exactly as it is while
-    /// [`Context::Typing`] holds the keyboard, and
+    /// `false` for every row except the list walks ([`Draft::also_filtered`]); while
+    /// [`Holder::Filter`] is standing over the tab, only these fire — and only on the tab they belong
+    /// to. Everything else — `Enter`, `Esc`, `Space`, letters, the tab chords, `Cmd+S` — stays
+    /// suppressed exactly as it is while [`Context::Typing`] holds the keyboard, and
     /// [`only_the_list_walks_fire_while_a_filter_box_holds_the_keys`] polices that over the whole
     /// table.
     pub while_filtering: bool,
+    /// **The journal panel's own keys.**
+    ///
+    /// `false` for every row except the three the panel names in its footer
+    /// ([`Draft::also_journal`]); while [`Holder::Journal`] is up, only these fire, and the tab is
+    /// not consulted. This is what stopped one `Esc` closing the journal *and* peeling a map layer
+    /// *and* leaving the Tiles page *and* discarding an edge proposal.
+    pub while_journal: bool,
 }
 
 /// **A binding that has not said where it lives yet.**
@@ -749,6 +744,7 @@ pub struct Draft {
     needs_stance: Option<Stance>,
     context: Context,
     while_filtering: bool,
+    while_journal: bool,
     chord: &'static str,
     does: &'static str,
 }
@@ -764,6 +760,7 @@ impl Draft {
             needs_stance: self.needs_stance,
             context: self.context,
             while_filtering: self.while_filtering,
+            while_journal: self.while_journal,
             chord: self.chord,
             does: self.does,
             home,
@@ -772,13 +769,23 @@ impl Draft {
 
     /// **A list-walk row stays live while the filter box owns the keyboard.**
     ///
-    /// The one flag a binding is allowed to set, and it names exactly what it buys: the walk whose
-    /// rows the box narrows. Chainable before [`Draft::at`], and deliberately not a constructor
-    /// parameter — a row has to say it is a list walk to get the exemption, and a new walk
-    /// forgotten here is a dead key while filtering, which is the defect this whole context was
-    /// built to close.
+    /// Names exactly what it buys: the walk whose rows the box narrows. Chainable before
+    /// [`Draft::at`], and deliberately not a constructor parameter — a row has to say it is a list
+    /// walk to get the exemption, and a new walk forgotten here is a dead key while filtering, which
+    /// is the defect the exemption was built to close.
+    ///
+    /// It does **not** cross tabs: [`allowed`] also requires the row's own context to overlap the
+    /// live tab, so the Rigs box narrowing the rig list cannot walk the Meshes list.
     pub const fn also_filtered(mut self) -> Draft {
         self.while_filtering = true;
+        self
+    }
+
+    /// **A row the open journal answers to.** Chainable before [`Draft::at`], and deliberately not a
+    /// constructor parameter — a row has to say the journal is a surface it belongs to, and a row
+    /// forgotten here is simply quiet while the panel is up, which is the correct default.
+    pub const fn also_journal(mut self) -> Draft {
+        self.while_journal = true;
         self
     }
 }
@@ -946,6 +953,7 @@ pub const BINDINGS: &[Binding] = &[
         "E",
         "every error this session",
     )
+    .also_journal()
     .at(Home::Legend),
     // **The agent's read-out, and it is Global because a problem is.**
     //
@@ -965,6 +973,7 @@ pub const BINDINGS: &[Binding] = &[
         "C",
         "copy this tab's text",
     )
+    .also_journal()
     .at(Home::Control(ControlId::Detail)),
     // **One key for "not that", now on every tab** — and the problem banner is its outermost layer.
     //
@@ -985,6 +994,7 @@ pub const BINDINGS: &[Binding] = &[
         "Esc",
         "back out",
     )
+    .also_journal()
     .at(Home::Legend),
     // **Undo is the MAP's.** It was `Global`, and `keys` had lost its `in_map_mode` run condition, so
     // `Cmd+Z` on the Tiles tab silently despawned a flood fill — up to ~1,400 placements — while every
@@ -2140,6 +2150,10 @@ pub const BINDINGS: &[Binding] = &[
     .at(Home::Control(ControlId::Tags)),
     // The arrows are the Tiles tab's too. Legal, and the reason the census models context at all:
     // the two tabs are never live together, so the same key means one thing in each.
+    //
+    // **`.also_filtered()`, because `anim_tab` spawns a filter box over this list** (`Pane::Rigs`).
+    // The four other list walks had the exemption and these two were missed, so clicking the Rigs box
+    // killed the rig walk — the exact defect the exemption exists to close, on the fourth pane.
     b(
         Action::PrevRig,
         KeyCode::ArrowUp,
@@ -2148,6 +2162,7 @@ pub const BINDINGS: &[Binding] = &[
         "up",
         "walk the rigs / Shift: x5",
     )
+    .also_filtered()
     .at(Home::Control(ControlId::Rigs)),
     b(
         Action::NextRig,
@@ -2157,6 +2172,7 @@ pub const BINDINGS: &[Binding] = &[
         "down",
         "walk the rigs / Shift: x5",
     )
+    .also_filtered()
     .at(Home::Control(ControlId::Rigs)),
     // Enter is the Tiles tab's Accept too — same legal cross-context share as the arrows above.
     b(
@@ -2396,6 +2412,7 @@ const fn full(
         needs_stance,
         context,
         while_filtering: false,
+        while_journal: false,
         chord,
         does,
     }
@@ -2699,34 +2716,63 @@ impl Plugin for KeysPlugin {
     }
 }
 
-/// Who owns the keyboard this frame, and what is in hand. Written once, in [`Phase::Sense`], and read
-/// everywhere else.
+/// Who owns the keyboard this frame, what is in hand, and what is standing over the tab. Written
+/// once, in [`Phase::Sense`], and read everywhere else.
 ///
-/// **A tuple struct with the context still at `.0`** so the six places that compare it to a `Context`
-/// directly (`live.0 == Context::Tiles`) read the way they always did. The dispatch functions take the
-/// whole thing, because a binding that declares a [`Stance`] cannot be judged from the context alone.
+/// **A tuple struct with the context still at `.0`** so the places that compare it to a `Context`
+/// directly (`live.0 == Context::Tiles`) read the way they always did. The dispatch functions take
+/// the whole thing, because a binding that declares a [`Stance`] cannot be judged from the context
+/// alone, and because the [`Holder`] decides which gate the context goes through at all.
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Live(pub Context, pub Stance);
+pub struct Live(pub Context, pub Stance, pub Holder);
 
 impl Default for Live {
     fn default() -> Self {
         // The tab the editor opens on — `tiles::Mode::default()` is `Map`. Stated rather than
         // derived, because `Context`'s own first variant is `Global`, which is not a tab.
-        Live(Context::Map, Stance::Idle)
+        Live(Context::Map, Stance::Idle, Holder::Tab)
     }
 }
 
-/// Who owns the keyboard: the live tab, unless a field is taking raw keys — and what is in hand.
+/// **What is holding the keyboard on top of the tab.**
 ///
-/// **Typing keeps whatever stance the tab had.** The stance was cleared to [`Stance::Idle`] while
-/// the old `Typing`-for-everything reigned, because every action was suppressed anyway and a live
-/// `Holding` beside it would have been a second state that decided nothing. [`Context::Filter`]
+/// The tab never goes away — that was the bug. `Context::Filter` was a *phase* wearing a [`Context`]'s
+/// clothes, and putting it in `Live.0` collapsed the four-tab axis to one bit: every
+/// [`Draft::also_filtered`] row in every tab fired on one arrow, `tiles::move_selection` (gated on
+/// nothing but the screen) walked the Meshes list while the author was filtering the Map palette, and
+/// every `live.0 == Context::X` reader in `guided.rs` and `editor.rs` answered `false` whenever any
+/// box had focus. The tab stays in `Live.0` and this says who is standing over it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Holder {
+    /// Nothing is over the tab; the tab's own bindings fire.
+    #[default]
+    Tab,
+    /// A [`crate::filter::Pane`] box has focus. A row fires only if it opted in with
+    /// [`Draft::also_filtered`] **and** belongs to the live tab — a list walk is a fact about one
+    /// pane, and there are four panes.
+    Filter,
+    /// The session journal is up. A row fires only if it opted in with [`Draft::also_journal`], and
+    /// the tab is deliberately not consulted: the journal is a panel over the whole viewport and its
+    /// three keys ([`Action::Cancel`], [`Action::CopyInfo`], [`Action::ShowErrors`]) are the panel's
+    /// own, named in its footer by `chrome::journal_panel`.
+    Journal,
+}
+
+/// Who owns the keyboard: the live tab, unless a field is taking raw keys — plus what is in hand and
+/// what is standing over the tab.
+///
+/// **Typing keeps whatever stance the tab had.** The stance was cleared to [`Stance::Idle`] while the
+/// old `Typing`-for-everything reigned, because every action was suppressed anyway and a live
+/// `Holding` beside it would have been a second state that decided nothing. [`Holder::Filter`]
 /// changed that: the list walks stay live while the box holds the keys, and two of them — the Tiles
-/// page's `TilePrev`/`TileNext` — are bound at [`Stance::Browsing`], so a Filter that blanked the
-/// stance to Idle would kill exactly the walk it exists to keep. The stance survives, and the
-/// suppression is stated where it decides: [`allowed`] refuses Filter for every binding that did
-/// not opt in with [`Draft::also_filtered`].
-pub fn live(tab: Context, typing: bool, stance: Stance) -> Live {
+/// page's `TilePrev`/`TileNext` — are bound at [`Stance::Browsing`], so blanking the stance to Idle
+/// would kill exactly the walk the exemption exists to keep. The stance survives, and the suppression
+/// is stated where it decides: [`allowed`] refuses every binding that did not opt in.
+///
+/// **`typing` and `holder` are separate answers.** A filter box is a field taking raw keys, so it
+/// sets both — `Context::Typing` at `.0` and [`Holder::Filter`] at `.2` — and the tab is preserved
+/// through `Holder::Filter`'s own `b.context.overlaps` clause rather than through `.0`.
+pub fn live(tab: Context, typing: bool, stance: Stance, holder: Holder) -> Live {
     Live(
         if typing {
             Context::Typing
@@ -2734,6 +2780,7 @@ pub fn live(tab: Context, typing: bool, stance: Stance) -> Live {
             tab
         },
         stance,
+        holder,
     )
 }
 
@@ -2744,8 +2791,10 @@ pub fn live(tab: Context, typing: bool, stance: Stance) -> Live {
 /// collision test, and the exact inverse of what dispatch needs. Used naively, every binding in the
 /// census would fire *while* you type. So the suppression is stated once, here, and `overlaps` keeps
 /// doing only the tab-exclusion half it was written for.
+///
+/// Only asked of [`Holder::Tab`]: the other two holders have their own clause in [`allowed`].
 pub fn fires_in(want: Context, live: Context) -> bool {
-    live != Context::Typing && live != Context::Filter && want.overlaps(live)
+    live != Context::Typing && want.overlaps(live)
 }
 
 /// Does this binding's [`Stance`] requirement hold right now? `None` is always satisfied — the same
@@ -2760,14 +2809,21 @@ fn stance_ok(b: &Binding, live: Stance) -> bool {
 /// Every gate a binding must pass except the key itself, in one place so the three entry points below
 /// cannot drift from each other.
 fn allowed(b: &Binding, keys: &ButtonInput<KeyCode>, live: Live) -> bool {
-    // **The one exemption, named where the guard lives.** `Context::Filter` is Typing with a
-    // deliberate hole: the list walks keep firing while the box that narrows them holds the keys.
-    // Everything else goes through `fires_in`, which refuses Filter the way it refuses Typing, so
-    // the exemption is exactly the rows that called [`Draft::also_filtered`] and nothing else.
-    let context_ok = if live.0 == Context::Filter {
-        b.while_filtering
-    } else {
-        fires_in(b.context, live.0)
+    // **The two exemptions, named where the guard lives.** A holder over the tab suppresses the
+    // keyboard the way [`Context::Typing`] does, with a per-row hole: the list walks keep firing
+    // while the box that narrows them holds the keys, and the journal's own three keys keep firing
+    // while it is up. Everything else is refused, so each exemption is exactly the rows that opted
+    // in and nothing else.
+    let context_ok = match live.2 {
+        Holder::Tab => fires_in(b.context, live.0),
+        // **The tab is still consulted, and that is the fix.** A filtered walk is one pane's list.
+        // While this was a `Context` in `live.0` the tab was thrown away, so one `ArrowUp` fired
+        // `PalettePrev`, `PrevCandidate` *and* `TileListPrev` together — and `tiles::move_selection`
+        // is gated on nothing but the screen, so filtering the Map palette walked the Meshes list.
+        Holder::Filter => b.while_filtering && b.context.overlaps(live.0),
+        // The tab is deliberately NOT consulted here: the journal is a panel over the whole viewport
+        // and its three keys are the panel's own, named in its own footer.
+        Holder::Journal => b.while_journal,
     };
     context_ok
         && stance_ok(b, live.1)
@@ -3195,7 +3251,7 @@ mod tests {
         let mut input = ButtonInput::<KeyCode>::default();
         input.press(KeyCode::ArrowUp);
 
-        let idle = Live(Context::Tiles, Stance::Idle);
+        let idle = Live(Context::Tiles, Stance::Idle, Holder::Tab);
         assert!(
             just_pressed(&input, idle, Action::TileListPrev),
             "with nothing in hand, up walks the library"
@@ -3205,7 +3261,7 @@ mod tests {
             "with nothing in hand, up must not move a piece there is none of"
         );
 
-        let holding = Live(Context::Tiles, Stance::Holding);
+        let holding = Live(Context::Tiles, Stance::Holding, Holder::Tab);
         assert!(
             just_pressed(&input, holding, Action::BuildForward),
             "with a piece in hand, up moves it"
@@ -3823,14 +3879,14 @@ mod tests {
         input.press(binding(Action::Shortcuts).key);
         for tab in [Context::Map, Context::Meshes, Context::Anim] {
             assert!(
-                pressed(&input, Live(tab, Stance::Idle), Action::Shortcuts),
+                pressed(&input, Live(tab, Stance::Idle, Holder::Tab), Action::Shortcuts),
                 "the shortcuts overlay must be reachable from {tab:?}"
             );
         }
         assert!(
             !pressed(
                 &input,
-                Live(Context::Typing, Stance::Idle),
+                Live(Context::Typing, Stance::Idle, Holder::Tab),
                 Action::Shortcuts
             ),
             "and must not open while a field is taking keys"
@@ -3881,18 +3937,18 @@ mod tests {
         let mut input = ButtonInput::<KeyCode>::default();
         input.press(KeyCode::KeyK);
         assert!(
-            just_pressed(&input, Live(Context::Map, Stance::Idle), Action::Shortcuts),
+            just_pressed(&input, Live(Context::Map, Stance::Idle, Holder::Tab), Action::Shortcuts),
             "K did not fire Shortcuts"
         );
         assert!(
-            !just_pressed(&input, Live(Context::Map, Stance::Idle), Action::Cancel),
+            !just_pressed(&input, Live(Context::Map, Stance::Idle, Holder::Tab), Action::Cancel),
             "K fired an unrelated action"
         );
 
         let mut input = ButtonInput::<KeyCode>::default();
         input.press(KeyCode::Escape);
         assert!(
-            just_pressed(&input, Live(Context::Map, Stance::Idle), Action::Cancel),
+            just_pressed(&input, Live(Context::Map, Stance::Idle, Holder::Tab), Action::Cancel),
             "Escape did not fire Cancel"
         );
     }
@@ -3912,27 +3968,34 @@ mod tests {
         }
         for b in BINDINGS {
             assert!(
-                !just_pressed(&input, Live(Context::Typing, Stance::Idle), b.action),
+                !just_pressed(&input, Live(Context::Typing, Stance::Idle, Holder::Tab), b.action),
                 "{:?} fired while a text field owned the keyboard",
                 b.action
             );
             assert!(
-                !pressed(&input, Live(Context::Typing, Stance::Idle), b.action),
+                !pressed(&input, Live(Context::Typing, Stance::Idle, Holder::Tab), b.action),
                 "{:?} read as held while a text field owned the keyboard",
                 b.action
             );
         }
     }
 
-
-    /// **The filter box keeps the list walks and suppresses everything else.**
+    /// **The filter box keeps its own tab's list walks and suppresses everything else.**
     ///
-    /// [`Context::Filter`] is the one deliberate hole in the focus guard: while a filter box owns
-    /// the keyboard, the rows it narrows must keep walking. Asserted over the WHOLE census, the
-    /// same shape as [`no_action_fires_while_a_field_is_taking_keys`] — exactly the bindings that
-    /// called [`Draft::also_filtered`] fire at `Live(Context::Filter, _)`, and nothing else does,
-    /// so a row added later without the opt-in is a dead key while filtering and this test names
-    /// it.
+    /// [`Holder::Filter`] is the one deliberate hole in the focus guard: while a filter box owns the
+    /// keyboard, the rows it narrows must keep walking. Asserted over the WHOLE census, the same
+    /// shape as [`no_action_fires_while_a_field_is_taking_keys`] — exactly the bindings that called
+    /// [`Draft::also_filtered`] fire, and nothing else does, so a row added later without the opt-in
+    /// is a dead key while filtering and this test names it.
+    ///
+    /// # It used to name no tab, and asserted the cross-tab multi-fire AS the contract
+    ///
+    /// `want` was `b.while_filtering && stance_ok(..)`, with the holder living in `Live.0` where the
+    /// tab used to be. So at `Stance::Idle` one `ArrowUp` was *expected* to fire `PalettePrev` (Map),
+    /// `PrevCandidate` (Meshes) **and** `TileListPrev` (Tiles) together — and `tiles::move_selection`
+    /// is gated on nothing but the screen, so filtering the Map palette really did walk the Meshes
+    /// list. The tab is named on every rung now, once per tab, which is what makes the assertion the
+    /// contract rather than a description of the bug.
     #[test]
     fn only_the_list_walks_fire_while_a_filter_box_holds_the_keys() {
         let mut input = ButtonInput::<KeyCode>::default();
@@ -3942,42 +4005,146 @@ mod tests {
         // The walks are bare keys, so the modifier must be UP for them to pass `allowed` — the
         // Typing census above presses MOD_KEYS because it asserts nothing fires either way; here
         // the flagged rows must actually fire, so the modifier stays out of it.
-        for b in BINDINGS {
-            let fires = just_pressed(&input, Live(Context::Filter, Stance::Idle), b.action);
-            // A walk bound at another stance (the Tiles page's pair is `Stance::Browsing`) is
-            // correctly quiet at Idle — the stance axis still applies while filtering; only the
-            // context gate loosened. So the expected value is the opt-in AND the stance.
-            let want = b.while_filtering && stance_ok(b, Stance::Idle);
-            assert_eq!(
-                fires,
-                want,
-                "{:?} {} while a filter box owned the keyboard — a row that did not call \
-                 [`Draft::also_filtered`] must stay suppressed, and a walk that did must stay live",
-                b.action,
-                if want {
-                    "must fire"
-                } else {
-                    "must not fire"
-                }
-            );
+        for tab in [
+            Context::Map,
+            Context::Meshes,
+            Context::Tiles,
+            Context::Anim,
+            Context::Compose,
+        ] {
+            for b in BINDINGS {
+                let live = Live(tab, Stance::Idle, Holder::Filter);
+                let fires = just_pressed(&input, live, b.action);
+                // Three axes, all still live while filtering: the opt-in, the tab, and the stance. A
+                // walk bound at another stance (the Tiles page's pair is `Stance::Browsing`) is
+                // correctly quiet at Idle, and a walk belonging to another tab is correctly quiet
+                // here — only the *context gate* loosened, and only for its own tab.
+                let want =
+                    b.while_filtering && b.context.overlaps(tab) && stance_ok(b, Stance::Idle);
+                assert_eq!(
+                    fires, want,
+                    "{:?} {} while a filter box owned the keyboard on {tab:?} — a row that did not \
+                     call `Draft::also_filtered` must stay suppressed, a walk that did must stay \
+                     live, and neither may reach across tabs",
+                    b.action,
+                    if want { "must fire" } else { "must not fire" }
+                );
+            }
         }
-        // The stance survives into Filter: the Tiles page's walk is bound at `Stance::Browsing`,
-        // and a Filter that blanked the stance to Idle would kill exactly the walk it exists to
-        // keep. Same shape as the loop above, but with the arrow pressed fresh (the loop's press
-        // set is cleared so `just_pressed` sees a real transition) and the Browsing stance.
+        // The stance survives: the Tiles page's walk is bound at `Stance::Browsing`, and a holder
+        // that blanked the stance to Idle would kill exactly the walk it exists to keep. Same shape
+        // as the loop above, but with the arrow pressed fresh (the loop's press set is cleared so
+        // `just_pressed` sees a real transition) and the Browsing stance.
         let mut walked = ButtonInput::<KeyCode>::default();
         walked.press(KeyCode::ArrowUp);
         assert!(
             just_pressed(
                 &walked,
-                Live(Context::Filter, Stance::Browsing),
+                Live(Context::Tiles, Stance::Browsing, Holder::Filter),
                 Action::TilePrev
             ),
             "the Tiles page walk must fire while its filter box is open, at its own stance"
         );
         assert!(
-            !just_pressed(&walked, Live(Context::Filter, Stance::Idle), Action::TilePrev),
+            !just_pressed(
+                &walked,
+                Live(Context::Tiles, Stance::Idle, Holder::Filter),
+                Action::TilePrev
+            ),
             "and the same key must not fire at Idle — the stance axis still applies while filtering"
+        );
+        assert!(
+            !just_pressed(
+                &walked,
+                Live(Context::Map, Stance::Browsing, Holder::Filter),
+                Action::TilePrev
+            ),
+            "and it must not fire from the MAP's filter box — a list walk is one pane's fact, and \
+             `tiles::move_selection` is gated on nothing but the screen"
+        );
+    }
+
+    /// **The open journal answers to three keys and nothing else.**
+    ///
+    /// While the panel is up it owns the keyboard, and the exemption is exactly the rows that called
+    /// [`Draft::also_journal`]. Asserted over the WHOLE census, so a row added later without the
+    /// opt-in is quiet while the journal is up — and, more to the point, a row added WITH it is a
+    /// deliberate decision rather than a leak.
+    ///
+    /// This is what stopped one `Esc` closing the journal *and* peeling a map layer *and* leaving the
+    /// Tiles page *and* discarding an edge proposal: four consumers of one `Context::Global` row.
+    #[test]
+    fn only_the_journal_s_own_keys_fire_while_the_journal_is_up() {
+        let mut input = ButtonInput::<KeyCode>::default();
+        for b in BINDINGS {
+            input.press(b.key);
+        }
+        // `ShowErrors` and `CopyInfo` are modified rows and `Cancel` is bare, so no single modifier
+        // state fires all three — which is why `want` carries `b.needs_mod` and the bare `Esc` is
+        // asserted separately below.
+        for k in MOD_KEYS {
+            input.press(k);
+        }
+        for b in BINDINGS {
+            let live = Live(Context::Map, Stance::Idle, Holder::Journal);
+            let fires = just_pressed(&input, live, b.action);
+            let want = b.while_journal && b.needs_mod && stance_ok(b, Stance::Idle);
+            assert_eq!(
+                fires, want,
+                "{:?} must {}fire while the journal owned the keyboard",
+                b.action,
+                if want { "" } else { "not " }
+            );
+        }
+        let mut esc = ButtonInput::<KeyCode>::default();
+        esc.press(KeyCode::Escape);
+        assert!(
+            just_pressed(
+                &esc,
+                Live(Context::Map, Stance::Idle, Holder::Journal),
+                Action::Cancel
+            ),
+            "`Esc` is the key that closes the journal — it must reach `notice::dismiss`"
+        );
+    }
+
+    /// **Every pane with a filter box keeps its own list walking.**
+    ///
+    /// The census census: `crate::filter::Pane::walk` names the rows each box's list answers to, and
+    /// every one of them must have called [`Draft::also_filtered`]. Two facts have to agree and
+    /// neither can see the other — one is a fact about a pane, the other a flag on a binding — so
+    /// nothing but a test can hold them together.
+    ///
+    /// This is exactly the check that was missing. Four panes spawn a box; the first three had the
+    /// exemption and `Pane::Rigs` did not, so clicking the Rigs box killed the rig walk — a dead key
+    /// with nothing on screen to say why, shipped, and invisible to every other test in this module
+    /// because they all iterate `BINDINGS` and `BINDINGS` had nothing to say about panes.
+    #[test]
+    fn every_filtered_pane_keeps_its_own_walk() {
+        let mut missing: Vec<String> = Vec::new();
+        for pane in crate::filter::Pane::ALL {
+            for action in pane.walk() {
+                if !binding(*action).while_filtering {
+                    missing.push(format!("{pane:?}'s {action:?}"));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these list walks go dead the moment their own filter box takes the keyboard, because \
+             the row never called `Draft::also_filtered`: {}",
+            missing.join(", ")
+        );
+        // Anti-vacuity: `Pane::Tags` narrows a grid and names no walk, so an empty table would pass
+        // the loop above in silence.
+        let named = crate::filter::Pane::ALL
+            .into_iter()
+            .map(|p| p.walk().len())
+            .sum::<usize>();
+        assert!(
+            named >= 8,
+            "only {named} walk row(s) are claimed by a pane; three panes walk lists and one of them \
+             serves two tabs, so the table has stopped describing the editor"
         );
     }
 
@@ -3990,11 +4157,11 @@ mod tests {
         input.press(KeyCode::KeyS);
         assert!(just_pressed(
             &input,
-            Live(Context::Map, Stance::Idle),
+            Live(Context::Map, Stance::Idle, Holder::Tab),
             Action::PanBack
         ));
         assert!(
-            !just_pressed(&input, Live(Context::Map, Stance::Idle), Action::Save),
+            !just_pressed(&input, Live(Context::Map, Stance::Idle, Holder::Tab), Action::Save),
             "bare S must not save"
         );
 
@@ -4005,11 +4172,11 @@ mod tests {
         input.press(MOD_KEYS[0]);
         input.press(KeyCode::KeyS);
         assert!(
-            just_pressed(&input, Live(Context::Map, Stance::Idle), Action::Save),
+            just_pressed(&input, Live(Context::Map, Stance::Idle, Holder::Tab), Action::Save),
             "{MOD_NAME}+S must save"
         );
         assert!(
-            !just_pressed(&input, Live(Context::Map, Stance::Idle), Action::PanBack),
+            !just_pressed(&input, Live(Context::Map, Stance::Idle, Holder::Tab), Action::PanBack),
             "{MOD_NAME}+S must not also pan"
         );
     }
@@ -4028,13 +4195,13 @@ mod tests {
         input.press(MOD_KEYS[0]);
         input.press(KeyCode::KeyZ);
         assert!(
-            just_pressed(&input, Live(Context::Map, Stance::Idle), Action::Undo),
+            just_pressed(&input, Live(Context::Map, Stance::Idle, Holder::Tab), Action::Undo),
             "{MOD_NAME}+Z must undo"
         );
         assert!(
             !just_pressed(
                 &input,
-                Live(Context::Meshes, Stance::Idle),
+                Live(Context::Meshes, Stance::Idle, Holder::Tab),
                 Action::CellSolid
             ),
             "{MOD_NAME}+Z must not also mark a cell solid"
@@ -4045,13 +4212,13 @@ mod tests {
         assert!(
             just_pressed(
                 &input,
-                Live(Context::Meshes, Stance::Idle),
+                Live(Context::Meshes, Stance::Idle, Holder::Tab),
                 Action::CellSolid
             ),
             "bare Z must mark the lattice cell solid"
         );
         assert!(
-            !just_pressed(&input, Live(Context::Map, Stance::Idle), Action::Undo),
+            !just_pressed(&input, Live(Context::Map, Stance::Idle, Holder::Tab), Action::Undo),
             "bare Z must not undo"
         );
     }
@@ -4083,7 +4250,7 @@ mod tests {
                 Action::GenerateDeclared,
                 Action::GenerateComposed,
             ] {
-                let fired = just_pressed(&input, Live(Context::Map, Stance::Idle), other);
+                let fired = just_pressed(&input, Live(Context::Map, Stance::Idle, Holder::Tab), other);
                 assert_eq!(
                     fired,
                     other == wanted,
@@ -4163,7 +4330,7 @@ mod tests {
         assert!(
             repeating(
                 &input,
-                Live(Context::Map, Stance::Idle),
+                Live(Context::Map, Stance::Idle, Holder::Tab),
                 Action::TurnPieceRight,
                 &mut repeat,
                 0.0
@@ -4181,7 +4348,7 @@ mod tests {
         for _ in 0..9 {
             if repeating(
                 &input,
-                Live(Context::Map, Stance::Idle),
+                Live(Context::Map, Stance::Idle, Holder::Tab),
                 Action::TurnPieceRight,
                 &mut repeat,
                 step,
@@ -4197,14 +4364,14 @@ mod tests {
         // Crossing it fires exactly once.
         assert!(repeating(
             &input,
-            Live(Context::Map, Stance::Idle),
+            Live(Context::Map, Stance::Idle, Holder::Tab),
             Action::TurnPieceRight,
             &mut repeat,
             step * 2.0
         ));
         assert!(!repeating(
             &input,
-            Live(Context::Map, Stance::Idle),
+            Live(Context::Map, Stance::Idle, Holder::Tab),
             Action::TurnPieceRight,
             &mut repeat,
             0.0
@@ -4258,7 +4425,7 @@ mod tests {
     #[test]
     fn holding_accelerates_and_releasing_forgets() {
         let key = binding(Action::TurnPieceLeft).key;
-        let live = Live(Context::Map, Stance::Idle);
+        let live = Live(Context::Map, Stance::Idle, Holder::Tab);
         let mut input = ButtonInput::<KeyCode>::default();
         let mut repeat = Repeat::default();
 
@@ -4329,7 +4496,7 @@ mod tests {
         input.press(key);
         assert!(repeating(
             &input,
-            Live(Context::Map, Stance::Idle),
+            Live(Context::Map, Stance::Idle, Holder::Tab),
             Action::TurnPieceRight,
             &mut repeat,
             0.0
@@ -4338,7 +4505,7 @@ mod tests {
         // Part of the way to the next repeat, then let go.
         repeating(
             &input,
-            Live(Context::Map, Stance::Idle),
+            Live(Context::Map, Stance::Idle, Holder::Tab),
             Action::TurnPieceRight,
             &mut repeat,
             REPEAT_SECS * 0.8,
@@ -4346,7 +4513,7 @@ mod tests {
         input.release(key);
         assert!(!repeating(
             &input,
-            Live(Context::Map, Stance::Idle),
+            Live(Context::Map, Stance::Idle, Holder::Tab),
             Action::TurnPieceRight,
             &mut repeat,
             0.0
@@ -4357,7 +4524,7 @@ mod tests {
         assert!(
             repeating(
                 &input,
-                Live(Context::Map, Stance::Idle),
+                Live(Context::Map, Stance::Idle, Holder::Tab),
                 Action::TurnPieceRight,
                 &mut repeat,
                 0.0
@@ -4380,7 +4547,7 @@ mod tests {
         input.clear_just_pressed(key);
         assert!(!repeating(
             &input,
-            Live(Context::Meshes, Stance::Idle),
+            Live(Context::Meshes, Stance::Idle, Holder::Tab),
             Action::TurnPieceRight,
             &mut repeat,
             5.0
@@ -4390,7 +4557,7 @@ mod tests {
         assert!(
             !repeating(
                 &input,
-                Live(Context::Map, Stance::Idle),
+                Live(Context::Map, Stance::Idle, Holder::Tab),
                 Action::TurnPieceRight,
                 &mut repeat,
                 5.0
