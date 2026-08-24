@@ -400,6 +400,33 @@ impl Fixture {
         self
     }
 
+    /// **Declare `look` tokens**, so a test can drive the tag block with the words a shipped guide
+    /// actually names.
+    ///
+    /// The fixture ships one, `plain`, which is enough for every test that only needs *a* token on
+    /// this axis. `the_label_a_mesh_script_s_objective_steps_can_actually_be_walked` needs the two
+    /// the script names, because a drive test that substituted its own words would prove the block
+    /// works and not that the script can be followed — and the script's payload is exactly what was
+    /// wrong with it.
+    pub fn look_tokens(self, names: &[&str]) -> Fixture {
+        let at = self.dir.join("assets/emerge/vocab.ron");
+        let was =
+            std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("cannot read {at:?}: {e}"));
+        let one = r#"look: (tokens: [( name: "plain", note: "unremarkable" )]),"#;
+        assert!(
+            was.contains(one),
+            "the fixture's look axis must be the shipped one, or this is a no-op"
+        );
+        let mut rows = vec![r#"( name: "plain", note: "unremarkable" )"#.to_owned()];
+        for n in names {
+            rows.push(format!(r#"( name: "{n}", note: "how it reads" )"#));
+        }
+        let full = format!("look: (tokens: [{}]),", rows.join(", "));
+        std::fs::write(&at, was.replace(one, &full))
+            .unwrap_or_else(|e| panic!("cannot write {at:?}: {e}"));
+        self
+    }
+
     /// **A `kind` token that brings an `effects` token with it** — the *derived* half of `effects`.
     ///
     /// `Vocabularies::implied_effects` resolves the implication, `Vocabularies::masks` folds it into

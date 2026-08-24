@@ -83,6 +83,29 @@ fn tap_key(app: &mut App, logical: bevy::input::keyboard::Key, code: KeyCode) {
     app.update();
 }
 
+/// The `KeyCode` a lowercase letter arrives on.
+///
+/// [`tap_key`] writes only the message stream, which every text handler in this crate matches on
+/// `logical_key` — so the code is not what makes typing work. It is stated truthfully anyway: a test
+/// that claimed every letter was `KeyA` would be lying about the input it drove, and the next reader
+/// would believe it.
+fn letter_key(c: char) -> KeyCode {
+    const KEYS: [KeyCode; 26] = [
+        KeyCode::KeyA, KeyCode::KeyB, KeyCode::KeyC, KeyCode::KeyD, KeyCode::KeyE, KeyCode::KeyF,
+        KeyCode::KeyG, KeyCode::KeyH, KeyCode::KeyI, KeyCode::KeyJ, KeyCode::KeyK, KeyCode::KeyL,
+        KeyCode::KeyM, KeyCode::KeyN, KeyCode::KeyO, KeyCode::KeyP, KeyCode::KeyQ, KeyCode::KeyR,
+        KeyCode::KeyS, KeyCode::KeyT, KeyCode::KeyU, KeyCode::KeyV, KeyCode::KeyW, KeyCode::KeyX,
+        KeyCode::KeyY, KeyCode::KeyZ,
+    ];
+    match (c.to_ascii_lowercase() as u32)
+        .checked_sub(u32::from(b'a'))
+        .and_then(|i| KEYS.get(i as usize))
+    {
+        Some(k) => *k,
+        None => panic!("`{c}` is not an ASCII letter — a vocabulary token is expected to be one"),
+    }
+}
+
 /// **One chord, as `ButtonInput`** — for the verbs, which read that rather than the stream.
 ///
 /// `release_all` before `press` is load-bearing: `just_pressed` needs a transition, and a key left
@@ -14085,6 +14108,142 @@ fn enter_in_the_tag_box_takes_the_one_match_and_refuses_a_tie() {
         said.contains('3') && said.contains("match"),
         "a tie has to say how many, so the author knows to keep typing — it said {said:?}"
     );
+}
+
+/// **The two objective steps of `guides/label_a_mesh.json` can actually be walked.**
+///
+/// Both name the checkpoint `the piece carries` and both hand it a payload; the walk is `/`, type the
+/// token, `Enter`. The checkpoint must answer `false` before the keystroke and `true` after it, for
+/// the axis and token **the script itself names** — which is why the payload is read out of the JSON
+/// rather than restated here, and why the fixture declares the script's own `look` words.
+///
+/// # It shipped unwalkable, and every existing test agreed it was fine
+///
+/// The payloads were spelled `"args"`. `Step`'s field is `with`, every field of `Step` was
+/// `#[serde(default)]`, and serde said nothing — so `with` deserialised to `None`, `carries_token`
+/// was handed `null` for ever, and both steps could never pass. Two things hid it:
+/// `every_checkpoint_a_shipped_guide_names_is_registered_and_runs` reads the corpus as a
+/// `serde_json::Value` and only checks that the checkpoint NAME resolves, and `label_a_mesh.json`
+/// had no drive test at all. So the guide looked complete, the suite was green, and an author
+/// following the card was parked at step four indefinitely.
+///
+/// # What this does NOT cover, measured rather than assumed
+///
+/// Two sibling fixes landed with the typo. The misspelled-axis refusal is a `panic!`, and reaching it
+/// needs `catch_unwind` plus a swapped panic hook, which is process-global in a binary whose tests
+/// run in parallel — see the note at the foot of the body.
+///
+/// The other is the layer: the checkpoint resolved the piece through `project.library`, the
+/// *layered* view, while `tiles::toggle_tag` writes `project.measured`. Reading the layer you write
+/// is right on its face, but **this test cannot tell the two apart and neither can a fixture.** It
+/// was tried: a `policy::Patch` pinning the piece's `look` to `plain` does make the layered view
+/// differ at open, and yet after the toggle the layered view reads `["plain", "wood", "worn"]` —
+/// `pick` replaces, so the patched value has evidently reached the measurement layer, and both
+/// layers then carry whatever the author typed. Swapping `measured` for `library` here leaves this
+/// test green. Do not take that as licence to swap it back: it means the divergence is unreachable
+/// through the fixture, not that the layers agree by design.
+#[cfg(feature = "debugger")]
+#[test]
+fn the_label_a_mesh_script_s_objective_steps_can_actually_be_walked() {
+    use emerge_mapper::keys::Action;
+
+    // Read both steps' payloads out of the shipped script. `guide_step` panics if a label moves, so
+    // renaming a card moves this test or fails it by name.
+    let steps = [
+        guide_step("label_a_mesh.json", "take it with Enter"),
+        guide_step(
+            "label_a_mesh.json",
+            "type the next one without leaving the box",
+        ),
+    ];
+    let words: Vec<(String, String)> = steps
+        .iter()
+        .map(|(name, with)| {
+            assert_eq!(
+                name, "the piece carries",
+                "this test drives `the piece carries`; the script now names {name:?}"
+            );
+            let axis = with["axis"].as_str().unwrap_or_else(|| {
+                panic!(
+                    "the step's payload names no axis: {with}. If the key is `args`, it is `with` — \
+                     serde drops an unknown field silently and the step can never pass"
+                )
+            });
+            let token = with["token"]
+                .as_str()
+                .unwrap_or_else(|| panic!("the step's payload names no token: {with}"));
+            (axis.to_owned(), token.to_owned())
+        })
+        .collect();
+
+    let looks: Vec<&str> = words.iter().map(|(_, t)| t.as_str()).collect();
+    let root = Fixture::new("labelmeshwalk")
+        .descriptor("floor", "alpha")
+        .look_tokens(&looks)
+        .build("m");
+    let mut app = harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Meshes)
+        .unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..3 {
+        app.update();
+    }
+    let id = app
+        .world()
+        .resource::<emerge_mapper::project::Project>()
+        .library
+        .descriptors
+        .first()
+        .map(|d| d.id.clone())
+        .unwrap_or_else(|| panic!("the fixture must carry a descriptor"));
+    app.world_mut()
+        .resource_mut::<emerge_mapper::tiles::ImportState>()
+        .selected_library_id = Some(id.clone());
+    for _ in 0..4 {
+        app.update();
+    }
+
+    press_once(&mut app, emerge_mapper::keys::binding(Action::FocusTagFilter).key);
+    for _ in 0..3 {
+        app.update();
+    }
+
+    for ((axis, token), (name, with)) in words.iter().zip(steps.iter()) {
+        assert!(
+            !checkpoint(&mut app, name, with.clone()),
+            "`{token}` must not be on `{axis}` before the step that puts it there — otherwise the \
+             step passes without the author doing anything"
+        );
+        for c in token.chars() {
+            let code = letter_key(c);
+            tap_key(
+                &mut app,
+                bevy::input::keyboard::Key::Character(c.to_string().into()),
+                code,
+            );
+        }
+        tap_key(&mut app, bevy::input::keyboard::Key::Enter, KeyCode::Enter);
+        for _ in 0..4 {
+            app.update();
+        }
+        assert!(
+            checkpoint(&mut app, name, with.clone()),
+            "after typing `{token}` and pressing Enter the step must pass. It reads `{axis}` on the \
+             focused piece, which now holds look {:?}",
+            app.world()
+                .resource::<emerge_mapper::project::Project>()
+                .measured
+                .descriptors
+                .iter()
+                .find(|d| d.id == id)
+                .map(|d| d.look.clone())
+                .unwrap_or_default()
+        );
+    }
+
+    // **Not tested here: a misspelled axis panics.** `carries_token`'s `Some(other) => panic!(..)`
+    // arm is what stops a card naming `"looks"` parking its author for ever in front of a correctly
+    // tagged piece — but reaching it from a test needs `catch_unwind` plus a swapped panic hook, and
+    // the hook is process-global in a binary whose tests run in parallel. Buying that assertion with
+    // cross-test interference is a worse trade than reading the arm.
 }
 
 /// **The open settles the derived half of `effects`, and the first save must not undo it.**
