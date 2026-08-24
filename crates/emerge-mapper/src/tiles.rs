@@ -3480,8 +3480,8 @@ impl Plugin for TilesPlugin {
 /// A one-tab door draws a one-entry strip, which reads as a title. That is deliberate rather than a
 /// special case — one loop, one shape, and a door that gains a panel is one arm in [`Door::tabs`].
 ///
-/// **`Option<Res<Door>>`, like every other `OnEnter(Editor)` spawner here** (`labels::warm_cache`,
-/// `anim_cache::load_bench_cache`, `thumbs::setup`): the door is a door's resource, so a screen
+/// **`Option<Res<Door>>`, like every other `OnEnter(Editor)` spawner here**
+/// (`anim_cache::load_bench_cache`, `thumbs::setup`): the door is a door's resource, so a screen
 /// entered without one draws no strip rather than aborting the process. `screen::open_the_door`
 /// already says so on the log in the one case that reaches it.
 fn spawn_tab_strip(
@@ -5722,10 +5722,13 @@ fn toggle_tag(axis: Axis, token_ix: usize, project: &mut Project, state: &mut Im
 fn move_selection(
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<crate::keys::Live>,
-    // **The tab, read from the door's `Mode` rather than `live.0`.** While a filter box owns the
-    // keyboard, `live.0` answers [`keys::Context::Filter`] — a *phase*, not a tab — and dispatching
-    // on it would send the Tiles tab's arrows to the Meshes pair of lists. The mode is where the
-    // tab actually lives, which is the fact this system is deciding on.
+    // **The tab, read from the door's `Mode` rather than `live.0`.** While any text field owns the
+    // keyboard — a filter box included — `live.0` answers [`crate::keys::Context::Typing`], which is
+    // a *phase* and not a tab, so dispatching on it would send the Tiles tab's arrows to the Meshes
+    // pair of lists. What keeps this system's own keys alive through a filter box is
+    // [`crate::keys::Holder::Filter`] plus each row's `also_filtered` opt-in, and `keys::allowed`
+    // checks the row's context against the live tab there — so the two answers agree by
+    // construction. The mode is where the tab actually lives, which is the fact being decided on.
     mode: Res<Mode>,
     time: Res<Time>,
     mut repeat: ResMut<crate::keys::Repeat>,

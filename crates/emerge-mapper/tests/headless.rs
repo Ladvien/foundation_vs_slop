@@ -9697,10 +9697,12 @@ fn f_focuses_the_filter_and_enter_hands_the_keyboard_back() {
 /// of the list it was narrowing, so an author who typed `w`, saw the row, and pressed `down` got
 /// nothing — the filter had narrowed the list the arrows no longer walked.
 ///
-/// [`keys::Context::Filter`] is the one deliberate hole in the focus guard: the walk rows the box
-/// narrows stay live, and everything else (the drop, the tabs, the letters) stays suppressed —
-/// which is also what makes the final `Enter` hand the keyboard back WITHOUT falling through to a
-/// drop, the way it does in [`f_focuses_the_filter_and_enter_hands_the_keyboard_back`].
+/// `keys::Holder::Filter` is the one deliberate hole in the focus guard: the walk rows the box
+/// narrows stay live **on the tab they belong to**, and everything else (the drop, the tabs, the
+/// letters) stays suppressed — which is also what makes the final `Enter` hand the keyboard back
+/// WITHOUT falling through to a drop, the way it does in
+/// [`f_focuses_the_filter_and_enter_hands_the_keyboard_back`]. It was a `Context::Filter` in
+/// `Live.0`, which threw the tab away and fired every tab's walk on one arrow.
 #[test]
 fn the_list_still_walks_while_its_filter_box_holds_the_keys() {
     use bevy::input::keyboard::KeyboardInput;
@@ -9827,9 +9829,9 @@ fn the_list_still_walks_while_its_filter_box_holds_the_keys() {
         "the filter re-seats the cursor on its first row — the old seed was filtered out"
     );
 
-    // **The walk fires through the open box** — the bug reported at the keyboard. One `down`
-    // reaches the second row the filter shows; before `Context::Filter` existed, the box holding
-    // the keys suppressed the arrows entirely and the author was stranded on the first row.
+    // **The walk fires through the open box** — the bug reported at the keyboard. One `down` reaches
+    // the second row the filter shows; before the exemption existed, the box holding the keys
+    // suppressed the arrows entirely and the author was stranded on the first row.
     press(&mut app, key(Action::TileListNext));
     for _ in 0..2 {
         app.update();
