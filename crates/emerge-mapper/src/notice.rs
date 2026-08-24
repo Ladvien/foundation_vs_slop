@@ -31,10 +31,11 @@ use crate::tiles::Mode;
 /// panel's `Text` still exists — `chrome::panel_root` hides with `Display::None`, which keeps the
 /// entities. Asking "is this node drawn" would mean walking ancestors; naming the tabs is one field.
 ///
-/// A list for [`crate::chrome::ProblemBanner`]'s reason: the Meshes and Tiles tabs share one detail
-/// pane, and tagging it `Meshes` made `Cmd+C` on Tiles harvest the status lines and none of the tile
-/// — no id, no envelope, no member list — in an editor where `bevy_ui` offers no other way to get
-/// that text out of the window.
+/// **A list**, because the Meshes and Tiles tabs share one detail pane: tagging it `Meshes` alone made
+/// `Cmd+C` on Tiles harvest the status lines and none of the tile — no id, no envelope, no member
+/// list — in an editor where `bevy_ui` offers no other way to get that text out of the window. It is
+/// the only marker left with a tab list; `chrome::ProblemBanner` had one and it decided nothing, so
+/// it is a bare marker now.
 #[derive(Component, Clone, Copy)]
 pub struct CopyPane(pub &'static [Mode]);
 
@@ -72,7 +73,11 @@ const TOAST_FADE: f32 = 0.6;
 #[derive(Resource, Default)]
 struct Toast {
     shown: Option<String>,
-    left: f32,
+    /// Seconds of life left. **Not `left`**: `tests/no_system_writes_every_frame.rs` matches
+    /// `.left =` by name to catch `Node::left`, and a resource field sharing the name is charged as
+    /// a layout write — which is half of why this module carried the crate's first (and only)
+    /// `WRITES-EVERY-FRAME-OK:` marker.
+    secs_left: f32,
 }
 
 pub struct NoticePlugin;
@@ -124,7 +129,7 @@ fn paint_notices(
     mut toast: ResMut<Toast>,
     // **No `Node` here any more.** Whether the toast is on screen is its clock's answer, not this
     // system's — see [`fade_toast`]. This writes what it says.
-    mut banners: Query<(&mut Text, &crate::chrome::ProblemBanner)>,
+    mut banners: Query<&mut Text, With<crate::chrome::ProblemBanner>>,
     journals: Query<&Node, With<crate::chrome::JournalPanel>>,
 ) {
     let tab = *mode;
@@ -142,7 +147,7 @@ fn paint_notices(
     // `showing.tab` is still the tab we are leaving at this point in the frame.
     let newest = status.problems().last().map(|p| p.line());
     if toast.shown != newest || showing.tab != Some(tab) {
-        toast.left = if newest.is_some() { TOAST_SECS } else { 0.0 };
+        toast.secs_left = if newest.is_some() { TOAST_SECS } else { 0.0 };
         toast.shown = newest.clone();
     }
     // **The toast stands down for as long as the journal is up.** `toggle_journal` zeroes it at
@@ -150,8 +155,8 @@ fn paint_notices(
     // seven seconds of the same sentence drawn over the journal's own title, the exact overlap the
     // stand-down exists to prevent. `shown` still tracks above, so closing the panel does not
     // resurrect a toast that was already read as the journal's first line.
-    if toast.left > 0.0 && journals.iter().any(|n| n.display != Display::None) {
-        toast.left = 0.0;
+    if toast.secs_left > 0.0 && journals.iter().any(|n| n.display != Display::None) {
+        toast.secs_left = 0.0;
     }
     // **Remembered here, and this is load-bearing.** The re-arm above compares against it, so a
     // `Showing` nothing ever wrote would make every frame look like a tab change and the toast would
@@ -160,21 +165,26 @@ fn paint_notices(
     if showing.tab != Some(tab) {
         showing.tab = Some(tab);
     }
-    // The card is a `Text` write guarded on its own content, so it is cheap every frame.
-    for (mut text, banner) in banners.iter_mut() {
-        if !banner.0.contains(&tab) {
-            continue;
-        }
-        if let Some(newest) = newest.as_deref() {
-            // The glyph is `▲` and not `⚠`: `FiraMono-Regular.ttf` has no U+26A0 (measured), and a
-            // missing codepoint draws as a tofu box.
-            let want = format!("▲  {newest}");
-            if text.0 != want {
-                text.0 = want;
-            }
+    // The card is a `Text` write guarded on its own content, so it is cheap every frame. There is
+    // one card and it speaks for whatever tab is live — the per-tab filter that used to stand here
+    // was reading `ProblemBanner(ALL_TABS)`, which is every tab, so it decided nothing.
+    for mut text in &mut banners {
+        // The glyph is `▲` and not `⚠`: `FiraMono-Regular.ttf` has no U+26A0 (measured), and a
+        // missing codepoint draws as a tofu box.
+        //
+        // **Cleared when there is nothing to say**, and that is not cosmetic: the card is hidden by
+        // its layer's `Display` (see [`paint_toast`]) rather than by being emptied, so a stale line
+        // sat in it for the whole life of the process — and `copy_out` harvests the text of every
+        // node the walk reaches, so the moment the toast came back up for an unrelated refusal the
+        // author's `Cmd+C` carried the wrong sentence.
+        let want = match newest.as_deref() {
+            Some(newest) => format!("▲  {newest}"),
+            None => String::new(),
+        };
+        if text.0 != want {
+            text.0 = want;
         }
     }
-
 }
 
 /// Everything a tab has to say, in the order an agent wants to read it.
@@ -400,8 +410,8 @@ mod tests {
 /// no-op compare to satisfy it would be the Goodhart move that test's own siblings warn about; two
 /// systems, each with one job, is the true shape.
 fn tick_toast(time: Res<Time>, mut toast: ResMut<Toast>) {
-    if toast.left > 0.0 {
-        toast.left = (toast.left - time.delta_secs()).max(0.0);
+    if toast.secs_left > 0.0 {
+        toast.secs_left = (toast.secs_left - time.delta_secs()).max(0.0);
     }
 }
 
@@ -417,7 +427,7 @@ fn paint_toast(
         With<crate::chrome::ProblemBanner>,
     >,
 ) {
-    let up = toast.left > 0.0;
+    let up = toast.secs_left > 0.0;
     for mut node in &mut layers {
         let want = if up { Display::Flex } else { Display::None };
         if node.display != want {
@@ -428,7 +438,7 @@ fn paint_toast(
         return;
     }
     // Full opacity until the last stretch, then out.
-    let alpha = (toast.left / TOAST_FADE).clamp(0.0, 1.0);
+    let alpha = (toast.secs_left / TOAST_FADE).clamp(0.0, 1.0);
     for (mut bg, mut ink) in &mut cards {
         let want_bg = crate::chrome::PROBLEM_BG.with_alpha(alpha);
         if bg.0 != want_bg {
@@ -470,14 +480,43 @@ fn record_problems(
         if now <= seen[i] {
             continue;
         }
-        // The text of the newest is what those raises were about. A burst inside one frame folds
-        // into a count rather than inventing lines for messages nobody kept.
-        let times = (now - seen[i]) as usize;
-        seen[i] = now;
-        let text = status.problem_text();
-        if !text.is_empty() {
-            journal.record(text, times);
+        // **Every refusal since the last look, each with its own text.** `raised` counts calls to
+        // `Status::problem` — folds included — so it says how far back to look and nothing more; the
+        // TEXT comes from the entries themselves. Recording `problem_text()` that many times was one
+        // sentence standing in for several: `labels::check_stale` raises a distinct refusal per stale
+        // result inside one loop, and the journal kept only the last of them, N times over.
+        let problems = status.problems();
+        // Newest first, spending the budget. The boundary entry may already be partly recorded — a
+        // repeat folds into it across frames — so it contributes only what is left rather than its
+        // whole count.
+        let mut budget = (now - seen[i]) as usize;
+        let mut back = 0usize;
+        let mut oldest_times = 0usize;
+        for p in problems.iter().rev() {
+            if budget == 0 {
+                break;
+            }
+            oldest_times = p.count.min(budget);
+            budget -= oldest_times;
+            back += 1;
         }
+        // Oldest of the tail first, so the journal reads in the order the refusals happened.
+        for (n, p) in problems[problems.len() - back..].iter().enumerate() {
+            let times = if n == 0 { oldest_times } else { p.count };
+            journal.record(&p.text, times);
+        }
+        // **The watermark moves by what was recorded, not by what was raised.** It moved first, and
+        // to `now`, so a raise whose text was already gone by the time this looked — `Esc` or a
+        // successful `Cmd+C` clears the tab in the same `Phase::Act` this runs after — was written
+        // off rather than still owed. A clock advanced past events it never read is a clock that
+        // silently forgets, which is `Status::dropped`'s argument one scope up.
+        //
+        // The tradeoff, stated: holding the watermark back attributes an unrecordable raise to the
+        // *next* refusal on that tab, inflating its `(xN)`. Advancing fully loses it outright. The
+        // reachable window is only raises created *and* cleared inside one `Act`, and in both real
+        // cases (`copy_out`, `editor::keys`) the refusal being cleared was raised on an earlier frame
+        // and is already recorded, so `budget` is zero.
+        seen[i] = now - budget as u64;
     }
 }
 
@@ -492,13 +531,14 @@ fn toggle_journal(
     mut toast: ResMut<Toast>,
     mut panels: Query<&mut Node, With<crate::chrome::JournalPanel>>,
 ) {
-    // WRITES-EVERY-FRAME-OK: it does not. This is behind a key EDGE — `just_pressed` returns on
-    // every frame but the one where `Cmd+E` went down, so the writes below happen once per press
-    // and the change flag they raise is exactly the news the layout wants. The alternative the lint
-    // would accept is a comparison against a value derived from the thing being compared, which
-    // guards nothing and reads as though it does — the Goodhart shape its own siblings warn about.
-    // First use of this marker in the crate; a later one that cannot say "behind an edge" should be
-    // looked at rather than copied from here.
+    // **Behind a key EDGE, and the lint can see that now.** `just_pressed` is false on every frame
+    // but the one where `Cmd+E` went down, so the one write below happens once per press and the
+    // change flag it raises is exactly the news the layout wants. This carried the crate's only
+    // `WRITES-EVERY-FRAME-OK:` marker, for two false positives rather than a real exemption:
+    // `count_writes` matched `.display =` inside `node.display ==` and charged the comparison as a
+    // write, and it matched `.left =` on `Toast::left`, an `f32` on a resource that is not
+    // `Node::left`. Both are fixed at the source — the lint skips comparison lines, and the field is
+    // `secs_left`.
     if !keys::just_pressed(&keyboard, *live, Action::ShowErrors) {
         return;
     }
@@ -511,7 +551,7 @@ fn toggle_journal(
         // showing — which is the duplication this whole area was rebuilt to end. `shown` is left
         // alone, so putting the journal away does not raise it again.
         if opening {
-            toast.left = 0.0;
+            toast.secs_left = 0.0;
         }
     }
 }

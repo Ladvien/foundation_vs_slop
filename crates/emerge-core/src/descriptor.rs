@@ -118,20 +118,35 @@ pub struct Descriptor {
 /// description; a single "model or human" stamp would call the whole piece human the moment one word
 /// was touched, and the question worth answering — *which of these has nobody actually checked?* —
 /// would have no answer again.
+///
+/// # Why `at` has no default
+///
+/// This carried a container-level `#[serde(default)]`, so a record with no date deserialised to
+/// `at: ""` and said nothing about it. That is the one field the whole struct is *for*: a person
+/// deciding what to re-check reads the date, and an empty string reads as *"re-checked at the dawn
+/// of time"* — an absence wearing a value's clothes, which is precisely the mistake
+/// [`Descriptor::labels`] exists to stop. The default moved down onto the three fields that have an
+/// honest absence, and `at` now refuses at parse instead.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(deny_unknown_fields)]
 pub struct LabelOrigin {
     /// Per-axis, and `None` per axis means the same as `None` here: no record.
+    #[serde(default)]
     pub by: AxisOrigin,
     /// Which model, when one wrote any of it. Absent for a piece only ever labelled by hand.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// The day of the most recent write, `YYYY-MM-DD`. A date rather than a timestamp: this is read
     /// by a person deciding what to re-check, not by anything that needs to order two edits.
+    ///
+    /// **Required**, and the only field here that is. A provenance record is a claim that somebody
+    /// or something wrote these values at a moment; a record that cannot say when is not a weaker
+    /// record, it is a different kind of statement, and it must be refused rather than filled in
+    /// with `""` — see the struct docs.
     pub at: String,
     /// How sure the model said it was, carried through from the proposal. Display only, never a
     /// branch — the same rule it follows while the proposal is still pending.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<Confidence>,
 }
 
@@ -1716,6 +1731,85 @@ mod tests {
                 }],
             },
             effects: vec!["uses-electricity".into()],
+            ..crate_desc()
+        };
+        let text =
+            ron::ser::to_string_pretty(&d, ron::ser::PrettyConfig::default()).expect("serializes");
+        let back: Descriptor = ron::from_str(&text).expect("parses");
+        assert_eq!(d, back);
+    }
+
+    /// **Absence of evidence must not become evidence.**
+    ///
+    /// Every descriptor written before 2026-08-20 carries no `labels`, and so does every one a
+    /// generator fills from a manifest. A round trip that minted an empty record for those would
+    /// turn *"nobody has said"* into *"something wrote this, by nobody, on no date"* — and the
+    /// editor's tag block reads that record to decide which chips it may draw as checked. The
+    /// `skip_serializing_if` on the field is what keeps the file honest; this is the assertion that
+    /// keeps the `skip_serializing_if`.
+    #[test]
+    fn a_descriptor_written_before_provenance_keeps_no_record_through_a_round_trip() {
+        let d: Descriptor = ron::from_str("(id: \"crate\")").expect("parses");
+        assert_eq!(d.labels, None, "no record means no record");
+
+        let text =
+            ron::ser::to_string_pretty(&d, ron::ser::PrettyConfig::default()).expect("serializes");
+        assert!(
+            !text.contains("labels"),
+            "an absent record must not be written back as an empty one: {text}"
+        );
+
+        let back: Descriptor = ron::from_str(&text).expect("parses");
+        assert_eq!(back.labels, None, "and it must still be absent on the way in");
+    }
+
+    /// **A provenance record with no date is refused**, rather than dated the dawn of time.
+    ///
+    /// [`LabelOrigin`] carried a container-level `#[serde(default)]`, so this literal parsed and
+    /// `at` came out `""` — a record claiming a model wrote these values at no moment at all. The
+    /// date is the field a person deciding what to re-check actually reads, so an empty one is worse
+    /// than a missing record: a missing record says *"nobody has said"*, and this said *"checked,
+    /// never"*.
+    ///
+    /// The message is matched with `contains` rather than an equality, so a `ron` bump that rewords
+    /// its own missing-field text does not redden this — but a *successful* parse gets its own panic
+    /// rather than an empty string that happens not to contain the word, because a refusal test that
+    /// passes when nothing was refused is the failure mode this whole step is about.
+    #[test]
+    fn a_provenance_record_with_no_date_is_refused_at_parse() {
+        let parsed = ron::from_str::<Descriptor>(
+            "(id: \"crate\", labels: Some(( by: ( kind: Some(Model) ), model: Some(\"qwen3-vl\") )))",
+        );
+        let err = match parsed {
+            Ok(d) => panic!(
+                "a record with no date parsed, and `at` came out {:?}",
+                d.labels.map(|l| l.at)
+            ),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("at"), "the refusal must name the missing field: {err}");
+    }
+
+    /// **A whole record survives the file**, which is the only reason writing one is worth anything.
+    ///
+    /// The mixed case is the normal case — a model's `kind` kept and its note rewritten by hand — so
+    /// the fixture deliberately stamps two axes differently. `the_schema_round_trips_through_ron`
+    /// builds from `crate_desc()` and never sets `labels` at all, so nothing pinned this until now:
+    /// dropping a variant off [`By`] or a field off [`AxisOrigin`] would have gone unnoticed by the
+    /// suite and shown up as a chip painted the wrong colour.
+    #[test]
+    fn a_provenance_record_round_trips_whole() {
+        let d = Descriptor {
+            labels: Some(LabelOrigin {
+                by: AxisOrigin {
+                    kind: Some(By::Model),
+                    note: Some(By::Human),
+                    ..AxisOrigin::default()
+                },
+                model: Some("qwen3-vl".into()),
+                at: "2026-08-22".into(),
+                confidence: Some(Confidence::High),
+            }),
             ..crate_desc()
         };
         let text =

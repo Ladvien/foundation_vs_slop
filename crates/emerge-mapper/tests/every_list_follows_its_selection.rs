@@ -48,6 +48,24 @@ fn sources() -> Vec<(String, String)> {
     out
 }
 
+/// **The marker out of a `scroll_list(..)` argument tail**, or `None` when the tail does not carry
+/// one yet.
+///
+/// `None` is what drives the read forward a line at a time: `scroll_list(` at the end of its own
+/// line has no tail at all, `p,` has no second argument, and `p,\n(` has one that is a bare open
+/// bracket. Only when a name is in hand does the caller stop.
+fn marker_of(tail: &str) -> Option<String> {
+    let name = tail
+        .split(',')
+        .nth(1)?
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(&[')', ';'][..])
+        .trim()
+        .to_owned();
+    (!name.is_empty()).then_some(name)
+}
+
 /// **A scrollable list without a follower is a list whose highlight can leave the screen.**
 ///
 /// The list's marker is the link: `scroll_list(p, RigList)` spawns it, and a follower has to query
@@ -88,28 +106,55 @@ fn every_scrollable_list_has_something_that_follows_its_selection() {
             let Some(rest) = line.split_once("scroll_list(").map(|(_, r)| r) else {
                 continue;
             };
+            // **The call may be spread over several lines, so read on until the marker is in
+            // hand.**
+            //
             // `scroll_list(p, RigList)` — the second argument is the marker. It may also be a
             // BUNDLE: `scroll_list(p, (DetailPane, CopyPane(..)))`, where the marker to follow is
             // the first component. Splitting on ',' alone yielded `(DetailPane`, which matches no
             // `With<..>` anywhere and so reported a real pane under a name that does not exist.
-            let Some(arg) = rest.split(',').nth(1) else { continue };
-            let marker = arg
-                .trim()
-                .trim_start_matches('(')
-                .trim_end_matches(&[')', ';'][..])
-                .trim()
-                .to_owned();
-            if marker.is_empty() || marker.starts_with("marker") {
+            //
+            // # It read one line, and three call sites reflowed off it
+            //
+            // Adding `chrome::Control(..)` to the marker bundles pushed `compose.rs`'s
+            // `ComposeBody` and `tiles.rs`'s `CandidateList` from one line onto five, and
+            // `anim_tab.rs`'s `SlotPane` with them. A one-line read finds `scroll_list(` and then
+            // no second argument on that line, so all three were silently skipped — while
+            // `markers.len() >= 3` stayed green on the three that happened not to reflow. A
+            // ratchet that stops seeing its subjects is the failure this whole file is about, so
+            // the read follows the call: five lines is more than any bundle here needs, and the
+            // bound is what keeps a mangled file from swallowing the rest of the crate.
+            let mut rest = rest.to_owned();
+            let mut ahead = 0usize;
+            while marker_of(&rest).is_none() && ahead < 5 {
+                ahead += 1;
+                match lines.get(i + ahead) {
+                    Some(next) => {
+                        rest.push('\n');
+                        rest.push_str(next);
+                    }
+                    None => break,
+                }
+            }
+            let Some(marker) = marker_of(&rest) else { continue };
+            if marker.starts_with("marker") {
                 continue; // the definition itself
             }
             markers.push((file.clone(), marker));
         }
     }
 
-    assert!(
-        markers.len() >= 3,
-        "expected to find the editor's scrollable lists; found {markers:?}. If `scroll_list` was \
-         renamed, rename it here too — a ratchet that silently matches nothing is worse than none."
+    // **Seven, and stated as a number rather than as "some".** The floor was three, which is what
+    // let the reflow above hide: three of the ten call sites were still on one line, so the
+    // assertion passed while the parser had gone blind to the rest. It is the real count now, so
+    // slack cannot absorb the next one — and the three exempt panes (`DetailPane`, `JournalList`,
+    // `SlotPane`, each carrying `FOLLOW-OK:` at its spawn) are deliberately not in it.
+    assert_eq!(
+        markers.len(),
+        7,
+        "expected the editor's seven followed scrollable lists; found {markers:?}. If a list was \
+         added, raise this number with it; if `scroll_list` was renamed, rename it here too — a \
+         ratchet that silently matches nothing is worse than none."
     );
 
     // **A follower is a query holding BOTH the marker and a `ScrollPosition`.** Checking only that

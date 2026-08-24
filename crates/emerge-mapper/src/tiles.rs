@@ -36,20 +36,33 @@ use crate::chrome::{
 use crate::keys::{self, Action};
 use crate::project::Project;
 
-/// Which job the editor is doing.
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Mode {
-    /// Place pieces and build the level.
-    #[default]
-    Map,
-    /// Bring meshes in and say what they are.
-    Meshes,
-    /// Assemble a cell-sized tile out of meshes, on the tile's own grid.
-    Tiles,
-    /// Preview and tune a rig's clips.
-    Anim,
-    /// Build reusable groups, and see what they present and what has gone stale under them.
-    Compose,
+crate::keys::enumerated! {
+    /// Which job the editor is doing.
+    #[derive(Resource, Clone, Copy, PartialEq, Eq, Default)]
+    pub enum Mode {
+        /// Place pieces and build the level.
+        #[default]
+        Map,
+        /// Bring meshes in and say what they are.
+        Meshes,
+        /// Assemble a cell-sized tile out of meshes, on the tile's own grid.
+        Tiles,
+        /// Preview and tune a rig's clips.
+        Anim,
+        /// Build reusable groups, and see what they present and what has gone stale under them.
+        Compose,
+    }
+    /// **Every panel there is**, in strip order — for the ratchets that have to visit all of them.
+    ///
+    /// Generated with the enum by `keys::enumerated!`, because the list used to live in
+    /// `tests/headless.rs` as a hand-written `const TABS: [Mode; 5]`. Adding a variant compiled: the
+    /// new panel was silently dropped from the eleven tests that loop the tabs, and every
+    /// `checked >= TABS.len()` anti-vacuity floor in them got *easier* to clear in the same commit.
+    /// A new panel made the suite weaker and nothing said so.
+    ///
+    /// [`Door::tabs`] is the other list of `Mode`s and is deliberately not this: it answers *"which
+    /// panels does this door show"*, which is a different question with three different answers.
+    ALL;
 }
 
 /// **Which door the editor was entered by.**
@@ -3776,13 +3789,6 @@ fn spawn_tiles_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
     .insert(TilesRoot)
     .with_children(|p| {
         crate::chrome::title(p, "MESHES AND TILES");
-        // **One banner per tab, both in the shared panel.** `ProblemBanner` carries the tabs it
-        // speaks for and `notice.rs` shows only a matching one, so a panel serving two tabs needs
-        // two — without the second, every refusal the Tiles tab's verbs write would be invisible on
-        // it. The detail pane and the problem log below take the other shape, `TILES_PANEL_TABS`:
-        // they are single nodes whose *contents* the live tab decides, so duplicating them would be
-        // two copies to keep in step rather than one node that says which tabs it is for.
-
         p.spawn((
             Text::new(""),
             TextColor(DIM),

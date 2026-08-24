@@ -232,77 +232,133 @@ pub enum Home {
     Legend,
 }
 
-/// **A control the census can name.**
+/// **Declare an enum and the array of every one of its variants, from one list.**
 ///
-/// Symbolic on purpose: `keys.rs` must not learn what a palette is, and a badge system querying
-/// fourteen domain markers (`PaletteRow`, `TagChip`, `CellButton`, …) would be the second census this
-/// module exists to delete. A panel attaches `crate::chrome::Control(id)` to the node it spawns, and
-/// the join is by id.
+/// The variants are written once and both the type and `ALL` come out of them, so a variant with no
+/// place in `ALL` is not a thing an author can write — there is nowhere to leave one out.
 ///
-/// **The rule that keeps this list honest:** a `ControlId` may only name a node that is on screen for
-/// the *whole* of every `(Context, Stance)` in which some binding homes to it. A pane that renders
-/// nothing until something is selected is not a home — its badge would vanish exactly when a new
-/// author needs it. `every_home_a_live_binding_names_is_on_screen` in `tests/headless.rs` is what
-/// holds that, and it runs against an empty project as well as a populated one for precisely this
-/// reason.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ControlId {
-    /// The strip of panel chips — `1`, `2`, `3`.
-    DoorStrip,
-    /// Where you are: the kit and map name in the chrome bar.
-    Title,
-    /// The way out, to kits and maps.
-    Back,
-    /// The line in the status band that says to hold the shortcuts key. Holding it puts that key's
-    /// own badge on the line that told you about it, which is the rehearsal loop closing on itself.
-    Hint,
-    /// The tab's own text pane — the Map's status block, the Meshes/Tiles detail pane, the anim
-    /// bench's slots, the Compose body. Exactly one is ever laid out, because the others' panels are
-    /// `Display::None`.
+/// # It used to be two hand-written lists, and a test carried a third
+///
+/// [`ControlId::ALL`] was a typed-out `[ControlId; 19]` beside a typed-out enum, and
+/// `crate::tiles::Mode`'s enumeration was not in the crate at all: `tests/headless.rs` carried
+/// `const TABS: [Mode; 5]`. Both compiled with a new variant missing from them. A twentieth control
+/// would simply never reach the badge census's paint order or any of the four ratchets that walk
+/// `ALL`; a sixth panel would be dropped from the eleven tests that loop the tabs **and** make every
+/// `checked >= TABS.len()` anti-vacuity floor easier to clear at the same time — a new panel making
+/// the suite weaker and saying nothing.
+///
+/// [`ControlId::in_a_band`]'s exhaustive `match` was the only thing forcing an author's hand, and it
+/// forces the classification rather than the list. This forces the list.
+///
+/// The length is `[$(stringify!($variant)),*].len()`, which is a `const` expression over an array of
+/// `&str` — so `ALL` keeps the type `[$name; N]` its readers index and `into_iter()` by value,
+/// rather than becoming a slice that would hand them `&$name` instead.
+///
+/// It lives here because [`ControlId`] does, and `crate::tiles` reaches it by path — one mechanism
+/// with two users rather than a copy per module, which is the second census this module exists to
+/// refuse, one level down.
+macro_rules! enumerated {
+    (
+        $(#[$outer:meta])*
+        $vis:vis enum $name:ident {
+            $( $(#[$variant_doc:meta])* $variant:ident ),* $(,)?
+        }
+        $(#[$all_doc:meta])*
+        ALL;
+    ) => {
+        $(#[$outer])*
+        $vis enum $name {
+            $( $(#[$variant_doc])* $variant, )*
+        }
+
+        impl $name {
+            $(#[$all_doc])*
+            pub const ALL: [$name; [$(stringify!($variant)),*].len()] =
+                [$($name::$variant),*];
+        }
+    };
+}
+pub(crate) use enumerated;
+
+enumerated! {
+    /// **A control the census can name.**
     ///
-    /// **For a verb whose readout is the pane itself** — `Cmd+C`, the commit door on a derivation,
-    /// each tab's undo pair (what undo changes is what the pane reports), the anim bench's
-    /// scrub/play/ghost, the Compose carousel. Not a bin: it was briefly the home
-    /// of seven unrelated groups — `I`, `M`, `T F G H [ ]`, `Z X V`, `B N O P`, `L …` — and that was
-    /// the mistake this whole overlay exists to avoid: a container is not an anchor, so eleven bare
-    /// chords piled against a pane's edge with nothing under them saying what any of them did. Each
-    /// of those has a row of its own, and each now names it.
-    Detail,
-    /// The id headline of the piece being defined — the thing `I` types.
-    IdField,
-    /// The `mount` row, which `M` cycles.
-    Mount,
-    /// The subgrid's own lattice of cells: what the cell cursor walks and what solid/edge/clear
-    /// paints.
-    CellGrid,
-    /// The block of tag chips, and so the labels the VLM proposes into it.
-    Tags,
-    /// The scan button — the mesh as measured, which is what rescanning and turning act on.
-    Mesh,
-    /// The Map's PLACE list.
-    Palette,
-    /// The candidate/library/kit list the Meshes and Tiles tabs share.
-    Pieces,
-    /// The filter box above whichever list has one.
-    Filter,
-    /// The animation bench's rig list.
-    Rigs,
-    /// The Map's YAW row — the facing the turn cluster writes.
-    Yaw,
-    /// The Map's UNDER row — the piece under the cursor, which the piece-verbs act on and the row
-    /// exists to name.
-    Under,
-    /// The TILE card in the Tiles pane — the tile being assembled, open or not: its heading is on
-    /// screen in every branch, including the one that says "press N to start one".
-    Tile,
-    /// The MEMBERS list of the open tile — the focus the member-verbs move. On screen whenever a
-    /// verb homed here is live: every one is `Stance::Holding`, and Holding means an open tile
-    /// with a focused member (`editor::sense_context`).
-    Members,
-    /// The GRID section of the open tile — the rung and layer its verbs walk. Absent with no tile
-    /// open, and `badges::resolve` sends its verbs to the legend for exactly that state; with a
-    /// tile open, the line that says "J for thirds" is the line `J` lands on.
-    Grid,
+    /// Symbolic on purpose: `keys.rs` must not learn what a palette is, and a badge system querying
+    /// fourteen domain markers (`PaletteRow`, `TagChip`, `CellButton`, …) would be the second census
+    /// this module exists to delete. A panel attaches `crate::chrome::Control(id)` to the node it
+    /// spawns, and the join is by id.
+    ///
+    /// **The rule that keeps this list honest:** a `ControlId` may only name a node that is on screen
+    /// for the *whole* of every `(Context, Stance)` in which some binding homes to it. A pane that
+    /// renders nothing until something is selected is not a home — its badge would vanish exactly
+    /// when a new author needs it. `every_control_the_census_homes_a_verb_at_is_on_screen` in
+    /// `tests/headless.rs` is what holds that, and it runs against an empty project as well as a
+    /// populated one for precisely this reason.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum ControlId {
+        /// The strip of panel chips — `1`, `2`, `3`.
+        DoorStrip,
+        /// Where you are: the kit and map name in the chrome bar.
+        Title,
+        /// The way out, to kits and maps.
+        Back,
+        /// The line in the status band that says to hold the shortcuts key. Holding it puts that key's
+        /// own badge on the line that told you about it, which is the rehearsal loop closing on itself.
+        Hint,
+        /// The tab's own text pane — the Map's status block, the Meshes/Tiles detail pane, the anim
+        /// bench's slots, the Compose body. Exactly one is ever laid out, because the others' panels are
+        /// `Display::None`.
+        ///
+        /// **For a verb whose readout is the pane itself** — `Cmd+C`, the commit door on a derivation,
+        /// each tab's undo pair (what undo changes is what the pane reports), the anim bench's
+        /// scrub/play/ghost, the Compose carousel. Not a bin: it was briefly the home
+        /// of seven unrelated groups — `I`, `M`, `T F G H [ ]`, `Z X V`, `B N O P`, `L …` — and that was
+        /// the mistake this whole overlay exists to avoid: a container is not an anchor, so eleven bare
+        /// chords piled against a pane's edge with nothing under them saying what any of them did. Each
+        /// of those has a row of its own, and each now names it.
+        Detail,
+        /// The id headline of the piece being defined — the thing `I` types.
+        IdField,
+        /// The `mount` row, which `M` cycles.
+        Mount,
+        /// The subgrid's own lattice of cells: what the cell cursor walks and what solid/edge/clear
+        /// paints.
+        CellGrid,
+        /// The block of tag chips, and so the labels the VLM proposes into it.
+        Tags,
+        /// The scan button — the mesh as measured, which is what rescanning and turning act on.
+        Mesh,
+        /// The Map's PLACE list.
+        Palette,
+        /// The candidate/library/kit list the Meshes and Tiles tabs share.
+        Pieces,
+        /// The filter box above whichever list has one.
+        Filter,
+        /// The animation bench's rig list.
+        Rigs,
+        /// The Map's YAW row — the facing the turn cluster writes.
+        Yaw,
+        /// The Map's UNDER row — the piece under the cursor, which the piece-verbs act on and the row
+        /// exists to name.
+        Under,
+        /// The TILE card in the Tiles pane — the tile being assembled, open or not: its heading is on
+        /// screen in every branch, including the one that says "press N to start one".
+        Tile,
+        /// The MEMBERS list of the open tile — the focus the member-verbs move. On screen whenever a
+        /// verb homed here is live: every one is `Stance::Holding`, and Holding means an open tile
+        /// with a focused member (`editor::sense_context`).
+        Members,
+        /// The GRID section of the open tile — the rung and layer its verbs walk. Absent with no tile
+        /// open, and `badges::resolve` sends its verbs to the legend for exactly that state; with a
+        /// tile open, the line that says "J for thirds" is the line `J` lands on.
+        Grid,
+    }
+    /// Every one, so a ratchet can enumerate. A `ControlId` nothing homes to is a word with no
+    /// meaning, and a `ControlId` no panel attaches is a badge that never appears.
+    ///
+    /// Generated with the enum by `enumerated!`, so the count and the list cannot disagree and a
+    /// twentieth variant cannot be left out of it.
+    ALL;
 }
 
 impl ControlId {
@@ -347,30 +403,6 @@ impl ControlId {
             | ControlId::Grid => false,
         }
     }
-
-    /// Every one, so a ratchet can enumerate. A `ControlId` nothing homes to is a word with no
-    /// meaning, and a `ControlId` no panel attaches is a badge that never appears.
-    pub const ALL: [ControlId; 19] = [
-        ControlId::DoorStrip,
-        ControlId::Title,
-        ControlId::Back,
-        ControlId::Hint,
-        ControlId::Detail,
-        ControlId::IdField,
-        ControlId::Mount,
-        ControlId::CellGrid,
-        ControlId::Tags,
-        ControlId::Mesh,
-        ControlId::Palette,
-        ControlId::Pieces,
-        ControlId::Filter,
-        ControlId::Rigs,
-        ControlId::Yaw,
-        ControlId::Under,
-        ControlId::Tile,
-        ControlId::Members,
-        ControlId::Grid,
-    ];
 }
 
 /// Everything the editor can be asked to do.

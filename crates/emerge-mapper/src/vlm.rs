@@ -262,8 +262,11 @@ pub struct NeedsTurn {
 }
 
 /// What the model proposed, already validated against the live vocabulary — every token in these
-/// lists exists, in vocabulary order, deduplicated. Serde because the suggestions cache persists
-/// these between sessions.
+/// lists exists, in vocabulary order, deduplicated.
+///
+/// Serde is derived and currently unread: the reason for it was the suggestion cache under
+/// `target/` that persisted these between sessions, and that cache is gone — see `labels`' module
+/// note for why a proposal no longer outlives the frame it lands in.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Suggestion {
     /// The model's one-sentence identification — the reasoning the axis answers hang off, and the
@@ -276,6 +279,11 @@ pub struct Suggestion {
     pub mount: Option<Mount>,
     /// The item's visual front — which face it should present to the room. A judgement only
     /// appearance can answer, which is why the importer defaults it and the model proposes it.
+    ///
+    /// **A proposal, and it loses to a measurement.** `Glb::derive_front` reads the vertex buffer,
+    /// and symmetry is a property of the buffer that two three-quarter renders cannot settle, so
+    /// `labels::apply_fields` fills an unmeasured front from this and refuses to overwrite a
+    /// measured one.
     pub front: Option<Face>,
     pub needs_turn: Option<NeedsTurn>,
     pub note: Option<String>,
@@ -317,6 +325,9 @@ impl Suggestion {
 /// endpoint host.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Provenance {
+    /// **The model that ANSWERED**, off the reply envelope — see [`Reply::model`]. Never
+    /// [`VlmConfig::model`], which is only the name the request asked for: `llama-swap` serves what
+    /// it serves, and this is the field a person reads to know whose judgement is in the library.
     pub model: String,
     /// `YYYY-MM-DD`, supplied by the caller (this module owns no clock).
     pub date: String,
@@ -738,18 +749,47 @@ pub struct RawProposal {
     pub why: String,
 }
 
-/// The model's reply text out of the OpenAI response envelope.
-pub fn extract_content(http_body: &str) -> Result<String, String> {
+/// **What the endpoint answered** — the reply text, and the name of the model that produced it.
+///
+/// There was no response type at all: the envelope was walked for `choices[0].message.content` and
+/// everything else was thrown away, so [`label_with_retry`] stamped its [`Provenance`] with
+/// `cfg.model` — the name of the model that was **asked**. Those are two different facts the moment
+/// `llama-swap` serves something other than the name it was handed (a stale `EMERGE_VLM_MODEL`, a
+/// proxy that routes elsewhere), and saying whose judgement is in the library is the whole point of
+/// the field.
+pub struct Reply {
+    /// The model's own words, still unparsed — [`parse_reply`]'s input.
+    pub content: String,
+    /// **The model that answered**, off the envelope's own top-level `model`.
+    pub model: String,
+}
+
+/// The model's reply, and which model gave it, out of the OpenAI response envelope.
+pub fn extract_reply(http_body: &str) -> Result<Reply, String> {
     let v: serde_json::Value = serde_json::from_str(http_body)
         .map_err(|e| format!("the endpoint's response is not JSON: {e}"))?;
     if let Some(err) = v.get("error") {
         // llama-swap and Ollama both put their complaint here; surface it verbatim.
         return Err(format!("the endpoint refused: {err}"));
     }
-    v["choices"][0]["message"]["content"]
+    let content = v["choices"][0]["message"]["content"]
         .as_str()
-        .map(str::to_owned)
-        .ok_or_else(|| "the response carries no choices[0].message.content".to_owned())
+        .ok_or_else(|| "the response carries no choices[0].message.content".to_owned())?
+        .to_owned();
+    // **Refused, rather than filled in from the request.** `model` is a required member of the
+    // chat-completion object every endpoint this speaks to serves, and the alternative to reading
+    // it is what stood here: `cfg.model` written into a provenance record, so `library.ron` named
+    // the model that was asked as though it were the one that replied. There is no honest empty
+    // either — `LabelOrigin.model` of `None` is drawn as *"by hand"* by the Meshes pane, which
+    // would trade one false claim for a worse one — so an envelope that names nobody is a refusal.
+    let model = v["model"]
+        .as_str()
+        .filter(|m| !m.is_empty())
+        .ok_or_else(|| {
+            "the response names no `model`, so nothing can say whose judgement this is".to_owned()
+        })?
+        .to_owned();
+    Ok(Reply { content, model })
 }
 
 /// The model's JSON out of its reply text — fence-tolerant (a model that wraps its answer in
@@ -1035,6 +1075,77 @@ pub struct RetryTurn<'a> {
     pub rejection: &'a str,
 }
 
+/// **Why a labelling request produced no suggestion** — a type, because the one thing a caller
+/// branches on is a fact about the failure and it was being recovered by searching the sentence.
+///
+/// `labels::poll_tasks` asked `e.contains("endpoint is unreachable")`, twice, to decide whether to
+/// mark the link down and stop a 778-mesh walk rather than burn it. Every word of that sentence was
+/// written in two places at once — [`request_labels`] and [`warm`], byte-identical — so the walk
+/// only stopped while three copies of one string agreed, and nothing said so: reword one and the
+/// batch quietly goes back to discovering a dead endpoint one mesh at a time, which is a failure
+/// this module has already paid for once. The sentence is written exactly once now, in the
+/// [`std::fmt::Display`] impl, and the question is asked of the value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LabelFailure {
+    /// Nothing is listening. Carries the transport's own words plus the remedy for this address,
+    /// when it is one whose refusal means something — see [`refusal_remedy`].
+    Unreachable {
+        transport: String,
+        remedy: Option<String>,
+    },
+    /// **Everything else, in the words the author has to read**: a timeout with its advice, a
+    /// non-2xx body, an envelope carrying no reply, the gate's verdict on a rejected suggestion.
+    /// One variant and not five, because nothing branches on the difference — the day something
+    /// does is the day to split it.
+    Refused(String),
+}
+
+impl LabelFailure {
+    /// **The endpoint could not be reached at all**, with this URL's remedy travelling along.
+    fn unreachable(url: &str, transport: impl std::fmt::Display) -> LabelFailure {
+        LabelFailure::Unreachable {
+            transport: transport.to_string(),
+            remedy: remedy_for_url(url),
+        }
+    }
+
+    /// **Is this the failure whose remedy is "bring the endpoint up"?**
+    ///
+    /// The one question a caller asks of a failure, and the reason this is a type rather than a
+    /// sentence: it decides whether the status band says the link is down and whether a running
+    /// batch stops instead of reporting the same fault once per queued mesh.
+    pub fn is_unreachable(&self) -> bool {
+        matches!(self, LabelFailure::Unreachable { .. })
+    }
+}
+
+impl std::fmt::Display for LabelFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LabelFailure::Unreachable {
+                transport,
+                remedy: Some(remedy),
+            } => write!(f, "the VLM endpoint is unreachable ({transport}) — {remedy}"),
+            LabelFailure::Unreachable {
+                transport,
+                remedy: None,
+            } => write!(f, "the VLM endpoint is unreachable: {transport}"),
+            LabelFailure::Refused(text) => f.write_str(text),
+        }
+    }
+}
+
+/// **A plain-string complaint from outside the transport is a refusal, and never the link being
+/// down.** `labels::spawn_request` mixes `VlmConfig::load`'s and `encode_png`'s `String` errors in
+/// with this type at one boundary; converting them here is what keeps any of them from being read
+/// as an unreachable endpoint, which is precisely what a substring match over the joined text
+/// allowed.
+impl From<String> for LabelFailure {
+    fn from(text: String) -> LabelFailure {
+        LabelFailure::Refused(text)
+    }
+}
+
 /// One blocking OpenAI-style chat POST. Called only from a task-pool thread — never the UI
 /// thread. Returns the raw response body; envelope and JSON handling are the parsers' business.
 pub fn request_labels(
@@ -1043,7 +1154,7 @@ pub fn request_labels(
     system: &str,
     user: &str,
     retry: Option<RetryTurn<'_>>,
-) -> Result<String, String> {
+) -> Result<String, LabelFailure> {
     use base64::Engine as _;
     let image_part = |png: &[u8]| {
         serde_json::json!({
@@ -1124,20 +1235,18 @@ pub fn request_labels(
         // confidently wrong, and the actual cause (a 31 GB model still loading) was not something
         // the message let you reach.
         .map_err(|e| match e {
-            ureq::Error::Timeout(_) => format!(
+            ureq::Error::Timeout(_) => LabelFailure::Refused(format!(
                 "the VLM endpoint did not answer within {}s. The forward may be fine: a cold model \
                  load on bmb costs minutes and is spent before the first mesh. Check with \
                  `curl -sS http://127.0.0.1:9292/health`, and if that answers OK, raise \
                  EMERGE_VLM_TIMEOUT_SECS rather than restarting the tunnel.",
                 cfg.timeout_secs
-            ),
+            )),
             // **The remedy travels with the fault, on every path.** `probe` only guards the batch,
             // so without this the single `L` and the sentinel reported a bare
-            // "io: Connection refused" for the exact condition `Shift+L` explains in full.
-            other => match remedy_for_url(&cfg.url) {
-                Some(remedy) => format!("the VLM endpoint is unreachable ({other}) — {remedy}"),
-                None => format!("the VLM endpoint is unreachable: {other}"),
-            },
+            // "io: Connection refused" for the exact condition `Shift+L` explains in full. The
+            // sentence itself lives in `LabelFailure`'s `Display`, written once for both callers.
+            other => LabelFailure::unreachable(&cfg.url, other),
         })?;
     let status = response.status();
     let text = response
@@ -1145,7 +1254,9 @@ pub fn request_labels(
         .read_to_string()
         .map_err(|e| format!("reading the VLM response failed: {e}"))?;
     if !status.is_success() {
-        return Err(format!("the VLM endpoint answered {status}: {text}"));
+        return Err(LabelFailure::Refused(format!(
+            "the VLM endpoint answered {status}: {text}"
+        )));
     }
     Ok(text)
 }
@@ -1232,7 +1343,7 @@ fn is_near(ip: std::net::IpAddr) -> bool {
 /// projector with the model it belongs to, so one text token brings both in. A warm-up carrying a
 /// 1×1 PNG would exercise the projector's own first call as well; if the first *real* mesh of a
 /// batch is ever measured to be much slower than the second, that is the thing to try next.
-pub fn warm(cfg: &VlmConfig) -> Result<(), String> {
+pub fn warm(cfg: &VlmConfig) -> Result<(), LabelFailure> {
     let mut body = serde_json::json!({
         "model": cfg.model,
         "temperature": 0.0,
@@ -1253,15 +1364,14 @@ pub fn warm(cfg: &VlmConfig) -> Result<(), String> {
         .header("Authorization", &format!("Bearer {}", cfg.key))
         .send_json(&body)
         .map_err(|e| match e {
-            ureq::Error::Timeout(_) => format!(
+            ureq::Error::Timeout(_) => LabelFailure::Refused(format!(
                 "the model did not finish loading within {}s. Raise EMERGE_VLM_TIMEOUT_SECS — a \
                  cold 31 GB load can outlast it on a busy GPU.",
                 cfg.timeout_secs
-            ),
-            other => match remedy_for_url(&cfg.url) {
-                Some(remedy) => format!("the VLM endpoint is unreachable ({other}) — {remedy}"),
-                None => format!("the VLM endpoint is unreachable: {other}"),
-            },
+            )),
+            // Same fault, same words as `request_labels` — because they are now the same words,
+            // spelled in one place. They were two copies a substring match had to keep in step.
+            other => LabelFailure::unreachable(&cfg.url, other),
         })?;
     let status = response.status();
     let text = response
@@ -1272,7 +1382,9 @@ pub fn warm(cfg: &VlmConfig) -> Result<(), String> {
         // A model name the endpoint does not serve lands here, and it is worth the whole body:
         // `could not find suitable inference handler` is what a stale EMERGE_VLM_MODEL looks like,
         // and it cost a batch once already (see `VlmConfig::from_lookup`).
-        return Err(format!("the VLM endpoint answered {status}: {text}"));
+        return Err(LabelFailure::Refused(format!(
+            "the VLM endpoint answered {status}: {text}"
+        )));
     }
     Ok(())
 }
@@ -1378,15 +1490,19 @@ pub fn label_with_retry(
     vocab: &Vocabularies,
     ctx: &PromptCtx,
     date: String,
-) -> Result<(Suggestion, Provenance), String> {
+) -> Result<(Suggestion, Provenance), LabelFailure> {
     let (system, user) = build_prompt(vocab, ctx);
     let body = request_labels(cfg, pngs, &system, &user, None)?;
-    let reply = extract_content(&body)?;
-    match parse_reply(&reply).and_then(|raw| validate(raw, vocab)) {
+    let reply = extract_reply(&body)?;
+    match parse_reply(&reply.content).and_then(|raw| validate(raw, vocab)) {
         Ok(s) => Ok((
             s,
             Provenance {
-                model: cfg.model.clone(),
+                // **The model that ANSWERED, not the one that was asked.** This was
+                // `cfg.model.clone()`, so every record named whatever `EMERGE_VLM_MODEL` happened
+                // to say — and `llama-swap` serves what it serves. `extract_reply` refuses an
+                // envelope that names nobody, so this can never be a guess.
+                model: reply.model,
                 date,
                 attempts: 1,
             },
@@ -1398,16 +1514,18 @@ pub fn label_with_retry(
                 &system,
                 &user,
                 Some(RetryTurn {
-                    prior_reply: &reply,
+                    prior_reply: &reply.content,
                     rejection: &rejection,
                 }),
             )?;
-            let reply = extract_content(&body)?;
-            let s = parse_reply(&reply).and_then(|raw| validate(raw, vocab))?;
+            let reply = extract_reply(&body)?;
+            let s = parse_reply(&reply.content).and_then(|raw| validate(raw, vocab))?;
             Ok((
                 s,
                 Provenance {
-                    model: cfg.model.clone(),
+                    // The SECOND answer's model, for the same reason: a swap can happen between the
+                    // two turns and the record is about the answer that landed.
+                    model: reply.model,
                     date,
                     attempts: 2,
                 },
@@ -2148,8 +2266,19 @@ mod tests {
         (format!("http://{addr}/v1/chat/completions"), handle)
     }
 
+    /// **The model a test envelope says answered** — deliberately not [`VlmConfig::for_stub`]'s
+    /// `stub-model`, so a `Provenance` built out of the REQUEST rather than the reply is a failing
+    /// assertion instead of a coincidence nobody can see.
+    const ANSWERED: &str = "the-model-that-answered";
+
     fn envelope(content: &str) -> String {
-        serde_json::json!({ "choices": [{ "message": { "content": content } }] }).to_string()
+        // `model` is not decoration here: `extract_reply` refuses an envelope without one, because
+        // the only other way to fill `Provenance::model` is to copy the name the request asked for.
+        serde_json::json!({
+            "model": ANSWERED,
+            "choices": [{ "message": { "content": content } }]
+        })
+        .to_string()
     }
 
     #[test]
@@ -2166,6 +2295,11 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(s.kind, vec!["light".to_owned()]);
         assert_eq!(prov.attempts, 2);
+        assert_eq!(
+            prov.model, ANSWERED,
+            "the record names the model that ANSWERED, never the one the request asked for — which \
+             is `stub-model` here for exactly this reason"
+        );
         let seen = handle.join().unwrap_or_else(|_| panic!("stub died"));
         assert_eq!(seen.len(), 2);
         // The reprompt carries the gate's verdict and the model's own prior reply.
@@ -2190,6 +2324,7 @@ mod tests {
         let (s, prov) = label_with_retry(&cfg, &pngs, &v, &ctx(), "2026-08-06".to_owned())
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(prov.attempts, 1);
+        assert_eq!(prov.model, ANSWERED, "and on the first-answer path too");
         assert_eq!(s.confidence, Confidence::High);
         drop(handle);
 
@@ -2202,7 +2337,7 @@ mod tests {
         let e = label_with_retry(&cfg, &pngs, &v, &ctx(), "2026-08-06".to_owned())
             .err()
             .unwrap_or_else(|| panic!("accepted"));
-        assert!(e.contains("`kind` token"), "{e}");
+        assert!(e.to_string().contains("`kind` token"), "{e}");
     }
 
     #[test]
@@ -2222,6 +2357,38 @@ mod tests {
         )
         .err()
         .unwrap_or_else(|| panic!("accepted"));
-        assert!(e.contains("model not found"), "{e}");
+        assert!(e.to_string().contains("model not found"), "{e}");
+    }
+
+    /// **An envelope that names no model is refused, not credited to the model we asked for.**
+    ///
+    /// `Provenance::model` exists to say whose judgement ends up in `library.ron`, and the request's
+    /// own `model` is not evidence of who replied — it is only what was asked, which is what
+    /// `cfg.model.clone()` used to write. There is no honest empty to fall back to either: the
+    /// Meshes pane draws a `LabelOrigin` with no model as *"by hand"*, so a blank would claim a
+    /// person did work a machine did. Refusing out loud, naming the field, is what is left.
+    #[test]
+    fn a_reply_that_names_no_model_is_refused_rather_than_credited_to_the_request() {
+        let bare = serde_json::json!({
+            "choices": [{ "message": { "content": r#"{"what": "a lamp", "kind": ["light"]}"# } }]
+        })
+        .to_string();
+        let (url, _h) = stub(vec![bare]);
+        let cfg = VlmConfig::for_stub(url, 5);
+        let e = label_with_retry(
+            &cfg,
+            &[vec![0u8], vec![0u8]],
+            &vocab(),
+            &ctx(),
+            "2026-08-06".to_owned(),
+        )
+        .err()
+        .unwrap_or_else(|| panic!("a reply naming no model was accepted"));
+        let said = e.to_string();
+        assert!(said.contains("names no `model`"), "{said}");
+        assert!(
+            !said.contains("stub-model"),
+            "and it must not have reached for the request's own model name: {said}"
+        );
     }
 }

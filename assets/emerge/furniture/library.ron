@@ -72,7 +72,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(South),
+                front: None,
             ),
             extent: (
                 footprint: Some((0.38, 0.2)),
@@ -83,39 +83,40 @@
             )),
             clearance: [],
             offers: (
-                surfaces: [
-                    "support",
-                ],
+                surfaces: [],
                 faces: [],
                 sockets: [],
             ),
             kind: [
-                "container",
+                "fixture",
+                "light",
             ],
-            effects: [],
+            effects: [
+                "emit",
+            ],
             look: [
+                "white",
                 "plastic",
                 "beige",
             ],
             placement: (
                 rooms: [
-                    "kitchen",
-                    "dining",
-                    "bar",
-                    "living",
+                    "hall",
+                    "bathroom",
+                    "bedroom",
                 ],
                 group: None,
             ),
             subgrid: None,
-            note: Some("The asset name \'wall_light\' is incorrect; this is a small bowl. The mesh is symmetric and the name suggests a light fixture, but the geometry and appearance are clearly a container."),
+            note: None,
             labels: Some((
                 by: (
-                    kind: Some(Model),
-                    effects: Some(Model),
-                    look: Some(Model),
-                    surfaces: Some(Model),
+                    kind: None,
+                    effects: None,
+                    look: None,
+                    surfaces: None,
                     mount: Some(Model),
-                    note: Some(Model),
+                    note: None,
                 ),
                 model: Some("qwen3-vl"),
                 at: "2026-08-22",
@@ -188,7 +189,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(South),
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.33, 0.28)),
@@ -219,7 +220,6 @@
                     "office",
                     "living",
                     "dining",
-                    "decor",
                 ],
                 group: None,
             ),
@@ -278,7 +278,6 @@
                     "dining",
                     "bedroom",
                     "hall",
-                    "decor",
                 ],
                 group: None,
             ),
@@ -307,7 +306,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(South),
+                front: None,
             ),
             extent: (
                 footprint: Some((0.18, 0.18)),
@@ -338,7 +337,6 @@
                     "living",
                     "dining",
                     "bedroom",
-                    "decor",
                 ],
                 group: None,
             ),
@@ -354,7 +352,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(South),
+                front: None,
             ),
             extent: (
                 footprint: Some((0.32, 0.32)),
@@ -704,7 +702,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(South),
+                front: None,
             ),
             extent: (
                 footprint: Some((1.23, 0.38)),
@@ -714,7 +712,7 @@
             clearance: [],
             offers: (
                 surfaces: [
-                    "shelf",
+                    "support",
                 ],
                 faces: [],
                 sockets: [],
@@ -912,7 +910,6 @@
                     "living",
                     "dining",
                     "office",
-                    "decor",
                 ],
                 group: None,
             ),
@@ -941,7 +938,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(South),
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.89, 0.89)),
@@ -974,7 +971,6 @@
                     "living",
                     "dining",
                     "office",
-                    "decor",
                 ],
                 group: None,
             ),
@@ -1332,7 +1328,6 @@
                 rooms: [
                     "living",
                     "dining",
-                    "decor",
                 ],
                 group: None,
             ),
@@ -1479,7 +1474,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(South),
+                front: Some(West),
             ),
             extent: (
                 footprint: Some((0.52, 0.53)),
@@ -1763,7 +1758,7 @@
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(South),
+                front: Some(North),
             ),
             extent: (
                 footprint: Some((0.25, 0.24)),
@@ -2031,7 +2026,6 @@
                     "warehouse",
                     "lab",
                     "dorm",
-                    "hospital",
                     "medical",
                     "bathroom",
                     "kitchen",
@@ -2434,7 +2428,6 @@
             ],
             placement: (
                 rooms: [
-                    "decor",
                     "living",
                     "office",
                     "industrial",
@@ -2510,7 +2503,7 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(South),
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.20000003, 2.0000005)),
@@ -2780,7 +2773,6 @@
             ],
             placement: (
                 rooms: [
-                    "decor",
                     "living",
                     "office",
                     "hall",
@@ -2939,11 +2931,9 @@
                     "bathroom",
                     "bedroom",
                     "command",
-                    "decor",
                     "dining",
                     "dorm",
                     "hall",
-                    "hospital",
                     "industrial",
                     "kitchen",
                     "lab",
@@ -3097,7 +3087,7 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(South),
+                front: None,
             ),
             extent: (
                 footprint: Some((0.6, 0.6)),
@@ -3239,7 +3229,7 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(South),
+                front: None,
             ),
             extent: (
                 footprint: Some((0.58911353, 0.5891134)),
@@ -3458,7 +3448,6 @@
             placement: (
                 rooms: [
                     "lab",
-                    "hospital",
                     "medical",
                     "dorm",
                     "office",
@@ -3640,7 +3629,7 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(North),
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((0.2500955, 0.20234182)),
@@ -3867,11 +3856,9 @@
                     "bathroom",
                     "bedroom",
                     "command",
-                    "decor",
                     "dining",
                     "dorm",
                     "hall",
-                    "hospital",
                     "industrial",
                     "kitchen",
                     "lab",
@@ -3957,7 +3944,6 @@
             ],
             placement: (
                 rooms: [
-                    "decor",
                     "hall",
                     "industrial",
                     "kitchen",
@@ -4042,7 +4028,6 @@
             ],
             placement: (
                 rooms: [
-                    "decor",
                     "hall",
                     "living",
                     "office",
@@ -4098,7 +4083,7 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(South),
+                front: None,
             ),
             extent: (
                 footprint: Some((0.6, 1.4)),
@@ -4175,7 +4160,7 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(South),
+                front: Some(West),
             ),
             extent: (
                 footprint: Some((0.45583838, 1.1000001)),
@@ -4358,7 +4343,7 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(South),
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((2.2865834, 1.1837324)),
@@ -4388,7 +4373,6 @@
                     "dorm",
                     "bedroom",
                     "living",
-                    "hospital",
                     "medical",
                     "industrial",
                     "storage",
@@ -4691,7 +4675,7 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(South),
+                front: None,
             ),
             extent: (
                 footprint: Some((0.81082094, 1.2108209)),
@@ -4804,7 +4788,6 @@
             ],
             placement: (
                 rooms: [
-                    "hospital",
                     "medical",
                     "lab",
                 ],
@@ -4999,7 +4982,7 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(North),
+                front: Some(South),
             ),
             extent: (
                 footprint: Some((0.3360979, 0.120000005)),
@@ -5034,7 +5017,7 @@
                     "command",
                     "office",
                     "lab",
-                    "hospital",
+                    "medical",
                     "industrial",
                     "storage",
                 ],
@@ -5065,7 +5048,7 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(South),
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((1.0840936, 0.8130703)),
@@ -5484,7 +5467,7 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.0, 0.0)),
                 rotate: None,
-                front: Some(South),
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.59183437, 0.54699314)),
@@ -6056,7 +6039,7 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.046103776, 0.07024437)),
                 rotate: None,
-                front: Some(South),
+                front: None,
             ),
             extent: (
                 footprint: Some((1.0371472, 2.2195797)),
@@ -6236,7 +6219,7 @@
                 y_offset: Some(-0.0),
                 pivot: Some((0.049822807, 0.0681262)),
                 rotate: None,
-                front: Some(South),
+                front: None,
             ),
             extent: (
                 footprint: Some((1.0371472, 2.2195802)),
@@ -6944,7 +6927,6 @@
             placement: (
                 rooms: [
                     "office",
-                    "computer_room",
                 ],
                 group: None,
             ),
@@ -7013,7 +6995,6 @@
             ],
             placement: (
                 rooms: [
-                    "computer_room",
                     "office",
                     "lab",
                 ],

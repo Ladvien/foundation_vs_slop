@@ -146,6 +146,15 @@ fn count_writes(body: &str) -> usize {
             if l.starts_with("//") {
                 return false;
             }
+            // **A comparison is not a write, and the substring cannot tell.** `.display ==` contains
+            // `.display =`, so `if node.display != want` and `let opening = node.display ==
+            // Display::None` were each charged as a write AND credited as a guard — a body that
+            // guards perfectly reads as one write short every time. `notice::toggle_journal` is the
+            // whole reason the crate had a `WRITES-EVERY-FRAME-OK:` marker at all, and it does not
+            // have one now.
+            if l.contains("==") || l.contains("!=") {
+                return false;
+            }
             WATCHED_WRITES.iter().any(|w| l.contains(w))
                 || l.contains(".0 = ")
                 || l.contains("= Some(want)")
@@ -215,7 +224,7 @@ fn a_drawing_system_writes_only_when_something_changed() {
     );
 }
 
-/// **The scan can see the systems it claims to check.**
+/// **The scan can see the systems it claims to check, in each file it claims to check them in.**
 ///
 /// The companion assertion, and the one that matters most: a parser that quietly matched nothing
 /// would pass forever.
@@ -224,23 +233,28 @@ fn a_drawing_system_writes_only_when_something_changed() {
 /// *"`chrome.rs` alone carries several of these"* — and then the held-key overlay left for
 /// `badges.rs`, taking two of them with it, and this failed. That is the guard working: the right
 /// answer was to follow them rather than to lower the number, because the number is the whole point.
+///
+/// **A floor per file, not a sum over both.** The sum was strictly weaker than the single-file check
+/// it replaced: `chrome.rs` alone still yields six, so `badges.rs` could stop parsing entirely — or
+/// lose every drawing system it owns — and the total would clear the bar unmoved. Two files with
+/// their own floors cannot cover for each other.
 #[test]
 fn the_scan_actually_finds_drawing_systems() {
-    let mut found: Vec<String> = Vec::new();
-    for file in ["chrome.rs", "badges.rs"] {
+    // Measured, then floored just under: `chrome.rs` carries six and `badges.rs` two.
+    for (file, floor) in [("chrome.rs", 5usize), ("badges.rs", 2)] {
         let src = std::fs::read_to_string(src_dir().join(file))
             .unwrap_or_else(|e| panic!("{file}: {e}"));
-        found.extend(
-            functions(&src)
-                .into_iter()
-                .filter(|(_, b)| b.contains("&mut Node") || b.contains("&mut BackgroundColor"))
-                .map(|(n, _)| format!("{file}::{n}")),
+        let found: Vec<String> = functions(&src)
+            .into_iter()
+            .filter(|(_, b)| b.contains("&mut Node") || b.contains("&mut BackgroundColor"))
+            .map(|(n, _)| n)
+            .collect();
+        assert!(
+            found.len() >= floor,
+            "the scan found only {} drawing system(s) in {file}, under its floor of {floor} — if the \
+             parser has stopped seeing them, the rule above is being enforced against nothing there: \
+             {found:?}",
+            found.len()
         );
     }
-    assert!(
-        found.len() >= 6,
-        "the scan found only {} drawing systems in the window's own chrome — if the parser has \
-         stopped seeing them, the rule above is being enforced against nothing: {found:?}",
-        found.len()
-    );
 }

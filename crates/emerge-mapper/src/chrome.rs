@@ -595,7 +595,7 @@ pub struct FrameSystems;
 /// unique node carrying it with a non-zero [`bevy::ui::ComputedNode`] — which is also the visibility
 /// test, since [`panel_root`]'s hidden form is `Display::None` and lays out to nothing. Two visible
 /// at once is a bug rather than a tie to break, and
-/// `every_home_a_live_binding_names_is_on_screen` is what says so.
+/// `every_control_the_census_homes_a_verb_at_is_on_screen` is what says so.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Control(pub keys::ControlId);
 
@@ -1043,21 +1043,21 @@ impl Journal {
     }
 }
 
-/// The banner a panel shows its newest problem in. Carries **which tabs it speaks for**, so a shared
-/// painter cannot write another tab's block.
+/// **The one card the toast's text is written into.**
 ///
-/// # A list, because one panel can serve two tabs
+/// # It used to carry the tabs it spoke for, and that list decided nothing
 ///
-/// The TILES panel is the whole reason: Meshes and Tiles share it. A banner is one line and there is
-/// one per tab, so each of those names a single tab — but the **detail pane** and the **problem log**
-/// in that panel are single nodes whose contents the live tab decides, and tagging them with a lone
-/// `Mode::Meshes` silently made them belong to Meshes alone. Every refusal the Tiles tab's verbs
-/// wrote landed in a log `paint_notices` then skipped, and `Cmd+C` harvested a pane it could not see.
+/// It was `ProblemBanner(&'static [Mode])`, from when there was a banner per panel and a shared
+/// painter could otherwise write another tab's block. The toast replaced all of that: there is now
+/// exactly one card, over the viewport, and it says whatever the live tab's newest refusal is. The
+/// field survived the move with the value `ALL_TABS` — every tab — so `paint_notices`' `if
+/// !banner.0.contains(&tab) { continue; }` was a tautology guarding nothing, while reading as though
+/// a tab could be skipped.
 ///
-/// A node saying which tabs it serves is the true thing to say; duplicating a shared node once per
-/// tab would be two copies to keep in step. `tiles::TILES_PANEL_TABS` is the list.
+/// A marker with no field cannot be asked a question it has no business answering. Which tab is live
+/// is `Mode`'s answer, asked once by [`crate::notice::paint_notices`].
 #[derive(Component, Clone, Copy)]
-pub struct ProblemBanner(pub &'static [crate::tiles::Mode]);
+pub struct ProblemBanner;
 
 /// **The problem, as a toast over the viewport.**
 ///
@@ -1111,7 +1111,7 @@ pub fn problem_toast(mut commands: Commands, frame: Res<Frame>) {
             TextFont::from_font_size(text::BODY),
             TextLayout::new(Justify::Left, LineBreak::WordOrCharacter),
             bevy::picking::Pickable::IGNORE,
-            ProblemBanner(ALL_TABS),
+            ProblemBanner,
         ))
         .id();
     commands
@@ -2441,17 +2441,6 @@ pub fn repaint_where_you_are(
         }
     }
 }
-
-/// **Every panel this editor has.** The status band speaks for whichever one is live, so it names
-/// them all and `notice::paint_notices` picks — rather than five bands each hidden by its own tab.
-pub const ALL_TABS: &[crate::tiles::Mode] = &[
-    crate::tiles::Mode::Map,
-    crate::tiles::Mode::Meshes,
-    crate::tiles::Mode::Tiles,
-    crate::tiles::Mode::Anim,
-    crate::tiles::Mode::Compose,
-];
-
 
 /// **One band at the foot of the window: what went wrong, and what the keys are.**
 ///

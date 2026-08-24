@@ -537,9 +537,9 @@ fn laid_out_rect(node: &ComputedNode, tf: &UiGlobalTransform) -> Option<Rect> {
 /// in the legend, which is the one outcome [`Home`] exists to rule out. The exactly-one answer wins
 /// because it is the answer that actually decides whether a box is drawn.
 ///
-/// `every_home_a_live_binding_names_is_on_screen` is the guard; the warning is the report when the
-/// duplicate has already shipped, and it is diagnostics only — nothing about where the badge goes
-/// depends on it.
+/// `every_control_the_census_homes_a_verb_at_is_on_screen` is the guard; the warning is the report
+/// when the duplicate has already shipped, and it is diagnostics only — nothing about where the
+/// badge goes depends on it.
 fn sole_control(
     id: keys::ControlId,
     controls: &Query<(Entity, &chrome::Control, &ComputedNode, &UiGlobalTransform)>,

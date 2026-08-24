@@ -286,40 +286,103 @@ impl Vocabularies {
         Ok(v)
     }
 
-    /// Every table is well-formed. Called by [`Self::parse`]; call it directly for tables built in
-    /// Rust.
+    /// Every table is well-formed, and every implication resolves. Called by [`Self::parse`]; call
+    /// it directly for tables built in Rust.
+    ///
+    /// # It used to check four tables of seven, and never looked at `implies` at all
+    ///
+    /// `capabilities`, `edge` and `slot` were validated by nothing, so a duplicate on one of them
+    /// was two bits meaning one word and the only symptom was a match that quietly never fired. And
+    /// the sole implication check lived inside [`Self::implied_effects`], reached from
+    /// [`Self::masks`] once per **descriptor** — so a vocabulary naming an invented implied token
+    /// loaded clean for ever and then exploded the first time an author used that kind, in a part of
+    /// the program a long way from the file that was wrong.
     pub fn validate_tables(&self) -> Result<(), String> {
         self.kind.validate("kind")?;
         self.effects.validate("effects")?;
         self.look.validate("look")?;
         self.surfaces.validate("surfaces")?;
+        self.capabilities.validate("capabilities")?;
+        self.edge.validate("edge")?;
+        self.slot.validate("slot")?;
+        // **Last, so a duplicate token wins over an implication.** A table declaring `bed` twice has
+        // two bits meaning one word, and an implication message about the second `bed` would point
+        // the reader at the wrong line. The table has to be well-formed before what it says can be
+        // read at all.
+        self.validate_implications()
+    }
+
+    /// **Every `implies` names an axis that resolves it, and a token that exists.**
+    ///
+    /// Two refusals, because they are two different mistakes.
+    ///
+    /// An `implies` on any axis but `kind` is read by nothing — [`Self::masks`] resolves
+    /// implications out of the `kind` table alone — so it is a sentence an author wrote that the
+    /// program will never perform. That is the free-text failure this whole module exists to end,
+    /// and the axis and the token are both named because *"`implies` is misplaced"* in a file of
+    /// seven tables is a search rather than an answer.
+    ///
+    /// An implication naming a token the `effects` axis does not hold is the ordinary typo, and it
+    /// gets the same did-you-mean [`Self::masks`] and [`Self::role_mask`] give.
+    fn validate_implications(&self) -> Result<(), String> {
+        for (axis, table) in [
+            ("effects", &self.effects),
+            ("look", &self.look),
+            ("surfaces", &self.surfaces),
+            ("capabilities", &self.capabilities),
+            ("edge", &self.edge),
+            ("slot", &self.slot),
+        ] {
+            if let Some(t) = table.tokens.iter().find(|t| !t.implies.is_empty()) {
+                return Err(format!(
+                    "vocab: axis `{axis}` token `{}` declares `implies`, which only `kind` \
+                     resolves. Nothing would ever read it — move the implication to the `kind` \
+                     token that brings it, or delete it.",
+                    t.name
+                ));
+            }
+        }
+        for t in &self.kind.tokens {
+            for implied in &t.implies {
+                if self.effects.contains(implied) {
+                    continue;
+                }
+                let hint = nearest(&self.effects, implied)
+                    .map(|n| format!(" Did you mean `{n}`?"))
+                    .unwrap_or_default();
+                return Err(format!(
+                    "vocab: `kind` token `{}` implies `{implied}`, which is not an `effects` \
+                     token.{hint} The axis holds: {}.",
+                    t.name,
+                    self.effects.names().collect::<Vec<_>>().join(", ")
+                ));
+            }
+        }
         Ok(())
     }
 
-    /// Resolve one descriptor's tokens to masks, or say which token is wrong.
-    ///
-    /// Errors name the descriptor, the axis, the token, and — because the overwhelmingly common cause
-    /// is a typo rather than a missing feature — the nearest token that *is* in the table.
     /// **Every effect token the given kinds bring with them**, in vocabulary order.
     ///
-    /// Refused rather than ignored when an implication names a token the effects axis does not
-    /// hold: a vocabulary that promises an effect nobody defines is a promise every consumer would
-    /// silently drop, and this crate's rule is that an invented token is refused at the door.
-    pub fn implied_effects(&self, kinds: &[String]) -> Result<Vec<String>, String> {
+    /// Infallible, because the refusal moved to `validate_implications` — which [`Self::parse`] runs
+    /// before a `Vocabularies` exists at all. (Named without a link on purpose: it is private,
+    /// because [`Self::validate_tables`] is the one door and a second entrance to the same check is
+    /// a second answer waiting to happen.)
+    ///
+    /// # It used to return a `Result`, and that is what made the answer wrong
+    ///
+    /// It re-checked every implied token against the `effects` axis on every call — and the call is
+    /// once per descriptor, so it asked the same question about the same file as many times as the
+    /// library is long, and answered too late to name the line that was wrong. Worse, a `Result` no
+    /// caller can act on is a `Result` a caller eventually papers over: the editor's labeller
+    /// carried `let Ok(want) = ... else { return effects.to_vec(); }`, a second path that produced a
+    /// plausible wrong answer — the authored list, silently un-derived — whenever this refused.
+    pub fn implied_effects(&self, kinds: &[String]) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for token in &self.kind.tokens {
             if !kinds.iter().any(|k| k == &token.name) {
                 continue;
             }
             for implied in &token.implies {
-                if !self.effects.contains(implied) {
-                    return Err(format!(
-                        "vocabulary: `kind` token `{}` implies `{implied}`, which is not an \
-                         `effects` token. The axis holds: {}.",
-                        token.name,
-                        self.effects.names().collect::<Vec<_>>().join(", ")
-                    ));
-                }
                 if !out.contains(implied) {
                     out.push(implied.clone());
                 }
@@ -327,9 +390,13 @@ impl Vocabularies {
         }
         // Vocabulary order, so a resolved set is the same list however the kinds were written.
         out.sort_by_key(|t| self.effects.names().position(|n| n == t).unwrap_or(usize::MAX));
-        Ok(out)
+        out
     }
 
+    /// Resolve one descriptor's tokens to masks, or say which token is wrong.
+    ///
+    /// Errors name the descriptor, the axis, the token, and — because the overwhelmingly common cause
+    /// is a typo rather than a missing feature — the nearest token that *is* in the table.
     pub fn masks(&self, d: &Descriptor) -> Result<Masks, String> {
         let axis = |v: &Vocabulary, name: &str, tokens: &[String]| -> Result<u64, String> {
             v.mask(tokens).map_err(|_| {
@@ -399,9 +466,16 @@ impl Vocabularies {
         // `emerge-mapper`'s labeller that only its apply path consulted — so a bed labelled by the
         // editor gained `stamina-recharge` and the identical bed written by hand did not, and the
         // game, which reads these masks, could not tell the two apart. Deriving it at resolve time
-        // means the stored list is an author's *statement* and the mask is the *truth*, which is
-        // the only arrangement in which the two cannot drift.
-        let implied = self.implied_effects(&d.kind)?;
+        // means the stored list is an author's *statement* and the mask is the *truth*.
+        //
+        // # It used to say the two cannot drift, and they drift constantly
+        //
+        // `labels::settle_library` exists precisely because they do, and `project.rs` logs how many
+        // rows it corrected at open. What cannot drift is what anything ever MATCHES on: every
+        // consumer reads the mask and none reads the stored list, so a row whose written `effects`
+        // is a word behind still behaves correctly, and the settle is a tidy-up of the FILE rather
+        // than a repair of behaviour.
+        let implied = self.implied_effects(&d.kind);
         let mut effects = d.effects.clone();
         for token in implied {
             if !effects.contains(&token) {
@@ -837,6 +911,111 @@ mod tests {
         .err()
         .unwrap_or_default();
         assert!(err.contains("does not parse"), "{err}");
+    }
+
+    /// **An implication naming a token nothing defines is refused at the door**, which is the whole
+    /// point of moving the check out of `implied_effects`.
+    ///
+    /// It used to load clean and then fail from `masks`, once per descriptor, the first time an
+    /// author reached for that kind — an error about a *file* raised in the middle of resolving a
+    /// *library*, naming the kind but never the line. The one-character slip is the case that
+    /// matters, so the suggestion is asserted too: a bare *"not an `effects` token"* about a
+    /// fifteen-character hyphenated word is a spelling bee rather than an answer.
+    #[test]
+    fn a_kind_implying_a_token_the_effects_axis_does_not_hold_is_refused_at_parse() {
+        let err = Vocabularies::parse(
+            r#"(
+                kind: ( tokens: [
+                    ( name: "bed",  note: "a thing to lie on", implies: ["stamina-recharg"] ),
+                ] ),
+                effects: ( tokens: [
+                    ( name: "stamina-recharge",  note: "restores stamina to whoever uses it" ),
+                ] ),
+                look: ( tokens: [] ),
+                surfaces: ( tokens: [] ),
+            )"#,
+        )
+        .err()
+        .unwrap_or_default();
+        assert!(err.contains("`kind` token `bed`"), "must name the kind: {err}");
+        assert!(
+            err.contains("implies `stamina-recharg`"),
+            "must name the token that does not resolve, not just the one that does: {err}"
+        );
+        assert!(
+            err.contains("Did you mean `stamina-recharge`?"),
+            "a one-character slip is the common case and must be said out loud: {err}"
+        );
+    }
+
+    /// **`implies` on an axis that resolves none is refused**, even when every token it names exists.
+    ///
+    /// `masks` resolves implications out of the `kind` table and no other, so an `implies` anywhere
+    /// else is a sentence the program will never perform — the free-text failure this module exists
+    /// to end, wearing the schema's own clothes. The literal below deliberately implies a token the
+    /// `effects` axis DOES hold, so the refusal cannot be riding on a typo: the misplacement alone
+    /// has to be enough.
+    #[test]
+    fn an_implication_on_an_axis_that_does_not_resolve_one_is_refused_at_parse() {
+        let err = Vocabularies::parse(
+            r#"(
+                kind: ( tokens: [] ),
+                effects: ( tokens: [
+                    ( name: "emit",  note: "casts light", implies: ["uses-electricity"] ),
+                    ( name: "uses-electricity",  note: "stops working when the power does" ),
+                ] ),
+                look: ( tokens: [] ),
+                surfaces: ( tokens: [] ),
+            )"#,
+        )
+        .err()
+        .unwrap_or_default();
+        assert!(err.contains("axis `effects`"), "must name the axis: {err}");
+        assert!(err.contains("token `emit`"), "must name the token: {err}");
+        assert!(
+            err.contains("only `kind` resolves"),
+            "must say why it can never be read: {err}"
+        );
+    }
+
+    /// **A kind's implication reaches the effects mask, and only the piece that carries the kind.**
+    ///
+    /// Three claims in one test because they are one behaviour. A `food` ration gets
+    /// `stamina-recharge` without any author writing it; the implication lands on `effects` and
+    /// **not** on `kind`, which is the axis that implied it — smearing it there would make every
+    /// implied effect also look like a kind, and `kind` is the axis identity is matched on; and a
+    /// `seating` piece gets nothing, because an implication that fired for everyone would be a
+    /// default rather than a fact about a word.
+    #[test]
+    fn a_kinds_implication_lands_in_the_effects_mask_and_only_when_that_kind_is_present() {
+        let mut v = vocabs();
+        // `kind.tokens[3]` is `food`; `effects` already holds `stamina-recharge`.
+        v.kind.tokens[3].implies = vec!["stamina-recharge".to_owned()];
+        v.validate_tables()
+            .unwrap_or_else(|e| panic!("the implication resolves, so the door must open: {e}"));
+
+        let recharge = v.effects.bit("stamina-recharge").expect("the fixture holds it");
+        let food = v.kind.bit("food").expect("the fixture holds it");
+
+        let mut ration = desc("ozea/ration");
+        ration.kind = vec!["food".to_owned()];
+        let m = v.masks(&ration).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            m.effects, recharge,
+            "the kind brings the effect with it, with nothing authored"
+        );
+        assert_eq!(
+            m.kind, food,
+            "the implication must not smear onto the axis that implied it"
+        );
+
+        let mut chair = desc("ozea/chair");
+        chair.kind = vec!["seating".to_owned()];
+        assert_eq!(
+            v.masks(&chair).unwrap_or_else(|e| panic!("{e}")).effects,
+            0,
+            "a kind that implies nothing brings nothing"
+        );
     }
 
     /// **A hole accepts something the project declared**, refused at open and naming all three of

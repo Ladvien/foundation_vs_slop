@@ -1,17 +1,32 @@
 // **This game's tag vocabulary.** The mechanism lives in `emerge_core::vocab`; the tokens live here,
 // because a library shared between games must not carry one game's idea of what a prop can be.
 //
-// Four rules, all enforced by `Vocabularies::validate_tables` and `validate_library`:
+// Five rules. Four of them a program refuses at the door; the one that does not says so, because a
+// rule nothing checks is a rule the next author has to remember, and this file's whole argument is
+// that remembering is what failed. (It used to claim all of them were enforced by
+// `Vocabularies::validate_tables` and `validate_library`, and named neither the enforcer per rule
+// nor the implication rule at all — which was how an invented implied token came to load clean.)
 //
 //   1. A token not in a table is an ERROR naming the descriptor, the axis and the token. The whole
 //      reason this file exists is `docs/2026-08-03-asset-schema-audit.md` §2: of eight free-text
 //      affordance tokens shipped, FOUR were never read by anything, and nothing ever said so.
+//      Refused by `Vocabularies::masks`, per descriptor, at open.
 //   2. Tokens take their bit from their POSITION. **Append freely; never reorder or delete.**
-//      Reordering silently re-points every mask already computed.
+//      Reordering silently re-points every mask already computed. NOTHING CHECKS THIS, and nothing
+//      can: a reordered file is indistinguishable from a file that always read that way. Use
+//      `vocab::append_token`, which is the one writer that cannot get it wrong.
 //   3. Every token carries a note. A token nobody can describe in a sentence is a token whose meaning
 //      has not been decided yet — which is exactly how `sleep`/`store`/`decor`/`hygiene` happened.
+//      Refused by `vocab::append_token`; a hand edit is on its honour.
 //   4. `surfaces` is checked from BOTH sides: a class something needs and nothing offers is an error,
-//      because a prop that can never be placed looks exactly like a prop nobody authored.
+//      because a prop that can never be placed looks exactly like a prop nobody authored. Refused by
+//      `Vocabularies::validate_library`, which needs the whole library and so cannot be a table check.
+//   5. `implies` lives on `kind` and nowhere else, and names an `effects` token that exists. Only
+//      `kind` implications are resolved, so one written on any other axis is a sentence nothing will
+//      ever perform. Refused at PARSE by `Vocabularies::validate_tables`, whose last step is the one
+//      that reads implications — last so a duplicate token wins over an implication message. It was
+//      checked once per descriptor from `masks` until then, so a vocabulary naming an effect nobody
+//      defines loaded clean and exploded the first time an author reached for the kind.
 //
 // The three semantic axes are all IMMUTABLE properties — what a thing IS, DOES, and LOOKS LIKE.
 // Dynamic state (is it lit, is someone sitting on it) belongs on the entity at runtime, never here.

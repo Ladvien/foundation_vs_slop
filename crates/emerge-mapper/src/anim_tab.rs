@@ -325,6 +325,8 @@ fn spawn_panels(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
             },
             BenchLine,
         ));
+        // FOLLOW-OK: a table, not a list. The slots are read and copied, not walked — there is no
+        // highlight for the arrows to move, so the scroll exists for HEIGHT alone.
         // The slot table scrolls: a rig has up to ten slots and each is two lines with its measured
         // number under the declared one. The declared-beside-measured table is the block an author
         // asking about a gait is looking at, and the one worth handing to somebody else verbatim —

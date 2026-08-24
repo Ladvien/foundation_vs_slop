@@ -295,9 +295,23 @@ impl Fixture {
     /// what is under test is `policy::layered_library` + `Project::open` reading it back. The two
     /// are not the same code.
     ///
-    /// `run` cells wide, so the piece is sized to exactly that many divisions — `grid::cells` is
-    /// what decides, and a lattice with a cell outside its own divisions is refused at load.
+    /// `run` cells wide **along the run axis**, so the piece is sized to exactly that many divisions
+    /// across — `grid::cells` is what decides, and a lattice with a cell outside its own divisions
+    /// is refused at load. The claim is one-axis on purpose: every cell written here sits at
+    /// `(x, 0, 0)`, and that fills the *whole* face only because the fixture leaves
+    /// `Lattice::face_bands` at 1. Set that and these cells are still legal, but they are one band
+    /// of several rather than the face.
     pub fn authored_lattice(mut self, id: &str, pack: &str, token: &str, run: u32) -> Fixture {
+        // **Zero is the caller's bug, and it surfaces four layers away.** `run: 0` writes
+        // `footprint: Some((0, 1))` and an empty cell list, and the project then fails to open with
+        // a load error about a descriptor — pointing at the RON this helper generated rather than at
+        // the test that asked for nothing.
+        assert!(
+            run > 0,
+            "authored_lattice was asked for a run of 0 cells: that writes a piece 0 m wide and a \
+             lattice with nothing in it, and the refusal then arrives from `Project::open` instead \
+             of from here. Name the number of cells the test is about."
+        );
         self = self.sized_descriptor(id, pack, run as f32 * emerge_core::grid::SNAP, 1.0);
         if let Some(last) = self.descriptors.last_mut() {
             let was = "subgrid: None";
@@ -394,8 +408,19 @@ impl Fixture {
     /// is exactly why the settling had nothing to be driven against — the one test that reached it
     /// read the shipped corpus.
     ///
-    /// The effect token is declared on the `effects` axis in the same breath, because
-    /// `implied_effects` refuses an implication naming a token that axis does not hold.
+    /// The effect token is declared on the `effects` axis in the same breath, because a vocabulary
+    /// whose `kind` token implies a word the `effects` axis does not hold **does not load**:
+    /// `Vocabularies::validate_tables` calls `validate_implications`, and that is the door. Writing
+    /// the implication alone would fail at `Project::open` with a refusal about the vocabulary
+    /// rather than at the assertion the test is about.
+    ///
+    /// # It used to name the wrong door
+    ///
+    /// This said `implied_effects` refuses it. It did once — the check lived inside the resolver and
+    /// so ran once per descriptor, which meant an invented implied token loaded clean for ever and
+    /// exploded the first time an author used that kind. The refusal moved to parse, and
+    /// `implied_effects` is infallible now; a sentence still pointing at the resolver would send the
+    /// next reader looking for a `Result` that no longer exists.
     pub fn kind_implies(self, effect: &str) -> Fixture {
         let at = self.dir.join("assets/emerge/vocab.ron");
         let was =
@@ -491,7 +516,33 @@ impl Fixture {
     }
 
     /// Place one under an id you choose — for the tests that are about id minting.
+    ///
+    /// # A placement naming an id nothing carries is refused here
+    ///
+    /// `redraw_placements` resolves a row through `library.get(..)` and `continue`s when that is
+    /// `None`, so a map placing `alpha/floor` in a project whose library carries `floor` draws
+    /// **nothing at all** — silently, with no refusal anywhere. Seven badge fixtures were built that
+    /// way (`Fixture::descriptor("floor", "alpha")` mints the id `floor`; `alpha` is only the mesh
+    /// folder), and every geometry test standing on them was measuring an empty map while claiming
+    /// to measure a populated one.
+    ///
+    /// So the fixture refuses instead. It is the one place that knows both halves — the ids declared
+    /// and the ids placed — and a panic naming the id beats a green suite measuring nothing. Kit ids
+    /// count too: [`Fixture::kit`] rows are as placeable as the root kit's.
     pub fn place_as(mut self, row: &str, id: &str, at: (f32, f32)) -> Fixture {
+        let known: Vec<&str> = self
+            .ids
+            .iter()
+            .flat_map(|(_, v)| v.iter().map(String::as_str))
+            .collect();
+        assert!(
+            known.contains(&id),
+            "this fixture places `{id}`, which no descriptor it carries is called. It carries \
+             {known:?} — a placement naming an id nothing defines is dropped by \
+             `redraw_placements` without a word, so the map draws empty and every assertion about \
+             what is on it passes over nothing. Note that `descriptor(\"floor\", \"alpha\")` mints \
+             the id `floor`: the pack is the mesh folder, never a namespace."
+        );
         self.placements.push(format!(
             r#"        (
             id: "{row}",

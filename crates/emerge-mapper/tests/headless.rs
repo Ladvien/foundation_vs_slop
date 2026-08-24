@@ -721,7 +721,9 @@ mod stepped {
     /// library is populated rather than merely loadable.
     #[test]
     fn the_editor_boots_on_the_shipped_kit() {
-        let mut app = harness::build_headless_at(&root(), "untitled_map", Some("furniture"), emerge_mapper::tiles::Mode::Meshes)
+        // `None`, because the subject named above is the `authoring` field rather than a directory:
+        // `Project::open(root, None)` resolves it, so this follows the declaration wherever it goes.
+        let mut app = harness::build_headless_at(&root(), "untitled_map", None, emerge_mapper::tiles::Mode::Meshes)
             .unwrap_or_else(|e| panic!("{e}"));
         for _ in 0..10 {
             app.update();
@@ -947,6 +949,18 @@ mod stepped {
              An authored lattice that does not survive the round-trip is a wall that stops sealing \
              rooms, and nothing else in this suite would notice.",
             edged.len()
+        );
+        // **Which cells, not only how many.** `len == 4` beside `at.1 == 0 && at.2 == 0` is
+        // satisfied by four cells collapsed onto `(0, 0, 0)` — which is exactly what a round-trip
+        // that lost the `at` tuple would hand back, and the failure this test is named for. A run is
+        // a *run*: four distinct steps along x.
+        let mut across: Vec<u32> = edged.iter().map(|c| c.at.0).collect();
+        across.sort_unstable();
+        assert_eq!(
+            across,
+            vec![0, 1, 2, 3],
+            "the authored cells came back off their own positions: {:?}",
+            edged.iter().map(|c| c.at).collect::<Vec<_>>()
         );
         // All on one face — the run — which is what makes them a *run* face rather than a scatter.
         assert!(
@@ -4093,6 +4107,218 @@ fn undo_steps_back_through_the_meshes_brought_into_a_tile() {
     assert_eq!(members(&app).len(), 1, "one press, one step");
 }
 
+/// **A refit on another tab is not an edit, so it costs the tile's history nothing.**
+///
+/// `refit_tile` lost its `*mode != Mode::Tiles` gate deliberately — its own note gives the reason,
+/// reported from the keyboard: *"the sizing of the tile around the mesh doesn't take place until you
+/// enter the mesh or the tile editing… we want this to happen whenever a mesh gets loaded."* The
+/// envelope is read off the contents, so which panel an author happens to be looking at cannot be
+/// part of the answer. Removing the gate exposed two bugs it had been masking, and this drives the
+/// one no other test can reach.
+///
+/// `tile_history` is still asleep behind its own Tiles gate, so a measurement landing while the
+/// author is on Meshes grows `build.open.envelope` unobserved. `Composition`'s `PartialEq` covers
+/// that field and `adjusted_member` deliberately does not — *"the envelope is deliberately not
+/// compared"* — so on returning to Tiles the recorder saw a difference, could not classify it as a
+/// continuing run, pushed a step nobody took and called `history.future.clear()`. Undo then restored
+/// the pre-refit size, which refit again next frame and pushed again: **undo never advanced, and
+/// redo was gone for good.**
+///
+/// # Why no existing test could reach it
+///
+/// Every other undo test on this tab stays within one tab, and the schedule pins
+/// `build_keys → refit_tile → tile_history` inside a single frame — so `seen` and `open` are already
+/// envelope-consistent by the time the recorder looks, and the branch is never entered. The
+/// excursion is the whole point: leave Tiles, let a measurement land, come back.
+///
+/// `TileHistory`'s fields are private to `build.rs`, so both halves are asserted through what they
+/// do. `past` being untouched is an undo that takes a **real** step back rather than restoring the
+/// same members at their old size; `future` surviving is a redo that still has somewhere to go.
+#[test]
+fn a_refit_on_another_tab_leaves_the_tile_history_alone() {
+    use bevy::input::ButtonInput;
+    use bevy::prelude::{App, IntoScheduleConfigs, KeyCode, ResMut, Update};
+    use emerge_mapper::keys::{Action, binding};
+
+    let root = Fixture::new("refit_history")
+        .descriptor("floor", "alpha")
+        .descriptor("wall", "alpha")
+        .build("m");
+    let mut app = harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Tiles)
+        .unwrap_or_else(|e| panic!("the fixture project must open: {e}"));
+    app.update();
+    open_tile(&mut app, "tile");
+
+    fn once(app: &mut App, chord: Vec<KeyCode>) {
+        app.add_systems(
+            Update,
+            IntoScheduleConfigs::before(
+                move |mut keys: ResMut<ButtonInput<KeyCode>>,
+                      mut done: bevy::prelude::Local<bool>| {
+                    if !*done {
+                        keys.release_all();
+                        for k in &chord {
+                            keys.press(*k);
+                        }
+                        *done = true;
+                    }
+                },
+                emerge_mapper::keys::Phase::Act,
+            ),
+        );
+        app.update();
+    }
+    // **Released, then stepped.** A latched press stays down, and `keys::repeating` would auto-repeat
+    // an `Undo` held across idle frames — which is exactly what these frames are for.
+    fn settle(app: &mut App, frames: usize) {
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release_all();
+        for _ in 0..frames {
+            app.update();
+        }
+    }
+    let members = |app: &App| -> Vec<String> {
+        app.world()
+            .resource::<emerge_mapper::build::Build>()
+            .open
+            .as_ref()
+            .map(|c| c.members.iter().map(|m| m.id.clone()).collect())
+            .unwrap_or_default()
+    };
+    let envelope = |app: &App| -> (f32, f32, f32) {
+        match app
+            .world()
+            .resource::<emerge_mapper::build::Build>()
+            .open
+            .as_ref()
+            .map(|c| c.envelope)
+        {
+            Some(emerge_core::composition::Envelope::Bounded { size }) => size,
+            other => panic!("the open tile must claim a tile; it holds {other:?}"),
+        }
+    };
+
+    // Two drops, so there is a real step to walk back to *and* a real one to walk forward to. The
+    // release-and-walk between them is the honest loop — `Enter` is `Idle`-scoped, so a drop while
+    // holding is refused by stance.
+    once(&mut app, vec![binding(Action::BuildArm).key]);
+    once(&mut app, vec![binding(Action::BuildDrop).key]);
+    once(&mut app, vec![binding(Action::Cancel).key]);
+    once(&mut app, vec![binding(Action::BuildBack).key]);
+    once(&mut app, vec![binding(Action::BuildDrop).key]);
+    let two = members(&app);
+    assert_eq!(two.len(), 2, "two meshes are in the tile: {two:?}");
+
+    // One step back, so `future` is carrying an entry the excursion could destroy.
+    once(
+        &mut app,
+        vec![KeyCode::SuperLeft, binding(Action::UndoBuild).key],
+    );
+    settle(&mut app, 2);
+    let one = members(&app);
+    assert_eq!(one.len(), 1, "one undo takes the second mesh back out: {one:?}");
+
+    // **Off to Meshes, where `tile_history` is asleep and `refit_tile` is not.**
+    *app.world_mut().resource_mut::<emerge_mapper::tiles::Mode>() =
+        emerge_mapper::tiles::Mode::Meshes;
+    settle(&mut app, 2);
+    let before = envelope(&app);
+
+    // **A measurement lands.** `fit_envelope` measures a member through `library.get(id)`, so this
+    // is the case `refit_tile`'s own note describes: a piece whose footprint was not known yet spans
+    // nothing and the tile fits to one cell, and the tile has to grow when the number arrives. Both
+    // lists, because `Project` carries the measured layer and the merged one and `refit` reads the
+    // merge.
+    {
+        let member = one
+            .first()
+            .cloned()
+            .unwrap_or_else(|| panic!("a member must survive the undo"));
+        let mut project = app
+            .world_mut()
+            .resource_mut::<emerge_mapper::project::Project>();
+        let project = &mut *project;
+        let mut touched = 0;
+        for list in [
+            &mut project.measured.descriptors,
+            &mut project.library.descriptors,
+        ] {
+            for d in list.iter_mut().filter(|d| d.id == member) {
+                d.extent.footprint = Some((3.0, 3.0));
+                touched += 1;
+            }
+        }
+        assert!(touched > 0, "`{member}` must be in one of the two lists");
+    }
+    settle(&mut app, 4);
+    let grown = envelope(&app);
+    assert!(
+        grown.0 > before.0 && grown.2 > before.2,
+        "the measurement did not grow the envelope ({before:?} -> {grown:?}), so nothing below is \
+         about a refit at all"
+    );
+    assert_eq!(
+        members(&app),
+        one,
+        "and it moved no member — a refit is a derived size, not an edit"
+    );
+
+    // Back to Tiles. These are the frames the recorder wakes up on and sees a difference it did not
+    // watch happen: with the fix it adopts the new envelope, without it pushes a phantom step and
+    // clears `future`.
+    *app.world_mut().resource_mut::<emerge_mapper::tiles::Mode>() =
+        emerge_mapper::tiles::Mode::Tiles;
+    settle(&mut app, 2);
+
+    // **`past` was not topped with a phantom.** One undo empties the tile, which is the step the
+    // author actually took. Before the fix the top of `past` held the pre-refit tile — the same
+    // members at their old size — so this press restored what was already on screen, refit it again,
+    // pushed again, and undo never advanced however many times it was pressed.
+    once(
+        &mut app,
+        vec![KeyCode::SuperLeft, binding(Action::UndoBuild).key],
+    );
+    settle(&mut app, 2);
+    assert!(
+        members(&app).is_empty(),
+        "one undo after a refit on another tab must step back a real edit; the tile still holds {:?}",
+        members(&app)
+    );
+
+    // **`future` was not cleared.** Both redos land, and each one is an entry the phantom step's
+    // `history.future.clear()` used to destroy.
+    once(
+        &mut app,
+        vec![
+            KeyCode::SuperLeft,
+            KeyCode::ShiftLeft,
+            binding(Action::RedoBuild).key,
+        ],
+    );
+    settle(&mut app, 2);
+    assert_eq!(
+        members(&app),
+        one,
+        "the first redo puts the first mesh back — `future` still held it"
+    );
+    once(
+        &mut app,
+        vec![
+            KeyCode::SuperLeft,
+            KeyCode::ShiftLeft,
+            binding(Action::RedoBuild).key,
+        ],
+    );
+    settle(&mut app, 2);
+    assert_eq!(
+        members(&app),
+        two,
+        "and the second redo puts the second one back — the entry a recorded refit would have thrown \
+         away"
+    );
+}
+
 /// **A tile survives being saved and reopened — members, hole and all.**
 ///
 /// The round-trip §7 of the tile-authoring plan asked for and which did not exist: *"build floor +
@@ -4472,18 +4698,17 @@ fn a_piece_that_is_not_in_the_library_cannot_be_dropped_into_a_tile() {
     );
 }
 
-/// **A refusal raised on the Tiles tab is on screen, and does not follow you off it.**
+/// **A refusal raised on the Tiles tab reaches the card that speaks for it.**
 ///
-/// The Meshes and Tiles tabs share one panel, and `ProblemBanner` carries the tab it speaks for —
-/// so the split needed a second banner, and the visibility pass needed to *hide* the banner that is
-/// not live rather than skip it. Skipping was safe only while every banner sat in a panel
-/// `apply_mode` hid for it. Both halves are asserted here: a refusal shows on the tab that raised
-/// it, and is gone on the tab that did not.
+/// The Meshes and Tiles tabs share one panel, and the refusals of both go through one `ImportState`.
+/// There is one problem card, over the viewport, and `notice::paint_notices` writes the live tab's
+/// newest refusal into it — which is also what `Cmd+C` harvests, in an editor where `bevy_ui` offers
+/// no other way to get text out of the window. So a card that does not follow the tab is a wrong
+/// sentence in somebody's paste buffer, and that is what this asserts.
 #[test]
 fn a_refusal_on_the_tiles_tab_is_visible_and_stays_there() {
     use bevy::input::ButtonInput;
     use bevy::prelude::{App, IntoScheduleConfigs, KeyCode, ResMut, Update};
-    use bevy::ui::Display;
     use emerge_mapper::keys::{Action, binding};
 
     let root = Fixture::new("tiles_banner")
@@ -4533,30 +4758,36 @@ fn a_refusal_on_the_tiles_tab_is_visible_and_stays_there() {
         "the premise: Shift+Enter with no slot tokens must refuse, or this test proves nothing"
     );
 
-    let banner = |app: &mut App, want: emerge_mapper::tiles::Mode| -> Display {
+    // **The card, not a `Node.display` nobody writes.** This used to look up a banner by the tab list
+    // it carried and assert `Display::Flex` on it — twice. Both assertions were vacuous: `ProblemBanner`
+    // is one card over the viewport whose visibility its *layer* owns (`paint_toast` writes
+    // `ToastLayer`), so the card's own `display` was never written by anything and `Display::Flex` is
+    // simply `Node`'s default. What is worth asserting is what `paint_notices` actually promises: the
+    // card carries the live tab's newest refusal, so `Cmd+C` harvests the right sentence.
+    let card = {
         let mut q = app
             .world_mut()
-            .query::<(&bevy::prelude::Node, &emerge_mapper::chrome::ProblemBanner)>();
-        q.iter(app.world())
-            .find(|(_, b)| b.0.contains(&want))
-            .map(|(n, _)| n.display)
-            .unwrap_or_else(|| panic!("the shared panel must carry a banner for {}", want.label()))
+            .query_filtered::<&bevy::prelude::Text, bevy::prelude::With<emerge_mapper::chrome::ProblemBanner>>();
+        let world = app.world();
+        let all: Vec<String> = q.iter(world).map(|t| t.0.clone()).collect();
+        assert_eq!(
+            all.len(),
+            1,
+            "there is exactly one problem card over the viewport, found {}",
+            all.len()
+        );
+        all.into_iter().next().unwrap_or_default()
     };
-
-    assert_eq!(
-        banner(&mut app, emerge_mapper::tiles::Mode::Tiles),
-        Display::Flex,
-        "a refusal the Tiles tab raised must be on the Tiles tab's banner"
-    );
-
-    // **The leak this guarded against cannot happen any more.** The second half of this test used
-    // to switch to the Meshes tab and assert the Tiles banner hid, because the two shared one panel
-    // and a stale line about work the author had left behind is a lie on screen. A door shows one
-    // thing for the life of the process, so there is no switch and nothing to leak across — what is
-    // left worth asserting is that the banner belongs to the door showing it.
+    let said = app
+        .world()
+        .resource::<emerge_mapper::tiles::ImportState>()
+        .status
+        .problem_text()
+        .to_owned();
     assert!(
-        banner(&mut app, emerge_mapper::tiles::Mode::Tiles) == Display::Flex,
-        "the banner stays up on the door that raised it"
+        card.contains(&said),
+        "the toast card reads {card:?} while the tab's refusal is {said:?} — a card that does not \
+         follow the live tab is a card `notice::copy_out` harvests the wrong sentence out of"
     );
 }
 
@@ -6623,8 +6854,9 @@ fn every_piece_a_shipped_guide_names_exists_in_the_shipped_kit() {
         .unwrap_or_else(|| panic!("the crate must live two levels under the workspace"))
         .to_path_buf();
     // The kit `kits.ron` declares as `authoring` — what an author gets on a plain open, and so the
-    // library every shipped card has to be walkable against.
-    let mut app = harness::build_headless(&workspace, "untitled_map", Some("furniture"))
+    // library every shipped card has to be walkable against. `None` is how that field is resolved;
+    // naming `furniture` was a directory standing in for the declaration.
+    let mut app = harness::build_headless(&workspace, "untitled_map", None)
         .unwrap_or_else(|e| panic!("{e}"));
     for _ in 0..10 {
         app.update();
@@ -7616,9 +7848,14 @@ fn the_shipped_tiles_become_solver_prototypes() {
         panic!("the crate must sit two levels under the repo root");
     };
     // The kit `kits.ron` declares as `authoring`. `compositions.ron` is the **project's**, not any
-    // one kit's, so what is under test is every tile that ships — the kit named here decides which
-    // library those tiles are resolved against.
-    let project = emerge_mapper::project::Project::open(&root, Some("furniture"))
+    // one kit's, so what is under test is every tile that ships — the kit resolved here decides
+    // which library those tiles are resolved against.
+    //
+    // **`None`, which is what a plain open does.** `Project::open(root, None)` resolves that
+    // `authoring` field, so passing nothing is what makes the code match the sentence above. Naming
+    // `furniture` made the test agree with a *directory* rather than with the declaration it claims
+    // to be about, and the day `authoring` moves it would have gone on reading the old kit, green.
+    let project = emerge_mapper::project::Project::open(&root, None)
         .unwrap_or_else(|e| panic!("the shipped kit must open: {e}"));
 
     let tiles = &project.compositions.compositions;
@@ -10376,6 +10613,21 @@ fn the_first_arrow_press_lands_on_the_first_piece() {
         )
     };
 
+    // **The row count first, because both assertions below compare two `Option`s.**
+    //
+    // `armed` against `rows().first()` and `picked` against `rows().get(1)`: with an empty list both
+    // sides of the first are `None`, and with fewer than two rows both sides of the second are — so
+    // a fixture that stopped reaching the list, or a filter that emptied it, would pass this test
+    // twice over while the seed and the walk did nothing at all. Two descriptors go in; two rows
+    // must come out.
+    assert_eq!(
+        rows(&app).len(),
+        2,
+        "the library list must hold the fixture's two pieces for either comparison below to mean \
+         anything; it holds {:?}",
+        rows(&app)
+    );
+
     // **Arrival arms the first row — no press did it.** This is the half the old bug was about:
     // the press that establishes the selection must not also walk it.
     let armed = app
@@ -11064,13 +11316,14 @@ fn hold(app: &mut App, keys_down: Vec<KeyCode>) {
 }
 
 /// The five panels a badge overlay has to serve, each with the door that shows it.
-const TABS: [emerge_mapper::tiles::Mode; 5] = [
-    emerge_mapper::tiles::Mode::Map,
-    emerge_mapper::tiles::Mode::Meshes,
-    emerge_mapper::tiles::Mode::Tiles,
-    emerge_mapper::tiles::Mode::Anim,
-    emerge_mapper::tiles::Mode::Compose,
-];
+///
+/// **`tiles::Mode::ALL`, not a list typed out here.** It was `const TABS: [Mode; 5] = [..]`, written
+/// by hand: adding a `Mode` variant compiled, dropped the new panel from the eleven tests that loop
+/// this, and *lowered* every `checked >= TABS.len()` anti-vacuity floor in them at the same time —
+/// so a new panel made the suite weaker and nothing said so. `Mode::ALL` is generated with the enum
+/// by `keys::enumerated`, so there is nowhere to leave a sixth one out of.
+const TABS: [emerge_mapper::tiles::Mode; emerge_mapper::tiles::Mode::ALL.len()] =
+    emerge_mapper::tiles::Mode::ALL;
 
 /// An editor open on `mode` with the shortcut key held, stepped until its layout is real.
 fn badges_up(root: &std::path::Path, mode: emerge_mapper::tiles::Mode) -> App {
@@ -11115,6 +11368,18 @@ fn controls_on_screen(app: &mut App) -> Vec<emerge_mapper::keys::ControlId> {
 /// **Put a piece in the detail pane**, because that is when the paned controls exist at all — the
 /// pane draws nothing until something is selected, and an overlap rule enforced against an empty
 /// pane is enforced against a different, smaller layout than the one an author works in.
+///
+/// # It could stage nothing and say nothing
+///
+/// It was a pair of `if let`s over an `Option`, so a fixture with an empty library — or a tab with
+/// no `ImportState` — silently did nothing at all. Seven tests call this and every one of them
+/// filters `Visibility::Hidden` clusters out, so their `checked >=` floors were satisfiable by
+/// exactly the unstaged, smaller layout the note above calls the wrong one to measure. And it
+/// stepped four frames where `badges_up` steps eight, for the reason `badges_up` gives: the panels
+/// are change-gated rebuilds and the reveal is a frame behind the rebuild. Four is a different
+/// layout again.
+///
+/// So: loud when there is nothing to stage, and it checks that the staging landed.
 fn stage_a_piece(app: &mut App) {
     let id = app
         .world()
@@ -11122,17 +11387,113 @@ fn stage_a_piece(app: &mut App) {
         .library
         .descriptors
         .first()
-        .map(|d| d.id.clone());
-    if let (Some(id), Some(mut state)) = (
-        id,
-        app.world_mut()
-            .get_resource_mut::<emerge_mapper::tiles::ImportState>(),
-    ) {
-        state.selected_library_id = Some(id);
+        .map(|d| d.id.clone())
+        .unwrap_or_else(|| {
+            panic!(
+                "stage_a_piece was handed a project with an empty library, so there is nothing to \
+                 put in the detail pane and every rule the caller is about would be enforced \
+                 against an empty one. Give the fixture a descriptor."
+            )
+        });
+    match app
+        .world_mut()
+        .get_resource_mut::<emerge_mapper::tiles::ImportState>()
+    {
+        Some(mut state) => state.selected_library_id = Some(id.clone()),
+        None => panic!(
+            "no `ImportState` to stage `{id}` in — the resource the whole detail pane is drawn from \
+             is absent, and staging silently did nothing before this said so"
+        ),
     }
-    for _ in 0..4 {
+    // Eight, for parity with `badges_up`: same reason, same number.
+    for _ in 0..8 {
         app.update();
     }
+    assert_eq!(
+        app.world()
+            .resource::<emerge_mapper::tiles::ImportState>()
+            .selected_library_id
+            .as_deref(),
+        Some(id.as_str()),
+        "`{id}` did not stay staged, so the pane below is not the one an author works in"
+    );
+    // **And the pane really grew controls, on the two tabs that have any inside a fold.**
+    //
+    // `chrome::Control(Detail)` sits *on* the scrolling pane on every tab, so the controls that live
+    // *inside* one are the Meshes and Tiles detail builders' — `IdField`, `Mount`, `Tags`, `Mesh`,
+    // `CellGrid`, `Tile`, `Grid`, `Members`. Those are exactly the tabs whose pane is drawn from
+    // `ImportState`, so those are the tabs where a no-op stage is visible, and the fold rules the
+    // callers check have nothing to measure anywhere else.
+    let mode = *app.world().resource::<emerge_mapper::tiles::Mode>();
+    if matches!(
+        mode,
+        emerge_mapper::tiles::Mode::Meshes | emerge_mapper::tiles::Mode::Tiles
+    ) {
+        assert!(
+            paned_controls(app) > 0,
+            "{}: `{id}` is staged and not one laid-out `chrome::Control` sits inside a scrolling \
+             pane, so the detail block was not drawn and every fold rule below measures nothing",
+            mode.label()
+        );
+    }
+}
+
+/// How many laid-out `chrome::Control` nodes sit **inside** a `ScrollArea` — the same walk
+/// `badges::fold_of` makes, counted. Strict about *inside*: a node that **is** the pane is a whole
+/// control with open ground beside it, not a row within one.
+fn paned_controls(app: &mut App) -> usize {
+    use bevy::ui::ComputedNode;
+    let named: Vec<Entity> = {
+        let mut q = app
+            .world_mut()
+            .query::<(Entity, &emerge_mapper::chrome::Control, &ComputedNode)>();
+        q.iter(app.world())
+            .filter(|(_, _, n)| n.size() != Vec2::ZERO)
+            .map(|(e, ..)| e)
+            .collect()
+    };
+    let world = app.world();
+    named
+        .into_iter()
+        .filter(|e| {
+            let mut up = world.get::<ChildOf>(*e).map(|p| p.parent());
+            while let Some(x) = up {
+                if world.get::<bevy::ui_widgets::ScrollArea>(x).is_some() {
+                    return true;
+                }
+                up = world.get::<ChildOf>(x).map(|p| p.parent());
+            }
+            false
+        })
+        .count()
+}
+
+/// **Scroll every pane to `y` logical pixels**, and say how many took the write.
+///
+/// `ScrollPosition` is logical where `ComputedNode`/`UiGlobalTransform` are physical, and
+/// `ui_layout_system` clamps it to `content - size` and floors it — so a pane whose content fits
+/// stays where it is however large a number it is handed. That is why a caller asks for several
+/// offsets rather than assuming one lands.
+///
+/// Nothing in the editor writes these back over us: the three followers are armed by
+/// `chrome::Follow` on a *selection change*, and the panes that hold the paned controls
+/// (`DetailPane`, `ComposeBody`, `SlotPane`) carry no follower at all — each says `FOLLOW-OK:` at
+/// its spawn.
+fn scroll_every_pane(app: &mut App, y: f32) -> usize {
+    let panes: Vec<Entity> = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<Entity, With<bevy::ui_widgets::ScrollArea>>();
+        q.iter(app.world()).collect()
+    };
+    let mut wrote = 0;
+    for e in panes {
+        if let Some(mut at) = app.world_mut().get_mut::<bevy::ui::ScrollPosition>(e) {
+            at.0.y = y;
+            wrote += 1;
+        }
+    }
+    wrote
 }
 
 /// What should be drawn on this tab, in this stance — the census, resolved against what is on screen
@@ -11245,33 +11606,82 @@ fn holding_k_puts_a_badge_on_everything_this_tab_can_do() {
     }
 }
 
-/// **Every place the census names is a place on screen** — the one that matters.
+/// **Every control the census homes a verb at is on screen, or that verb is in the legend** — the
+/// one that matters.
 ///
 /// A `ControlId` is only allowed to name a node that is laid out for the *whole* of every state some
-/// binding homes to it in. A pane that renders nothing until something is selected would pass a
-/// populated fixture and drop its badges exactly when a new author needs them, so this runs against
-/// **two** projects: one with a piece to select and one with nothing in it at all.
+/// binding homes to it in — and where the design says a control is genuinely absent
+/// (`ControlId::Grid` with no tile open says so in its own doc), `badges::resolve` has to send its
+/// verbs to the legend and the legend has to be there to take them. Two visible nodes claiming one
+/// id is a bug in either case. So this runs against **two** projects, one with a piece to select and
+/// one with nothing in it at all: a pane that renders nothing until something is selected drops its
+/// badges exactly when a new author needs them.
 ///
 /// Zero size is the visibility test, because `chrome::panel_root`'s hidden form is `Display::None`
 /// and a node that is not displayed is never laid out.
+///
+/// # It could only ever detect a duplicate
+///
+/// It walked `expected_badges`, which passes every home through `badges::resolve` **before** the
+/// loop — and `resolve`'s entire job is to turn a home that is not on screen into `Home::Legend`.
+/// The loop then skipped every non-`Control` home. So an absent control was demoted before the
+/// check and filtered out after it: `visible >= 1` held by construction, only `visible >= 2` was
+/// reachable, and the documented failure — a pane that draws nothing until something is selected —
+/// was precisely the case that got skipped. The second, empty fixture added to catch it strictly
+/// *reduced* the ids that reached the check.
+///
+/// It walks the census **unresolved** now: the homes the bindings themselves name, before `resolve`
+/// has an opinion. Three things are then asked of each, and each is a different way to be drawn
+/// nowhere — two nodes claiming one id, `resolve` failing to demote a control that is not there, and
+/// a resolved home with no cluster built for it at all.
 #[test]
-fn every_home_a_live_binding_names_is_on_screen() {
+fn every_control_the_census_homes_a_verb_at_is_on_screen() {
     use bevy::ui::ComputedNode;
     use emerge_mapper::keys::Home;
 
     let populated = Fixture::new("badgehome")
         .descriptor("floor", "alpha")
-        .place("alpha/floor", (0.0, 0.0))
+        .place("floor", (0.0, 0.0))
         .build("m");
     let empty = Fixture::new("badgehome_empty").build("m");
 
     let mut missing = Vec::new();
+    let mut asked = 0usize;
     for (what, root) in [("a populated kit", &populated), ("an empty kit", &empty)] {
         for mode in TABS {
             let mut app = badges_up(root, mode);
-            let want = expected_badges(&mut app, mode);
-            for home in want.iter().map(|b| b.home) {
+            // **The census's own homes, not `expected_badges`'.** That helper resolves, and
+            // resolving is the step this must happen before — see the note above. The door trim and
+            // the `Context::Global` chain are `rebuild_badges`' own, in its order.
+            let stance = app.world().resource::<emerge_mapper::keys::Live>().1;
+            let panels = emerge_mapper::tiles::Door::showing(mode).tabs().len();
+            let named: Vec<Home> = emerge_mapper::keys::badges(mode.context(), stance)
+                .into_iter()
+                .chain(emerge_mapper::keys::badges(
+                    emerge_mapper::keys::Context::Global,
+                    stance,
+                ))
+                .filter_map(|b| b.on_a_door_of(panels))
+                .map(|b| b.home)
+                .collect();
+            // **Every cluster the overlay built, placed or not.** Existence rather than
+            // `Visibility`: `place_badges` may legitimately leave a box unplaced on a screen with
+            // no ground for it, and that is `no_badge_cluster_draws_through_another`'s subject
+            // rather than this one. What is asked here is whether the verb was given a home at
+            // all — a census entry with no cluster anywhere is a verb the author cannot reach by
+            // any route.
+            let built: Vec<Home> = {
+                let mut q = app
+                    .world_mut()
+                    .query::<&emerge_mapper::badges::BadgeCluster>();
+                q.iter(app.world()).map(|c| c.0).collect()
+            };
+            // The editor's own answer to *"is this control on screen"*, which is what decides where
+            // the badge goes. Compared against the direct count below, so the two cannot drift.
+            let on_screen = controls_on_screen(&mut app);
+            for home in named {
                 let Home::Control(id) = home else { continue };
+                asked += 1;
                 let visible = {
                     let mut q = app
                         .world_mut()
@@ -11280,10 +11690,28 @@ fn every_home_a_live_binding_names_is_on_screen() {
                         .filter(|(c, node)| c.0 == id && node.size() != Vec2::ZERO)
                         .count()
                 };
-                if visible != 1 {
+                let resolved = emerge_mapper::badges::resolve(home, &on_screen);
+                let want = if visible == 1 { home } else { Home::Legend };
+                if visible > 1 {
                     missing.push(format!(
-                        "{what}, {}: {id:?} is laid out {visible} time(s), and a badge needs \
-                         exactly one",
+                        "{what}, {}: {id:?} is laid out {visible} times; two visible nodes claiming \
+                         one id is a bug rather than a tie to break, and `badges::sole_control` \
+                         answers `None` to both of its callers when it happens",
+                        mode.label()
+                    ));
+                } else if resolved != want {
+                    missing.push(format!(
+                        "{what}, {}: {id:?} is laid out {visible} time(s) and `badges::resolve` \
+                         answered {resolved:?} rather than {want:?}. A control that is not on \
+                         screen must be demoted to the legend — a verb that keeps `Home::Control` \
+                         with nothing to stand on is drawn neither on a control nor beside its own \
+                         prose, which is the one outcome `Home` exists to rule out.",
+                        mode.label()
+                    ));
+                } else if !built.contains(&want) {
+                    missing.push(format!(
+                        "{what}, {}: {id:?} resolves to {want:?} and no cluster was built for it, \
+                         so the verb is drawn nowhere at all",
                         mode.label()
                     ));
                 }
@@ -11294,9 +11722,18 @@ fn every_home_a_live_binding_names_is_on_screen() {
     missing.dedup();
     assert!(
         missing.is_empty(),
-        "the census homes verbs at controls that are not on screen in the state that offers them. \
-         Either the panel stopped drawing the node, or the `Home` belongs on a region:\n  {}",
+        "the census homes verbs where they cannot be read. Either the panel stopped drawing the \
+         node, or two nodes claim one id, or the legend that catches the absent ones is not \
+         there:\n  {}",
         missing.join("\n  ")
+    );
+    // Ten `badges_up` boots contribute; a tab whose census names no control at all would be a
+    // finding of its own, and zero across all ten means the census stopped answering.
+    assert!(
+        asked >= 2 * TABS.len(),
+        "only {asked} control home(s) were asked about across two fixtures and {} tabs — the \
+         census has stopped naming any, so nothing above was checked",
+        TABS.len()
     );
 }
 
@@ -11414,10 +11851,20 @@ fn the_badge_layer_never_answers_the_pointer() {
     // which is exactly the node `build_hover_map` blocks on by default. The claim is about the
     // subtree, so the test walks the subtree.
     let mut hoverable: Vec<Entity> = Vec::new();
+    let mut walked = 0usize;
+    let mut clusters = 0usize;
     {
         let mut q = app.world_mut().query_filtered::<Entity, With<BadgeLayer>>();
         let mut stack: Vec<Entity> = q.iter(app.world()).collect();
         while let Some(id) = stack.pop() {
+            walked += 1;
+            if app
+                .world()
+                .get::<emerge_mapper::badges::BadgeCluster>(id)
+                .is_some()
+            {
+                clusters += 1;
+            }
             if app
                 .world()
                 .get::<bevy::picking::hover::Hovered>(id)
@@ -11435,6 +11882,22 @@ fn the_badge_layer_never_answers_the_pointer() {
         "{} node(s) of the badge layer carry `Hovered` ({hoverable:?}); a layer over the whole \
          window that answers the pointer kills map zoom and click-to-place everywhere",
         hoverable.len()
+    );
+    // **The anti-vacuity floor, which all five geometric siblings carry and this did not.**
+    //
+    // Every clause above is an absence, so a layer that was never spawned — or a walk that reached
+    // no children — reads exactly the same as a layer that answers no pointer. The subtree is the
+    // subject: a box, its chord, and the wrapper the description is measured inside, which is the
+    // node this test was widened to see in the first place.
+    assert!(
+        walked > 1,
+        "the walk visited {walked} node(s) under the badge layer, so it is asserting the absence of \
+         something that was never drawn"
+    );
+    assert!(
+        clusters > 0,
+        "the walk found no `BadgeCluster` under the layer, so the subtree the claim is about was \
+         not built — {walked} node(s) were visited"
     );
 }
 
@@ -11630,7 +12093,10 @@ fn a_held_piece_carries_its_badges_on_the_member_list() {
     assert_eq!(
         live.1,
         Stance::Holding,
-        "arm, drop, arm again must leave a piece in hand — without it this test drives nothing"
+        "the drop must leave a piece in hand — `placing` stays true through it, and without that \
+         this test drives nothing. (It used to say *arm, drop, arm again*, which is the loop the \
+         2026-08-20 stance rules removed: `Enter` is `Idle`-scoped, so the drop alone is the honest \
+         path and it is the only key pressed above.)"
     );
 
     hold(&mut app, vec![binding(Action::Shortcuts).key]);
@@ -11705,7 +12171,7 @@ fn a_badge_stands_on_ground_nothing_else_uses() {
 
     let root = Fixture::new("badgeside")
         .descriptor("floor", "alpha")
-        .place("alpha/floor", (0.0, 0.0))
+        .place("floor", (0.0, 0.0))
         .build("m");
 
     let mut covered = Vec::new();
@@ -12353,8 +12819,6 @@ fn the_tag_axes_have_a_block_to_stand_in() {
 
 /// **A verb whose row is out of view is pinned to its own pane, not floating past it.**
 ///
-/// **A row beyond the fold is pointed at from its pane's edge.**
-///
 /// A row in a `chrome::scroll_list` keeps its rect when it scrolls out of view — only its clip
 /// changes. Taken at face value that would aim a leader hundreds of pixels below the pane, level
 /// with the status band, naming a row nobody can see. Boxes used to be pinned there bodily, and a
@@ -12363,92 +12827,160 @@ fn the_tag_axes_have_a_block_to_stand_in() {
 /// line points at the edge where scrolling would bring the row back.
 ///
 /// The invariant: a paned control's leader begins inside its pane's fold, give or take a hairline.
+///
+/// # It never scrolled anything, so it could not reach the case it names
+///
+/// Every pane sat at the top of its content, so every paned control was wholly inside its fold and
+/// the clamp had nothing to do — deleting it changed no number here. The one shape that *would*
+/// have shown it, a control scrolled entirely past its fold, is skipped by `place_badges` itself
+/// (`a.at.intersect(f)` empty → `continue`), leaves the cluster `Visibility::Hidden`, and is
+/// filtered out below. So the regression this test is named for was unreachable from it.
+///
+/// The panes are scrolled now, and by an offset **read off the layout** rather than picked: a pane
+/// moved by `row centre − fold top` puts exactly that row half in and half out. `straddled` is the
+/// count that says such a row was really measured, and `scrollable` says whether there was any
+/// scroll room to produce one — two separate failures, so a quiet test names its own reason.
 #[test]
 fn a_row_beyond_the_fold_is_pointed_at_from_its_pane() {
     use bevy::ui::{ComputedNode, UiGlobalTransform};
     use emerge_mapper::badges::{BadgeCluster, Lead, LeadSeg};
     use emerge_mapper::keys::Home;
 
+    /// Every laid-out `chrome::Control` that sits **inside** a scrolling pane, as
+    /// `(id, the fold, the control's own rect, the pane's logical-per-physical factor, its scroll
+    /// room in physical pixels)`. The same ancestry walk `badges::fold_of` makes, and strict about
+    /// *inside* for the same reason: a node that **is** the pane is a whole control with open ground
+    /// beside it, not a row within one.
+    fn paned(app: &mut App) -> Vec<(emerge_mapper::keys::ControlId, Rect, Rect, f32, f32)> {
+        let mut q = app
+            .world_mut()
+            .query::<(Entity, &emerge_mapper::chrome::Control, &ComputedNode)>();
+        let ids: Vec<(Entity, emerge_mapper::keys::ControlId)> = q
+            .iter(app.world())
+            .filter(|(_, _, n)| n.size() != Vec2::ZERO)
+            .map(|(e, c, _)| (e, c.0))
+            .collect();
+        let world = app.world();
+        ids.into_iter()
+            .filter_map(|(e, id)| {
+                let at = world
+                    .get::<ComputedNode>(e)
+                    .zip(world.get::<UiGlobalTransform>(e))
+                    .map(|(n, tf)| Rect::from_center_size(tf.translation, n.size()))?;
+                let mut up = world.get::<ChildOf>(e).map(|p| p.parent());
+                while let Some(x) = up {
+                    if world.get::<bevy::ui_widgets::ScrollArea>(x).is_some() {
+                        let (n, tf) = world
+                            .get::<ComputedNode>(x)
+                            .zip(world.get::<UiGlobalTransform>(x))?;
+                        if n.size() == Vec2::ZERO {
+                            return None;
+                        }
+                        let room = (n.content_size.y - n.size.y).max(0.0);
+                        return Some((
+                            id,
+                            Rect::from_center_size(tf.translation, n.size()),
+                            at,
+                            n.inverse_scale_factor,
+                            room,
+                        ));
+                    }
+                    up = world.get::<ChildOf>(x).map(|p| p.parent());
+                }
+                None
+            })
+            .collect()
+    }
+
     let root = Fixture::new("badgefold")
         .descriptor("floor", "alpha")
-        .place("alpha/floor", (0.0, 0.0))
+        .place("floor", (0.0, 0.0))
         .build("m");
 
     let mut loose = Vec::new();
     let mut checked = 0usize;
+    let mut straddled = 0usize;
+    let mut scrollable = 0usize;
     for mode in TABS {
         let mut app = badges_up(&root, mode);
         stage_a_piece(&mut app);
 
-        // Every control, with the fold it sits inside — the same walk `badges::fold_of` makes.
-        let folds: Vec<(emerge_mapper::keys::ControlId, Rect)> = {
-            let mut q = app
-                .world_mut()
-                .query::<(Entity, &emerge_mapper::chrome::Control, &ComputedNode)>();
-            let ids: Vec<(Entity, emerge_mapper::keys::ControlId)> = q
-                .iter(app.world())
-                .filter(|(_, _, n)| n.size() != Vec2::ZERO)
-                .map(|(e, c, _)| (e, c.0))
-                .collect();
-            let world = app.world();
-            ids.into_iter()
-                .filter_map(|(e, id)| {
-                    let mut up = world.get::<ChildOf>(e).map(|p| p.parent());
-                    while let Some(x) = up {
-                        if world.get::<bevy::ui_widgets::ScrollArea>(x).is_some() {
-                            return world
-                                .get::<ComputedNode>(x)
-                                .zip(world.get::<UiGlobalTransform>(x))
-                                .filter(|(n, _)| n.size() != Vec2::ZERO)
-                                .map(|(n, tf)| {
-                                    (id, Rect::from_center_size(tf.translation, n.size()))
-                                });
-                        }
-                        up = world.get::<ChildOf>(x).map(|p| p.parent());
-                    }
-                    None
-                })
-                .collect()
-        };
-
-        // Every paned cluster's reach segment starts inside its pane.
-        let leads: Vec<(emerge_mapper::keys::ControlId, Entity)> = {
-            let mut q = app
-                .world_mut()
-                .query::<(&BadgeCluster, &Lead, &Visibility)>();
-            q.iter(app.world())
-                .filter(|(.., vis)| **vis != Visibility::Hidden)
-                .filter_map(|(c, lead, _)| match c.0 {
-                    Home::Control(id) => Some((id, lead.0[0])),
-                    Home::Legend => None,
-                })
-                .collect()
-        };
-        let mut seg_q = app
-            .world_mut()
-            .query_filtered::<(&ComputedNode, &UiGlobalTransform, &Visibility), With<LeadSeg>>();
-        let world = app.world();
-        for (id, seg) in leads {
-            let Some((_, fold)) = folds.iter().find(|(x, _)| *x == id) else {
-                continue;
-            };
-            let Ok((node, tf, vis)) = seg_q.get(world, seg) else {
-                continue;
-            };
-            if *vis == Visibility::Hidden || node.size() == Vec2::ZERO {
-                loose.push(format!("{}: {id:?} shows no reach segment at all", mode.label()));
+        // **The offsets come out of the layout, not out of a guess.**
+        //
+        // Scrolling a pane by `row centre − fold top` puts exactly that row half inside the fold and
+        // half above it, which is the one shape the clamp exists for: wholly inside needs no clamp,
+        // and wholly outside is skipped by `place_badges` (`a.at.intersect(f)` empty → `continue`),
+        // left `Visibility::Hidden`, and filtered out below. One candidate per paned control, capped
+        // at the pane's real scroll room, so any pane that can move at all produces a straddle
+        // rather than the test hoping a fixed number lands mid-row.
+        //
+        // `0.0` stays first: it is the unscrolled coverage the `checked` floor is written against.
+        let mut offsets: Vec<f32> = vec![0.0];
+        for (_, fold, at, inv, room) in paned(&mut app) {
+            if room <= 1.0 {
                 continue;
             }
-            checked += 1;
-            let y = tf.translation.y;
-            if y < fold.min.y - 2.0 || y > fold.max.y + 2.0 {
-                loose.push(format!(
-                    "{}: {id:?} is pointed at from y {:.0}, outside its pane {:.0}..{:.0}",
-                    mode.label(),
-                    y,
-                    fold.min.y,
-                    fold.max.y
-                ));
+            scrollable += 1;
+            let want = ((at.center().y - fold.min.y) * inv).clamp(0.0, room * inv);
+            if want > 0.5 && !offsets.iter().any(|o| (o - want).abs() < 0.5) {
+                offsets.push(want);
+            }
+        }
+
+        for scroll in offsets {
+            scroll_every_pane(&mut app, scroll);
+            for _ in 0..8 {
+                app.update();
+            }
+            let folds = paned(&mut app);
+
+            // Every paned cluster's reach segment starts inside its pane.
+            let leads: Vec<(emerge_mapper::keys::ControlId, Entity)> = {
+                let mut q = app
+                    .world_mut()
+                    .query::<(&BadgeCluster, &Lead, &Visibility)>();
+                q.iter(app.world())
+                    .filter(|(.., vis)| **vis != Visibility::Hidden)
+                    .filter_map(|(c, lead, _)| match c.0 {
+                        Home::Control(id) => Some((id, lead.0[0])),
+                        Home::Legend => None,
+                    })
+                    .collect()
+            };
+            let mut seg_q = app
+                .world_mut()
+                .query_filtered::<(&ComputedNode, &UiGlobalTransform, &Visibility), With<LeadSeg>>();
+            let world = app.world();
+            for (id, seg) in leads {
+                let Some((_, fold, at, ..)) = folds.iter().find(|(x, ..)| *x == id) else {
+                    continue;
+                };
+                let Ok((node, tf, vis)) = seg_q.get(world, seg) else {
+                    continue;
+                };
+                if *vis == Visibility::Hidden || node.size() == Vec2::ZERO {
+                    loose.push(format!("{}: {id:?} shows no reach segment at all", mode.label()));
+                    continue;
+                }
+                checked += 1;
+                // Part-way past the fold: intersecting it, and reaching beyond it. `straddled` is
+                // what says the clamp was asked anything at all.
+                let seen = at.intersect(*fold);
+                if seen.height() > 0.0
+                    && (at.min.y < fold.min.y - 0.5 || at.max.y > fold.max.y + 0.5)
+                {
+                    straddled += 1;
+                }
+                let y = tf.translation.y;
+                if y < fold.min.y - 2.0 || y > fold.max.y + 2.0 {
+                    loose.push(format!(
+                        "{}: {id:?} is pointed at from y {:.0}, outside its pane {:.0}..{:.0}",
+                        mode.label(),
+                        y,
+                        fold.min.y,
+                        fold.max.y
+                    ));
+                }
             }
         }
     }
@@ -12464,6 +12996,20 @@ fn a_row_beyond_the_fold_is_pointed_at_from_its_pane() {
         "only {checked} paned leader(s) were measured across {} tabs; the rule is being enforced \
          against nothing",
         TABS.len()
+    );
+    assert!(
+        scrollable > 0,
+        "no `chrome::Control` in the editor sits inside a pane with any scroll room, so a row \
+         part-way past its fold is unreachable from here and the rule has no subject. Either the \
+         detail pane now fits its content on this fixture, or nothing is laid out inside a \
+         `ScrollArea` any more."
+    );
+    assert!(
+        straddled > 0,
+        "{scrollable} paned control(s) had scroll room and {checked} leader(s) were measured, and \
+         not one named a control reaching past its own fold — so the clamp was never asked anything \
+         and deleting it would not move this test. The offsets are derived from the layout, so this \
+         means the rows are moving less than half their own height."
     );
 }
 
@@ -12500,7 +13046,7 @@ fn no_badge_cluster_draws_through_another() {
     // red suite into the record of two different bugs. `BACKLOG.md` carries it with its output.
     let root = Fixture::new("badgeoverlap")
         .descriptor("floor", "alpha")
-        .place("alpha/floor", (0.0, 0.0))
+        .place("floor", (0.0, 0.0))
         .build("m");
 
     let mut through = Vec::new();
@@ -12647,7 +13193,7 @@ fn a_badge_takes_the_ground_a_dock_leaves() {
 
     let root = Fixture::new("badgedock")
         .descriptor("floor", "alpha")
-        .place("alpha/floor", (0.0, 0.0))
+        .place("floor", (0.0, 0.0))
         .build("m");
 
     let mut inside = Vec::new();
@@ -12702,7 +13248,7 @@ fn a_badge_takes_the_ground_a_dock_leaves() {
 fn the_grounds_step_back_while_the_shortcut_key_is_held() {
     let root = Fixture::new("groundheld")
         .descriptor("floor", "alpha")
-        .place("alpha/floor", (0.0, 0.0))
+        .place("floor", (0.0, 0.0))
         .build("m");
 
     let mut app = badges_up(&root, emerge_mapper::tiles::Mode::Map);
@@ -12761,7 +13307,7 @@ fn every_panel_and_band_is_ground() {
 
     let root = Fixture::new("grounded")
         .descriptor("floor", "alpha")
-        .place("alpha/floor", (0.0, 0.0))
+        .place("floor", (0.0, 0.0))
         .build("m");
 
     let mut bare = Vec::new();
@@ -13073,9 +13619,14 @@ fn crowded_root(name: &str) -> std::path::PathBuf {
     for id in &ids {
         fixture = fixture.descriptor(id, "alpha");
     }
+    // **`piece_00`, not `alpha/piece_00`.** `descriptor(id, "alpha")` mints the id verbatim and puts
+    // its mesh under `assets/alpha/`; the pack is a folder, never a namespace. Both rows named an id
+    // nothing carries, so `redraw_placements` dropped them without a word and this "crowded" project
+    // had an **empty map** — the same defect the seven `alpha/floor` fixtures had, and the reason
+    // `Fixture::place` refuses an unknown id now.
     fixture
-        .place("alpha/piece_00", (0.0, 0.0))
-        .place("alpha/piece_01", (2.0, 0.0))
+        .place("piece_00", (0.0, 0.0))
+        .place("piece_01", (2.0, 0.0))
         .build("m")
 }
 
@@ -13090,7 +13641,7 @@ fn every_control_cluster_is_tied_to_its_anchor() {
 
     let root = Fixture::new("badgetie")
         .descriptor("floor", "alpha")
-        .place("alpha/floor", (0.0, 0.0))
+        .place("floor", (0.0, 0.0))
         .build("m");
 
     let mut untied = Vec::new();
@@ -13490,40 +14041,39 @@ fn enter_in_the_tag_box_takes_the_one_match_and_refuses_a_tie() {
         "and keep the keyboard — `Esc` is what leaves"
     );
 
-    // Now a tie: `p` is in `prop`, `plain` and `worktop`.
+    // Now a tie: `p` is in `prop` (kind), `plain` (look) and `worktop` (surfaces).
     tap_key(
         &mut app,
         bevy::input::keyboard::Key::Character("p".into()),
         KeyCode::KeyP,
     );
-    let before = (
-        surfaces(&app, &id),
+    // **The WHOLE descriptor, not two of its axes.**
+    //
+    // It compared `offers.surfaces` and `kind` — and the third token matching `p` is `plain`, which
+    // is on the **`look`** axis, which neither of those covers. So an `Enter` that resolved the tie
+    // by writing `plain` wrote a tag the author never chose and this test passed it. "Nothing was
+    // written" is a claim about the row, so the row is what is compared;
+    // `a_settled_effect_survives_the_next_save` compares a whole descriptor for the same reason.
+    let row = |app: &App, id: &str| {
         app.world()
             .resource::<emerge_mapper::project::Project>()
             .library
             .descriptors
             .iter()
             .find(|d| d.id == id)
-            .map(|d| d.kind.clone())
-            .unwrap_or_default(),
-    );
+            .cloned()
+            .unwrap_or_else(|| panic!("the fixture must carry `{id}`"))
+    };
+    let before = row(&app, &id);
     tap_key(&mut app, bevy::input::keyboard::Key::Enter, KeyCode::Enter);
     for _ in 0..3 {
         app.update();
     }
-    let after_kind = app
-        .world()
-        .resource::<emerge_mapper::project::Project>()
-        .library
-        .descriptors
-        .iter()
-        .find(|d| d.id == id)
-        .map(|d| d.kind.clone())
-        .unwrap_or_default();
     assert_eq!(
-        (surfaces(&app, &id), after_kind),
+        row(&app, &id),
         before,
-        "three tokens match `p`, so `Enter` must write nothing at all rather than pick one"
+        "three tokens match `p` — one on each of `kind`, `look` and `surfaces` — so `Enter` must \
+         write nothing at all rather than pick one"
     );
     let said = app
         .world()
@@ -13729,7 +14279,20 @@ fn delete_sends_a_mesh_back_to_not_imported_and_lands_on_it() {
     use emerge_mapper::keys::Action;
     use emerge_mapper::tiles::ImportState;
 
-    let root = Fixture::new("sendback")
+    let root = Fixture::new("sendback_cursor")
+        // **Two unimported meshes that sort BEFORE the pack the library pieces live in**, so the
+        // reborn row cannot be index 0.
+        //
+        // Without them the candidate list is empty until the delete, the mesh comes back at 0, and
+        // `ImportState::selected` was already 0 — so `remove_tile`'s whole cursor move could be
+        // deleted and the last assertion here would still hold. `import::scan` sorts by path and
+        // `assets/aaa/…` sorts before `assets/alpha/…`, so the reborn row lands at 2.
+        //
+        // The name is `sendback_cursor` rather than `sendback` because `Fixture::new` keys its temp
+        // directory on the name alone: `cmd_remove_falls_to_the_place_selection` already builds a
+        // `sendback`, and these run in parallel — two tests sharing one directory, one of which now
+        // writes a pack the other would scan.
+        .pack("aaa", &["spare_one", "spare_two"])
         .descriptor("floor", "alpha")
         .descriptor("wall", "alpha")
         .build("m");
@@ -13789,6 +14352,12 @@ fn delete_sends_a_mesh_back_to_not_imported_and_lands_on_it() {
     assert_eq!(
         state.selected_library_id, None,
         "the cursor leaves the library shelf, which is what puts NOT IMPORTED on screen"
+    );
+    assert_ne!(
+        back,
+        Some(0),
+        "the fixture must put the reborn row somewhere other than index 0, or the assertion below \
+         is satisfied by a cursor that never moved — it came back at {back:?}"
     );
     assert_eq!(
         Some(state.selected),
@@ -13888,25 +14457,66 @@ fn the_library_reads_newest_first_and_remembers_the_row_you_left() {
          away where you had got to"
     );
 
-    // **Editing does not reshuffle.** Touch the oldest piece's tags; it stays where it was.
-    {
-        let mut project = app.world_mut().resource_mut::<Project>();
-        if let Some(d) = project
-            .measured
-            .descriptors
-            .iter_mut()
-            .find(|d| d.id == "oldest")
-        {
-            d.look = vec!["plain".to_owned()];
-        }
+    // **Editing does not reshuffle** — and the edit goes in through the keyboard, because that is
+    // the only path that rebuilds the list under assertion.
+    //
+    // # It used to mutate a list nothing here reads
+    //
+    // The block wrote `project.measured.descriptors` while `shelf()` reads
+    // `project.library.descriptors`, and nothing rebuilds one from the other outside
+    // `commit_measured` — so the edit never reached the list being asserted on, and *"the row did
+    // not move"* was true of a row nothing had touched. The whole block could be deleted and this
+    // stayed green. Typing a token into the tag box and taking it with `Enter` is the write an
+    // author actually makes and it goes through `commit_measured`; the neighbouring
+    // `a_settled_effect_survives_the_next_save` drives the same path for the same reason.
+    app.world_mut()
+        .resource_mut::<ImportState>()
+        .selected_library_id = Some("oldest".to_owned());
+    for _ in 0..4 {
+        app.update();
     }
+    press_once(&mut app, emerge_mapper::keys::binding(Action::FocusTagFilter).key);
     for _ in 0..2 {
         app.update();
     }
+    // One more, as the two neighbouring tag tests do: the box has to be focused *and* laid out
+    // before a character means anything to it.
+    app.update();
+    for (logical, code) in [
+        ("w", KeyCode::KeyW),
+        ("o", KeyCode::KeyO),
+        ("r", KeyCode::KeyR),
+        ("k", KeyCode::KeyK),
+    ] {
+        tap_key(
+            &mut app,
+            bevy::input::keyboard::Key::Character(logical.into()),
+            code,
+        );
+    }
+    tap_key(&mut app, bevy::input::keyboard::Key::Enter, KeyCode::Enter);
+    for _ in 0..3 {
+        app.update();
+    }
+    // **The premise, asserted.** `worktop` is the only token in the fixture's vocabulary matching
+    // `work`, so `Enter` takes it. Without this the assertion below is about a piece nobody edited,
+    // which is exactly the state the old block left it in.
+    assert_eq!(
+        app.world()
+            .resource::<Project>()
+            .library
+            .descriptors
+            .iter()
+            .find(|d| d.id == "oldest")
+            .map(|d| d.offers.surfaces.clone())
+            .unwrap_or_default(),
+        vec!["worktop".to_owned()],
+        "the keyboard write did not land on `oldest`, so nothing below is about an edited row"
+    );
     assert_eq!(
         shelf(&app).last().map(String::as_str),
         Some("oldest"),
-        "a piece that was edited does not jump to the top — the order is definition order, and \
+        "a piece that was edited jumped out of its place — the order is definition order, and \
          reshuffling under an author's hand is what `docs/ui.md` §3.5 is against"
     );
 }
