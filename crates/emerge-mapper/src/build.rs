@@ -1065,7 +1065,26 @@ pub fn tile_history(
         return;
     }
 
-    // Not a history key, so anything different is an edit worth remembering.
+    // **A refit is not an edit.** `refit_tile` runs on every tab now (see its note), so coming back
+    // to Tiles after a measurement landed presents a tile that differs from what was last seen only
+    // in its *derived* envelope. `Composition`'s `PartialEq` covers that field and `adjusted_member`
+    // deliberately does not, so the compare below would push a step nobody took and clear `future` —
+    // and undo would then restore the pre-refit size, which refits and pushes again, for ever.
+    //
+    // Adopting rather than recording is the whole fix: the envelope is **read off the contents**
+    // ([`fit_envelope`]), so there is nothing here an author could want back.
+    if let (Some(Some(was)), Some(now)) = (history.seen.as_ref(), build.open.as_ref())
+        && was.id == now.id
+        && was.members == now.members
+        && was.locations == now.locations
+        && was.note == now.note
+        && was.envelope != now.envelope
+    {
+        history.seen = Some(build.open.clone());
+        return;
+    }
+
+    // Not a history key and not a refit, so anything different is an edit worth remembering.
     if history.seen.as_ref() != Some(&build.open) {
         // **A run of adjustments to one member is one step.**
         //
@@ -1145,7 +1164,26 @@ pub fn refit_tile(
     // **property of the tile**, not an event in its history — `docs/ui.md` §3.2, show the state where
     // the state lives. It is one line in the TILE block now, true exactly while it is on screen, and
     // it costs the alert budget (§3.4) nothing.
-    refit(&mut build, &project.library, project.lattice.cell_height);
+    // **Bypassed, then flagged by hand.**
+    //
+    // `ResMut::deref_mut` flags the resource, so passing `&mut build` told every reader the tile had
+    // moved before `refit` had decided whether it had — and because this system is gated on
+    // `build.is_changed()` and was setting that flag itself, one edit anywhere left `Build` flagged
+    // every frame for ever. `refit`'s note says it writes only on a real change; this is what makes
+    // that true from the outside as well.
+    //
+    // The two beneficiaries are `tiles::rebuild_candidates` and `tiles::rebuild_detail`, both gated
+    // on `resource_changed::<Build>` and both despawning and respawning their whole pane — that
+    // per-frame bounce is what stops.
+    if refit(
+        build.bypass_change_detection(),
+        &project.library,
+        project.lattice.cell_height,
+    )
+    .is_some()
+    {
+        build.set_changed();
+    }
 }
 
 /// **Every BUILD verb, in one system.**

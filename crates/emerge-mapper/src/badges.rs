@@ -381,6 +381,15 @@ impl FreeGround {
         if c0 < 0.0 || r0 < 0.0 || c1 > self.cols as f32 || r1 > self.rows as f32 {
             return false;
         }
+        // **A rect starting on the far cell boundary has no cell to stand on.** A zero-width probe
+        // at `window.max` floors `c0` to `cols`, clears the guard above — `c1 > cols` is false when
+        // `c1 == cols` — and the `max(c0 + 1)` below then indexes `sum` a column past its last,
+        // which on the bottom row is a column past the table. There is no ground at the edge of the
+        // grid, so the honest answer is the one a rect outside it already gets. Reachable from the
+        // `deep` probe below, which is why this is a panic and not merely a wrong answer.
+        if c0 as usize >= self.cols || r0 as usize >= self.rows {
+            return false;
+        }
         let (c0, r0) = (c0 as usize, r0 as usize);
         let (c1, r1) = ((c1 as usize).max(c0 + 1), (r1 as usize).max(r0 + 1));
         let taken = self.sum[r1 * w + c1] + self.sum[r0 * w + c0]
@@ -512,6 +521,41 @@ fn laid_out_rect(node: &ComputedNode, tf: &UiGlobalTransform) -> Option<Rect> {
     (size != Vec2::ZERO).then(|| Rect::from_center_size(tf.translation, size))
 }
 
+/// **The one laid-out node claiming a [`keys::ControlId`], or none** — the single answer to *"is
+/// this control on screen"*, asked by the census in [`rebuild_badges`] and by [`anchor`] alike.
+///
+/// Two visible nodes claiming one id is a bug rather than a tie to break, and choosing between them
+/// would hide it. Answering `None` to **both** callers is what makes the bug survivable: [`resolve`]
+/// sends a home nothing answers for to [`Home::Legend`], where the chord is drawn beside its own
+/// prose.
+///
+/// # Two predicates is what made a duplicated id draw nothing at all
+///
+/// The census used to ask `.any(..)` — at-least-one — while this asked for exactly one. So a
+/// duplicated id carried [`Home::Control`] through [`resolve`] and then found no anchor to be placed
+/// against: the cluster stayed `Visibility::Hidden` and the verb was drawn neither on a control nor
+/// in the legend, which is the one outcome [`Home`] exists to rule out. The exactly-one answer wins
+/// because it is the answer that actually decides whether a box is drawn.
+///
+/// `every_home_a_live_binding_names_is_on_screen` is the guard; the warning is the report when the
+/// duplicate has already shipped, and it is diagnostics only — nothing about where the badge goes
+/// depends on it.
+fn sole_control(
+    id: keys::ControlId,
+    controls: &Query<(Entity, &chrome::Control, &ComputedNode, &UiGlobalTransform)>,
+) -> Option<(Entity, Rect)> {
+    let mut found = controls
+        .iter()
+        .filter(|(_, c, ..)| c.0 == id)
+        .filter_map(|(e, _, node, tf)| laid_out_rect(node, tf).map(|r| (e, r)));
+    let first = found.next()?;
+    if found.next().is_some() {
+        warn_once!("two visible controls claim {id:?}; its badges go to the legend");
+        return None;
+    }
+    Some(first)
+}
+
 /// The scrolling pane a control sits **inside**, if any. Strict: a node that *is* the `ScrollArea` is
 /// a whole control with open ground beside it, not a row within one.
 fn fold_of(
@@ -577,11 +621,7 @@ fn rebuild_badges(
     let key = want.then(|| {
         let on_screen: Vec<keys::ControlId> = keys::ControlId::ALL
             .into_iter()
-            .filter(|id| {
-                controls
-                    .iter()
-                    .any(|(_, c, node, tf)| c.0 == *id && laid_out_rect(node, tf).is_some())
-            })
+            .filter(|id| sole_control(*id, &controls).is_some())
             .collect();
         (*mode, live.1, on_screen)
     });
@@ -821,19 +861,7 @@ fn anchor(
 ) -> Option<Anchored> {
     match home {
         Home::Control(id) => {
-            let mut found = controls
-                .iter()
-                .filter(|(_, c, ..)| c.0 == id)
-                .filter_map(|(e, _, node, tf)| laid_out_rect(node, tf).map(|r| (e, r)));
-            let first = found.next()?;
-            if found.next().is_some() {
-                // Two visible nodes claiming one id is a bug rather than a tie to break, and
-                // choosing between them would hide it. `every_home_a_live_binding_names_is_on_screen`
-                // is the guard; this is the report when it has already shipped.
-                warn_once!("two visible controls claim {id:?}; its badges are not drawn");
-                return None;
-            }
-            let (entity, at) = first;
+            let (entity, at) = sole_control(id, controls)?;
             let fold = fold_of(entity, parents, folds, rects);
             // Asked of the frame, not of a height: `chrome::Frame` names these three, so a band that
             // grows or shrinks cannot make this answer stale the way a pixel threshold would.
@@ -1392,12 +1420,20 @@ fn place_badges(
         }
         let size = node.size();
         let leading = a.at.min.x - size.x - reach;
+        // **Clamped into the window, on both axes.** Every other placement is bounded by
+        // `FreeGround::is_free` refusing a rect that reaches outside it; a banded box takes neither
+        // that ladder nor the dock's bound, so the bound has to be stated here or a chip belonging
+        // to the chrome bar's rightmost control is drawn off the edge of the screen — and `y` was
+        // never bounded at all. `.max(window.min.x)` keeps `clamp`'s range the right way round for a
+        // box wider than the window it is being put in; an inverted range panics.
         let x = if leading >= window.min.x {
             leading
         } else {
             a.at.max.x + reach
-        };
-        let y = a.at.center().y - size.y * 0.5;
+        }
+        .clamp(window.min.x, (window.max.x - size.x).max(window.min.x));
+        let y = (a.at.center().y - size.y * 0.5)
+            .clamp(window.min.y, (window.max.y - size.y).max(window.min.y));
         let pos = Vec2::new(x, y);
         let me = Rect::from_corners(pos, pos + size);
         banded_plans[i].pos = Some(pos);
@@ -1489,8 +1525,18 @@ fn place_badges(
             // The cost is density, and it is the cost that was chosen: a badge may sit further down
             // its column, away from the row it names, with the leader carrying the association
             // across that distance. That is what the leader was bought for.
-            let mut floor = stage.min.y;
             let side = rail_of(left);
+            // **A side with no leaders reserves no corridor.** `left_edge`/`right_edge` are still
+            // their `f32::MIN`/`f32::MAX` sentinels when nothing un-banded anchors on this side, so
+            // the band built from them below is not two empty lanes — it is a rect pinned at the far
+            // end of the number line, pushed into `taken`, telling the legend and the other side's
+            // boxes that ground they can see is spoken for. Everything after this line either
+            // iterates `side` or reads a band only `side` uses, and `lanes_for` returns nothing for
+            // zero leaders, so an empty side has nothing to do here.
+            if side.is_empty() {
+                continue;
+            }
+            let mut floor = stage.min.y;
             // **The corridor is a band now, one [`LANE`] per leader on this side.** Reserved whole
             // and up front, so a box can never stand where a lane might later run — which is what
             // lets the lanes be chosen *after* every box is placed, from the geometry they all end
@@ -1596,8 +1642,19 @@ fn place_badges(
                 } else {
                     a.at.min.x + width
                 };
-                let home_fits = dock_of(left)
-                    .is_some_and(|d| home_x >= d.min.x && home_x + size.x + width <= d.max.x + width);
+                // **The dock has to hold the box *and* the gutter its leader turns in.** The gutter
+                // sits on the anchor's side of the box — outboard on the right dock, inboard on the
+                // left — so the span is sided. This read `home_x + size.x + width <= d.max.x +
+                // width`, where `+ width` cancelled on both sides and the test measured the box
+                // alone: a box whose gutter ran off the dock still earned the dock, and its leader
+                // then turned outside it.
+                let (span_lo, span_hi) = if left {
+                    (home_x, home_x + size.x + width)
+                } else {
+                    (home_x - width, home_x + size.x)
+                };
+                let home_fits =
+                    dock_of(left).is_some_and(|d| span_lo >= d.min.x && span_hi <= d.max.x);
                 let mut chosen: Option<(f32, f32, bool)> = None;
                 'ladder: for (cx, at_home) in [(home_x, true), (rail_x, false)] {
                     if at_home && !home_fits {
@@ -1641,9 +1698,16 @@ fn place_badges(
                 // it stands over the stage instead. Measured, when this briefly read `column`:
                 // `MESHES: Control(CellGrid) covers 137x13 px of ink at Vec2(28.0, 668.0)`.
                 let (x, y, at_home) = chosen.unwrap_or_else(|| {
-                    let y = settle_past(settled(floor), size, rail_x, &taken, stack)
+                    // **Clamped into the window before the column is settled, not after.** `rail_x`
+                    // walks outward with the lane band — `(side.len() + 2) * lane` — so a side with
+                    // six leaders puts the rail past the edge on a narrow window, and this arm takes
+                    // neither the `is_free` ladder nor the dock's bound. Clamped first so
+                    // `settle_past` stacks against the column the box will actually stand in; the
+                    // high bound is `.max(lo)` because `f32::clamp` panics on an inverted range.
+                    let x = rail_x.clamp(window.min.x, (window.max.x - size.x).max(window.min.x));
+                    let y = settle_past(settled(floor), size, x, &taken, stack)
                         .clamp(top, (bottom - size.y).max(top));
-                    (rail_x, y, false)
+                    (x, y, false)
                 });
                 let pos = Vec2::new(x, y);
                 plans[i].pos = Some(pos);
@@ -2202,21 +2266,29 @@ fn one_badge(
             // box is too small for the text, so the text just slips under it
             // where it can't be seen."* Constrained from outside, the measure
             // runs against the width it will actually get.
-            b.spawn(Node {
-                // A column, so the block has a width you can predict. Capping the
-                // *cluster* instead was tried and is the wrong lever:
-                // `align_items: Stretch` plus a shrinkable row let flex take the
-                // words down to nothing rather than wrap them.
-                // A cap, not a width: the wrapper hugs its words and wraps only past this, so a
-                // short description costs exactly what it measures. The fixed width before it made
-                // every box as wide as the longest description the census allows.
-                // Passed in rather than branched on here: the legend has a whole stage to stand
-                // in and can afford a wide column, a control's box has to fit on whatever free
-                // ground is left beside it. That is a fact about the *home*, and the caller is
-                // where the home is known.
-                max_width: Val::Px(does_col),
-                ..default()
-            })
+            b.spawn((
+                Node {
+                    // A column, so the block has a width you can predict. Capping the
+                    // *cluster* instead was tried and is the wrong lever:
+                    // `align_items: Stretch` plus a shrinkable row let flex take the
+                    // words down to nothing rather than wrap them.
+                    // A cap, not a width: the wrapper hugs its words and wraps only past this, so a
+                    // short description costs exactly what it measures. The fixed width before it
+                    // made every box as wide as the longest description the census allows.
+                    // Passed in rather than branched on here: the legend has a whole stage to stand
+                    // in and can afford a wide column, a control's box has to fit on whatever free
+                    // ground is left beside it. That is a fact about the *home*, and the caller is
+                    // where the home is known.
+                    max_width: Val::Px(does_col),
+                    ..default()
+                },
+                // **The wrapper answers the pointer too, or the whole layer does.** It is the one
+                // node in this subtree that carries no marker, so an `Or<With<..>>` guard could not
+                // see it, and `build_hover_map` blocks on an entity with no `Pickable` by default —
+                // a hover stopping here is a hover `view::over_ui` reads as "the pointer is on the
+                // interface" everywhere the description happens to be.
+                bevy::picking::Pickable::IGNORE,
+            ))
             .with_children(|w| {
                 w.spawn((
     Text::new(badge.does.to_owned()),

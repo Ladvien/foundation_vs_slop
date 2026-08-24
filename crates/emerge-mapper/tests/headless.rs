@@ -6551,6 +6551,19 @@ fn every_checkpoint_a_shipped_guide_names_is_registered_and_runs() {
                  twenty-one shipped tutorials were missing, and the one an author needs at the \
                  exact moment the step does not work"
             );
+            // **Deserialise the step the way the app will, because serde's silence is the whole
+            // failure mode.** Every field of `Step` is `#[serde(default)]`, so a sibling of
+            // `checkpoint` spelled `args` instead of `with` did not fail — it deserialised to
+            // `with: None`, the condition was handed `null` for ever, and the step could never pass.
+            // Two steps of `label_a_mesh.json` shipped that way. Reading the JSON as a `Value`, which
+            // is all the assertions around this one do, cannot see it; asking `Step` itself can, and
+            // it needs no field list kept in step by hand.
+            serde_json::from_value::<bevy_debugger_bevy::Step>(step.clone()).unwrap_or_else(|e| {
+                panic!(
+                    "{name}: step `{label}` is not a `Step`: {e}. If that names an unknown field, \
+                     the checkpoint's arguments are `with`, never `args`"
+                )
+            });
             // `null` is a real value here: a step only a person can judge.
             let Some(checkpoint) = step["checkpoint"].as_str() else {
                 continue;
@@ -11077,6 +11090,11 @@ fn badges_up(root: &std::path::Path, mode: emerge_mapper::tiles::Mode) -> App {
 
 /// Which `ControlId`s are laid out right now — the fact that decides whether a verb sits on its
 /// control or joins the legend.
+///
+/// **Exactly one, not at-least-one**, because that is what `badges::sole_control` answers and this
+/// helper feeds `badges::resolve`. Asking a different question here would let a duplicated id keep
+/// `Home::Control` in the expectation while the editor sent it to the legend — the same two-predicate
+/// drift `sole_control` exists to close, reintroduced in the test that checks it.
 fn controls_on_screen(app: &mut App) -> Vec<emerge_mapper::keys::ControlId> {
     use bevy::ui::ComputedNode;
     let mut q = app
@@ -11087,7 +11105,9 @@ fn controls_on_screen(app: &mut App) -> Vec<emerge_mapper::keys::ControlId> {
         .into_iter()
         .filter(|id| {
             q.iter(world)
-                .any(|(c, node)| c.0 == *id && node.size() != Vec2::ZERO)
+                .filter(|(c, node)| c.0 == *id && node.size() != Vec2::ZERO)
+                .count()
+                == 1
         })
         .collect()
 }
@@ -11381,33 +11401,40 @@ fn no_badge_leaves_the_window() {
 /// why `chrome::chip` cannot be reused for a badge: it spawns `Hovered` along with its `Button`.
 #[test]
 fn the_badge_layer_never_answers_the_pointer() {
-    use emerge_mapper::badges::{BadgeCluster, BadgeLayer};
+    use emerge_mapper::badges::BadgeLayer;
 
     let root = Fixture::new("badgehover")
         .descriptor("floor", "alpha")
         .build("m");
     let mut app = badges_up(&root, emerge_mapper::tiles::Mode::Map);
 
-    let mut hoverable = 0usize;
+    // **Every node under the layer, not the three that carry a marker.** The wrapper the
+    // description's `Text` is measured inside carries no marker at all, so an `Or<With<..>>` query
+    // could not see it — and it was the one node in the subtree spawned without `Pickable::IGNORE`,
+    // which is exactly the node `build_hover_map` blocks on by default. The claim is about the
+    // subtree, so the test walks the subtree.
+    let mut hoverable: Vec<Entity> = Vec::new();
     {
-        let mut q = app
-            .world_mut()
-            .query_filtered::<Entity, Or<(With<BadgeLayer>, With<BadgeCluster>, With<emerge_mapper::badges::Badge>)>>();
-        let ids: Vec<Entity> = q.iter(app.world()).collect();
-        for id in ids {
+        let mut q = app.world_mut().query_filtered::<Entity, With<BadgeLayer>>();
+        let mut stack: Vec<Entity> = q.iter(app.world()).collect();
+        while let Some(id) = stack.pop() {
             if app
                 .world()
                 .get::<bevy::picking::hover::Hovered>(id)
                 .is_some()
             {
-                hoverable += 1;
+                hoverable.push(id);
+            }
+            if let Some(kids) = app.world().get::<Children>(id) {
+                stack.extend(kids.iter());
             }
         }
     }
-    assert_eq!(
-        hoverable, 0,
-        "{hoverable} node(s) of the badge layer carry `Hovered`; a layer over the whole window that \
-         answers the pointer kills map zoom and click-to-place everywhere"
+    assert!(
+        hoverable.is_empty(),
+        "{} node(s) of the badge layer carry `Hovered` ({hoverable:?}); a layer over the whole \
+         window that answers the pointer kills map zoom and click-to-place everywhere",
+        hoverable.len()
     );
 }
 
@@ -11746,9 +11773,21 @@ fn a_badge_stands_on_ground_nothing_else_uses() {
 /// A count that moves its neighbour makes the neighbour unreadable, and the neighbour is the one
 /// thing on that bar that says which map you are in. So the count holds a reserved column and the
 /// digits grow leftwards into it; this is what says so.
+///
+/// # It used to inject three strings and measure the same one three times
+///
+/// It wrote `"9,999,999 tris drawn"` straight into the `Text` and stepped frames — but
+/// `refresh_triangle_total` is registered bare in `Update` and rewrites the readout from the live
+/// mesh count *before* `PostUpdate` lays anything out, so all three iterations measured the fixture's
+/// own total and `moved` was empty by construction. Deleting `min_width` left it green.
+///
+/// The property is not "three strings put the name in the same place" — the strings cannot be made to
+/// stick. It is that **the column is wide enough for the widest string the format can produce, and
+/// the node is actually given it**. Both halves are checked, and each fails on its own: shrink
+/// `COST_COL` and the first goes; delete `min_width` and the second goes.
 #[test]
 fn the_triangle_count_does_not_shove_the_maps_name() {
-    use bevy::ui::{ComputedNode, UiGlobalTransform};
+    use bevy::ui::ComputedNode;
 
     let root = Fixture::new("costcol")
         .descriptor("floor", "alpha")
@@ -11758,49 +11797,56 @@ fn the_triangle_count_does_not_shove_the_maps_name() {
         app.update();
     }
 
-    let name_at = |app: &mut App| -> Option<f32> {
-        let mut q = app
-            .world_mut()
-            .query_filtered::<(&ComputedNode, &UiGlobalTransform), With<emerge_mapper::chrome::WhereYouAre>>();
-        q.iter(app.world())
-            .map(|(n, tf)| tf.translation.x - n.size().x / 2.0)
-            .next()
-    };
-
-    // Every width the readout can take, from empty to the longest string `refresh_cost` renders.
-    let mut seen: Vec<(String, f32)> = Vec::new();
-    for count in ["0 tris drawn", "79,520 tris drawn", "9,999,999 tris drawn"] {
-        {
-            let mut q = app
-                .world_mut()
-                .query_filtered::<&mut Text, With<emerge_mapper::editor::TriangleTotal>>();
-            let world = app.world_mut();
-            let mut any = false;
-            for mut t in q.iter_mut(world) {
-                t.0 = count.to_owned();
-                any = true;
-            }
-            assert!(any, "no triangle readout in the bar — this test would prove nothing");
-        }
-        for _ in 0..3 {
-            app.update();
-        }
-        let Some(x) = name_at(&mut app) else {
-            panic!("no `WhereYouAre` in the bar — this test would prove nothing")
-        };
-        seen.push((count.to_owned(), x));
-    }
-
-    let first = seen[0].1;
-    let moved: Vec<String> = seen
-        .iter()
-        .filter(|(_, x)| (x - first).abs() > 0.5)
-        .map(|(c, x)| format!("`{c}` puts the name at {x}, not {first}"))
-        .collect();
+    // The widest phrase the readout can ever hold, asked of the formatter the readout itself uses.
+    // `usize::MAX` rather than a threshold: `refresh_triangle_total` sums every visible mesh and
+    // `HEAVY_SCENE` only tints, so nothing in the editor bounds the number.
+    let longest = format!(
+        "{} tris drawn",
+        emerge_mapper::editor::with_thousands(usize::MAX)
+    );
+    let need = longest.chars().count() as f32 * emerge_mapper::chrome::BODY_CHAR_W
+        + 2.0 * emerge_mapper::editor::COST_PAD_X;
     assert!(
-        moved.is_empty(),
-        "the triangle count is dragging the map's name across the bar as it changes width:\n  {}",
-        moved.join("\n  ")
+        emerge_mapper::editor::COST_COL >= need,
+        "the reserved column is {} px and `{longest}` needs {need} px; the node is `min_width`, so \
+         it will grow past the reservation and drag the map's name with it",
+        emerge_mapper::editor::COST_COL
+    );
+
+    // …and the node is actually given the column. Measured off the live layout rather than assumed
+    // from the source, which is the half the old version could not see.
+    let mut q = app
+        .world_mut()
+        .query_filtered::<(&ComputedNode, &ChildOf), With<emerge_mapper::editor::TriangleTotal>>();
+    let widths: Vec<f32> = {
+        let world = app.world();
+        q.iter(world)
+            .filter_map(|(_, parent)| world.get::<ComputedNode>(parent.parent()))
+            .map(|n| n.size().x)
+            .collect()
+    };
+    assert_eq!(
+        widths.len(),
+        1,
+        "expected exactly one triangle readout in the bar, found {} — this test would prove nothing",
+        widths.len()
+    );
+    assert!(
+        widths[0] >= emerge_mapper::editor::COST_COL - 0.5,
+        "the readout's box measured {} px against a reserved {} px: it is hugging its digits, so \
+         every change of magnitude will move `WhereYouAre`",
+        widths[0],
+        emerge_mapper::editor::COST_COL
+    );
+
+    // The reservation is only worth anything if the neighbour it protects is on the bar at all.
+    let mut names = app
+        .world_mut()
+        .query_filtered::<Entity, With<emerge_mapper::chrome::WhereYouAre>>();
+    assert_eq!(
+        names.iter(app.world()).count(),
+        1,
+        "no `WhereYouAre` in the bar — the column would be protecting nothing"
     );
 }
 

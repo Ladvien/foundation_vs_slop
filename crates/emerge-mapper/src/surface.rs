@@ -319,7 +319,7 @@ fn fit_surface_to_window(
     mut ui_scale: ResMut<UiScale>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    // No window is a headless run: there is nothing to fit to, and the initial square stands.
+    // No window is a headless run: there is nothing to fit to, and the initial 16:9 stands.
     let (Ok(window), Some(surface), Ok(mut mirror)) =
         (windows.single(), surface, mirror.single_mut())
     else {

@@ -204,24 +204,26 @@ impl Plugin for GuidePlugin {
         let compose_tab = app.register_system(|_: In<Value>, live: Res<Live>| {
             live.0 == keys::Context::Compose
         });
-        // **By id, so a script can send the author to a named mesh** and know they arrived — the
-        // selection is what `B` derives for and what `Enter` imports.
         // **Does the focused piece hold this token, on this axis?**
         //
         // The one objective question in a walk of the tag block, and the reason it is worth a
         // checkpoint rather than a judgement call: the block's whole point is that a keystroke can
         // now do what only a click could, so *"did the token actually land"* has a true answer and
-        // an author should not have to be the one who checks it. Takes `{"axis": "look", "token":
-        // "wood"}`; an unknown axis answers `false` rather than panicking, because a script is a
-        // file somebody typed.
+        // an author should not have to be the one who checks it. Takes
+        // `{"axis": "look", "token": "wood"}`.
         let carries_token = app.register_system(
             |args: In<Value>,
              state: Res<crate::tiles::ImportState>,
              project: Option<Res<Project>>| {
-                let (Some(project), Some(target)) = (project, state.target()) else {
+                let Some(project) = project else {
                     return false;
                 };
-                let Some(d) = state.placed_at_target(&target, &project) else {
+                // **The measured layer, because that is the one the tag toggle writes.**
+                // `tiles::toggle_tag` edits through `state.editing_mut(&mut project.measured)`, and
+                // `placed_at_target` reads `project.library` — the measurements with the kit's
+                // `project.ron` stretched over them. Reading the patched view answered `false` about
+                // a token that had just landed, on exactly the rows a kit patches.
+                let Some(d) = state.editing(&project.measured) else {
                     return false;
                 };
                 let Some(token) = args.0.get("token").and_then(Value::as_str) else {
@@ -232,11 +234,27 @@ impl Plugin for GuidePlugin {
                     Some("effects") => &d.effects,
                     Some("look") => &d.look,
                     Some("surfaces") => &d.offers.surfaces,
-                    _ => return false,
+                    // **A typo'd axis is a broken script, not a failed step.** It used to answer
+                    // `false`, which is indistinguishable from the token not being there — so a card
+                    // naming `"looks"` parked its author for ever in front of a piece that was
+                    // correctly tagged.
+                    //
+                    // The token check above stays first on purpose:
+                    // `every_checkpoint_a_shipped_guide_names_is_registered_and_runs` runs every
+                    // checkpoint with `Value::Null`, where `get("token")` is `None` and this match is
+                    // never reached. `None` is that case and answers `false`; only a *named* wrong
+                    // axis is the broken script.
+                    Some(other) => panic!(
+                        "the guide step watching `the piece carries` names axis {other:?}, which is \
+                         not one of kind, effects, look, surfaces"
+                    ),
+                    None => return false,
                 };
                 held.iter().any(|t| t == token)
             },
         );
+        // **By id, so a script can send the author to a named mesh** and know they arrived — the
+        // selection is what `B` derives for and what `Enter` imports.
         let selected_mesh = app.register_system(
             |args: In<Value>, state: Res<crate::tiles::ImportState>| {
                 args.0

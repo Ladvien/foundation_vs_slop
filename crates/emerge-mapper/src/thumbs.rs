@@ -352,9 +352,18 @@ fn bake(
             // origin pointed the camera at empty air and baked two blank tiles — the same *symptom*
             // as the render-target race, from a completely different cause, which is the argument for
             // measuring rather than assuming twice over.
-            let (centre, extent) = subject_bounds(model, &children, &bounds)
-                .map(|(lo, hi)| aim_and_span(lo, hi))
-                .unwrap_or((BOOTH + Vec3::Y * 0.5, subject_extent(&d)));
+            let Some((lo, hi)) = subject_bounds(model, &children, &bounds) else {
+                // Unreachable behind `has_mesh` above: a drawable mesh has an `Aabb`. Loud rather
+                // than guessed, because the alternative is a camera aimed at a number the descriptor
+                // claims and a baked picture of nothing — the exact failure the paragraph above says
+                // measuring exists to prevent, reintroduced on the branch that gives up measuring.
+                error!(
+                    "`{}` passed the readiness gate with nothing measurable under it; no preview",
+                    d.id
+                );
+                return;
+            };
+            let (centre, extent) = aim_and_span(lo, hi);
             *tf = Transform::from_translation(centre + Vec3::new(1.0, 0.85, 1.0) * extent * FRAMING)
                 .looking_at(centre, Vec3::Y);
             *proj = Projection::from(OrthographicProjection {
@@ -395,11 +404,12 @@ fn bake(
 
 /// **The world-space box of everything actually drawn under `root`** — `(low corner, high corner)`.
 ///
-/// `None` when nothing under it has an `Aabb` yet, which the caller treats as "fall back to what the
-/// descriptor says" — that path is reachable only in the frames before the mesh exists, and the
-/// readiness gate above means the bake does not aim then. `pub(crate)`: the label booth frames from
-/// the same measured bounds, so the two booths cannot drift apart on what "framed" means — and since
-/// 2026-08-20 so does the mesh stage's camera.
+/// `None` when nothing under it has an `Aabb` yet. **Both booths refuse on it** — behind their
+/// readiness gates a drawable mesh always has one, so a `None` there is a broken invariant and not a
+/// cue to guess a size. The one legitimate reader of `None` is the mesh stage, which uses it as a
+/// "nothing staged yet" sentinel and re-derives its own span. `pub(crate)`: the label booth frames
+/// from the same measured bounds, so the two booths cannot drift apart on what "framed" means — and
+/// since 2026-08-20 so does the mesh stage's camera.
 ///
 /// **It returns the box rather than a centre and a diameter**, and that widening is the whole reason
 /// the mesh stage could use it. A thumbnail booth points a camera at a subject from a fixed distance,
@@ -444,19 +454,6 @@ pub(crate) fn subject_bounds(
 pub(crate) fn aim_and_span(lo: Vec3, hi: Vec3) -> (Vec3, f32) {
     let size = hi - lo;
     ((lo + hi) * 0.5, size.x.max(size.y).max(size.z).max(0.05))
-}
-
-/// The subject's largest dimension, from what the descriptor records. The fallback for the frames
-/// before any `Aabb` exists; floored, so it never puts the camera inside the mesh.
-fn subject_extent(d: &emerge_core::descriptor::Descriptor) -> f32 {
-    // The extent IS the drawn size: it is recorded post-scale (`placed_footprint`'s contract), and
-    // `stage` below draws the raw mesh at `splat(scale)`, which lands it exactly on these numbers.
-    // No multiplication here — an earlier version multiplied by `scale` by hand, which framed the one
-    // scaled piece for a size it does not draw at. `stretch_y` is deliberately not applied either:
-    // the booth stages the art, not a facility's policy over it.
-    let (w, dep) = emerge_core::descriptor::placed_footprint(d).unwrap_or((1.0, 1.0));
-    let h = d.extent.height.unwrap_or(1.0);
-    (w.max(dep).max(h)).max(0.25)
 }
 
 fn stage(

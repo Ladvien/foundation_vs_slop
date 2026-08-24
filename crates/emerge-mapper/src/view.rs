@@ -56,8 +56,14 @@ pub(crate) const MIN_ZOOM: f32 = 0.25;
 /// The furthest out the rig goes. `pub(crate)` because the Compose sheet has to know it: a gallery
 /// that needs more than this to be seen whole is cropped, and cropped silently reads as complete.
 pub(crate) const MAX_ZOOM: f32 = 80.0;
-/// Metres of viewport height per **line** of wheel — one detent of a notched mouse wheel.
-const ZOOM_STEP: f32 = 2.0;
+/// **Viewport height per wheel line, as a RATIO.** One detent of a notched mouse wheel.
+///
+/// It was an absolute 2.0 m. That is a sane detent across a 4 m..80 m range and a two-position switch
+/// below 2.25 m: with [`MIN_ZOOM`] at 0.25 the wheel had exactly one stop between the floor and 2 m,
+/// so the tab that exists to look at one 12 cm mesh could not be scrolled around it. A ratio is the
+/// same gesture at every scale — 1.2 puts about thirty-two detents across the whole
+/// [`MIN_ZOOM`]..[`MAX_ZOOM`] range, wherever in it the author is standing.
+const ZOOM_STEP: f32 = 1.2;
 
 /// **A wheel notch and a trackpad swipe are not the same number, and the wheel is the one this
 /// editor was tuned for.**
@@ -68,9 +74,9 @@ const ZOOM_STEP: f32 = 2.0;
 /// shape of the numbers.
 ///
 /// Multiplying a pixel delta by [`ZOOM_STEP`] treated every pixel as a detent. A gentle two-finger
-/// swipe accumulates on the order of thirty pixels in a frame, so one frame asked for sixty metres
-/// of viewport height against a range ([`MIN_ZOOM`]..[`MAX_ZOOM`]) that is eighty metres wide —
-/// the whole zoom in a flick. Reported from the keyboard: *"way too sensitive for a touchpad."*
+/// swipe accumulates on the order of thirty pixels in a frame, so one frame asked for thirty detents
+/// — the whole [`MIN_ZOOM`]..[`MAX_ZOOM`] range, which is about thirty-two, in a flick. Reported from
+/// the keyboard: *"way too sensitive for a touchpad."*
 ///
 /// [`MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR`] is the pinned engine's own answer to how many
 /// pixels make a line, so the conversion is Bevy's number rather than one invented here — and both
@@ -84,8 +90,19 @@ fn wheel_lines(scroll: &AccumulatedMouseScroll) -> f32 {
         }
     }
 }
-/// Metres a second, matching the game's `src/camera.rs` so the two feel the same.
-const PAN_SPEED: f32 = 16.0;
+/// **Viewport heights a second a held pan key crosses**, not metres a second.
+///
+/// It was an absolute 16.0 m/s matched to the game's `src/camera.rs`, on the argument that the same
+/// key should feel the same in both applications. That held while the floor of the wheel was 4 m.
+/// [`MIN_ZOOM`] is 0.25 m now so that a 12 cm mug can be looked at, and at the floor one 60 Hz frame
+/// of 16 m/s moves the focus 0.267 m — further than the whole viewport is tall, so the subject leaves
+/// the screen on the first frame the key is held. Pan is `Context::Global` and
+/// `tiles::stage_camera` frames a small mesh straight down to the floor, so that is the ordinary case
+/// rather than a corner of it.
+///
+/// The number is the old one over the height it was tuned at — 16 m/s at an 18 m map view — so the
+/// Map tab is unchanged to the metre and every closer framing scales with what is on screen.
+const PAN_SPEED: f32 = 16.0 / 18.0;
 
 /// Where the camera is looking and how far out.
 #[derive(Resource)]
@@ -245,7 +262,9 @@ fn drive(
 
     let lines = wheel_lines(&scroll);
     if lines != 0.0 && !over_ui {
-        rig.height = (rig.height - lines * ZOOM_STEP).clamp(MIN_ZOOM, MAX_ZOOM);
+        // **A ratio, so a detent is the same gesture at every scale.** Subtracting metres put one
+        // wheel stop between the floor and 2 m.
+        rig.height = (rig.height * ZOOM_STEP.powf(-lines)).clamp(MIN_ZOOM, MAX_ZOOM);
     }
 
     let step = TAU / ROTATION_STEPS as f32;
@@ -281,13 +300,10 @@ fn drive(
     let iso = rig.offset();
     if wish != Vec2::ZERO {
         let screen = pan_direction(wish, rig.yaw);
-        // **Constant speed, like the game.** This used to scale by `rig.height / 18.0`, on the
-        // argument that a keypress should cross the same *fraction of the screen* at every zoom. In
-        // the hand it reads as the camera sticking: zoomed in — which is where an author does detail
-        // work — panning crawled at a third of the speed the game moves at, and the same keys
-        // behaving differently in the two applications is the surprise worth removing.
-        // `src/camera.rs:370` is the reference: `rig.focus += dir * PAN_SPEED * dt`, unscaled.
-        rig.focus += screen * PAN_SPEED * dt;
+        // **A fraction of what is on screen, not a fixed number of metres.** Read out first: this is
+        // one statement over a `ResMut`, and `rig.focus +=` takes the mutable borrow.
+        let height = rig.height;
+        rig.focus += screen * PAN_SPEED * height * dt;
     }
 
     let (mut tf, mut proj) = camera.into_inner();

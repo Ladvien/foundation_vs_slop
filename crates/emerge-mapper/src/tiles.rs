@@ -470,13 +470,11 @@ fn stage_camera(
             // aiming at it put a 2.4 m tile in the top half of the frame with the bottom empty —
             // seen in a captured frame, and the same correction the Tiles arm makes with `want_lift`.
             rig.focus = crate::compose::COMPOSE_STAGE + Vec3::Y * carousel.0.tallest * 0.5;
-            rig.height = crate::compose::framing_height(
-                carousel.0.extent,
-                carousel.0.tallest,
-                crate::compose::SQUARE,
-            )
-            .max(TILE_VIEW_HEIGHT)
-            .min(crate::view::MAX_ZOOM);
+            // One statement of the floor, shared with the crop report `restage_group` writes — the
+            // two used to compute it separately and this one alone applied the ceiling, so the
+            // sentence an author read named a height the rig was never set to.
+            rig.height =
+                crate::compose::carousel_height(&carousel.0).min(crate::view::MAX_ZOOM);
             rig.elevation = crate::view::ISO_ELEVATION;
         }
         Mode::Map => {
@@ -2440,14 +2438,18 @@ fn on_fill_header(
 /// comparison is for. `rebuild_detail` and [`refresh_cells`] both need this and they must not
 /// disagree: one draws the pane, the other repaints inside it, and a proposal visible to only one of
 /// them is a value that flickers.
-fn pending_proposal(
+fn pending_proposal<'a>(
     state: &ImportState,
-    suggestions: Option<&crate::labels::Suggestions>,
+    suggestions: Option<&'a crate::labels::Suggestions>,
     d: &emerge_core::descriptor::Descriptor,
-) -> Option<crate::labels::Entry> {
+) -> Option<&'a crate::labels::Entry> {
     let target = state.target()?;
     let entry = suggestions?.get(&target)?;
-    (d.mesh.as_deref() == Some(entry.mesh.as_str())).then(|| entry.clone())
+    // **Borrowed, because [`refresh_cells`] asks every frame.** It carries no run condition — it is
+    // the in-place repaint — so a clone here was a dozen heap allocations a frame for as long as a
+    // focused piece had a proposal standing: five `Vec<String>`, three `String`s and an
+    // `Option<String>`, thrown away unread. Both readers only look.
+    (d.mesh.as_deref() == Some(entry.mesh.as_str())).then_some(entry)
 }
 
 /// **What the description box says**, and the only place that decides.
@@ -3394,7 +3396,14 @@ impl Plugin for TilesPlugin {
                             // that condition would despawn and respawn this whole pane on every
                             // keystroke typed into the *candidate* list beside it — a rebuild for a
                             // change this pane cannot show. See `tag_filter_changed`.
-                            .or_else(tag_filter_changed),
+                            //
+                            // **`or_eager`, because `tag_filter_changed` holds a `Local`.** `or_else`
+                            // combines with `||` and short-circuits, so on any frame one of the four
+                            // conditions above already answered true this one never ran and its
+                            // remembered needle went stale. `take_the_one_match` writes the
+                            // descriptor *and* clears the box in the same frame, so that is not a
+                            // corner: the next keystroke compared against a needle two edits old.
+                            .or_eager(tag_filter_changed),
                     ),
                     refresh_lines,
                     // **Both stages, nested as one.** A system tuple caps at twenty in 0.19, and these
@@ -3812,9 +3821,6 @@ fn spawn_tiles_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
             },
             ActionLine,
         ));
-        // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
-        // the panel, and an auto margin in a column absorbs the free space above it — so
-        // placed any earlier it pushes every sibling after it down with it.
     });
 
     // **The candidate list, in its own panel against the right edge** — the same shape, the same
@@ -5361,13 +5367,19 @@ fn remove_tile(
             // `selected_library_id.is_none()` is *"the arrows are walking the candidates"* — so
             // clearing it and pointing `selected` at the reborn row is what puts `NOT IMPORTED` on
             // screen with the piece under the highlight. There is no second flag to set.
-            if let Some(at) = mesh
-                .as_ref()
-                .and_then(|m| state.candidates.iter().position(|c| &c.mesh == m))
-            {
-                state.selected = at;
-            }
             state.selected_library_id = None;
+            // **Through `focus_on`, the one place allowed to move this cursor.** Setting `selected`
+            // by hand left the mesh's pack FOLDED, and `keep_candidate_selection_visible` — which
+            // fires on the very next `ImportState` change, and this is one — takes the highlight off
+            // any row that is not on screen. So the piece just sent back lost the cursor to whichever
+            // row happened to be visible first. `focus_on` opens the pack, drops the heading cursor
+            // and clears the shelf as one act; see its note for why the unfold is not cosmetic.
+            //
+            // The clear above stays first: `focus_on` early-returns when the mesh is not among the
+            // candidates, and the `None` arm below still has to put the shelf away.
+            if let Some(m) = &mesh {
+                state.focus_on(&EditTarget::Candidate(m.clone()));
+            }
             // Proposed labels under either identity judged the piece as it was configured —
             // stale by definition now.
             let dropped = suggestions
@@ -5645,16 +5657,12 @@ fn on_new_token_chip(
 /// shows real changes only, and a `kind` **settles its implied effects**. A keyboard path that got
 /// any one of those wrong would write descriptors the mouse path never could.
 fn toggle_tag(axis: Axis, token_ix: usize, project: &mut Project, state: &mut ImportState) {
-    // **Both the token and the vocabulary order come out first, owned.** What follows needs a mutable
+    // **The token and the vocabulary order come out first, owned.** What follows needs a mutable
     // borrow of the same `Project`, and the sort key cannot be read from it while that is held.
-    let (token, order, vocab) = {
+    let (token, order) = {
         let names: Vec<String> = axis.tokens(&project.vocab).names().map(str::to_owned).collect();
-        // The whole vocabulary, for the settle below — it carries the `implies` rule now, not just
-        // the DOES ordering. Read here for the same reason everything else in this block is: the
-        // write needs `project` mutably.
-        let vocab = project.vocab.clone();
         match names.get(token_ix) {
-            Some(t) => (t.clone(), names, vocab),
+            Some(t) => (t.clone(), names),
             None => return,
         }
     };
@@ -5683,8 +5691,12 @@ fn toggle_tag(axis: Axis, token_ix: usize, project: &mut Project, state: &mut Im
     // **A kind typed by hand implies the same effects a labelled one does.** The rule is about the
     // word, not about who wrote it — so `uses-electricity` follows a chip click exactly as it
     // follows a proposal, and stops following when the kind is clicked off again.
+    //
+    // The vocabulary is read **here**, borrowed, and not hoisted into the block above: `editing_mut`
+    // borrows `project.measured` and `vocab` is a disjoint field, so nothing forced a clone of every
+    // axis table on every chip click — one that only this one branch ever read.
     if axis == Axis::Kind {
-        crate::labels::settle_implied_effects(d, &vocab);
+        crate::labels::settle_implied_effects(d, &project.vocab);
     }
     // **A person decided this one**, which is the whole difference between a chip a model lit and a
     // chip you lit. Stamped after the write and only for the axis touched — the other three keep
@@ -7763,9 +7775,14 @@ fn build_detail(p: &mut ChildSpawnerCommands, build: &crate::build::Build, proje
 /// typed into the candidate list too, and this pane would be torn down and rebuilt for a change it
 /// cannot display. A `Local` of what was last drawn is the precision that costs one `String`.
 ///
-/// It is a run condition, so it is evaluated **every frame regardless of what else gated the
-/// system** — 0.19 has no short-circuit, which this crate's `CLAUDE.md` records twice. That is what
-/// makes the `Local` safe here: it tracks the text, not the runs.
+/// **It must be joined with `or_eager`, never `or_else`.** `SystemCondition::or_else` combines with
+/// `||` — `OrElseMarker::combine` is `Ok(a(..).unwrap_or(false) || b(..).unwrap_or(false))`,
+/// bevy_ecs 0.19.0 `schedule/condition.rs:1564` — so an earlier condition that returned true skips
+/// this one entirely and the `Local` stops tracking the text it exists to track: type into the tag
+/// box on a frame that also wrote `ImportState`, and the next keystroke compares against a string
+/// two edits old and reports no change. `or_eager` combines with `|` (same file, line 1586) and runs
+/// both. The `CLAUDE.md` trap — *all run conditions are evaluated* — is about the conditions of a
+/// `.run_if(..)` CHAIN, not about the two halves of one combinator.
 fn tag_filter_changed(filters: Res<crate::filter::Filters>, mut last: Local<String>) -> bool {
     let now = filters.text(crate::filter::Pane::Tags);
     if last.as_str() == now {
@@ -8331,7 +8348,14 @@ fn rebuild_detail(
                             Axis::Surfaces => e.suggestion.offers_surfaces.clone(),
                         })
                         .unwrap_or_default();
-                    // **Did a model write this axis, and has nobody checked it since?**
+                    // **Has a PERSON checked this axis?** Anything else is unchecked.
+                    //
+                    // It asked `== Some(By::Model)`, which made `None` — no provenance record at
+                    // all, which is every descriptor written before the labeller existed and every
+                    // one a hand edit produced — paint in `TEXT`. `TEXT` on a chip means *you did*
+                    // (see `chrome::UNCHECKED`), so the pane claimed a human confirmation that no
+                    // file records. `By` has two variants and `None` is a third answer; only `Human`
+                    // is the one that clears the doubt.
                     //
                     // Read once per axis rather than per chip: it is a property of the axis, and
                     // asking it 21 times for `KIND` would be the same lookup 21 times.
@@ -8339,30 +8363,35 @@ fn rebuild_detail(
                         .labels
                         .as_ref()
                         .and_then(|l| l.by.get(axis.origin()))
-                        == Some(emerge_core::descriptor::By::Model);
+                        != Some(emerge_core::descriptor::By::Human);
                     crate::chrome::section(p, axis.label());
-                    // **An axis the filter emptied keeps its heading and says `-`.**
+                    // **An axis the filter emptied keeps its heading, says `-`, and still offers `+`.**
                     //
                     // Dropping the whole axis would move the three below it every time a letter is
                     // typed, which is the moving-menu cost the filter exists to avoid — and it would
                     // make "not on this axis" look identical to "this kit has no such axis". A dash
                     // is an answer; a gap is a question.
-                    if kept.is_empty() {
-                        p.spawn((
-                            Text::new("-"),
-                            TextColor(LABEL),
-                            TextFont::from_font_size(crate::chrome::text::LABEL),
-                        ));
-                        continue;
-                    }
+                    //
+                    // The dash used to `continue` past the chip row, which took the `+` with it —
+                    // and "the filter matched nothing" is precisely the moment an author wants to add
+                    // the word they just typed. So the row is spawned unconditionally and the dash
+                    // moves inside it, where it can stand beside the `+` alone.
                     p.spawn(Node {
                         flex_direction: FlexDirection::Row,
                         flex_wrap: FlexWrap::Wrap,
+                        align_items: AlignItems::Center,
                         column_gap: Val::Px(crate::chrome::GAP_TIGHT),
                         row_gap: Val::Px(crate::chrome::GAP_TIGHT),
                         ..default()
                     })
                     .with_children(|chips| {
+                        if kept.is_empty() {
+                            chips.spawn((
+                                Text::new("-"),
+                                TextColor(LABEL),
+                                TextFont::from_font_size(crate::chrome::text::LABEL),
+                            ));
+                        }
                         for (ix, name) in kept.iter().map(|(i, n)| (*i, n.as_str())) {
                             let on = held.iter().any(|h| h == name);
                             // Proposed-but-not-held: ghost-lit in SUGGEST with a hairline border —

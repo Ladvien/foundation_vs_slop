@@ -40,7 +40,7 @@
         "look at where `wood` now sits in LOOKS, and at the status line"
       ],
       "checkpoint": "the piece carries",
-      "args": {
+      "with": {
         "axis": "look",
         "token": "wood"
       },
@@ -54,7 +54,7 @@
         "then press Esc and confirm the whole vocabulary is back"
       ],
       "checkpoint": "the piece carries",
-      "args": {
+      "with": {
         "axis": "look",
         "token": "worn"
       },

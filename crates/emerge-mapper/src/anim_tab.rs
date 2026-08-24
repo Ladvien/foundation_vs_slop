@@ -339,9 +339,6 @@ fn spawn_panels(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
         )
         .entry::<Node>()
         .and_modify(|mut n| n.margin.top = Val::Px(8.0));
-        // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
-        // the panel, and an auto margin in a column absorbs the free space above it — so
-        // placed any earlier it pushes every sibling after it down with it.
     });
 
     crate::chrome::panel_root(

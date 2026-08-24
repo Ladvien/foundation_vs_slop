@@ -309,12 +309,26 @@ fn drive_shots(
                 abandon("the booth lost a piece of itself", &mut commands, rig, &mut cams);
                 return;
             };
+            // **Measure before borrowing the camera.** `abandon` needs `&mut cams`, so the refusal
+            // below cannot be written after `cams.get_mut` has handed out `tf`/`proj`/`target`. The
+            // measurement needs neither, so it goes first and the ordering is not a workaround.
+            let Some((lo, hi)) = subject_bounds(model, &children, &bounds) else {
+                // Unreachable behind `ready_to_draw` in `Phase::Staging`: a drawable mesh has an
+                // `Aabb`. Loud rather than guessed, because a camera aimed at `LAB_BOOTH` with a
+                // 1 m span bakes six plausible pictures of nothing and the labeller reads them as
+                // the piece.
+                abandon(
+                    "the staged mesh measured to nothing",
+                    &mut commands,
+                    rig,
+                    &mut cams,
+                );
+                return;
+            };
+            let (centre, extent) = crate::thumbs::aim_and_span(lo, hi);
             let Ok((mut tf, mut proj, mut target)) = cams.get_mut(cam) else {
                 return;
             };
-            let (centre, extent) = subject_bounds(model, &children, &bounds)
-                .map(|(lo, hi)| crate::thumbs::aim_and_span(lo, hi))
-                .unwrap_or((LAB_BOOTH, 1.0));
             let (aim_tf, viewport) = aim(centre, extent, angle);
             *tf = aim_tf;
             *proj = Projection::from(OrthographicProjection {

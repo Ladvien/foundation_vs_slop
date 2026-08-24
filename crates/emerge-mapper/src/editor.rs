@@ -120,13 +120,26 @@ const THUMB_SLOT: f32 = 30.0;
 const BUSY_SCENE: usize = 1_000_000;
 const HEAVY_SCENE: usize = 5_000_000;
 
+/// The chrome bar's own inset, either side of the readout. Named so [`COST_COL`] is derived from the
+/// same number the node applies rather than from a copy of it. `pub` for the same reason
+/// [`TriangleTotal`] is: the test that checks the column measures it against what the node was given
+/// rather than against a literal copied out of here.
+pub const COST_PAD_X: f32 = 8.0;
+
 /// **The column the triangle count holds**, so the map's name beside it does not move.
 ///
-/// Derived rather than picked: the longest string `refresh_cost` can render is [`HEAVY_SCENE`]'s
-/// order of magnitude through `with_thousands` — `9,999,999 tris drawn`, twenty characters — and the
-/// shipped face is monospace at [`crate::chrome::text::BODY`], which advances about 6.6 px. Twenty
-/// characters plus the node's own 8 px padding each side is what this reserves.
-const COST_COL: f32 = 148.0;
+/// Derived from what the readout can draw, not from a colour threshold. [`HEAVY_SCENE`] tints the
+/// digits and bounds nothing — `refresh_triangle_total` sums every visible mesh, and this file's own
+/// note names a flood fill that costs forty million triangles. Sized at [`HEAVY_SCENE`]'s order of
+/// magnitude the column was one character short: `10,000,000 tris drawn` is twenty-one characters,
+/// 138.6 px of glyphs in a 132 px content box, and because it is `min_width` the node grew and
+/// shoved `WhereYouAre` — the exact bouncing the constant exists to stop.
+///
+/// So it is the widest string the format can produce: `with_thousands(usize::MAX)` is twenty digits
+/// and six separators, and ` tris drawn` is eleven more. `Node::box_sizing` defaults to
+/// `BoxSizing::BorderBox`, so [`COST_PAD_X`] is inside the width and has to be added here.
+const COST_CHARS: f32 = 26.0 + 11.0;
+pub const COST_COL: f32 = COST_CHARS * crate::chrome::BODY_CHAR_W + 2.0 * COST_PAD_X;
 
 #[derive(Resource)]
 pub struct EditorState {
@@ -1018,10 +1031,17 @@ impl Plugin for EditorPlugin {
                     // one rule: the list the arrows rearm must be the list on screen.
                     (
                         rebuild_palette.run_if(
-                            // `or_else`, not the deprecated `or`: 0.19 spells the lazy form this
-                            // way, and this project has already paid for the eager one — every run
-                            // condition being evaluated is what made a bare `Res<T>` behind an
-                            // earlier `false` panic on launch.
+                            // **`or_eager` on the last rung, because `run_once` holds a `Local`.**
+                            // `bevy_ecs-0.19.0/src/schedule/condition.rs:690` is
+                            // `pub fn run_once(mut has_run: Local<bool>) -> bool`, and `or_else`
+                            // combines with `||` (same file, line 1564) — so on the very first
+                            // frame, where `Project` was just inserted and answers true, `run_once`
+                            // never ran and never spent its flag. It then fired on the first *later*
+                            // frame where nothing else had changed, rebuilding the palette for
+                            // nothing some frames after startup. `or_eager` (`|`, line 1586) runs it.
+                            //
+                            // The chain rungs above are stateless `resource_changed` conditions, so
+                            // they keep `or_else` and its skip is free.
                             resource_exists_and_changed::<Project>
                                 .or_else(resource_changed::<Folded>)
                                 .or_else(resource_changed::<crate::filter::Filters>)
@@ -1029,7 +1049,7 @@ impl Plugin for EditorPlugin {
                                 // happens when the row is built. See `thumbs::ThumbGeneration` for
                                 // why this is not `resource_changed::<Thumbnails>`.
                                 .or_else(resource_changed::<crate::thumbs::ThumbGeneration>)
-                                .or_else(run_once),
+                                .or_eager(run_once),
                         ),
                         keep_palette_selection_on_screen.run_if(in_map_mode),
                     ),
@@ -1040,9 +1060,10 @@ impl Plugin for EditorPlugin {
                     (
                         draw_bounds,
                         draw_map_grid,
-                        fit_bounds_floor.run_if(resource_exists_and_changed::<Project>.or_else(run_once)),
+                        fit_bounds_floor
+                            .run_if(resource_exists_and_changed::<Project>.or_eager(run_once)),
                     ),
-                    check_edges.run_if(resource_exists_and_changed::<Project>.or_else(run_once)),
+                    check_edges.run_if(resource_exists_and_changed::<Project>.or_eager(run_once)),
                     draw_edge_faults.run_if(in_map_mode),
                 ),)
                     .run_if(in_state(crate::screen::Screen::Editor))
@@ -1085,7 +1106,7 @@ fn spawn_cost_readout(mut commands: Commands, frame: Res<crate::chrome::Frame>) 
         bar.spawn((
             crate::tiles::MapRoot,
             Node {
-                padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                padding: UiRect::axes(Val::Px(COST_PAD_X), Val::Px(4.0)),
                 // **A reserved column, and the number grows leftwards into it.**
                 //
                 // This is the last child of a row whose spacer pushes everything to the right end, so
@@ -1432,9 +1453,6 @@ fn spawn_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
             }
         });
 
-        // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
-        // the panel, and an auto margin in a column absorbs the free space above it — so
-        // placed any earlier it pushes every sibling after it down with it.
     });
 }
 
@@ -2709,7 +2727,11 @@ fn brief_count(n: usize) -> String {
 
 /// Group a number for reading. The total is meant to be compared against itself over time, so the
 /// digits matter.
-fn with_thousands(n: usize) -> String {
+///
+/// `pub` because [`COST_COL`] is sized for the widest string this can produce, and the test that
+/// checks the sizing has to ask *this* function rather than restate the format — a second copy of it
+/// would agree with the constant while disagreeing with the readout.
+pub fn with_thousands(n: usize) -> String {
     let s = n.to_string();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
     for (i, c) in s.chars().enumerate() {

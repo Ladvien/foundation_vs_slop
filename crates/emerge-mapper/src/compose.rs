@@ -366,9 +366,6 @@ fn spawn_compose_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>)
                 crate::chrome::Control(crate::keys::ControlId::Detail),
             ),
         );
-        // **Last, and it must be.** `margin-top: auto` is what pins it to the bottom of
-        // the panel, and an auto margin in a column absorbs the free space above it — so
-        // placed any earlier it pushes every sibling after it down with it.
     });
 }
 
@@ -1015,7 +1012,18 @@ pub fn framing_height(extent: (f32, f32), tallest: f32, usable_aspect: f32) -> f
     let vertical = spread * elevation.sin() + tallest * elevation.cos();
     // The viewport is `height` metres tall and `height * usable_aspect` metres wide, so a subject
     // spreading `spread` across it needs `spread / usable_aspect` of height to fit sideways.
-    (vertical.max(spread / usable_aspect.max(f32::EPSILON)) * MARGIN).max(0.0)
+    //
+    // **A viewport with no width has no framing, and this says so rather than inventing one.** It
+    // used to be `usable_aspect.max(f32::EPSILON)`, which turned a zero aspect into a 3.4e38 m view
+    // — a number no clamp reads as wrong and no author reads at all — and the trailing `.max(0.0)`
+    // scrubbed a negative one. Every caller today passes a positive aspect; the assert is what
+    // obliges the next one to.
+    assert!(
+        usable_aspect.is_finite() && usable_aspect > 0.0,
+        "framing_height was handed a usable_aspect of {usable_aspect}: a viewport with no width, or \
+         one that has not been laid out yet, has no framing to compute"
+    );
+    vertical.max(spread / usable_aspect) * MARGIN
 }
 
 /// **A viewport as wide as it is tall** — the assumption this function used to make for everyone.
@@ -1024,6 +1032,21 @@ pub fn framing_height(extent: (f32, f32), tallest: f32, usable_aspect: f32) -> f
 /// judged in captured frames at this value and re-fitting it is a separate change with its own
 /// before-and-after. Named rather than a bare `1.0` so the assumption is greppable.
 pub const SQUARE: f32 = 1.0;
+
+/// **The viewport height that shows the whole carousel** — one answer, so the crop report and the
+/// camera cannot quote different numbers.
+///
+/// [`framing_height`] returns unclamped at both ends and the floor is the caller's; this is that
+/// caller, and it was written twice. [`restage_group`] computed it to decide whether to report a crop
+/// and `tiles::stage_camera` computed it again to apply it — with a `.min(MAX_ZOOM)` the report did
+/// not have — so the sentence an author read named a height the rig had never been set to.
+///
+/// The ceiling deliberately stays out of here: the report is *about* wanting more than
+/// [`crate::view::MAX_ZOOM`], and a value already clipped to it cannot say so. The camera applies
+/// `.min(crate::view::MAX_ZOOM)` on top; the report compares against it.
+pub fn carousel_height(carousel: &Carousel) -> f32 {
+    framing_height(carousel.extent, carousel.tallest, SQUARE).max(crate::tiles::TILE_VIEW_HEIGHT)
+}
 
 /// **The carousel as it currently stands**, written by [`restage_group`] and read by everything that
 /// has to agree with it — the gizmos, the labels, the click, the camera.
@@ -1229,8 +1252,7 @@ fn restage_group(
     // **A strip too big to be seen whole says so.** The rig stops at `MAX_ZOOM`, so past that the
     // outer miniatures are cropped — and cropped read as complete is exactly the silent truncation
     // `fill::box_fill` grew its `truncated` flag to avoid.
-    let want = framing_height(carousel.extent, carousel.tallest, SQUARE)
-        .max(crate::tiles::TILE_VIEW_HEIGHT);
+    let want = carousel_height(&carousel);
     if want > crate::view::MAX_ZOOM {
         state.status.problem(format!(
             "this composition and its neighbours need a {want:.0} m view and the camera stops at \

@@ -291,13 +291,21 @@ pub fn refresh(
     for (which, mut text, mut colour) in &mut texts {
         let focused = filters.focus == Some(which.0);
         let raw = filters.text(which.0);
-        let (want, want_colour) = match (focused, raw.is_empty()) {
-            (true, _) => (format!("{raw}_"), ACCENT),
-            (false, true) => (placeholder(which.0).to_owned(), DIM),
-            (false, false) => (raw.to_owned(), TEXT),
+        // **Compared without building the string.** The loop above earns its per-frame run by
+        // comparing before writing, and this one used to spend a `format!` or a `to_owned` just to
+        // have something to compare against — two allocations per box per frame, in the steady state
+        // where nothing changed. The caret is one trailing character, so the wanted string is two
+        // borrowed halves and the comparison is `strip_suffix`; `strip_suffix("")` returns the whole
+        // string, so the two caretless arms reduce to a plain `!=`.
+        let (head, tail, want_colour) = match (focused, raw.is_empty()) {
+            (true, _) => (raw, "_", ACCENT),
+            (false, true) => (placeholder(which.0), "", DIM),
+            (false, false) => (raw, "", TEXT),
         };
-        if text.0 != want {
-            text.0 = want;
+        if text.0.strip_suffix(tail).is_none_or(|rest| rest != head) {
+            text.0.clear();
+            text.0.push_str(head);
+            text.0.push_str(tail);
         }
         if colour.0 != want_colour {
             colour.0 = want_colour;

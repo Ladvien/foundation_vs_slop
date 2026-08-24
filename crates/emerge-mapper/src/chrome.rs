@@ -1150,9 +1150,10 @@ pub struct ProblemLogLine;
 /// unanswerable — each refusal replaced the last, so a session that raised five could only show the
 /// fifth. Bulleted and one line each, because it is a list to scan rather than prose to read.
 ///
-/// `margin-top: auto` pushes it to the bottom of whatever panel holds it, which is the bottom-left
-/// of the screen for the panels pinned `full_height` and the end of the panel for the one that is
-/// not — without this needing to know which is which.
+/// **A centred overlay, not a panel in the frame's flow.** It used to be pinned to the bottom of
+/// whatever panel held it with `margin-top: auto`; it is absolutely positioned now — 8% down, 10% in,
+/// 80% wide — so a journal of five refusals is read at a width that fits them rather than in a dock
+/// column. Nothing here needs to know which panels are `full_height`.
 pub fn journal_panel(mut commands: Commands, frame: Res<Frame>) {
     let panel = commands
         .spawn((

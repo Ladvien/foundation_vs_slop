@@ -151,11 +151,6 @@ pub fn add_debugger_plugins(app: &mut App) -> &mut App {
     ))
 }
 
-/// **The shipped face, installed over Bevy's default asset id.**
-///
-/// Both entry points do this, because it is not cosmetic: the embedded default is 95 codepoints of
-/// ASCII, so every `—` in the editor's copy — and in the refusals `emerge-core` hands back — draws as
-/// a tofu box. A harness whose text ran through a different font would measure different layout.
 /// **Resize the headless surface**, for a test that needs a window shape the default is not.
 ///
 /// The windowed app resizes through `fit_surface_to_window`, which needs a `PrimaryWindow`; a
@@ -177,14 +172,30 @@ pub fn resize_surface(app: &mut App, width: u32, height: u32) -> Result<(), Stri
     let Some(mut image) = images.get_mut(&handle) else {
         return Err("the surface image is gone".into());
     };
+    // **A zero is the caller's bug, not a shape to round up.** Every argument here comes from a test
+    // author, and a silently clamped 1 x 864 surface renders a picture no assertion is about — the
+    // ratchet then measures it and passes. Two refusals above say so out loud when the surface is
+    // missing; this refuses for the same reason.
+    if width == 0 || height == 0 {
+        return Err(format!(
+            "cannot resize the surface to {width} x {height}: a zero {} is not a window shape — pass \
+             the physical texels the test means",
+            if width == 0 { "width" } else { "height" }
+        ));
+    }
     image.resize(bevy::render::render_resource::Extent3d {
-        width: width.max(1),
-        height: height.max(1),
+        width,
+        height,
         depth_or_array_layers: 1,
     });
     Ok(())
 }
 
+/// **The shipped face, installed over Bevy's default asset id.**
+///
+/// Both entry points do this, because it is not cosmetic: the embedded default is 95 codepoints of
+/// ASCII, so every `—` in the editor's copy — and in the refusals `emerge-core` hands back — draws as
+/// a tofu box. A harness whose text ran through a different font would measure different layout.
 pub fn install_font(app: &mut App, root: &Path) -> Result<(), String> {
     let path = root.join("assets/fonts/FiraMono-Regular.ttf");
     let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
