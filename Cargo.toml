@@ -180,7 +180,15 @@ bevy_speech_bubbles = { path = "crates/bevy_speech_bubbles" }
 #
 # Nothing else reaches this game. It constructs no `CutSettings`, never calls `cut_for`, and sets no
 # `FractureBores`, so it takes the bump and behaves identically until something here asks for a channel.
-bevy_autogib = { git = "https://github.com/Ladvien/bevy_autogib", rev = "c7d4868" }
+#
+# **Bumped c7d4868 → 5e54310, and it is examples only.** That commit is the first time
+# `examples/bullet_holes.rs` was ever actually executed — three autogib tickets had shipped it
+# unrun, because the machine it is developed on has no desktop session. Under Xvfb it produced four
+# rendering defects (two missing-glyph separators, an aim marker drawn inside the subject, and a
+# camera aimed at the floor anchor instead of the subject's middle). None of it reaches this repo,
+# which compiles no example of the crate; the pin moves so it names the tip rather than a commit
+# chosen by when someone stopped looking.
+bevy_autogib = { git = "https://github.com/Ladvien/bevy_autogib", rev = "5e54310" }
 # The agent debugger's companion Bevy plugin — custom BRP methods for screenshots and headless input
 # injection. **Optional, pulled in only by the `debugger` feature**, so it is absent from the resolved
 # dependency graph of every default, release and determinism build.
