@@ -151,7 +151,18 @@ bevy_speech_bubbles = { path = "crates/bevy_speech_bubbles" }
 # `FractureSettings` (unchanged), `FractureCache`, `FractureSubject`, `DetachedPart` and the plugin.
 # Checked rather than assumed, because a signature change in a pinned dependency is exactly the thing
 # a pin exists to make visible.
-bevy_autogib = { git = "https://github.com/Ladvien/bevy_autogib", rev = "007c6ca" }
+#
+# **Bumped 007c6ca → da9e7bf.** AG-023: the plug a bore removes comes back instead of being dropped.
+# A bullet hole and the gore that leaves through it are now the same subtraction — `Fracture::ejecta`
+# on the pure path, `FractureCache::ejecta` on the ECS one — and the bore conserves volume, which it
+# previously did not: `shards + plugs == the cell`.
+#
+# **Additive on both paths, checked rather than assumed.** `Ejecta` and `EjectaChunk` are new public
+# types and `audit_proxy` gained a sibling `audit_cell`; no existing signature this repo calls moved.
+# The bore's own internals changed shape (`soup::fracture` returns a third value), but all of that is
+# `pub(crate)`. This game still constructs no `CutSettings`, never calls `cut_for`, and sets no
+# `FractureBores` — so it takes the bump and behaves identically until something asks for a channel.
+bevy_autogib = { git = "https://github.com/Ladvien/bevy_autogib", rev = "da9e7bf" }
 # The agent debugger's companion Bevy plugin — custom BRP methods for screenshots and headless input
 # injection. **Optional, pulled in only by the `debugger` feature**, so it is absent from the resolved
 # dependency graph of every default, release and determinism build.
