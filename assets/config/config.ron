@@ -439,6 +439,12 @@
         weak_axis: 0.75,      // how hard to cut across the narrow dimension
         cap_relief: 0.30,     // how much the drawn cut face is crumpled
         soften: 0.5,          // how much the drawn fragment is rounded
+        // **Debris is rounded on its own dial** (autogib AG-024). `soften` relaxes each drawn piece
+        // independently without pinning the boundary it shares with its neighbour, so on a subject
+        // with bullet holes in it raising `soften` pulls the wedges around each channel apart. Gore
+        // that has already left shares a boundary with nothing, so it can be rounded freely — which
+        // is the difference between an ejected plug reading as sharp coins and as lumps of meat.
+        ejecta_soften: 0.55,  // how much the ejected debris is rounded
     ),
 
     // =============================================================================================

@@ -162,7 +162,25 @@ bevy_speech_bubbles = { path = "crates/bevy_speech_bubbles" }
 # The bore's own internals changed shape (`soup::fracture` returns a third value), but all of that is
 # `pub(crate)`. This game still constructs no `CutSettings`, never calls `cut_for`, and sets no
 # `FractureBores` — so it takes the bump and behaves identically until something asks for a channel.
-bevy_autogib = { git = "https://github.com/Ladvien/bevy_autogib", rev = "da9e7bf" }
+#
+# **Bumped da9e7bf → 6b6b886.** AG-024: an ejected plug breaks up instead of leaving whole. A plug is
+# one convex prism, so ejected intact it can only read as a dowel — `Bore::shatter` runs it through the
+# crate's own cut policy (the same one the body fracture uses, extracted rather than copied), and
+# `CutSettings::ejecta_soften` rounds the debris without touching the body. `FractureSettings` grows
+# `ejecta_soften` and is now twelve dials, not eleven.
+#
+# **`FractureSettings` gained a field, and this repo authors that struct from `config.ron`.** That
+# combination nearly broke the game at startup: the struct is `serde(deny_unknown_fields)` with no
+# struct-level default, so every field is *required*, and `config.ron`'s `fracture:` slice does
+# enumerate all eleven previous dials — so a twelfth would have been refused at load, with the release
+# build perfectly green. The crate now gives the dial an explicit `serde` default and pins it with a
+# test built from this file's own block (`a_config_written_before_ejecta_soften_still_loads`), which is
+# why the pin is `c7d4868` rather than `6b6b886`. `ejecta_soften` is authored below anyway, because
+# this file spells every other dial out.
+#
+# Nothing else reaches this game. It constructs no `CutSettings`, never calls `cut_for`, and sets no
+# `FractureBores`, so it takes the bump and behaves identically until something here asks for a channel.
+bevy_autogib = { git = "https://github.com/Ladvien/bevy_autogib", rev = "c7d4868" }
 # The agent debugger's companion Bevy plugin — custom BRP methods for screenshots and headless input
 # injection. **Optional, pulled in only by the `debugger` feature**, so it is absent from the resolved
 # dependency graph of every default, release and determinism build.
