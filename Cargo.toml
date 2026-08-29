@@ -138,7 +138,20 @@ bevy_speech_bubbles = { path = "crates/bevy_speech_bubbles" }
 # carries: the region-query hit model (AG-017), the fragment-adjacency match (AG-016), one bake
 # across granularities (AG-015), the halving and sub-pixel-face fixes (AG-018/19), and the demo,
 # recordings and on-screen controls (AG-020..023).
-bevy_autogib = { git = "https://github.com/Ladvien/bevy_autogib", rev = "0cfee6e" }
+#
+# **Bumped 0cfee6e → 007c6ca**, and this is the first bump taken the way the reversed arrow intends:
+# the work was done in `Ladvien/bevy_autogib`, verified there against its own lockfile, pushed there,
+# and arrives here as a rev. Nothing was vendored and nothing was mirrored back. What the bump
+# carries: AG-021 (the `isomesh` pin moved to `aa82b0b`, zero re-blessed numbers) and AG-022 (bullet
+# holes — a `Bore` subtracted from the proxy as plane cuts only, so a channel is real geometry with a
+# red interior and every shard is still a convex-hull collider).
+#
+# **`CutSettings` gained a `bores` field and `FractureSettings::cut_for` gained a parameter.** Neither
+# reaches this game: it constructs no `CutSettings` and never calls `cut_for` — it uses
+# `FractureSettings` (unchanged), `FractureCache`, `FractureSubject`, `DetachedPart` and the plugin.
+# Checked rather than assumed, because a signature change in a pinned dependency is exactly the thing
+# a pin exists to make visible.
+bevy_autogib = { git = "https://github.com/Ladvien/bevy_autogib", rev = "007c6ca" }
 # The agent debugger's companion Bevy plugin — custom BRP methods for screenshots and headless input
 # injection. **Optional, pulled in only by the `debugger` feature**, so it is absent from the resolved
 # dependency graph of every default, release and determinism build.
