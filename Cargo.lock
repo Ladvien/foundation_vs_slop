@@ -868,7 +868,7 @@ dependencies = [
 [[package]]
 name = "bevy_autogib"
 version = "0.1.0"
-source = "git+https://github.com/Ladvien/bevy_autogib?rev=c7d4868#c7d486824456e8c90064c7d4a9b85ee124dd4df6"
+source = "git+https://github.com/Ladvien/bevy_autogib?rev=5e54310#5e54310ac72d86493c139d8154e1b2e0509ba0a5"
 dependencies = [
  "bevy",
  "isomesh",
@@ -3802,7 +3802,7 @@ dependencies = [
  "vec_map",
  "wasm-bindgen",
  "web-sys",
- "windows 0.62.2",
+ "windows 0.52.0",
 ]
 
 [[package]]
@@ -8786,7 +8786,7 @@ dependencies = [
  "objc2-metal 0.3.2",
  "objc2-quartz-core 0.3.2",
  "once_cell",
- "ordered-float 5.3.0",
+ "ordered-float 4.6.0",
  "parking_lot",
  "portable-atomic",
  "portable-atomic-util",
@@ -8864,7 +8864,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
