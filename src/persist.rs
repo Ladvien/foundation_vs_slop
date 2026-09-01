@@ -9,7 +9,7 @@
 //!
 //! It is an `Entity`. An entity id is an index into *this process's* ECS, so writing one to disk stores
 //! a number that will mean something different — or nothing — next launch. That is exactly the class of
-//! bug FVS-N-8 turned out to be, one level up: `autogib::seed_from` hashed an `AssetId`, which is an
+//! bug FVS-N-8 turned out to be, one level up: `carnage::seed_from` hashed an `AssetId`, which is an
 //! index into the asset arena, and the fracture moved every run.
 //!
 //! It is also already dangling *before* any save: the captured anomaly is `run_scoped()`, so it is

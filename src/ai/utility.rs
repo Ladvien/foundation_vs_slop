@@ -597,7 +597,7 @@ pub fn decide(behaviors: &[Behavior], perc: &Perception, rng: &mut u32) -> usize
 #[cfg(test)]
 mod tests {
     // Pure decision logic — no App, no ECS (mirrors the seed-in/assert-out convention in
-    // `wfc.rs`/`autogib.rs`). Locks the response curves and the dual-utility bucket + weighted-random
+    // `wfc.rs`/`carnage.rs`). Locks the response curves and the dual-utility bucket + weighted-random
     // selection so a silent change to either is caught (Dill, "Dual-Utility Reasoning").
     use super::*;
 

@@ -362,14 +362,14 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
         // the field on FixedUpdate and is in this harness, so these move the trajectory; the cosmetic
         // `LightingPlugin` is not, so the visual knobs would be inert here anyway.
         w.lighting.apply_to(&mut gc.lighting);
-        // Same: only the 8 sim-relevant gore dials (FVS-I-7) — debris cap, autogib fragment count/throw,
+        // Same: only the 8 sim-relevant gore dials (FVS-I-7) — debris cap, the four `autogib_*` fragment count/throw dials,
         // and the meat the crabs forage on. `GorePlugin` (registered below) clones `gc.gore` at plugin
         // build, i.e. AFTER this seam, so this write is what a rollout's gib economy is scored against.
         // Guarded by `every_world_config_slice_reaches_the_game_config` (tests/replay.rs).
         //
         // **Two destinations, one gene group.** The three fragment-count genes land in `gc.fracture`
-        // (`bevy_autogib::FractureSettings`, read by the bake) and the launch gene in `gc.gore` (read by
-        // `spawn_fragments`). `autogib::AutogibPlugin` clones `gc.fracture` at plugin build, the same way
+        // (`bevy_carnage::FractureSettings`, read by the bake) and the launch gene in `gc.gore` (read by
+        // `spawn_fragments`). `carnage::CarnagePlugin` clones `gc.fracture` at plugin build, the same way
         // and at the same point in the sequence `GorePlugin` clones `gc.gore` — so both halves are still
         // written before anything reads them. Dropping the second argument here would silently freeze
         // every fragment-count gene at its authored value for the whole search.
@@ -479,7 +479,7 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
             crate::time_control::TimeControlPlugin,
             crate::juice::JuicePlugin,
             crate::gore::GorePlugin,
-            crate::autogib::AutogibPlugin,
+            crate::carnage::CarnagePlugin,
         ),
         crate::audio::GameAudioPlugin,
         (crate::vhs::VhsPlugin, crate::blood_lens::BloodLensPlugin),
@@ -1108,7 +1108,7 @@ pub fn field_at(app: &mut App, channel: usize, pos: Vec3) -> f32 {
         .sample(crate::ai::field::FieldId(channel), dungeon, pos)
 }
 
-/// Whether every squad unit's fracture set has finished baking (`bevy_autogib::bake_fractures`).
+/// Whether every squad unit's fracture set has finished baking (`bevy_carnage::bake_fractures`).
 ///
 /// A **precondition probe**, not a driver. `bake_fractures` self-gates on the figurine's sub-meshes being
 /// present in `Assets<Mesh>` — async GLB streaming — so *whether the bake has happened yet* is wall-clock
@@ -1129,7 +1129,7 @@ pub fn autogib_ready(app: &mut App) -> bool {
     if sources.is_empty() {
         return false;
     }
-    let cache = world.resource::<crate::autogib::AutogibCache>();
+    let cache = world.resource::<crate::carnage::CarnageCache>();
     sources.iter().all(|s| cache.fragments(*s).is_some())
 }
 

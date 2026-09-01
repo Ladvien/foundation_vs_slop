@@ -46,7 +46,7 @@ mod common;
 
 /// `util.rs` defines the sanctioned helpers, so its own `sort_unstable_by_key` calls ARE the primitives.
 ///
-/// `bevy_autogib/src/bake.rs` was the only other entry, for the same reason — a leaf crate cannot
+/// `bevy_carnage/src/bake.rs` was the only other entry, for the same reason — a leaf crate cannot
 /// import the game's `sort_total_by_key_at`, so it carries a checked copy. It came out with the
 /// crate itself (`f6ddc0f`): an exemption naming a file no walk reaches is dead weight that reads
 /// like coverage, which is the same silent-drift failure `common::source_roots` exists to prevent.

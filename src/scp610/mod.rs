@@ -28,7 +28,7 @@
 //! words: *"Quarantine the room and hold the line. Quietly — it settles when we stop making noise."*
 //! Kill it and you get a corpse; cordon it and you get a specimen.
 //!
-//! [`kill_blooms`] is deliberately **not** a despawn. Every other creature here dies through `autogib`
+//! [`kill_blooms`] is deliberately **not** a despawn. Every other creature here dies through `carnage`
 //! fracture; 610 collapses on its own baked clip and stays, because a dead mass of flesh is still the
 //! terrain it always was. `assets/scp610/README.md` §5 says the clip exists for exactly this reason.
 //! There is no `Killed` marker: `containment::state`'s module doc is explicit that a marker with no

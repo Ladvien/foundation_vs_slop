@@ -115,11 +115,11 @@ pub struct GameConfig {
     pub dungeon: DungeonConfig,
     pub placement: PlacementConfig,
     pub gore: GoreSettings,
-    /// How the character mesh is **cut** — `bevy_autogib`'s five bake dials. Its own slice rather than
+    /// How the character mesh is **cut** — `bevy_carnage`'s five bake dials. Its own slice rather than
     /// part of `gore:` because the crate owns the bake that reads it, and a dial with two owners is a
     /// dial that drifts. The *launch* dial (`autogib_speed_mult`) stays in `gore:`, with the code that
     /// throws the chunk.
-    pub fracture: bevy_autogib::FractureSettings,
+    pub fracture: bevy_carnage::FractureSettings,
     pub hair: crate::hair::HairSettings,
     pub impact_fx: ImpactFxSettings,
     pub ai_tuning: AiTuning,
@@ -168,7 +168,7 @@ pub struct WorldConfig {
     /// co-evolve the light the ecosystem steers on, rather than freezing it while evolving the mold's
     /// response to it. Visual knobs stay authored. Applied over `GameConfig::lighting`'s gameplay knobs.
     pub lighting: crate::light::LightingDynamics,
-    /// The evolvable **gameplay** gore dials (debris cap/settling, autogib fragment count and throw, and
+    /// The evolvable **gameplay** gore dials (debris cap/settling, the four `autogib_*` fragment-count and throw dials, and
     /// the meat the crabs forage on) — FVS-I-7. A gore knob has already tipped a 5/5 win into a wipe, so
     /// it is a live difficulty dial the offline search must be able to see. The ~22 cosmetic knobs stay
     /// authored; see `gore::GoreDynamics` for why encoding them would make the archive worse.
@@ -178,7 +178,7 @@ pub struct WorldConfig {
 /// Read, parse, and validate the unified config. One path: any read, parse, or per-slice validation
 /// failure is an `Err` the caller (`ConfigPlugin::build`) surfaces loudly — there is no default config.
 /// Validation reuses each subsystem's own validator so the invariants are identical to the pre-merge
-/// per-file loads (dungeon generation invariants, the WFC Tiled-prototype cap, the gore autogib range).
+/// per-file loads (dungeon generation invariants, the WFC Tiled-prototype cap, the gore `autogib_*` range).
 /// Fingerprint of `config.ron` as this process first saw it.
 ///
 /// **Why this exists.** The config is read from disk every time an `App` boots, so editing it while a

@@ -750,7 +750,7 @@ pub fn authored() -> WorldGenome {
         &crate::light::LightingDynamics::default(),
         &crate::gore::GoreDynamics::from_config(
             &crate::gore::GoreSettings::default(),
-            &bevy_autogib::FractureSettings::default(),
+            &bevy_carnage::FractureSettings::default(),
         ),
     )
 }
@@ -879,7 +879,7 @@ mod tests {
                 &crate::light::LightingDynamics::default(),
                 &crate::gore::GoreDynamics::from_config(
                     &crate::gore::GoreSettings::default(),
-                    &bevy_autogib::FractureSettings::default(),
+                    &bevy_carnage::FractureSettings::default(),
                 ),
             );
             base.0
@@ -930,7 +930,7 @@ mod gore_gene_tests {
     fn the_gore_dials_round_trip_through_the_genome() {
         let shipped = crate::gore::GoreDynamics::from_config(
                     &crate::gore::GoreSettings::default(),
-                    &bevy_autogib::FractureSettings::default(),
+                    &bevy_carnage::FractureSettings::default(),
                 );
         let decoded = decode(&authored()).expect("the authored genome decodes");
         assert_eq!(decoded.gore, shipped, "the authored genome must decode to the shipped gore dials");
@@ -945,7 +945,7 @@ mod gore_gene_tests {
         let idx_of = |perturb: fn(&mut crate::gore::GoreDynamics)| {
             let mut g = crate::gore::GoreDynamics::from_config(
                     &crate::gore::GoreSettings::default(),
-                    &bevy_autogib::FractureSettings::default(),
+                    &bevy_carnage::FractureSettings::default(),
                 );
             perturb(&mut g);
             let probed = encode(
@@ -979,7 +979,7 @@ mod gore_gene_tests {
     }
 
     /// `BOUNDS` clamps each knob independently and cannot express `min <= max`, so an ordinary
-    /// mutation can invert the autogib piece clamp. `decode` orders the pair — without it the search
+    /// mutation can invert the `autogib_*` piece clamp. `decode` orders the pair — without it the search
     /// could hand the game a config `gore::validate_settings` rejects, aborting the rollout.
     #[test]
     fn decode_orders_an_inverted_autogib_clamp() {
@@ -987,7 +987,7 @@ mod gore_gene_tests {
         let idx_of = |perturb: fn(&mut crate::gore::GoreDynamics)| {
             let mut g = crate::gore::GoreDynamics::from_config(
                     &crate::gore::GoreSettings::default(),
-                    &bevy_autogib::FractureSettings::default(),
+                    &bevy_carnage::FractureSettings::default(),
                 );
             perturb(&mut g);
             let probed = encode(
@@ -1012,7 +1012,7 @@ mod gore_gene_tests {
         let mut settings = crate::gore::GoreSettings::default();
         // The fragment-count clamp now lives with the bake that would panic on it, so the inverted pair
         // this test constructs has to be validated where it landed: `fracture:`, not `gore:`.
-        let mut fracture = bevy_autogib::FractureSettings::default();
+        let mut fracture = bevy_carnage::FractureSettings::default();
         decoded.apply_to(&mut settings, &mut fracture);
         crate::gore::validate_settings(&settings)
             .expect("a decoded genome must always produce a config the validator accepts");

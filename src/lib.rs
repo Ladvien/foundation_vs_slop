@@ -30,7 +30,7 @@ pub mod audio;
 /// turn sound into a stimulus agents react to; evolvable by the offline audio search (`squad_ai::
 /// audio_genome`). Mirrors `ai::tuning` / `sim`.
 pub mod audio_tuning;
-pub mod autogib;
+pub mod carnage;
 pub mod behavior_tuning;
 pub mod blood_lens;
 pub mod broadcast;
@@ -174,7 +174,7 @@ use bevy::winit::{UpdateMode, WinitSettings};
 
 /// Gravity for the (gib-only) physics world. Heavier than real 9.81 so chunks fall snappily and
 /// settle fast — arcade feel over realism. Only `RigidBody::Dynamic` gib chunks are affected;
-/// nothing else in the game is a physics body (see `gore`/`autogib`).
+/// nothing else in the game is a physics body (see `gore`/`carnage`).
 const GIB_GRAVITY: f32 = 18.0;
 
 /// While the dev-only region-capture tool (Ctrl+P, see `region_capture`) owns the mouse, the squad
@@ -382,7 +382,7 @@ pub fn run() {
 
     app
         // avian3d rigid-body physics — deliberately scoped: only gib chunks are dynamic bodies and
-        // only the floor + walls are static colliders (see `gore`/`autogib`/`dungeon`). Units,
+        // only the floor + walls are static colliders (see `gore`/`carnage`/`dungeon`). Units,
         // enemies, and lasers keep their own custom movement and never touch the solver.
         .add_plugins(PhysicsPlugins::default())
         .insert_resource(Gravity(Vec3::NEG_Y * GIB_GRAVITY))
@@ -485,7 +485,7 @@ pub fn run() {
                 time_control::TimeControlPlugin,
                 juice::JuicePlugin,
                 gore::GorePlugin,
-                autogib::AutogibPlugin,
+                carnage::CarnagePlugin,
             ),
             audio::GameAudioPlugin,
             // Cosmetic render/FX. Mycelia (GPU-compute mold ambience) lives here and is registered ONLY

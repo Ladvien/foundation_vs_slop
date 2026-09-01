@@ -133,7 +133,7 @@ fn resolve_offer(
 /// specimen's `Entity`: that is a process-local arena index, and FVS-N-8 is the standing proof of what
 /// happens when an allocated id reaches a seed.
 ///
-/// FNV-1a over the four fields, hand-rolled for the reason `bevy_autogib`'s `seed_from_path` gives:
+/// FNV-1a over the four fields, hand-rolled for the reason `bevy_carnage`'s `seed_from_path` gives:
 /// `DefaultHasher` is not guaranteed stable across toolchains, so it has no business seeding anything
 /// that must reproduce between builds.
 pub fn draw_seed(

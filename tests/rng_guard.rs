@@ -55,7 +55,7 @@ fn hash_f32_is_frozen() {
 /// **The same generator, in the crate that owns the fracture — pinned here so the two copies cannot
 /// drift.**
 ///
-/// `bevy_autogib` is a leaf: it cannot import `util::hash_f32`, so it carries its own copy, and that copy
+/// `bevy_carnage` is a leaf: it cannot import `util::hash_f32`, so it carries its own copy, and that copy
 /// seeds every cut plane's direction. A one-constant edit on either side would re-partition every mesh
 /// the game has ever fractured while both files still read plausibly. The crate freezes these same eight
 /// values in its own unit test; this asserts the two are the *same* eight, which is the property neither
@@ -63,10 +63,10 @@ fn hash_f32_is_frozen() {
 #[test]
 fn the_autogib_crates_hash_matches_the_games() {
     let mine: Vec<u32> = (0..64u32).map(|i| hash_f32(i).to_bits()).collect();
-    let theirs: Vec<u32> = (0..64u32).map(|i| bevy_autogib::hash_f32(i).to_bits()).collect();
+    let theirs: Vec<u32> = (0..64u32).map(|i| bevy_carnage::hash_f32(i).to_bits()).collect();
     assert_eq!(
         mine, theirs,
-        "`util::hash_f32` and `bevy_autogib::hash_f32` have diverged. They are two copies of one \
+        "`util::hash_f32` and `bevy_carnage::hash_f32` have diverged. They are two copies of one \
          generator on purpose (a leaf crate cannot import the game's), and the fracture seeds from the \
          crate's. Whichever one was edited, the fragments moved."
     );

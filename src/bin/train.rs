@@ -1686,7 +1686,7 @@ fn apply_archive(
             )?;
             // The gore dials — 8 knobs with a causal path to the `deaths` axis (FVS-I-7) — now span
             // **two** blocks: the three fragment-count genes live in `fracture:` (they are bake dials
-            // owned by `bevy_autogib`), the rest in `gore:`. So this is two splices, not one.
+            // owned by `bevy_carnage`), the rest in `gore:`. So this is two splices, not one.
             //
             // **And they are spliced with the full settings types, not `GoreDynamics`.** The subset type
             // was the guarantee elsewhere in this function — its field names being a flat subset of one

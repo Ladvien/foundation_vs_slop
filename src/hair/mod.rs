@@ -60,7 +60,7 @@
 //! `mycelia::MyceliaPlugin`'s precedent, not `vhs::VhsPlugin`'s — see
 //! `lib::run`'s cosmetic-tuple comment), and every [`HairRig`] is a fully TOP-LEVEL entity — never a
 //! `Children`-descendant of `Unit` — so the fracture bake's bounding-box DFS
-//! (`bevy_autogib::bake_fractures`) can never walk into it. That DFS is what flipped held-in seed
+//! (`bevy_carnage::bake_fractures`) can never walk into it. That DFS is what flipped held-in seed
 //! `0xD00D`→`0xFEED` after the prior mesh swap (`squad_ai::coevolve`'s `HELD_IN_SEEDS` history), so
 //! this boundary is load-bearing, not decorative — see [`HairRig`]'s doc comment.
 //!
@@ -127,7 +127,7 @@ struct HasHairRig;
 
 /// One squad member's simulated accent hair. **Must stay a fully top-level entity — never a
 /// `Children`-descendant of `Unit`, at any depth, including not a sibling of `FigurineModel`.**
-/// The fracture bake's DFS (`bevy_autogib::bake_fractures`) starts at `Query<(&FractureSubject,
+/// The fracture bake's DFS (`bevy_carnage::bake_fractures`) starts at `Query<(&FractureSubject,
 /// &Children)>` — `FigurineSource` IS that component — and walks EVERY descendant of `Unit` into its
 /// fracture bounding-box scan, with no opt-out tag today —
 /// so any child of `Unit` would be folded into that scan and could re-perturb the mesh-extent-derived
@@ -352,7 +352,7 @@ fn setup_hair_assets(
 // ---------------------------------------------------------------------------------------------
 
 /// DFS-walk each newly-streamed `FigurineModel` scene for the `head` bone, exactly mirroring
-/// `autogib::tag_valkyrie_rifle`'s retry-next-frame pattern (that one matches `contains("rifle")` and
+/// `carnage::tag_valkyrie_rifle`'s retry-next-frame pattern (that one matches `contains("rifle")` and
 /// tags a mesh node; this one matches the bone name exactly and stores the bone entity, not a mesh).
 fn locate_head_bone(
     mut commands: Commands,

@@ -4,7 +4,7 @@
 //! needs no CPU load, whereas the bug it guards took two sessions to find and its previous reproducer
 //! was an `#[ignore]`d, load-dependent, five-unit-death scenario.
 //!
-//! **What the bug was.** `autogib::seed_from` hashed the `AssetId` of the character GLB. An `AssetId`
+//! **What the bug was.** `carnage::seed_from` hashed the `AssetId` of the character GLB. An `AssetId`
 //! is a slot index in the asset arena, assigned by **async load order**, so the same mesh got a
 //! different id run to run, hashed to a different fracture seed, and `fracture` sliced the body along
 //! completely different planes. Every downstream symptom followed from that: chunk positions differing
@@ -18,7 +18,7 @@
 #![cfg(feature = "test-harness")]
 
 use bevy::prelude::With;
-use foundation_vs_slop::autogib::AutogibCache;
+use foundation_vs_slop::carnage::CarnageCache;
 use foundation_vs_slop::sim_harness::{
     build_headless_app, serial_guard, step_until_autogib_ready, SimConfig,
 };
@@ -45,7 +45,7 @@ fn bake_fingerprint(cfg: &SimConfig) -> Vec<[u32; 6]> {
     sources.sort_unstable();
     sources.dedup();
 
-    let cache = world.resource::<AutogibCache>();
+    let cache = world.resource::<CarnageCache>();
     let mut rows = Vec::new();
     for s in &sources {
         let Some(frags) = cache.fragments(*s) else { continue };

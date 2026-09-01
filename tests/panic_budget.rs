@@ -67,8 +67,8 @@ const EXEMPT: &[&str] = &["src/sim_harness.rs", "src/bin/train.rs"];
 // authored asset the game cannot start without, where the alternative — a silent default — renders a
 // Site with holes in it and no indication why. Loud at startup beats invisible at runtime.
 //
-// 28 -> 25 on 2026-08-16: no panic site was removed. `f6ddc0f` made `Ladvien/bevy_autogib` the
-// source of truth and this repo a consumer pinned to a rev, so `crates/bevy_autogib/src` left
+// 28 -> 25 on 2026-08-16: no panic site was removed. `f6ddc0f` made `Ladvien/bevy_carnage` the
+// source of truth and this repo a consumer pinned to a rev, so `crates/bevy_carnage/src` left
 // `common::source_roots` and its 3 shipped sites left this count with it. They still exist; they
 // are that repository's budget now.
 //

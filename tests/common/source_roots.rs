@@ -12,7 +12,7 @@
 //!
 //! # A crate that leaves the repository leaves this list
 //!
-//! `crates/bevy_autogib/src` was here until `f6ddc0f` made `Ladvien/bevy_autogib` the source of
+//! `crates/bevy_carnage/src` was here until `f6ddc0f` made `Ladvien/bevy_carnage` the source of
 //! truth and this repo an ordinary consumer of it, pinned to a rev. The assert below says to point
 //! a moved crate at its new home rather than drop it — and that is still the rule for a crate that
 //! moved *inside* this tree. It cannot apply here: the new home is a `~/.cargo/git/checkouts/`

@@ -31,7 +31,7 @@ fn run_state(app: &mut bevy::prelude::App) -> RunState {
 /// Bring a fresh app to a **fixed** tick with the fracture bake already complete, so a kill there is
 /// comparable across builds.
 ///
-/// Both halves matter. Waiting for `autogib` alone is not enough — `step_until_autogib_ready` steps a
+/// Both halves matter. Waiting for `carnage` alone is not enough — `step_until_autogib_ready` steps a
 /// *variable* number of ticks (the bake lands when the GLB streams in, which is wall-clock dependent), so
 /// gating on it and killing immediately moves the kill to a different tick in every run and compares two
 /// different sims. Waiting and then advancing to a fixed absolute tick pins both: the bake is done AND
@@ -314,7 +314,7 @@ fn the_wipe_paths_actors_and_fields_are_reproducible_under_load() {
 /// [`app_at_stable_kill_point`]) with the box under CPU load, comparing actors, fields and gibs across
 /// same-seed runs.
 ///
-/// **The cause, for anyone who sees this go red again.** `autogib::seed_from` hashed the **`AssetId`**
+/// **The cause, for anyone who sees this go red again.** `carnage::seed_from` hashed the **`AssetId`**
 /// of the character GLB to seed the fracture. An `AssetId` is a slot index in the asset arena, assigned
 /// by async load order — so the same mesh got a different id run to run and `fracture` sliced the body
 /// along completely different planes. Measured: 23 of 23 fragments differing in both centroid and

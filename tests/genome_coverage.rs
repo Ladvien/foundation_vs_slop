@@ -169,7 +169,7 @@ fn ledger() -> BTreeMap<&'static str, (Coverage, &'static str)> {
             "fracture",
             (
                 Coverage::World,
-                "how the character mesh is CUT (`bevy_autogib::FractureSettings`), split out of the \
+                "how the character mesh is CUT (`bevy_carnage::FractureSettings`), split out of the \
                  `gore` slice when the fracture became its own crate. **The coverage did not change \
                  with the move**: `pieces_base`, `min_pieces` and `max_pieces` are the same three \
                  `gore::GoreDynamics` genes the world genome has encoded since FVS-I-7, and they \

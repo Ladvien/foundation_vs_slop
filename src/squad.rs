@@ -201,14 +201,14 @@ pub struct AimTarget(pub Option<Vec3>);
 pub struct FacingOverride(pub Option<Vec3>);
 
 /// Marks the gun sub-model so the outfit recolor skips it (the blaster keeps its own colors) and so
-/// `autogib` can bake it as a separate intact chunk instead of folding it into the body fracture. The
+/// `carnage` can bake it as a separate intact chunk instead of folding it into the body fracture. The
 /// Researcher's flashlight carries this marker too — it is the unit's held item, so it inherits the same
 /// recolor-skip and death-fling behavior for free (see the spawn branch below).
 ///
-/// This *is* `bevy_autogib::DetachedPart`, under the name this game already used. The crate cannot call
+/// This *is* `bevy_carnage::DetachedPart`, under the name this game already used. The crate cannot call
 /// it a gun — a fracture library is useless to a project that has none — so the game's vocabulary is
 /// restored here rather than at the ~10 call sites.
-pub use bevy_autogib::DetachedPart as GunModel;
+pub use bevy_carnage::DetachedPart as GunModel;
 
 /// Marks the Researcher's flashlight sub-model (a sibling of [`GunModel`]'s role) so the windowed-only
 /// cosmetic `SpotLight` system (`light::attach_flashlight_spots`) can find it and give it a real beam.
@@ -226,13 +226,13 @@ pub struct FlashlightModel;
 pub struct FigurineModel;
 
 /// The unit's figurine scene asset, carried on the `Unit` itself as a stable, spawn-time id so death
-/// (`despawn_dead_units`) and fracture baking (`bevy_autogib::bake_fractures`) can key the gib source
+/// (`despawn_dead_units`) and fracture baking (`bevy_carnage::bake_fractures`) can key the gib source
 /// without reading the async `WorldAssetRoot` (which now lives on the [`FigurineModel`] child). One handle
 /// is loaded once and cloned into both the child's `WorldAssetRoot` and this component — one asset, one path.
 ///
-/// This *is* `bevy_autogib::FractureSubject`: it is what marks a unit as breakable, and its handle is
+/// This *is* `bevy_carnage::FractureSubject`: it is what marks a unit as breakable, and its handle is
 /// both the fracture cache's key and the seed the cut planes come from.
-pub use bevy_autogib::FractureSubject as FigurineSource;
+pub use bevy_carnage::FractureSubject as FigurineSource;
 
 /// Marks a [`FigurineModel`] child whose meshes have already been recolored (so the one-shot recolor
 /// runs once). Tagged on the figurine child, never the `Unit`, so recoloring never churns the sim archetype.
@@ -906,7 +906,7 @@ fn despawn_dead_units(
 
     for (_, entity, transform, outfit, figurine) in dead {
         // The unit's real 3D figurine gets crunched: blood spray + a floor pool + its own
-        // mesh sliced into flying meat chunks tinted to its outfit color (see `gore`/`autogib`).
+        // mesh sliced into flying meat chunks tinted to its outfit color (see `gore`/`carnage`).
         gore.0.push(GoreEvent {
             pos: transform.translation + Vec3::Y * 0.5,
             kind: GoreKind::UnitCrunch,

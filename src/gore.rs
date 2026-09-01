@@ -40,7 +40,7 @@ use bevy::time::Real;
 
 use avian3d::prelude::*;
 
-use crate::autogib::AutogibCache;
+use crate::carnage::CarnageCache;
 use crate::util::hash_f32;
 use crate::blood_lens::BloodLens;
 use crate::dungeon::Dungeon;
@@ -66,7 +66,7 @@ pub enum GoreKind {
 /// from `pos` (which stays at chest height for the blood layers) so fragments spawn from the
 /// figurine's true foot origin at its render scale. `None` for hits and billboard enemies.
 pub struct GibSource {
-    /// The character's source scene asset id — the key into [`AutogibCache`].
+    /// The character's source scene asset id — the key into [`CarnageCache`].
     pub source: AssetId<WorldAsset>,
     /// The figurine's foot origin in world space (fragments are placed relative to this).
     pub origin: Vec3,
@@ -320,7 +320,7 @@ struct GoreFx {
 pub struct BloodPool;
 
 
-/// Marker for every physics gib chunk (autogib fragment, flung gun, or meat blob). Motion is owned by
+/// Marker for every physics gib chunk (fracture fragment, flung gun, or meat blob). Motion is owned by
 /// avian3d — the chunk is a `RigidBody::Dynamic` with a box collider, launched with an initial
 /// linear + angular velocity, that tumbles, bounces off the floor/walls/other chunks, and settles.
 /// All chunks are registered in [`GibRing`] so the total count stays bounded.
@@ -387,7 +387,7 @@ pub enum CarryPhase {
 /// Density used to turn a chunk's mesh volume into a carry weight (`weight = density × volume`). Tuned
 /// against `crab::CRAB_CARRY_CAPACITY` so small chunks go solo and big ones need a crew.
 const MEAT_DENSITY: f32 = 900.0;
-/// Fill fraction applied to an autogib fragment's *bounding-box* volume when pricing it as a carry
+/// Fill fraction applied to a fracture fragment's *bounding-box* volume when pricing it as a carry
 /// weight (the severed mesh fills only part of its box). Chosen so a body part lands in the same
 /// haulable range as a meat chunk — light bits go solo, a torso needs a few crabs.
 const FRAG_FILL: f32 = 0.12;
@@ -484,18 +484,18 @@ pub struct GoreSettings {
     /// Seconds for a pool to dry (darken to matte); fresh blood is bright + glossy.
     dry_time: f32,
     max_pools: usize,
-    // Gib physics launch + material (avian): shared by autogib fragments and meat chunks. Gravity is
+    // Gib physics launch + material (avian): shared by fracture fragments and meat chunks. Gravity is
     // global (see `main::GIB_GRAVITY`); these tune the throw and how a chunk bounces/slides.
     gib_speed: f32,
     /// Bounciness of a chunk on impact (avian `Restitution`; 0 = dead thud, 1 = perfectly elastic).
     chunk_restitution: f32,
     /// Surface friction of a chunk (avian `Friction`; higher = slides less and settles sooner).
     gib_friction: f32,
-    // Autogib (unit crunch: the figurine mesh sliced into flying fragments; see `autogib`).
+    // Carnage (unit crunch: the figurine mesh sliced into flying fragments; see `carnage`).
     //
     // **Only the LAUNCH dial lives here.** The five dials that decide how the mesh is *cut* —
     // `pieces_base`, `ref_extent`, `min_pieces`, `max_pieces`, `min_fraction` — moved into
-    // `bevy_autogib::FractureSettings` with the bake that reads them, and are authored under the
+    // `bevy_carnage::FractureSettings` with the bake that reads them, and are authored under the
     // `fracture:` slice of `config.ron`. Split by role, so each dial has exactly one owner and no
     // system has to copy values between two resources to stay in sync.
     /// Fragment launch speed as a multiple of `gib_speed`. Read by `spawn_fragments`, which is this
@@ -716,7 +716,7 @@ fn drain_gore(
         ResMut<Trauma>,
         ResMut<Hitstop>,
         ResMut<BloodLens>,
-        Res<AutogibCache>,
+        Res<CarnageCache>,
         Res<crate::fog::FogGrid>,
     ),
     camera: Single<&GlobalTransform, With<crate::MainCamera>>,
@@ -801,7 +801,7 @@ fn drain_gore(
         }
 
         // --- SIM viscera (kills only): the unit's own mesh sliced into flying fragment gibs (raw-meat
-        //     cut faces, blaster flung off intact — see `autogib`) plus permanent meat chunks. The crab
+        //     cut faces, blaster flung off intact — see `carnage`) plus permanent meat chunks. The crab
         //     forage→haul→breed economy consumes these, so they spawn for EVERY kill regardless of the
         //     squad's line of sight. Gating a simulation resource on fog (a pure presentation concern)
         //     would starve nests of food from off-screen kills — e.g. the smiley devouring a pile of
@@ -1035,7 +1035,7 @@ fn spawn_gib_body(
     id
 }
 
-/// Spawn the unit's pre-baked mesh fragments as flying **physics** chunks (see `autogib`): each
+/// Spawn the unit's pre-baked mesh fragments as flying **physics** chunks (see `carnage`): each
 /// fragment is a dynamic rigid body carrying two child meshes — the outfit-tinted outer skin and the
 /// raw-meat cut face (`assets.meat_mat`) — so a crunched body reads as real severed pieces that
 /// tumble and pile. The carried blaster is flung off as one intact chunk keeping its own material.
@@ -1044,7 +1044,7 @@ fn spawn_gib_body(
 #[allow(clippy::too_many_arguments)]
 fn spawn_fragments(
     commands: &mut Commands,
-    cache: &AutogibCache,
+    cache: &CarnageCache,
     assets: &GoreAssets,
     std_mats: &mut Assets<StandardMaterial>,
     settings: &GoreSettings,
@@ -1059,7 +1059,7 @@ fn spawn_fragments(
     gib_ordinal: u64,
 ) {
     let Some(frags) = cache.fragments(source) else {
-        warn!("gore: no autogib bake for this character; skipping fragment gibs");
+        warn!("gore: no carnage bake for this character; skipping fragment gibs");
         return;
     };
 
@@ -1699,12 +1699,12 @@ impl GoreDynamics {
     /// Read the evolvable slice out of the two settings blocks that own it.
     ///
     /// **Two blocks, one gene group, and the group's SHAPE did not move.** Three of the four
-    /// `autogib_*` genes now live in `bevy_autogib::FractureSettings` (they are bake dials) while
+    /// `autogib_*` genes now live in `bevy_carnage::FractureSettings` (they are bake dials) while
     /// `autogib_speed_mult` stays in [`GoreSettings`] (it is a launch dial). Splitting the *storage*
     /// while keeping this struct's field order identical is deliberate: `world_genome`'s flat `Vec<f32>`
     /// is index-addressed and `tests/genome_coverage.rs` pins the layout, so reordering here would move
     /// every QD golden for a refactor that changes no behaviour.
-    pub fn from_config(c: &GoreSettings, f: &bevy_autogib::FractureSettings) -> Self {
+    pub fn from_config(c: &GoreSettings, f: &bevy_carnage::FractureSettings) -> Self {
         Self {
             max_gibs: c.max_gibs,
             chunk_restitution: c.chunk_restitution,
@@ -1718,7 +1718,7 @@ impl GoreDynamics {
     }
 
     /// Overwrite the evolvable knobs of both settings blocks, leaving every cosmetic knob authored.
-    pub fn apply_to(&self, c: &mut GoreSettings, f: &mut bevy_autogib::FractureSettings) {
+    pub fn apply_to(&self, c: &mut GoreSettings, f: &mut bevy_carnage::FractureSettings) {
         c.max_gibs = self.max_gibs;
         c.chunk_restitution = self.chunk_restitution;
         c.gib_friction = self.gib_friction;
@@ -1732,8 +1732,8 @@ impl GoreDynamics {
 
 /// Validate an already-deserialized [`GoreSettings`].
 ///
-/// The autogib fragment-count clamp this used to check moved with its dials — it is
-/// `bevy_autogib::FractureSettings::validate`, called from the same place in `config::load_game_config`.
+/// The `autogib_*` fragment-count clamp this used to check moved with its dials — it is
+/// `bevy_carnage::FractureSettings::validate`, called from the same place in `config::load_game_config`.
 /// This is kept as the gore slice's own validator so the config loader keeps one call per slice; it has
 /// no invariant of its own today, and a gore knob that grows one belongs here.
 pub fn validate_settings(_settings: &GoreSettings) -> Result<(), String> {

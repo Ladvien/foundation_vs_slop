@@ -16,7 +16,7 @@ use crate::squad_ai::surprise::containment_criterion;
 /// coordination more lethal, tipping that knife-edge world from a one-hit-point survival (489 dmg) into a
 /// squad wipe (779 dmg); it was replaced by `0xD00D`. `0xD00D` was itself retired on 2026-07-20 when the
 /// squad-member mesh was swapped (the greybox figurine → the VALKYRIE rig): the taller mesh fractures into
-/// more gib chunks per death (`autogib` bakes 23 vs the greybox's handful), and each death's larger meat
+/// more gib chunks per death (`carnage` bakes 23 vs the greybox's handful), and each death's larger meat
 /// "magnet" draws the swarm harder onto the living squad — tipping `0xD00D` from 5/5 with margin (205 dmg)
 /// into a wipe (699 dmg). It is replaced by `0xFEED`, where the authored squad survives 5/5 with margin
 /// (83 dmg at 7200) and the swarm survives — re-verified by

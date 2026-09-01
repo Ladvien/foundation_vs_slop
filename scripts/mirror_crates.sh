@@ -49,9 +49,9 @@ CRATES=(
     # same as every other crate but the direction of the FIRST move was inward. Its nested
     # `crates/bevy_debugger_bevy` travels with it — one mirror, both halves.
     bevy_debugger_mcp
-    # **`bevy_autogib` is deliberately absent, and it is the only crate that ever left this list.**
-    # It was a mirror of `crates/bevy_autogib` until 2026-08-16, when the arrow was reversed:
-    # `Ladvien/bevy_autogib` became the source of truth and this repo an ordinary consumer of it,
+    # **`bevy_carnage` is deliberately absent, and it is the only crate that ever left this list.**
+    # It was a mirror of `crates/` under its former name until 2026-08-16, when the arrow was reversed:
+    # `Ladvien/bevy_carnage` became the source of truth and this repo an ordinary consumer of it,
     # pinned by rev in the root manifest. A `subtree split` carries only commits, so the crate's own
     # audit harness could never reach the published repository from here — which is the whole reason
     # the direction changed. Mirroring it now would push this monorepo's history OVER the repository
