@@ -440,7 +440,11 @@ fn draw_piece(piece: crate::soup::Piece) -> Drawn {
     // included). Without the weave the two meet across T-junctions — flush geometrically, open
     // topologically, and a hairline crack under some rasterisers.
     let seam: Vec<Vec3> = render.pos.clone();
-    let mut drawn = render.clone();
+    // **Moved, not cloned**, for the same reason as `soften`'s output below: `draw_piece` takes its
+    // `Piece` by value, so this soup is already ours. The seam above is the one copy genuinely needed,
+    // because `append_cut_faces` writes into `drawn` while reading the skin's original boundary. Also
+    // measured, also worth nothing — kept because the clone claimed a sharing that does not exist.
+    let mut drawn = render;
     cell.append_cut_faces(&mut drawn, &seam, relief);
     // **Rounded after the cap is welded on**, so the relaxation bevels the skin/cap edge too — which
     // is the sharpest edge on the whole fragment and the one that most says "cleaved".
@@ -573,6 +577,7 @@ pub fn fracture_mesh(parts: &[(&Mesh, Mat4)], proxy: &[ProxyCell], cut: &CutSett
     }
     let (pieces, tree, ejected) = fracture(soup, proxy, cut);
     let bonds = bond_graph(&pieces, &tree);
+
     let fragments = pieces
         .into_iter()
         .enumerate()
@@ -993,7 +998,8 @@ pub(crate) fn soften(soup: &Soup, strength: f32) -> Soup {
 
     // One midpoint subdivision, so relaxation has vertices to work with. A fragment's drawn mesh is
     // a few dozen corners; relaxing that directly collapses it instead of rounding it.
-    let mut fine = Soup::default();
+    // Exactly four output triangles per input triangle, so the size is known rather than guessed.
+    let mut fine = Soup::with_capacity(soup.idx.len() * 4);
     for (t, tri) in soup.idx.iter().enumerate() {
         let (a, b, c) = (soup.vtx(tri[0]), soup.vtx(tri[1]), soup.vtx(tri[2]));
         let mid = |x: Vtx, y: Vtx| Vtx {
@@ -1014,27 +1020,61 @@ pub(crate) fn soften(soup: &Soup, strength: f32) -> Soup {
         (q(p.x), q(p.y), q(p.z))
     };
     // Lattice-keyed and never iterated — ids come from `unique.len()`. See `soup::LatticeHash`.
-    let mut canon: LatticeMap<(i64, i64, i64), usize> =
+    let mut canon: LatticeMap<(i64, i64, i64), u32> =
         LatticeMap::with_capacity_and_hasher(fine.pos.len(), LatticeHash);
     let mut unique: Vec<Vec3> = Vec::new();
-    let of: Vec<usize> = fine
+    // **`u32`, not `usize`.** This is walked four times below — twice building the CSR, once for
+    // normals, once assembling the output — so halving its width halves the bytes those passes touch.
+    // A fine vertex count cannot approach `u32::MAX`: it is three per subdivided triangle.
+    let of: Vec<u32> = fine
         .pos
         .iter()
         .map(|p| {
             *canon.entry(key(*p)).or_insert_with(|| {
                 unique.push(*p);
-                unique.len() - 1
+                unique.len() as u32 - 1
             })
         })
         .collect();
 
-    let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); unique.len()];
+    // **Adjacency as CSR, not `Vec<Vec<usize>>`, and the reason is the relaxation below rather than the
+    // allocation count.** The two relaxation passes walk every vertex's neighbour list, so with a
+    // vector per vertex they chase a thousand-plus separate heap blocks per piece, twice. One
+    // contiguous `nbr` array makes each list a slice, which is what the inner loop wants.
+    //
+    // **Bit-identical, and the fill order is what guarantees it.** The mean below is a float sum, so
+    // the *order* of each vertex's neighbours decides its last bits. Degrees are counted first, then
+    // offsets prefix-summed, then the neighbours are written by walking the triangles in exactly the
+    // order the old code pushed them — so every list comes out in the same sequence it had before.
+    let n_unique = unique.len();
+    let mut offs: Vec<u32> = vec![0; n_unique + 1];
     for tri in &fine.idx {
         for i in 0..3 {
             let (u, v) = (of[tri[i] as usize], of[tri[(i + 1) % 3] as usize]);
             if u != v {
-                adjacency[u].push(v);
-                adjacency[v].push(u);
+                offs[u as usize + 1] += 1;
+                offs[v as usize + 1] += 1;
+            }
+        }
+    }
+    for i in 0..n_unique {
+        offs[i + 1] += offs[i];
+    }
+    let total = offs[n_unique] as usize;
+    let mut nbr: Vec<u32> = vec![0; total];
+    // Cursors start at each vertex's offset and advance as its list fills.
+    let mut at: Vec<u32> = offs[..n_unique].to_vec();
+    for tri in &fine.idx {
+        for i in 0..3 {
+            let (u, v) = (
+                of[tri[i] as usize] as usize,
+                of[tri[(i + 1) % 3] as usize] as usize,
+            );
+            if u != v {
+                nbr[at[u] as usize] = v as u32;
+                at[u] += 1;
+                nbr[at[v] as usize] = u as u32;
+                at[v] += 1;
             }
         }
     }
@@ -1042,15 +1082,21 @@ pub(crate) fn soften(soup: &Soup, strength: f32) -> Soup {
     // Two relaxation passes. More than that and a fragment stops being the shape it was cut as; the
     // strength dial scales how far each pass travels rather than how many there are, so turning it
     // up rounds harder without also melting the piece.
+    //
+    // Double-buffered rather than cloning `moved` each pass: same reads, one fewer allocation and copy
+    // of the whole vertex set per pass.
     let mut moved = unique.clone();
+    let mut previous = moved.clone();
     for _ in 0..2 {
-        let previous = moved.clone();
-        for (i, neighbours) in adjacency.iter().enumerate() {
-            if neighbours.is_empty() {
+        previous.copy_from_slice(&moved);
+        for i in 0..n_unique {
+            let (lo, hi) = (offs[i] as usize, offs[i + 1] as usize);
+            if lo == hi {
                 continue;
             }
+            let list = &nbr[lo..hi];
             let mean: Vec3 =
-                neighbours.iter().map(|&n| previous[n]).sum::<Vec3>() / neighbours.len() as f32;
+                list.iter().map(|&n| previous[n as usize]).sum::<Vec3>() / list.len() as f32;
             moved[i] = previous[i].lerp(mean, strength.clamp(0.0, 1.0) * 0.5);
         }
     }
@@ -1059,28 +1105,46 @@ pub(crate) fn soften(soup: &Soup, strength: f32) -> Soup {
     // of the softening and costs nothing.
     let mut smooth = vec![Vec3::ZERO; unique.len()];
     for tri in &fine.idx {
-        let (i, j, k) = (of[tri[0] as usize], of[tri[1] as usize], of[tri[2] as usize]);
+        let (i, j, k) = (
+            of[tri[0] as usize] as usize,
+            of[tri[1] as usize] as usize,
+            of[tri[2] as usize] as usize,
+        );
         let face = (moved[j] - moved[i]).cross(moved[k] - moved[i]);
         smooth[i] += face;
         smooth[j] += face;
         smooth[k] += face;
     }
 
+    // **Normalised once per welded vertex, not once per reference to one.** There are about six fine
+    // corners per unique vertex, and the old code called `normalize_or_zero` — a square root — for
+    // every corner, so five in six were recomputing a value it already had. Same input, same
+    // operation, same result; just not repeated.
+    let unit: Vec<Vec3> = smooth.iter().map(|n| n.normalize_or_zero()).collect();
+
+    // One pass, filling both attribute buffers together, rather than two walks of `of`.
+    let n_fine = fine.pos.len();
+    let mut out_pos: Vec<Vec3> = Vec::with_capacity(n_fine);
+    let mut out_nrm: Vec<Vec3> = Vec::with_capacity(n_fine);
+    for i in 0..n_fine {
+        let u = of[i] as usize;
+        out_pos.push(moved[u]);
+        // A vertex whose faces cancel has no meaningful average; keep what it had.
+        let n = unit[u];
+        out_nrm.push(if n == Vec3::ZERO { fine.nrm[i] } else { n });
+    }
+
+    // **Moved, not cloned.** `fine` is local and dead from here, and these three buffers pass through
+    // `soften` unchanged — the subdivision's UVs, index buffer and interior flags are exactly what the
+    // output carries. Measured as a performance change and it is worth nothing (~111 KB of `memcpy`
+    // per piece against a 4 ms frame); it is here because a move says "these pass through" and a clone
+    // says "these are copies of something still in use", and only one of those is true.
     let mut out = Soup {
-        pos: fine.pos.iter().enumerate().map(|(i, _)| moved[of[i]]).collect(),
-        nrm: fine
-            .nrm
-            .iter()
-            .enumerate()
-            .map(|(i, fallback)| {
-                let n = smooth[of[i]].normalize_or_zero();
-                // A vertex whose faces cancel has no meaningful average; keep what it had.
-                if n == Vec3::ZERO { *fallback } else { n }
-            })
-            .collect(),
-        uv: fine.uv.clone(),
-        idx: fine.idx.clone(),
-        tri_interior: fine.tri_interior.clone(),
+        pos: out_pos,
+        nrm: out_nrm,
+        uv: std::mem::take(&mut fine.uv),
+        idx: std::mem::take(&mut fine.idx),
+        tri_interior: std::mem::take(&mut fine.tri_interior),
     };
     // Relaxation can pull a triangle's corners together; drop the ones that no longer have area.
     let keep: Vec<bool> = out
