@@ -1,0 +1,138 @@
+[package]
+name = "bevy_carnage"
+version = "0.1.0"
+edition = "2024"
+description = "Deterministic runtime gore for Bevy: plane-cut a character's own meshes into watertight-capped chunks, bore bullet channels through them, and drive blood, spatter and impact feel off the wounds that result."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Ladvien/bevy_carnage"
+keywords = ["bevy", "gamedev", "gore", "fracture", "destruction"]
+categories = ["game-development", "graphics"]
+publish = false
+
+[dependencies]
+# The umbrella with defaults off, matching `bevy_speech_bubbles`' precedent in the parent workspace.
+# The bake reads whatever scene a subject loads and writes `Mesh` assets back, so it needs the asset
+# arena, the mesh types, PBR's material handle for the detached part, the ECS/app to be a plugin at all,
+# and `log` for the loud refusals that are this crate's answer to bad input.
+bevy = { version = "0.19.0", default-features = false, features = [
+    "bevy_asset",   # Assets<Mesh>, Handle<T>, AssetId<T>, AssetPath, RenderAssetUsages
+    "bevy_mesh",    # Mesh, Mesh3d, Indices, PrimitiveTopology, VertexAttributeValues
+    "bevy_pbr",     # StandardMaterial / MeshMaterial3d — the detached part keeps its own material
+    # `WorldAsset` — the scene handle a subject is keyed by. It lives in
+    # `bevy_world_serialization`, NOT `bevy_scene`, and naming the wrong one here still built for a
+    # long time: `cargo test` pulls the dev-dependency full umbrella, which enables everything, so the
+    # gap only appears in a build that does not. `cargo build --release -p bevy_carnage` is the check.
+    "bevy_world_serialization",
+    "bevy_scene",   # the scene types `bevy_world_serialization` is layered over
+    "bevy_log",     # warn!/error!/info! — a refusal has to be visible
+    "std",
+] }
+# The five bake dials deserialize, so a caller can author them in a data file rather than hardcoding
+# fragment counts. Optional because a caller that builds `FractureSettings` in code needs none of it.
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+# **The mesh validator.** This crate could always cut a mesh; it could never say whether what came out
+# was closed, manifold or consistently wound — `examples/fracture_cube.rs` says so in as many words.
+# `isomesh` is what answers that, and it is an unusually cheap thing to admit: `no_std`, exactly one
+# dependency of its own (`libm`), and **no math library in its public API** — every signature is
+# `[f32; 3]`, so it cannot collide with the `glam` version Bevy 0.19 pins. That last property is why
+# this is a dependency at all rather than a vendored copy.
+#
+# **Pinned to a `rev`, and that is not caution — it is the same rule as `hash_f32`.** isomesh is under
+# active development in a sibling repo. An unpinned dependency whose welder or validator moved between
+# builds would move this crate's *reported* topology between builds, which is the same class of bug
+# `seed_from_path` and the canonical soup order exist to prevent. Bump it deliberately, in a commit that
+# re-blesses the locked topology counts, or not at all.
+#
+# **A git rev rather than the registry, deliberately, now that there is a choice.** isomesh publishes:
+# `0.0.10` went to crates.io on 2026-08-27, and for a `0.0.x` Cargo's caret range admits that version
+# alone, so `isomesh = "0.0.10"` would be an exact, checksummed pin. The rev is kept anyway because
+# `origin/main` carries `isomesh::mass` — divergence-theorem volume, centre of mass, inertia and an
+# `asymmetry` leak detector — which is in no published release, and because a bump has to be re-read
+# against a *tree* either way. Revisit when the registry catches up.
+#
+# **Bumped twice.**
+#
+# `4369e3c` → `22c3b35` (AG-013). Cost: one re-blessed number. `supports_inside_outside` gained a
+# `non_manifold_vertices == 0` clause, so the torso+head baseline's collider-ready count went 4 → 1.
+# That is a *correction*, not a regression — the old policy let a bowtie vertex through, and ten of
+# those twelve fragments have one. Bought: `weld_split_by` (the composite-key weld AG-005 was scoped to
+# hand-roll), and `predicates` with `orient2d`/`incircle`.
+#
+# `22c3b35` → `aa82b0b` (AG-021), 291 commits, `0.0.7` → `0.0.10` plus the unreleased `mass` work.
+# **Cost: zero re-blessed numbers, and that is a measurement rather than a hope.** `weld.rs` and
+# `mesh.rs` are byte-identical across the two revs. Every compute pass in `validate.rs` that produces a
+# counter this crate reads is line-for-line identical — the face triage, the edge-run scan behind
+# `boundary_edges`/`inconsistently_oriented_edges`/`non_manifold_edges`, the vertex-link pass behind
+# `non_manifold_vertices`, the degenerate-area test, the duplicate-vertex lattice probe, and the derived
+# χ/genus block. So are `ColliderReadiness`'s three predicates and `collider::from_report`.
+# `ValidateConfig::WELD_EPSILON_REL` is still `1e-4`, so `CELL_SIZE` and every threshold derived from it
+# are unmoved. `MeshReport`'s `Display` block is byte-identical, so even a printed report is the same
+# text. The only change in `collider.rs` is `triangle_indices` switching to `as_chunks::<3>()` — same
+# output. The one behaviour change 0.0.10 advertises loudly — vertex positions moving on the default
+# extraction path, 135 of 216 golden hashes rebaselined — is unreachable from here: this crate never
+# calls an extractor. Bought: `validate::sealing`, `validate::mesh_hash`, `connectivity`, `mass`, and two
+# recorded-never-gated `MeshReport` fields; none adopted, each triaged in
+# `docs/isomesh-upstream-asks.md`. Still `no_std` with `libm` as its only dependency — and that is
+# checked in `Cargo.lock`, not by `tests/leaf.rs`, which only parses this manifest's text.
+#
+# **Pin to a rev that is pushed.** `aa82b0b69bfb5829b0e4f18a3c3934d3652e3040` is `refs/heads/main` on
+# GitHub, confirmed with `git ls-remote`. A git dependency cannot resolve a commit that exists on one
+# machine, and that cost a session once already.
+isomesh = { git = "https://github.com/Ladvien/isomesh", rev = "aa82b0b", default-features = false }
+
+# **GPU blood, and it is optional for a reason the CI enforces.** `bevy_hanabi` compiles particle
+# effects to compute shaders, which means it drags in `bevy_render` and the whole GPU stack — exactly
+# what the trimmed `bevy` above exists to keep out of a consumer that only wants the bake. Behind the
+# `vfx` feature the crate's default-off build is unchanged, and `cargo build --release
+# --no-default-features --features serde` still resolves no render crate at all.
+#
+# **Admitted on the same terms as `isomesh`, and it passes them for a sharper reason: it cannot
+# report.** Hanabi 0.19 has no GPU→CPU readback path whatsoever, so a particle's position is
+# physically unable to reach a golden, a hash or a simulation. The determinism half of this crate
+# cannot see it even by mistake — the library enforces the write-only rule that the contract states.
+#
+# Version matched deliberately: hanabi 0.19 targets bevy 0.19 (its README's compatibility table reads
+# `| 0.19 | 0.19 |`), and both resolve the same `wgpu`/`naga` 29 that `bevy 0.19.1` pins in this
+# lockfile — checked, not assumed, because a mismatched `wgpu` is the one conflict a vendored fork
+# would be tempting for and a vendored Hanabi is worse than no GPU blood.
+bevy_hanabi = { version = "0.19", default-features = false, features = ["3d"], optional = true }
+
+# **Examples only.** The crate's own `bevy` above is trimmed to what a bake needs. A runnable example
+# additionally needs a window, an event loop (winit) and the 3D render pipeline, so it takes the full
+# umbrella here, where it cannot reach a consumer's dependency graph. `tests/leaf.rs` reads
+# `[dependencies]` only, deliberately.
+[dev-dependencies]
+bevy = { version = "0.19.0" }
+# **A RON parser, for one test and one reason.** `FractureSettings` is `deny_unknown_fields` with every
+# field required, so adding a dial breaks every authored file that enumerated the others — at load time,
+# which no compile catches. `a_config_written_before_ejecta_soften_still_loads` pins that against the
+# real shape a consumer authors, and it cannot be written without a format. Free in practice: `ron` is
+# already in the lockfile as a `bevy` dependency, and `tests/leaf.rs` scopes its closed-dependency
+# ratchet to `[dependencies]` for exactly this kind of case.
+ron = { version = "0.12" }
+
+[features]
+default = ["serde", "vfx"]
+
+# **The GPU half.** Particle effects and stain decals: everything that renders and nothing that
+# decides. Gated so a headless harness can take the deterministic half alone — which is also what
+# keeps `bevy_hanabi` and `bevy_render` out of the lean build the CI's `cargo build --release` step
+# exists to defend.
+#
+# The `bevy/*` features are the ones the render path needs and that the trimmed base deliberately
+# omits: `bevy_render` for the pipeline, `bevy_core_pipeline` for the depth prepass a forward decal
+# requires, `bevy_image` for the procedurally generated splat texture, and `bevy_camera` for the
+# camera types Hanabi's extraction reads.
+vfx = [
+    "dep:bevy_hanabi",
+    "bevy/bevy_render",
+    "bevy/bevy_core_pipeline",
+    "bevy/bevy_image",
+    "bevy/bevy_camera",
+]
+
+# **The vertex-soup sort's runtime tie check.** Off in a release build (it costs a pass over the parts
+# list); on automatically under `debug_assertions`; and turned on explicitly by a test harness that
+# builds in release but still wants the check on. See `bake::sort_total_by_key_at`.
+strict-order = []
