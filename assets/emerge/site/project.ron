@@ -1,0 +1,274 @@
+(
+    version: 2,
+    note: Some("SCP-9191\'s architecture over the Site kit\'s measurements. Originally generated, but that generator no longer exists anywhere in the tree — hand-maintained now. tests/site_descriptors.rs checks the heights these patches produce."),
+    // `face_bands` used to live here and no longer does: the lattice is a property of the PROJECT,
+    // not of one kit's policy, because two kits disagreeing about how finely a face is read have
+    // faces that cannot be compared. It is declared once in `assets/emerge/kits.ron` under
+    // `lattice:`, at the same value this file carried (1).
+    patches: [
+        (
+            match: Id("site/wall"),
+            because: "this facility builds Wall to 2.40 m; the mesh is authored at 2.40 m",
+            patch: (
+                id: "",
+                mesh: None,
+                align: (
+                    scale: None,
+                    stretch_y: Some(1.0),
+                    y_offset: None,
+                    pivot: None,
+                    front: None,
+                ),
+                extent: (
+                    footprint: None,
+                    height: None,
+                ),
+                mount: None,
+                clearance: [],
+                offers: (
+                    surfaces: [],
+                    sockets: [],
+                ),
+                kind: [],
+                effects: [],
+                look: [],
+                placement: (
+                    rooms: [],
+                    group: None,
+                ),
+                note: None,
+            ),
+        ),
+        (
+            match: Id("site/wall_corner"),
+            because: "this facility builds WallCorner to 2.40 m; the mesh is authored at 2.40 m",
+            patch: (
+                id: "",
+                mesh: None,
+                align: (
+                    scale: None,
+                    stretch_y: Some(1.0),
+                    y_offset: None,
+                    pivot: None,
+                    front: None,
+                ),
+                extent: (
+                    footprint: None,
+                    height: None,
+                ),
+                mount: None,
+                clearance: [],
+                offers: (
+                    surfaces: [],
+                    sockets: [],
+                ),
+                kind: [],
+                effects: [],
+                look: [],
+                placement: (
+                    rooms: [],
+                    group: None,
+                ),
+                note: None,
+            ),
+        ),
+        (
+            match: Id("site/wall_doorway"),
+            because: "this facility builds WallDoorway to 2.00 m; the mesh is authored at 2.01 m",
+            patch: (
+                id: "",
+                mesh: None,
+                align: (
+                    scale: None,
+                    stretch_y: Some(0.99502486),
+                    y_offset: None,
+                    pivot: None,
+                    front: None,
+                ),
+                extent: (
+                    footprint: None,
+                    height: None,
+                ),
+                mount: None,
+                clearance: [],
+                offers: (
+                    surfaces: [],
+                    sockets: [],
+                ),
+                kind: [],
+                effects: [],
+                look: [],
+                placement: (
+                    rooms: [],
+                    group: None,
+                ),
+                note: None,
+            ),
+        ),
+        (
+            match: Id("site/wall_doorway_wide"),
+            because: "this facility builds WallDoorwayWide to 2.00 m; the mesh is authored at 1.98 m",
+            patch: (
+                id: "",
+                mesh: None,
+                align: (
+                    scale: None,
+                    stretch_y: Some(1.010101),
+                    y_offset: None,
+                    pivot: None,
+                    front: None,
+                ),
+                extent: (
+                    footprint: None,
+                    height: None,
+                ),
+                mount: None,
+                clearance: [],
+                offers: (
+                    surfaces: [],
+                    sockets: [],
+                ),
+                kind: [],
+                effects: [],
+                look: [],
+                placement: (
+                    rooms: [],
+                    group: None,
+                ),
+                note: None,
+            ),
+        ),
+        (
+            match: Id("site/wall_header"),
+            because: "this facility builds WallHeader to 0.40 m; the mesh is authored at 0.40 m",
+            patch: (
+                id: "",
+                mesh: None,
+                align: (
+                    scale: None,
+                    stretch_y: Some(1.0000002),
+                    y_offset: None,
+                    pivot: None,
+                    front: None,
+                ),
+                extent: (
+                    footprint: None,
+                    height: None,
+                ),
+                mount: None,
+                clearance: [],
+                offers: (
+                    surfaces: [],
+                    sockets: [],
+                ),
+                kind: [],
+                effects: [],
+                look: [],
+                placement: (
+                    rooms: [],
+                    group: None,
+                ),
+                note: None,
+            ),
+        ),
+        (
+            match: Id("site/wall_window"),
+            because: "this facility builds WallWindow to 2.40 m; the mesh is authored at 2.40 m",
+            patch: (
+                id: "",
+                mesh: None,
+                align: (
+                    scale: None,
+                    stretch_y: Some(1.0),
+                    y_offset: None,
+                    pivot: None,
+                    front: None,
+                ),
+                extent: (
+                    footprint: None,
+                    height: None,
+                ),
+                mount: None,
+                clearance: [],
+                offers: (
+                    surfaces: [],
+                    sockets: [],
+                ),
+                kind: [],
+                effects: [],
+                look: [],
+                placement: (
+                    rooms: [],
+                    group: None,
+                ),
+                note: None,
+            ),
+        ),
+        (
+            match: Id("site/wall_low"),
+            because: "this facility builds WallLow to 0.90 m; the mesh is authored at 2.00 m",
+            patch: (
+                id: "",
+                mesh: None,
+                align: (
+                    scale: None,
+                    stretch_y: Some(0.45),
+                    y_offset: None,
+                    pivot: None,
+                    front: None,
+                ),
+                extent: (
+                    footprint: None,
+                    height: None,
+                ),
+                mount: None,
+                clearance: [],
+                offers: (
+                    surfaces: [],
+                    sockets: [],
+                ),
+                kind: [],
+                effects: [],
+                look: [],
+                placement: (
+                    rooms: [],
+                    group: None,
+                ),
+                note: None,
+            ),
+        ),
+        (
+            match: Id("site/column"),
+            because: "this facility builds Column to 2.40 m; the mesh is authored at 2.40 m",
+            patch: (
+                id: "",
+                mesh: None,
+                align: (
+                    scale: None,
+                    stretch_y: Some(1.0),
+                    y_offset: None,
+                    pivot: None,
+                    front: None,
+                ),
+                extent: (
+                    footprint: None,
+                    height: None,
+                ),
+                mount: None,
+                clearance: [],
+                offers: (
+                    surfaces: [],
+                    sockets: [],
+                ),
+                kind: [],
+                effects: [],
+                look: [],
+                placement: (
+                    rooms: [],
+                    group: None,
+                ),
+                note: None,
+            ),
+        ),
+    ],
+)
