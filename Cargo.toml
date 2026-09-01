@@ -12,6 +12,17 @@ members = [
     "crates/fvs",
     "crates/bevy_orca", "crates/map_elites", "crates/bevy_devshot",
     "crates/bevy_stigmergy", "crates/bevy_light_grid", "crates/bevy_speech_bubbles",
+    # Deterministic runtime gore, vendored whole on 2026-09-01 so it can be EVOLVED here rather than
+    # pinned to a rev of a repository this checkout cannot edit. Same correction, and for the same
+    # reason, as `bevy_debugger_mcp` two entries down: the crate needed sustained work, and a pin makes
+    # a crate unfixable at exactly the moment it needs fixing. Brought in with `git subtree add`,
+    # history intact — all 32 `AG-*` commits are in this repo's log.
+    #
+    # **The cost, paid deliberately: this crate does not mirror back.** Its history and this one are
+    # unrelated — none of AG-025..AG-031 existed here — so a `subtree split` push to
+    # `Ladvien/bevy_carnage` would not fast-forward, and this repo never forces one. So it is absent
+    # from `CRATES` in `scripts/mirror_crates.sh`, and the monorepo is now its source of truth.
+    "crates/bevy_carnage",
     # The agent debugger, vendored whole so it can be USED and EVOLVED here rather than pinned to a
     # rev of someone else's history. Two members because the repo has two independent halves: the MCP
     # server binary (a separate process, speaks MCP to an agent and BRP to the game) and the companion
@@ -112,105 +123,46 @@ bevy_light_grid = { path = "crates/bevy_light_grid" }
 # World-space speech/thought balloons: the CPU text raster and the billboard. The font path stays in
 # `dialogue::bubble`, because that is the one thing a library must not assume.
 bevy_speech_bubbles = { path = "crates/bevy_speech_bubbles" }
-# Runtime mesh fracture: the slicer, the watertight caps, and the bake-once-per-source cache. It hands
-# out a centre and a half-extent per fragment and stops there — `gore::spawn_fragments` is the facade
-# that turns those into avian bodies, and `carnage.rs` is the one that knows VALKYRIE carries a rifle.
+# Runtime mesh fracture and the carnage layer above it: the slicer, the watertight caps, the
+# bake-once-per-source cache, bullet channels and their ejected plugs, wounds, a literature-grounded
+# spatter model, a pulsatile bleed schedule, pure impact-feel curves, and GPU blood behind its `vfx`
+# feature. It hands out a centre and a half-extent per fragment and stops there — `gore::spawn_fragments`
+# is the facade that turns those into avian bodies, and `carnage.rs` is the one that knows VALKYRIE
+# carries a rifle.
 #
-# **A git dependency, not a workspace member, and the direction of that arrow is the point.** This crate
-# used to live in `crates/` under this crate's former name, with a read-only `subtree split` mirror
-# published from it. That was backwards in a way that cost real time: a `subtree split` carries only
-# *commits*, so the crate's
-# own audit harness — which sat uncommitted in this working tree — could never reach the published
-# repository, and an agent reading the published manifest reported our dependency list wrong. It was
-# reading the truth about what we had published.
+# **A workspace member as of 2026-09-01, and the direction of that arrow moved twice.** It lived in
+# `crates/` under its former name with a `subtree split` mirror published from it; then the mirror
+# became the source of truth and this repo an ordinary consumer pinned by rev; now it is vendored
+# again. The rationale for each move is in the members list above and in `CLAUDE.md`.
 #
-# `Ladvien/bevy_carnage` is now the source of truth and this is an ordinary consumer of it. Pinned to a
-# rev for the same reason bevy_carnage pins `isomesh`: an unpinned dependency whose slicer moved between
-# builds would move the game's gib geometry between builds.
+# **What the pin bought and what it cost.** It bought reproducible gib geometry — an unpinned slicer
+# that moved between builds would move the game's gibs between builds. It cost the ability to change
+# the crate from here at all, which is disqualifying for the work now queued against it: every edit
+# had to happen in a sibling checkout, be pushed, and arrive as a rev bump. Twelve such bumps are
+# recorded in this file's history; the crate's own `BACKLOG_ARCHIVE.md` and `BACKLOG.md` now carry the
+# same account in-tree at `crates/bevy_carnage/`, which is where a reader should look for it.
 #
-# The `test-harness` feature above forwards `bevy_carnage/strict-order`; a git dependency forwards
-# features exactly as a path dependency does, and that forward is what keeps the vertex-soup tie check
-# alive in a release-built harness.
+# Reproducibility does not come from the pin now — it comes from the crate's own frozen goldens, which
+# are inside `cargo test --workspace` for the first time: `fracture_output_is_bit_identical_across_runs`,
+# `hash_f32_is_frozen`, and `the_spatter_model_is_frozen`.
 #
-# **Bumped ba3b13b → 0cfee6e at the 2026-08-17 merge**, which is where the arrow's direction stops
-# being theoretical. `main` had meanwhile pulled the crate's AG-017..AG-023 line back INTO
-# that vendored copy (under the former name) and fixed it to pass this repo's gates; that copy is gone again and
-# the same work arrives the way every other dependency's does — by moving the pin. What the bump
-# carries: the region-query hit model (AG-017), the fragment-adjacency match (AG-016), one bake
-# across granularities (AG-015), the halving and sub-pixel-face fixes (AG-018/19), and the demo,
-# recordings and on-screen controls (AG-020..023).
+# The `test-harness` feature above forwards `bevy_carnage/strict-order`; a path dependency forwards
+# features exactly as a git one did, and that forward is what keeps the vertex-soup tie check alive in
+# a release-built harness.
 #
-# **Bumped 0cfee6e → 007c6ca**, and this is the first bump taken the way the reversed arrow intends:
-# the work was done in `Ladvien/bevy_carnage`, verified there against its own lockfile, pushed there,
-# and arrives here as a rev. Nothing was vendored and nothing was mirrored back. What the bump
-# carries: AG-021 (the `isomesh` pin moved to `aa82b0b`, zero re-blessed numbers) and AG-022 (bullet
-# holes — a `Bore` subtracted from the proxy as plane cuts only, so a channel is real geometry with a
-# red interior and every shard is still a convex-hull collider).
+# **The game still reaches only the fracture bake.** Wounds, spatter, bleed, feel, decals and the
+# `vfx` particles are compiled and unused — `gore.rs` still drains its own `GoreQueue` and spawns its
+# own blood. Wiring `Wound`/`Wounded` into it is its own piece of work with its own goldens to
+# re-bless.
 #
-# **`CutSettings` gained a `bores` field and `FractureSettings::cut_for` gained a parameter.** Neither
-# reaches this game: it constructs no `CutSettings` and never calls `cut_for` — it uses
-# `FractureSettings` (unchanged), `FractureCache`, `FractureSubject`, `DetachedPart` and the plugin.
-# Checked rather than assumed, because a signature change in a pinned dependency is exactly the thing
-# a pin exists to make visible.
-#
-# **Bumped 007c6ca → da9e7bf.** AG-023: the plug a bore removes comes back instead of being dropped.
-# A bullet hole and the gore that leaves through it are now the same subtraction — `Fracture::ejecta`
-# on the pure path, `FractureCache::ejecta` on the ECS one — and the bore conserves volume, which it
-# previously did not: `shards + plugs == the cell`.
-#
-# **Additive on both paths, checked rather than assumed.** `Ejecta` and `EjectaChunk` are new public
-# types and `audit_proxy` gained a sibling `audit_cell`; no existing signature this repo calls moved.
-# The bore's own internals changed shape (`soup::fracture` returns a third value), but all of that is
-# `pub(crate)`. This game still constructs no `CutSettings`, never calls `cut_for`, and sets no
-# `FractureBores` — so it takes the bump and behaves identically until something asks for a channel.
-#
-# **Bumped da9e7bf → 6b6b886.** AG-024: an ejected plug breaks up instead of leaving whole. A plug is
-# one convex prism, so ejected intact it can only read as a dowel — `Bore::shatter` runs it through the
-# crate's own cut policy (the same one the body fracture uses, extracted rather than copied), and
-# `CutSettings::ejecta_soften` rounds the debris without touching the body. `FractureSettings` grows
-# `ejecta_soften` and is now twelve dials, not eleven.
-#
-# **`FractureSettings` gained a field, and this repo authors that struct from `config.ron`.** That
-# combination nearly broke the game at startup: the struct is `serde(deny_unknown_fields)` with no
-# struct-level default, so every field is *required*, and `config.ron`'s `fracture:` slice does
-# enumerate all eleven previous dials — so a twelfth would have been refused at load, with the release
-# build perfectly green. The crate now gives the dial an explicit `serde` default and pins it with a
-# test built from this file's own block (`a_config_written_before_ejecta_soften_still_loads`), which is
-# why the pin is `c7d4868` rather than `6b6b886`. `ejecta_soften` is authored below anyway, because
-# this file spells every other dial out.
-#
-# Nothing else reaches this game. It constructs no `CutSettings`, never calls `cut_for`, and sets no
-# `FractureBores`, so it takes the bump and behaves identically until something here asks for a channel.
-#
-# **Bumped c7d4868 → 5e54310, and it is examples only.** That commit is the first time
-# `examples/bullet_holes.rs` was ever actually executed — three of that crate's tickets had shipped it
-# unrun, because the machine it is developed on has no desktop session. Under Xvfb it produced four
-# rendering defects (two missing-glyph separators, an aim marker drawn inside the subject, and a
-# camera aimed at the floor anchor instead of the subject's middle). None of it reaches this repo,
-# which compiles no example of the crate; the pin moves so it names the tip rather than a commit
-# chosen by when someone stopped looking.
-#
-# **Bumped 5e54310 → 1434a39, and the crate is now called `bevy_carnage`.** AG-025 renamed it — the
-# repository, the crate, `AutogibPlugin` → `CarnagePlugin`, `AutogibSystems` → `CarnageSystems` — and
-# AG-026..AG-031 added the layer the new name promises: `Wound` and the two ways of extracting one, a
-# spatter model grounded in Comiskey et al. 2018 (droplet size and speed inversely correlated, frozen
-# by a golden), a pulsatile bleed schedule in integer ticks, pure impact-feel curves, and GPU blood
-# behind a new `vfx` feature. **GitHub redirects the old clone URL**, so this dep line resolved fine
-# until it was updated; it is updated here so the pin names what the crate is called.
-#
-# **Nothing in this game uses the new layer yet, and that is deliberate for this bump.** It takes the
-# rename — a compile-checked, mechanical change — and nothing else. `gore.rs` still drains its own
-# `GoreQueue` and spawns its own blood; wiring `Wound`/`Wounded` into it is a separate piece of work
-# with its own goldens to re-bless, and folding it into a rename would have made both unreviewable.
-#
-# **What did NOT get renamed here, and why.** The `autogib_*` keys in `GoreSettings` and
+# **What did NOT get renamed at AG-025, and why.** The `autogib_*` keys in `GoreSettings` and
 # `config.ron` (the struct is `deny_unknown_fields`, so a renamed key refuses the authored config at
 # startup), the `autogib_*` gene names in `squad_ai/world_genome.rs` (encode/decode order defines
 # `WorldGenome::N` and every archived elite, so renaming moves every golden hash),
 # `sim_harness::{autogib_ready, step_until_autogib_ready}` and `tests/autogib_determinism.rs` (named
 # in `TESTING.md`'s invariants), and `GibSeq`/`GibKey`/`GibRing`. The line is: **compiler-checked
 # identifiers get renamed; serialized schema and golden-bearing names do not.**
-bevy_carnage = { git = "https://github.com/Ladvien/bevy_carnage", rev = "1434a39" }
+bevy_carnage = { path = "crates/bevy_carnage" }
 # The agent debugger's companion Bevy plugin — custom BRP methods for screenshots and headless input
 # injection. **Optional, pulled in only by the `debugger` feature**, so it is absent from the resolved
 # dependency graph of every default, release and determinism build.

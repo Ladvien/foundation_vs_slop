@@ -894,11 +894,11 @@ dependencies = [
 [[package]]
 name = "bevy_carnage"
 version = "0.1.0"
-source = "git+https://github.com/Ladvien/bevy_carnage?rev=1434a39#1434a39224ddcf03c2d23102cab9ae859f767357"
 dependencies = [
  "bevy",
  "bevy_hanabi",
  "isomesh",
+ "ron",
  "serde",
 ]
 
