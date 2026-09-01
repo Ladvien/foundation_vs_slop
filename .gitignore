@@ -102,3 +102,7 @@ debug_sessions/
 # artifacts — `assets/scp610/scp-610.glb` is in this repo's history three times, at 27, 5 and 4 MB.
 # See scripts/derived_assets.py.
 assets/ozea_kit/*.glb
+
+# macOS Finder metadata. Never useful, and it lands in a commit the moment anyone runs
+# `git add -A` in a directory Finder has opened.
+.DS_Store
