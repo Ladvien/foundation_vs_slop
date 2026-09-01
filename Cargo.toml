@@ -238,9 +238,20 @@ debug = false
 
 # Shipping/runtime profile. Bevy's recommended release settings: whole-program `thin` LTO plus a single
 # codegen unit trade longer link time for faster generated code across the whole 58k-LOC crate (the game
-# and the `--release` `train` driver both use this). These flags change scheduling/inlining only — they do
-# NOT alter IEEE-754 results (rustc never reassociates floats or contracts FMA without `-ffast-math`), so
-# the exact-hash determinism goldens are unaffected. Verified by running the determinism suite in release.
+# and the `--release` `train` driver both use this).
+#
+# **This block used to claim these flags "do NOT alter IEEE-754 results", and that claim is false.**
+# Measured 2026-09-01: `bevy_carnage`'s two frozen spatter goldens pass at opt-level 0 and fail by
+# **one ULP** at opt-level 1, on the same machine, same architecture, same source. The only variable
+# that reproduces it is `CARGO_PROFILE_TEST_OPT_LEVEL`. The mechanism is not FMA contraction —
+# `-Cllvm-args=--fp-contract=off` did not restore the old values — so the reassociation argument the
+# old comment rested on was answering the wrong question.
+#
+# What survives is the property that actually matters, and it is narrower than what was written here:
+# **a given profile is reproducible with itself.** The game's own goldens are unaffected because they
+# are only ever produced and checked within one profile. What is NOT safe is treating a table of
+# literal float bits as a fact about the source — it is a fact about a build. See the doc comment on
+# `the_spatter_model_is_frozen` in `crates/bevy_carnage/src/spatter.rs` for the full diagnosis.
 [profile.release]
 opt-level = 3
 lto = "thin"
