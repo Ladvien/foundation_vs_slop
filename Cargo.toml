@@ -18,10 +18,13 @@ members = [
     # a crate unfixable at exactly the moment it needs fixing. Brought in with `git subtree add`,
     # history intact — all 32 `AG-*` commits are in this repo's log.
     #
-    # **The cost, paid deliberately: this crate does not mirror back.** Its history and this one are
-    # unrelated — none of AG-025..AG-031 existed here — so a `subtree split` push to
-    # `Ladvien/bevy_carnage` would not fast-forward, and this repo never forces one. So it is absent
-    # from `CRATES` in `scripts/mirror_crates.sh`, and the monorepo is now its source of truth.
+    # It mirrors back AND publishes, and the "unrelated histories" note that used to sit here was wrong.
+    # `git subtree add` recorded `git-subtree-split: 1434a39` on `eacb160` and made that commit its
+    # second parent, so `Ladvien/bevy_carnage`'s `main` is an ANCESTOR of this history — a split push
+    # fast-forwards. Direction is one-way: this tree is the source of truth, `scripts/mirror_crates.sh`
+    # pushes the mirror, and `cargo publish -p bevy_carnage` cuts the crates.io release from the same
+    # commit. The game keeps the path dependency below deliberately — depending on the published version
+    # would restore exactly the pin that made this crate unfixable while it needed sustained work.
     "crates/bevy_carnage",
     # The agent debugger, vendored whole so it can be USED and EVOLVED here rather than pinned to a
     # rev of someone else's history. Two members because the repo has two independent halves: the MCP
