@@ -49,7 +49,10 @@ fn bake_fingerprint(cfg: &SimConfig) -> Vec<[u32; 6]> {
     let mut rows = Vec::new();
     for s in &sources {
         let Some(frags) = cache.fragments(*s) else { continue };
-        for f in frags {
+        // `flatten` skips the slots whose drawn meshes were never asked for. The bake requests the
+        // finest frontier itself, so this is exactly the leaf set — and the test compares run against
+        // run rather than against a constant, so nothing needs re-blessing for it.
+        for f in frags.iter().flatten() {
             rows.push([
                 f.center_local.x.to_bits(),
                 f.center_local.y.to_bits(),

@@ -975,14 +975,33 @@ fn drain_gore(
 /// which stops a box at the **room-side wall face** (not the wall centre); if the chunk crossed a wall,
 /// it's snapped back onto the floor and its horizontal velocity killed so it can't push through again.
 /// avian 0.7 syncs `Transform` → `Position` before each sim step, so writing `Transform` here holds.
+/// It also owns the one other per-gib transition that needs the chunk's own velocity: **when a chunk
+/// stops flying, its blood ribbon stops.** That lives here rather than in a system of its own because
+/// this is already the loop holding every gib's `LinearVelocity` on the fixed schedule, and a
+/// second system would be a second ordering edge into `GibEconomy` for one `remove`.
 fn confine_gibs(
+    mut commands: Commands,
     dungeon: Res<Dungeon>,
     mut gibs: Query<
-        (&mut Transform, &mut LinearVelocity, &mut GibConfine, Option<&Carryable>),
+        (
+            Entity,
+            &mut Transform,
+            &mut LinearVelocity,
+            &mut GibConfine,
+            Option<&Carryable>,
+            Has<bevy_carnage::BleedingChunk>,
+        ),
         With<GibChunk>,
     >,
 ) {
-    for (mut tf, mut lv, mut prev, carry) in &mut gibs {
+    for (entity, mut tf, mut lv, mut prev, carry, bleeding) in &mut gibs {
+        // A chunk that has slowed to a walk is no longer throwing blood behind it. Removing the
+        // marker is what `fade_landed_ribbons` watches for; the ribbon then stops emitting and its
+        // last particles age out rather than being cut off. One-way: a chunk kicked back into the air
+        // does not start bleeding again, because the blood it had to give left with the first throw.
+        if bleeding && lv.0.length_squared() <= GIB_REST_SPEED * GIB_REST_SPEED {
+            commands.entity(entity).remove::<bevy_carnage::BleedingChunk>();
+        }
         // A chunk mid-haul is Kinematic and driven along the nest flow field by `crab::carry_gibs` —
         // the sole authority over its transform then. Skip confinement so the two systems don't fight
         // (confine would yank a hauled chunk back toward its last grounded XZ when the haul route skirts
@@ -1005,6 +1024,13 @@ fn confine_gibs(
         prev.0 = Vec3::new(tf.translation.x, 0.0, tf.translation.z);
     }
 }
+
+/// Speed below which a gib counts as landed, m/s — the point its blood ribbon stops.
+///
+/// Not zero: a settled avian body keeps a small residual velocity while its solver puts it to sleep,
+/// and a strand that only ends at exactly zero would keep emitting on a chunk that has visibly
+/// stopped. A walking pace is comfortably above that residual and well below a thrown chunk's speed.
+const GIB_REST_SPEED: f32 = 0.35;
 
 fn spawn_gib_body(
     commands: &mut Commands,
@@ -1029,6 +1055,14 @@ fn spawn_gib_body(
             Visibility::default(),
             GibChunk,
             GibConfine(pos.with_y(0.0)),
+            // **Trails blood while it flies.** Purely cosmetic: `bevy_carnage`'s `attach_ribbons`
+            // gives anything carrying this a child GPU ribbon, and `confine_gibs` takes the marker
+            // off once the chunk comes to rest. Inserted here rather than only in a windowed build
+            // so the component's lifecycle is identical in the harness — the alternative is two
+            // archetype histories for one entity. It cannot reach an oracle: `gib_hash`/`gib_rows`
+            // fold `GibKey`/`Transform`/`Carryable` over *sorted* rows, and the harness never
+            // registers `CarnageVfxPlugin`, so nothing there ever reads it.
+            bevy_carnage::BleedingChunk,
         ))
         .id();
     gib_ring.0.push_back(id);
@@ -1058,10 +1092,27 @@ fn spawn_fragments(
     // another creature already died on this exact coordinate. See `GibKey`.
     gib_ordinal: u64,
 ) {
-    let Some(frags) = cache.fragments(source) else {
+    // **A frontier, never the whole array.** `cache.fragments` returns every node of the hierarchy,
+    // parents and children both, so iterating it puts the same volume in the scene twice: for `R`
+    // root cells and `T` leaves the array holds `2T - R` nodes, measured 40 against 23 leaves for the
+    // shipped figurine. Every duplicate was charged against the `GibEconomy` budget and the physics
+    // chunk cap. Both accessor docs forbid it in as many words (`bake.rs`, `mesh.rs`). This was
+    // correct when written — before the crate kept a hierarchy, `fragments()` returned only the
+    // finest pieces — which is why it went unnoticed.
+    //
+    // `leaves` is the finest frontier and reproduces that pre-hierarchy set exactly. It returns an
+    // empty `Vec`, never `None`, for an unbaked or absent subject.
+    //
+    // **No `FractureCache::request` here, deliberately.** The crate builds a fragment's drawn meshes
+    // on request and `bake_fractures` requests the finest frontier as its own last act, so the leaves
+    // are already drawn by the time any death can happen. Asking again from the drain would be a
+    // second path to the same state — and would need `ResMut` on a resource this system reads.
+    // A caller wanting a *coarser* frontier (a cleaving blow) is the case that must request ahead.
+    let frags = cache.leaves(source);
+    if frags.is_empty() {
         warn!("gore: no carnage bake for this character; skipping fragment gibs");
         return;
-    };
+    }
 
     // One flat outfit material shared by every outer-skin piece of this death (bounded asset growth).
     // Cut faces reuse the shared raw-meat material.
@@ -1072,6 +1123,10 @@ fn spawn_fragments(
     });
 
     let speed_mult = settings.autogib_speed_mult;
+    // `enumerate` over the FRONTIER, deliberately not `frag.id.index()`. The ordinal feeds both the
+    // per-piece hash below and the `GibKey`, and it has to stay dense and contiguous per death so
+    // `GibRing` eviction keeps its shape; a tree index is sparse over a frontier and would leave
+    // holes. Gib identity moves as a result, which is the point of the fix.
     for (i, frag) in frags.iter().enumerate() {
         let base = seed
             .wrapping_mul(2_246_822_519)

@@ -521,6 +521,14 @@ pub fn run() {
                 // Cosmetic half: drives the `mutation` morph. Windowed-only — the weight is not
                 // hashed state and putting it in the sim would make it part of `snapshot_hash`.
                 scp610::Scp610VisualsPlugin,
+                // GPU blood: the ribbons flying gibs drag behind them, and the stain/pool decals.
+                // **Windowed-only by registration, exactly like `MyceliaPlugin` above** — it adds
+                // `HanabiPlugin` and `decal::build_splats`, both of which need a render device, and
+                // `sim_harness` builds its plugin list without one. Nothing it spawns carries
+                // `Health`, `GibKey` or a hashed `Transform`, and Hanabi 0.19 has no GPU→CPU readback
+                // at all, so it cannot reach `snapshot_hash` or `gib_hash` even by mistake. The
+                // deterministic half is `carnage::CarnagePlugin`, which IS in the harness.
+                bevy_carnage::CarnageVfxPlugin,
                 // Site-67's presentation: geometry, avatars, the ASYNC door, specimen cells. Windowed
                 // ONLY — it spawns ~150 GLB scenes and nothing it creates carries `Health`, so it can
                 // never reach `snapshot_hash`. The Site's GAMEPLAY half (`SitePlugin`) is separate and
