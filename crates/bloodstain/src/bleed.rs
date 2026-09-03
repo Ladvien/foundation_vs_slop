@@ -41,9 +41,10 @@ use crate::{Wound, m};
 
 /// A wound's bleed state. Ticks, not seconds — see the module docs.
 ///
-/// Two fields, and neither is a running total: `opened_at` is when, `area` is how much. Everything
-/// else is derived from `(tick - opened_at)`, so this struct cannot drift out of step with the clock
-/// that drives it and a caller can serialize it into a save with no fixups.
+/// Three fields, and none is a running total: `opened_at` is when, `area` is how much, `seed` is
+/// *which* wound. Everything else is derived from `(tick - opened_at)`, so this struct cannot drift
+/// out of step with the clock that drives it and a caller can serialize it into a save with no
+/// fixups.
 ///
 /// **A plain value, deliberately.** It carries no ECS derive because this crate has no engine in it;
 /// a consumer that wants a bleeding *entity* wraps it in its own component — `bevy_carnage::Bleeding`
@@ -56,12 +57,27 @@ pub struct Bleed {
     pub opened_at: u32,
     /// The wound's area, carried so a caller can rebuild a [`Wound`] for a pulse without keeping one.
     pub area: f32,
+    /// **Which wound this is**, and the only reason it exists is [`pulse_phase`].
+    ///
+    /// One blow detaches many fragments in one frame, so every wound it opens shares `opened_at` —
+    /// and a schedule keyed on age alone then beats all of them in lockstep, forever, which reads as
+    /// one machine rather than as a body. This offsets each wound's beat within the period.
+    ///
+    /// **Seed it from the wound's own geometry, never from an entity id**: an id is a slot index
+    /// assigned by allocation order, which is the one thing this crate refuses to seed from. See
+    /// [`crate::hash_f32`].
+    pub seed: u32,
 }
 
 impl Bleed {
-    /// Open a bleed at `tick` with a wound's area.
-    pub fn new(opened_at: u32, area: f32) -> Self {
-        Bleed { opened_at, area }
+    /// Open a bleed at `tick` for a wound.
+    ///
+    /// **The wound is the only argument because both derived fields must come from it**: the area is
+    /// the wound's, and the seed is [`crate::wound_seed`] of the same wound — its quantised position
+    /// and kind. A constructor taking a loose seed would let a caller hand it an entity id, which is
+    /// a slot index assigned by allocation order and the one thing this crate refuses to seed from.
+    pub fn new(opened_at: u32, w: &Wound) -> Self {
+        Bleed { opened_at, area: w.area, seed: crate::wound_seed(w) }
     }
 
     /// Ticks elapsed since it opened.
@@ -93,12 +109,31 @@ pub fn pulse_period(hz: u32, s: &BloodSettings) -> u32 {
     (ticks as u32).max(1)
 }
 
+/// **This wound's offset within the heartbeat**, in ticks, in `0..pulse_period`.
+///
+/// One heart, one rate, wounds out of step — which is the physiological reading as well as the
+/// legible one: the pressure wave reaches a shin later than a shoulder, so two wounds on one body do
+/// not spurt on the same frame. Giving each wound its own *rate* instead would be giving the body
+/// several hearts.
+///
+/// Derived from [`Bleed::seed`] by the crate's own hash, so it is a function of the wound's geometry
+/// and reproduces exactly under a replay.
+pub fn pulse_phase(b: &Bleed, hz: u32, s: &BloodSettings) -> u32 {
+    let period = pulse_period(hz, s);
+    // `hash_f32` is in `[0, 1)`, so the product is in `[0, period)` before the `min` — which is
+    // there for the one input where a float rounds to exactly `period`.
+    ((crate::hash_f32(b.seed) * period as f32) as u32).min(period - 1)
+}
+
 /// Is this the tick a heartbeat pulse lands on? `hz` is the caller's fixed-tick rate.
 ///
-/// The tick the wound opened on is itself a pulse — a wound starts bleeding when it opens, not one
-/// heartbeat later.
+/// The tick the wound opened on is **no longer necessarily a beat**: it is one only for a wound whose
+/// [`pulse_phase`] is zero, and that is the point — a blow that opens twelve wounds on one tick must
+/// not make twelve wounds that beat together. A wound therefore waits up to one period before its
+/// first spurt, which at the shipped 72 bpm and 60 Hz is at most 50 ticks.
 pub fn pulses_on(b: &Bleed, tick: u32, hz: u32, s: &BloodSettings) -> bool {
-    b.age(tick) % pulse_period(hz, s) == 0
+    let period = pulse_period(hz, s);
+    b.age(tick) % period == pulse_phase(b, hz, s)
 }
 
 /// **The perfusion envelope by age**: full while spurting, tapering to exactly `0.0` at
@@ -173,6 +208,7 @@ pub fn pulse_wound(
 mod tests {
     use super::*;
     use crate::WoundKind;
+    use std::vec::Vec as StdVec;
 
     fn wound() -> Wound {
         Wound {
@@ -184,26 +220,75 @@ mod tests {
         }
     }
 
-    /// The pulse train is exactly periodic, forever, and the opening tick is a beat.
+    /// The pulse train is exactly periodic, forever, and starts at the wound's own phase.
     #[test]
     fn the_pulse_train_cannot_drift() {
         let s = BloodSettings::default();
-        let b = Bleed::new(1000, 0.004);
+        let b = Bleed::new(1000, &wound());
         let period = pulse_period(60, &s);
+        let phase = pulse_phase(&b, 60, &s);
         assert!(period >= 1, "the period is a modulus and must never be zero");
-        assert!(pulses_on(&b, 1000, 60, &s), "the tick a wound opens on is itself a pulse");
+        assert!(phase < period, "a phase outside the period would silence the wound forever");
         for k in 0..64u32 {
             assert!(
-                pulses_on(&b, 1000 + k * period, 60, &s),
+                pulses_on(&b, 1000 + phase + k * period, 60, &s),
                 "beat {k} must land exactly {period} ticks after the last"
             );
             if period > 1 {
                 assert!(
-                    !pulses_on(&b, 1000 + k * period + 1, 60, &s),
+                    !pulses_on(&b, 1000 + phase + k * period + 1, 60, &s),
                     "the tick after a beat must not also be one"
                 );
             }
         }
+    }
+
+    /// **Wounds opened by one blow on one tick must not beat together.**
+    ///
+    /// This is the defect the phase exists for: a blow detaches many fragments in a single frame, so
+    /// every wound it opens shares `opened_at`, and a schedule keyed on age alone spurts all of them
+    /// on the same frame forever — which reads as one machine rather than as a body. Prediction: a
+    /// spread of wounds across a body occupies many distinct phases, and the rate is still one rate.
+    #[test]
+    fn wounds_opened_on_one_tick_do_not_beat_together() {
+        let s = BloodSettings::default();
+        let period = pulse_period(60, &s);
+        let bleeds: StdVec<Bleed> = (0..24u32)
+            .map(|i| {
+                let t = i as f32;
+                let at = [0.03 * t - 0.3, 1.0 - 0.05 * t, 0.02 * t];
+                Bleed::new(1000, &Wound { at, ..wound() })
+            })
+            .collect();
+        let phases: StdVec<u32> = bleeds.iter().map(|b| pulse_phase(b, 60, &s)).collect();
+        let mut distinct = phases.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert!(
+            distinct.len() >= 16,
+            "24 wounds across a body must not share a beat; got {} distinct phases of {period} \
+             ({phases:?})",
+            distinct.len()
+        );
+        // One heart, one rate: every wound's period is still the shared one.
+        for (i, b) in bleeds.iter().enumerate() {
+            let beats: StdVec<u32> =
+                (1000..1000 + 4 * period).filter(|&t| pulses_on(b, t, 60, &s)).collect();
+            assert_eq!(beats.len(), 4, "wound {i} must beat exactly four times in four periods");
+            for w in beats.windows(2) {
+                assert_eq!(w[1] - w[0], period, "wound {i} must keep the shared rate");
+            }
+        }
+    }
+
+    /// The phase is a function of the wound's geometry, so a replay reproduces it exactly.
+    #[test]
+    fn one_wound_always_gets_the_same_phase() {
+        let s = BloodSettings::default();
+        let w = wound();
+        let a = pulse_phase(&Bleed::new(1000, &w), 60, &s);
+        let b = pulse_phase(&Bleed::new(7777, &w), 60, &s);
+        assert_eq!(a, b, "the phase is the wound's, not the tick it opened on");
     }
 
     /// A nonsense heart rate floors the period rather than dividing by zero.
@@ -238,16 +323,17 @@ mod tests {
     #[test]
     fn a_pulse_stops_for_good_when_the_blood_yields() {
         let s = BloodSettings::default();
-        let b = Bleed::new(0, 0.004);
+        let b = Bleed::new(0, &wound());
         let w = wound();
-        let first =
-            pulse_wound(&b, &w, 0, 60, &s).expect("a fresh wound must throw blood on its own tick");
+        let phase = pulse_phase(&b, 60, &s);
+        let first = pulse_wound(&b, &w, phase, 60, &s)
+            .expect("a fresh wound must throw blood on its own first beat");
         assert_eq!(first.severity, 1.0, "a fresh wound throws at full severity");
 
         let period = pulse_period(60, &s);
         if period > 1 {
             assert!(
-                pulse_wound(&b, &w, 1, 60, &s).is_none(),
+                pulse_wound(&b, &w, phase + 1, 60, &s).is_none(),
                 "no pulse happened on this tick, so there is no wound to throw"
             );
         }
@@ -259,7 +345,7 @@ mod tests {
                 (Some(t), Some(_)) => {
                     panic!("blood resumed at tick {tick} after stopping at {t}")
                 }
-                (None, None) if tick % period == 0 && tick > s.spurt_ticks => {
+                (None, None) if tick % period == phase && tick > s.spurt_ticks => {
                     stopped_at = Some(tick)
                 }
                 _ => {}
@@ -279,12 +365,13 @@ mod tests {
     #[test]
     fn severity_tapers_through_one_code_path() {
         let s = BloodSettings::default();
-        let b = Bleed::new(0, 0.004);
+        let b = Bleed::new(0, &wound());
         let w = wound();
         let period = pulse_period(60, &s);
+        let phase = pulse_phase(&b, 60, &s);
         let mut seen: std::vec::Vec<f32> = std::vec::Vec::new();
         for k in 0..(s.clot_ticks / period) {
-            if let Some(p) = pulse_wound(&b, &w, k * period, 60, &s) {
+            if let Some(p) = pulse_wound(&b, &w, k * period + phase, 60, &s) {
                 seen.push(p.severity);
             }
         }
@@ -300,7 +387,7 @@ mod tests {
     #[test]
     fn a_wound_that_spans_the_tick_wrap_does_not_panic() {
         let s = BloodSettings::default();
-        let b = Bleed::new(u32::MAX - 10, 0.004);
+        let b = Bleed::new(u32::MAX - 10, &wound());
         assert_eq!(b.age(u32::MAX - 10), 0);
         assert_eq!(b.age(9), 20, "the wrap must be arithmetic, not a panic");
         assert!(pulse_wound(&b, &wound(), 9, 60, &s).is_some() || true, "must not panic");

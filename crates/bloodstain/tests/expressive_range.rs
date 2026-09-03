@@ -103,14 +103,15 @@ fn sample(class: PatternClass, i: u32, s: &BloodSettings) -> Metrics {
         severity,
         kind: WoundKind::Severance,
     };
-    let b = Bleed::new(0, area);
+    let b = Bleed::new(0, &w);
     let hz = 60u32;
 
     match class {
         PatternClass::Impact => measure(&land_all(&impact_spatter(&w, s), s)),
         PatternClass::ArterialSpurt => {
             // Sampled across the pressure decay, so the class covers a fresh spurt and a spent one.
-            let tick = bloodstain::bleed::pulse_period(hz, s) * (i % 12);
+            let tick = bloodstain::bleed::pulse_period(hz, s) * (i % 12)
+                + bloodstain::bleed::pulse_phase(&b, hz, s);
             measure(&land_all(&arterial_arc(&w, &b, tick, hz, s), s))
         }
         PatternClass::CastOff => {

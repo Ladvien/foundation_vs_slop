@@ -466,9 +466,10 @@ mod tests {
     #[test]
     fn an_arterial_spurt_is_a_flat_arc_not_a_cone() {
         let s = BloodSettings::default();
-        let b = Bleed::new(0, 0.004);
+        let b = Bleed::new(0, &wound());
         let w = wound();
-        let arc = arterial_arc(&w, &b, 0, 60, &s);
+        let phase = bleed::pulse_phase(&b, 60, &s);
+        let arc = arterial_arc(&w, &b, phase, 60, &s);
         assert_eq!(arc.len(), s.arc_stains as usize, "one arc per systole, at the authored count");
 
         let axis = vec::normalize_or_zero(w.normal);
@@ -493,19 +494,20 @@ mod tests {
     #[test]
     fn the_arc_fires_on_the_heartbeat_and_decays() {
         let s = BloodSettings::default();
-        let b = Bleed::new(0, 0.004);
+        let b = Bleed::new(0, &wound());
         let w = wound();
         let period = bleed::pulse_period(60, &s);
+        let phase = bleed::pulse_phase(&b, 60, &s);
         if period > 1 {
             assert!(
-                arterial_arc(&w, &b, 1, 60, &s).is_empty(),
+                arterial_arc(&w, &b, phase + 1, 60, &s).is_empty(),
                 "no systole on this tick, so no arc"
             );
         }
-        let first = arterial_arc(&w, &b, 0, 60, &s);
+        let first = arterial_arc(&w, &b, phase, 60, &s);
         // Sampled while the wound is still flowing: past the arrest there is no arc to compare, and a
         // comparison against an empty arc would pass for the wrong reason.
-        let later = arterial_arc(&w, &b, period * 4, 60, &s);
+        let later = arterial_arc(&w, &b, period * 4 + phase, 60, &s);
         let peak = |v: &[Droplet]| v.iter().map(|d| d.speed).fold(0.0f32, f32::max);
         assert!(
             !later.is_empty() && peak(&later) < peak(&first),

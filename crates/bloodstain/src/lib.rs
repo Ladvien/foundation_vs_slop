@@ -19,7 +19,7 @@ pub mod settings;
 pub mod stain;
 
 pub use bag::pick;
-pub use bleed::{Bleed, flow, pulse_period, pulse_wound, pulses_on};
+pub use bleed::{Bleed, flow, pulse_period, pulse_phase, pulse_wound, pulses_on};
 pub use droplet::{
     BACK_SPATTER_SPEED, BLOOD_DENSITY, BLOOD_SURFACE_TENSION, Droplet, FORWARD_SPATTER_SPEED,
     droplet, droplet_count, droplets, landing, wound_seed,
