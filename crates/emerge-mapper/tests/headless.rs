@@ -4097,7 +4097,7 @@ fn undo_steps_back_through_the_meshes_brought_into_a_tile() {
     // `Cmd+Z` — the tab's own stack, not the mesh tab's.
     once(
         &mut app,
-        vec![KeyCode::SuperLeft, binding(Action::UndoBuild).key],
+        vec![emerge_mapper::keys::MOD_KEYS[0], binding(Action::UndoBuild).key],
     );
     let one = members(&app);
     assert_eq!(
@@ -4113,7 +4113,7 @@ fn undo_steps_back_through_the_meshes_brought_into_a_tile() {
 
     once(
         &mut app,
-        vec![KeyCode::SuperLeft, binding(Action::UndoBuild).key],
+        vec![emerge_mapper::keys::MOD_KEYS[0], binding(Action::UndoBuild).key],
     );
     assert!(members(&app).is_empty(), "the second undo empties the tile");
 
@@ -4121,7 +4121,7 @@ fn undo_steps_back_through_the_meshes_brought_into_a_tile() {
     once(
         &mut app,
         vec![
-            KeyCode::SuperLeft,
+            emerge_mapper::keys::MOD_KEYS[0],
             KeyCode::ShiftLeft,
             binding(Action::RedoBuild).key,
         ],
@@ -4130,7 +4130,7 @@ fn undo_steps_back_through_the_meshes_brought_into_a_tile() {
     once(
         &mut app,
         vec![
-            KeyCode::SuperLeft,
+            emerge_mapper::keys::MOD_KEYS[0],
             KeyCode::ShiftLeft,
             binding(Action::RedoBuild).key,
         ],
@@ -4142,7 +4142,7 @@ fn undo_steps_back_through_the_meshes_brought_into_a_tile() {
     // presses to take back.
     once(
         &mut app,
-        vec![KeyCode::SuperLeft, binding(Action::UndoBuild).key],
+        vec![emerge_mapper::keys::MOD_KEYS[0], binding(Action::UndoBuild).key],
     );
     assert_eq!(members(&app).len(), 1, "one press, one step");
 }
@@ -4253,7 +4253,7 @@ fn a_refit_on_another_tab_leaves_the_tile_history_alone() {
     // One step back, so `future` is carrying an entry the excursion could destroy.
     once(
         &mut app,
-        vec![KeyCode::SuperLeft, binding(Action::UndoBuild).key],
+        vec![emerge_mapper::keys::MOD_KEYS[0], binding(Action::UndoBuild).key],
     );
     settle(&mut app, 2);
     let one = members(&app);
@@ -4317,7 +4317,7 @@ fn a_refit_on_another_tab_leaves_the_tile_history_alone() {
     // pushed again, and undo never advanced however many times it was pressed.
     once(
         &mut app,
-        vec![KeyCode::SuperLeft, binding(Action::UndoBuild).key],
+        vec![emerge_mapper::keys::MOD_KEYS[0], binding(Action::UndoBuild).key],
     );
     settle(&mut app, 2);
     assert!(
@@ -4331,7 +4331,7 @@ fn a_refit_on_another_tab_leaves_the_tile_history_alone() {
     once(
         &mut app,
         vec![
-            KeyCode::SuperLeft,
+            emerge_mapper::keys::MOD_KEYS[0],
             KeyCode::ShiftLeft,
             binding(Action::RedoBuild).key,
         ],
@@ -4345,7 +4345,7 @@ fn a_refit_on_another_tab_leaves_the_tile_history_alone() {
     once(
         &mut app,
         vec![
-            KeyCode::SuperLeft,
+            emerge_mapper::keys::MOD_KEYS[0],
             KeyCode::ShiftLeft,
             binding(Action::RedoBuild).key,
         ],
@@ -4448,7 +4448,7 @@ fn a_tile_survives_a_save_and_a_reopen() {
     // `Cmd+S` — Global, and the handler asks which tab is live rather than there being a second key.
     once(
         &mut app,
-        vec![KeyCode::SuperLeft, binding(Action::Save).key],
+        vec![emerge_mapper::keys::MOD_KEYS[0], binding(Action::Save).key],
     );
     // The tile was named when it was opened (`open_tile` above), so the save writes under that id
     // directly — no name prompt.
@@ -4717,6 +4717,31 @@ fn a_piece_that_is_not_in_the_library_cannot_be_dropped_into_a_tile() {
     app.world_mut()
         .resource_mut::<emerge_mapper::tiles::ImportState>()
         .selected_library_id = None;
+
+    // **A tile has to be open for a drop to be refused, and this test never opened one.**
+    //
+    // It booted into `Mode::Tiles`, which lands on the Tiles *page* — where `Enter` is `TileOpen`,
+    // not `BuildDrop`. On an empty kit that fell through to an "unreachable" arm which posted
+    // `"no tile at row 0"`, and `has_problem()` read *that* as the refusal under test. So the
+    // assertion passed for years while the drop it names was never reached. Found 2026-09-03 when
+    // `+ New Tile` became row zero and that stray problem became a naming prompt instead.
+    //
+    // Opening a tile and standing on the Meshes page is the state the refusal is actually about.
+    {
+        let mut build = app
+            .world_mut()
+            .resource_mut::<emerge_mapper::build::Build>();
+        build.open = Some(emerge_core::composition::Composition {
+            id: "kit/target".to_owned(),
+            envelope: emerge_core::composition::Envelope::Bounded { size: (1.0, 4.0, 1.0) },
+            members: vec![],
+            locations: vec![],
+            note: None,
+        });
+        build.browsing = None;
+        build.placing = false;
+    }
+    app.update();
     once(&mut app, vec![binding(Action::BuildDrop).key]);
 
     let members = app
@@ -4779,6 +4804,31 @@ fn a_refusal_on_the_tiles_tab_is_visible_and_stays_there() {
         );
         app.update();
     }
+
+    // **A tile has to be open for a drop to be refused, and this test never opened one.**
+    //
+    // It booted into `Mode::Tiles`, which lands on the Tiles *page* — where `Enter` is `TileOpen`,
+    // not `BuildDrop`. On an empty kit that fell through to an "unreachable" arm which posted
+    // `"no tile at row 0"`, and `has_problem()` read *that* as the refusal under test. So the
+    // assertion passed for years while the drop it names was never reached. Found 2026-09-03 when
+    // `+ New Tile` became row zero and that stray problem became a naming prompt instead.
+    //
+    // Opening a tile and standing on the Meshes page is the state the refusal is actually about.
+    {
+        let mut build = app
+            .world_mut()
+            .resource_mut::<emerge_mapper::build::Build>();
+        build.open = Some(emerge_core::composition::Composition {
+            id: "kit/target".to_owned(),
+            envelope: emerge_core::composition::Envelope::Bounded { size: (1.0, 4.0, 1.0) },
+            members: vec![],
+            locations: vec![],
+            note: None,
+        });
+        build.browsing = None;
+        build.placing = false;
+    }
+    app.update();
 
     // **Shift+Enter drops a hole, and the fixture declares no `slot` tokens** — so this is a refusal
     // by construction rather than by contrivance, and it is the one a real author meets first on a
@@ -8084,19 +8134,43 @@ fn the_tiles_page_lists_authored_tiles_and_reopening_works() {
         "and the census follows, or the key list would be describing the wrong state"
     );
 
+    // **The page is `[+ New Tile, kit/one, kit/two]`.** The kit was empty when the tab arrived —
+    // the two compositions above were pushed after — so the cursor is on row 0, which is
+    // `+ New Tile` since 2026-09-03. It is a row the arrows can stand on now; it used to sit above
+    // the walk with no way onto it, and two down-presses on a short page moved nothing and said
+    // nothing (the review's L4).
     press(&mut app, key(Action::TileNext));
     assert_eq!(
         app.world().resource::<Build>().browsing,
         Some(1),
-        "down walks the tiles"
+        "down walks off `+ New Tile` onto the first tile"
+    );
+    press(&mut app, key(Action::TileNext));
+    assert_eq!(
+        app.world().resource::<Build>().browsing,
+        Some(2),
+        "and on to the second"
     );
     // Saturating at the end, like the member walk: holding an arrow should stop, not wrap.
     press(&mut app, key(Action::TileNext));
     assert_eq!(
         app.world().resource::<Build>().browsing,
-        Some(1),
+        Some(2),
         "and stops at the end"
     );
+    // And it walks back onto `+ New Tile`, which is the half that did not exist before.
+    for _ in 0..2 {
+        press(&mut app, key(Action::TilePrev));
+    }
+    assert_eq!(
+        app.world().resource::<Build>().browsing,
+        Some(emerge_mapper::build::NEW_TILE_ROW),
+        "the walk reaches `+ New Tile` — it used to sit above the cursor with no way onto it"
+    );
+    // Back down onto `kit/two`, so what follows is about opening a tile rather than about row zero.
+    for _ in 0..2 {
+        press(&mut app, key(Action::TileNext));
+    }
 
     // **`right` opens the tile under the cursor AND drills into the Meshes page** — the author's
     // shape for the tab: *"push right arrow with a tile selected to add/move to the Meshes tab."*
@@ -8118,18 +8192,36 @@ fn the_tiles_page_lists_authored_tiles_and_reopening_works() {
         "reopening a tile is holding it: there is nothing else to pick up"
     );
 
-    // **`left` comes back to the Tiles page**, and `Esc` backs out of the page entirely.
+    // **`left` comes back to the Tiles page.**
     press(&mut app, key(Action::PageLeave));
     assert_eq!(
         app.world().resource::<Build>().browsing,
-        Some(0),
-        "left returns to the Tiles page, cursor where the drill left it"
+        Some(1),
+        "left returns to the Tiles page, on the first authored tile — the drill row itself is not \
+         remembered, and row 0 is `+ New Tile` rather than a tile"
     );
+
+    // **`Esc` does NOT descend past it, and that reverses what this test used to assert.**
+    //
+    // It read *"Esc always returns to Choosing"*, and Choosing is the Meshes page — so the key that
+    // says "back out" went one step *deeper*, into the state where `build.open` is `None` and every
+    // tile verb, `Cmd+S` included, silently did nothing (the audit's T1 and T9 together). The page's
+    // own back key is `left`, and `Esc` now agrees with it instead of inventing a third direction.
+    //
+    // The tile is still held from the reopen above, so the first `Esc` puts the piece back — the
+    // unchanged arm — and the page stays where it is.
     press(&mut app, key(Action::Cancel));
     assert_eq!(
         app.world().resource::<Build>().browsing,
-        None,
-        "Esc always returns to Choosing"
+        Some(1),
+        "the first Esc puts the held piece back and leaves the page alone"
+    );
+    // And a second one, with nothing held, refuses rather than descending.
+    press(&mut app, key(Action::Cancel));
+    assert_eq!(
+        app.world().resource::<Build>().browsing,
+        Some(1),
+        "Esc on the Tiles page stays on it — `Ctrl+O` is how you leave the kit"
     );
 }
 
@@ -8161,7 +8253,8 @@ fn reopening_an_empty_tile_leaves_the_arrows_walking() {
     };
     {
         let mut build = app.world_mut().resource_mut::<Build>();
-        open_saved(&mut build, empty);
+        let opened = open_saved(&mut build, empty);
+        assert!(opened.is_ok(), "a bounded tile must open: {opened:?}");
     }
     for _ in 0..3 {
         app.update();
@@ -9538,8 +9631,8 @@ fn a_named_tile_is_a_row_on_the_tiles_page_before_it_is_saved() {
     );
     assert_eq!(
         page_len(&app.world().resource::<emerge_mapper::project::Project>(), build),
-        1,
-        "the page counts the draft — the walk clamps to it and the chip shows it"
+        2,
+        "the page counts the draft AND the `+ New Tile` row — the walk clamps to both"
     );
     let kit = emerge_core::census::of_catalog(
         &app.world().resource::<emerge_mapper::project::Project>().library,
@@ -9564,8 +9657,8 @@ fn a_named_tile_is_a_row_on_the_tiles_page_before_it_is_saved() {
     press(&mut app, vec![key(Action::PageLeave)]);
     assert_eq!(
         app.world().resource::<Build>().browsing,
-        Some(0),
-        "the page walk can stand on the draft row"
+        Some(1),
+        "the page walk can stand on the draft row — which is row 1, behind `+ New Tile`"
     );
 
     // **`Cmd+S` commits it** and the row stays, now as a committed tile.
@@ -9584,8 +9677,8 @@ fn a_named_tile_is_a_row_on_the_tiles_page_before_it_is_saved() {
     );
     assert_eq!(
         page_len(&app.world().resource::<emerge_mapper::project::Project>(), &app.world().resource::<Build>()),
-        1,
-        "after the save it is still one row — the committed tile the draft was"
+        2,
+        "after the save it is still one tile — two page rows, with `+ New Tile` above it"
     );
 }
 
@@ -9946,12 +10039,15 @@ fn right_enters_the_meshes_page_and_left_comes_back_to_tiles() {
             .browsing
     };
 
-    // **The tab opens on the Tiles page** — arrival seeds the cursor at the top. `right` drills
-    // into the Meshes page and opens the tile under the cursor on the way; `left` comes back.
+    // **The tab opens on the Tiles page**, and the cursor lands on the first real tile — row 0 is
+    // `+ New Tile` since 2026-09-03 (the review's L4: the arrows could not reach it), and arriving
+    // on the row that *makes* something would be the wrong default for a kit that already has one.
+    // `right` drills into the Meshes page and opens the tile under the cursor on the way; `left`
+    // comes back.
     assert_eq!(
         browsing(&app),
-        Some(0),
-        "the tab opens on the Tiles page — arrival seeds the cursor at the top"
+        Some(1),
+        "the tab opens on the first authored tile, not on `+ New Tile`"
     );
 
     press(&mut app, key(Action::PageEnter));
@@ -9974,8 +10070,8 @@ fn right_enters_the_meshes_page_and_left_comes_back_to_tiles() {
     }
     assert_eq!(
         browsing(&app),
-        Some(0),
-        "`left` must come back to the Tiles page — the strip has promised this since the kit shipped"
+        Some(1),
+        "`left` must come back to the Tiles page, on the first authored tile (row 0 is `+ New Tile`)"
     );
 
     // And the two are different keys doing different things, not one key toggling: `Enter` opens

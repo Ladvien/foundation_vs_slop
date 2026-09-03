@@ -111,6 +111,15 @@ pub struct Kit {
     /// `furniture`. Keying anything off the ids alone made the kit selection inert on every kit that
     /// ships — see `Project::kit_of`.
     pub namespace: Option<String>,
+    /// **Whether this project's `kits.ron` binds this directory** — which is the only thing that
+    /// decides if `Project::open` can open it.
+    ///
+    /// Not derivable from [`namespace`](Self::namespace), and that cost a wrong fix on 2026-09-03:
+    /// `read_kit` fills `namespace` from the kit's **own** `library.ron`, and the binding pass then
+    /// overwrites it — so an unbound kit carries a namespace too, and `namespace.is_some()` is true
+    /// for every kit that names itself. `site` is the live example: it declares `site` in its own
+    /// library and appears nowhere in `kits.ron`.
+    pub bound: bool,
     /// Every id this kit defines, so a placement can be traced back to the kit that provides it
     /// without re-reading a library per frame. `read_kit` parses it anyway.
     pub ids: BTreeSet<String>,
@@ -174,7 +183,9 @@ impl Catalog {
 
         let mut kits = Vec::new();
         // The root kit first, if it is one — `Project::open(None)` opens exactly this.
-        if let Some(kit) = read_kit(&base, None)? {
+        if let Some(mut kit) = read_kit(&base, None)? {
+            // The root kit is opened by `Project::open(None)` and needs no entry in `kits.ron`.
+            kit.bound = true;
             kits.push(kit);
         }
 
@@ -206,6 +217,7 @@ impl Catalog {
         for kit in &mut kits {
             if let Some(b) = bindings.iter().find(|b| Some(b.dir.as_str()) == kit.flag.as_deref()) {
                 kit.namespace = Some(b.namespace.clone());
+                kit.bound = true;
             }
         }
         // **Where new work lands**, read in the same breath as the bindings — it is a field of the
@@ -302,6 +314,8 @@ fn read_kit(dir: &Path, flag: Option<String>) -> Result<Option<Kit>, String> {
         dir: dir.to_path_buf(),
         pieces,
         namespace,
+        // Set by the binding pass in `Catalog::scan`; a kit read on its own is not yet bound.
+        bound: false,
         ids,
     }))
 }
@@ -2849,6 +2863,23 @@ impl Chooser {
         self.catalog.kits.get(self.kit.checked_sub(1)?)
     }
 
+    /// **The highlighted kit, but only if this project can actually open it.**
+    ///
+    /// The KITS column lists every directory under `assets/emerge/` that looks like a kit;
+    /// `Project::open` opens only the ones `kits.ron` binds. The two info panels asked the first
+    /// question and answered as though it were the second, so KIT INFO read `pieces 45` and POLICY
+    /// drew eight patch rows for `site` — a kit the project does not have, whose row refuses on
+    /// `Enter`. Two panels describing something you cannot enter is worse than two blank ones: the
+    /// blank says *there is nothing here for you*, which is true.
+    ///
+    /// The root kit carries no `flag` and is opened by `Project::open(None)`, so it needs no
+    /// binding and is never withheld.
+    fn openable_kit(&self) -> Option<&Kit> {
+        let binds_any = self.catalog.kits.iter().any(|k| k.bound);
+        self.current_kit()
+            .filter(|k| !binds_any || k.bound)
+    }
+
     /// **Every settings row the arrows can reach**, in the order they are drawn — which is
     /// [`Field::ALL`], and nothing else. MAP INFO's `bash` row is a fact, not a field: the arrows
     /// walk this list and `B` is what changes the bash.
@@ -3170,7 +3201,7 @@ impl Chooser {
     /// that `Delete` removes by ordinal — never by content, because nothing forbids two patches
     /// sharing a `matches` key.
     fn policy_rows(&self) -> (String, Vec<Row>) {
-        let Some(k) = self.current_kit() else {
+        let Some(k) = self.openable_kit() else {
             return ("POLICY".to_owned(), Vec::new());
         };
         let path = k.dir.join(emerge_core::policy::POLICY_FILE);
@@ -3594,6 +3625,7 @@ mod screen_tests {
             dir: PathBuf::from(label),
             pieces,
             namespace: None,
+            bound: false,
             ids: BTreeSet::new(),
         }
     }
@@ -4166,8 +4198,30 @@ impl Chooser {
         // once on the MAP INFO `bash` row and declared once in `kits.ron`. The tick was a per-map
         // list edited from the kit list; a combination is shared, so ticking one from a map row
         // would silently change every other map naming it.
+        // **Does this project bind kits at all?** Asked once, of the catalogue, rather than per row.
+        //
+        // A project whose `kits.ron` names `furniture` and `scp` genuinely cannot open `site`, and
+        // the row should say so. A project that binds nothing is a different thing — an older or
+        // simpler layout where every directory is reached by name — and marking every row there
+        // would be noise dressed as a warning. So the mark means *this project binds kits, and not
+        // this one*, which is exactly the sentence `Project::open`'s refusal writes.
+        let binds_any = self.catalog.kits.iter().any(|k| k.bound);
         kits.extend(self.catalog.kits.iter().enumerate().map(|(i, k)| {
             let selected = self.focus == Focus::Kits && i + 1 == self.kit;
+            // **A kit the project does not bind cannot be opened, and the row now says so.**
+            //
+            // Found live 2026-09-03: this column lists every directory under `assets/emerge/` that
+            // looks like a kit, while `Project::open` will only open one `kits.ron` binds. So `site`
+            // and `site_greybox` were offered, `Enter` refused with a good message — *"no kit `site`
+            // in this project … binds `furniture`, `scp`"* — and the row gave no warning before the
+            // press. Worse, KIT INFO read `pieces 45` and POLICY drew eight rows for it, so two
+            // panels described a kit that could not be entered.
+            //
+            // The row stays, because the directory is really there and hiding it would make a kit
+            // somebody copied in vanish silently. It is marked instead, and the marking is where the
+            // fix is: `kits.ron` is what needs the edit, and the row is where the author is looking.
+            // The root kit has no `flag` and is opened by `Project::open(None)`, so it is exempt.
+            let unbound = binds_any && !k.bound;
             Row {
                 left: if k.flag.is_none() {
                     format!("{} (default)", k.label)
@@ -4177,14 +4231,21 @@ impl Chooser {
                 // **The piece count stays.** It is the fact this screen was built to carry — on
                 // 2026-08-15 an author could not tell `site` from `site_v2` and relaunched three
                 // times.
-                right: format!("{} pieces", k.pieces),
+                right: if unbound {
+                    "not in kits.ron".to_owned()
+                } else {
+                    format!("{} pieces", k.pieces)
+                },
                 // **A blank kit reads as blank without being read.** This is the fact the screen
                 // exists to carry: on 2026-08-15 an author could not tell `site` from `site_v2`
                 // and relaunched three times. A count nobody looks at would not have helped.
-                tone: match (selected, k.pieces) {
-                    (true, _) => Tone::Selected,
-                    (false, 0) => Tone::Empty,
-                    (false, _) => Tone::Stocked,
+                tone: match (selected, unbound, k.pieces) {
+                    (true, _, _) => Tone::Selected,
+                    // Quieter than an empty kit: empty is a kit with no work in it yet, and this is
+                    // not a kit this project has.
+                    (false, true, _) => Tone::Empty,
+                    (false, false, 0) => Tone::Empty,
+                    (false, false, _) => Tone::Stocked,
                 },
             }
         }));
@@ -4285,7 +4346,9 @@ impl Chooser {
     /// nothing is selected and inventing a panel for it would be the same lie the columns to the
     /// right already refuse to tell.
     fn kit_rows(&self) -> (String, Vec<Row>) {
-        let Some(k) = self.current_kit() else {
+        // `openable_kit`, not `current_kit` — a kit this project does not bind gets a blank panel
+        // rather than a description of something `Enter` will refuse. See `openable_kit`.
+        let Some(k) = self.openable_kit() else {
             return ("KIT INFO".to_owned(), Vec::new());
         };
         let excluded = k.dir.file_name().map_or(0, |_| self.excluded_count());
@@ -6272,6 +6335,7 @@ mod render_tests {
             dir: PathBuf::from(label),
             pieces,
             namespace: None,
+            bound: false,
             ids: BTreeSet::new(),
         }
     }

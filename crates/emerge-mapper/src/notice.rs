@@ -46,7 +46,7 @@ pub struct CopyPane(pub &'static [Mode]);
 /// here — `EditorState` is written at drag rate, so a system gated on `is_changed()` would rebuild
 /// the log while the cursor moves.
 #[derive(Resource, Default, PartialEq, Eq)]
-struct Showing {
+pub(crate) struct Showing {
     tab: Option<Mode>,
 }
 
@@ -71,7 +71,7 @@ const TOAST_FADE: f32 = 0.6;
 /// different string. Pressing a refused key again therefore says so again, which is the whole point
 /// of feedback on a gesture.
 #[derive(Resource, Default)]
-struct Toast {
+pub(crate) struct Toast {
     shown: Option<String>,
     /// Seconds of life left. **Not `left`**: `tests/no_system_writes_every_frame.rs` matches
     /// `.left =` by name to catch `Node::left`, and a resource field sharing the name is charged as

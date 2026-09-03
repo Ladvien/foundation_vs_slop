@@ -98,7 +98,97 @@ fn open_the_door(world: &mut World) {
 fn close_the_door(world: &mut World) {
     despawn_scene(world);
     crate::args::Opened::remove_from(world);
+    reset_door_state(world);
 }
+
+/// **Put every [`Ownership::Door`] resource back to its opening value.**
+///
+/// # This is the fix for the worst bug on the 2026-09-03 list
+///
+/// [`OWNERSHIP`] classified fifty-odd resources as the door's own working state and **nothing acted
+/// on it** — the table was a declaration, and `close_the_door` removed exactly four resources. The
+/// test beside it says so in as many words: *"The door change is **already** the partial teardown
+/// the comment is spent avoiding, and the bug class it warns about is already open."*
+///
+/// Reproduced on camera: open `furniture`, `Ctrl+O`, open `scp` — a kit with **zero** pieces — and
+/// the chrome bar reads `KIT · scp` while the inspector shows `hoover`, the shelf chips read
+/// `NOT IMPORTED (270) / MESHES (90)`, the list shows the other kit's tile and the other kit's mesh
+/// is on the stage. `ImportState.scanned` is what pins it: both scan entrances are gated on
+/// `!state.scanned`, which means "first look", and a door change is a first look.
+///
+/// # Reset, not remove, and the difference is a panic
+///
+/// A missing `Res<T>` **panics its system** in Bevy 0.19, and these are `init_resource`d once at
+/// plugin build — so removing them would take the next door down rather than clean it. Each is
+/// removed and immediately re-initialised, which is the same value the application started with and
+/// costs nothing a fresh boot does not.
+///
+/// # The list is checked against the table
+///
+/// A hand-written list of forty types is exactly the thing that goes stale, which is the failure
+/// this whole file is about. `the_door_resets_what_it_says_it_owns` compares this macro's types
+/// against every `Ownership::Door` row in [`OWNERSHIP`] and fails on either half of a drift — a type
+/// classified `Door` and not reset, or reset and not classified.
+macro_rules! door_state {
+    ($($t:ty),* $(,)?) => {
+        pub(crate) fn reset_door_state(world: &mut World) {
+            $(
+                world.remove_resource::<$t>();
+                world.init_resource::<$t>();
+            )*
+        }
+
+        /// The types [`reset_door_state`] puts back, by type path, for the ratchet.
+        pub fn door_state_type_paths() -> Vec<&'static str> {
+            vec![$( std::any::type_name::<$t>() ),*]
+        }
+    };
+}
+
+door_state![
+    crate::build::TileHistory,
+    crate::build::Build,
+    crate::editor::EditorState,
+    crate::editor::CloneDrag,
+    crate::editor::MoveDrag,
+    crate::editor::PlaceDrag,
+    crate::editor::RemovalDrag,
+    crate::editor::FineAnchor,
+    crate::editor::Proposal,
+    crate::editor::Rung,
+    crate::editor::SizeEdit,
+    crate::editor::Folded,
+    crate::editor::StampPicture,
+    crate::editor::TargetLock,
+    crate::editor::UnderCursor,
+    crate::editor::EdgeFaults,
+    crate::tiles::ImportState,
+    crate::tiles::CellEdit,
+    crate::tiles::DerivedEdges,
+    crate::tiles::HeightEdit,
+    crate::tiles::LatticePick,
+    crate::tiles::MapView,
+    crate::tiles::NoteEdit,
+    crate::tiles::ScaleEdit,
+    crate::tiles::StagedLift,
+    crate::tiles::LibraryCursor,
+    crate::compose::ComposeState,
+    crate::compose::Budget,
+    crate::compose::StagedCarousel,
+    crate::anim_tab::BenchState,
+    crate::anim_tab::AdoptExclude,
+    crate::anim_stage::BenchAb,
+    crate::anim_stage::BenchCamera,
+    crate::anim_stage::BenchScrub,
+    crate::anim_watch::MeasureQueue,
+    crate::labels::LabelQueue,
+    crate::filter::Filters,
+    crate::notice::Showing,
+    crate::notice::Toast,
+    crate::badges::ShowingFor,
+    crate::view::Rig,
+    crate::token_prompt::TokenPrompt,
+];
 
 /// **Despawn every root a screen could have spawned.** The one implementation, called by both
 /// screens' teardowns.

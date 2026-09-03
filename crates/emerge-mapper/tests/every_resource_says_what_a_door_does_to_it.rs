@@ -108,3 +108,50 @@ fn the_working_state_is_named_as_such() {
          `Session` means it survives into the next kit."
     );
 }
+
+/// **And the classification is now executed, not merely declared.**
+///
+/// This file's own header records the finding it was written for: *"The door change is **already**
+/// the partial teardown the comment is spent avoiding, and the bug class it warns about is already
+/// open: edit a tile in kit A, leave, open kit B, and A's undo stack is there to be replayed into
+/// B."* It stayed open, and on 2026-09-03 it was reproduced on camera as something louder than an
+/// undo stack: opening a second kit showed the **first** kit's meshes, counts, tile list, cursors
+/// and staged piece, under a chrome bar correctly naming the second.
+///
+/// `screen::reset_door_state` closes it, and this is what stops the two halves drifting. A
+/// hand-written list of forty types is exactly the thing that goes stale — which is the failure this
+/// whole file is about — so the list and the table are compared in both directions.
+#[test]
+fn the_door_resets_what_it_says_it_owns() {
+    use emerge_mapper::screen::{door_state_type_paths, Ownership};
+
+    // `Frame` is the one deliberate absence. It holds entity ids from the screen that spawned them,
+    // so re-initialising it would be meaningless — `chrome::spawn_frame` replaces it wholesale on
+    // every entry, which is a stronger guarantee than a reset. The table says the same thing.
+    const REPLACED_ON_ENTRY: &[&str] = &["emerge_mapper::chrome::Frame"];
+
+    let declared: Vec<&str> = OWNERSHIP
+        .iter()
+        .filter(|(_, c)| *c == Ownership::Door)
+        .map(|(n, _)| *n)
+        .filter(|n| !REPLACED_ON_ENTRY.contains(n))
+        .collect();
+    let reset = door_state_type_paths();
+
+    let unreset: Vec<&&str> = declared.iter().filter(|n| !reset.contains(n)).collect();
+    assert!(
+        unreset.is_empty(),
+        "classified as the door's own working state and NOT reset when the door closes — each of \
+         these survives into the next kit, which is the bug this file was opened for:\n{unreset:#?}"
+    );
+
+    let unclassified: Vec<&&str> = reset
+        .iter()
+        .filter(|n| !declared.contains(n) && !REPLACED_ON_ENTRY.contains(n))
+        .collect();
+    assert!(
+        unclassified.is_empty(),
+        "reset when the door closes but not classified `Ownership::Door` — the table is what a \
+         reader consults, so a reset it does not mention is a reset nobody can find:\n{unclassified:#?}"
+    );
+}
