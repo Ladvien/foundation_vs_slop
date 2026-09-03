@@ -172,11 +172,72 @@ pub enum Stance {
 }
 
 impl Stance {
+    /// **Every stance a binding could be judged against**, in one place because two things read it:
+    /// [`Stances::overlaps`] asks whether two requirements can ever hold together, and the badge
+    /// tests sweep it. A fifth stance therefore costs one edit here rather than two that must agree.
+    pub const ALL: [Stance; 4] = [
+        Stance::Idle,
+        Stance::Holding,
+        Stance::Proposed,
+        Stance::Browsing,
+    ];
+
     /// Can these two be live at the same moment? A stance is exactly one thing at a time, so this is
     /// equality — stated as a method anyway, so the collision test reads the same for both axes and a
     /// future third stance costs a decision here rather than a silent `==`.
     pub fn overlaps(self, other: Stance) -> bool {
         self == other
+    }
+}
+
+/// **What a binding asks of the [`Stance`]**, and why it is three answers rather than two.
+///
+/// It was `Option<Stance>` — `None` for "the axis does not apply", `Some(s)` for "only in `s`" — on
+/// exactly [`Binding::needs_shift`]'s shape. That was enough while every stance-fussy row wanted
+/// *one* stance, and it could not say the thing the Tiles tab needed: **a tile verb belongs to every
+/// stance except [`Stance::Browsing`]**. `Space` takes the piece at `Idle` and puts it back at
+/// `Holding`, so `Only` is too narrow for it; `Any` is what it had, and `Any` is what let `Del`
+/// empty a tile that was not on screen and `Space` print *"placing — arrows move the tile"* while the
+/// arrows walked the tile list (the 2026-09-03 review's T4). A handler guard would have fixed the
+/// key and left the badge overlay still offering the verb, which is the half of the defect the census
+/// exists to own.
+///
+/// So the axis grew the one answer it was missing. `AnyBut` is not a fourth state to reason about:
+/// [`Stances::allows`] answers all three the same way, and [`Stances::overlaps`] decides
+/// exclusiveness by asking [`Stance::ALL`] rather than by case analysis, so a fifth stance cannot
+/// make it quietly wrong.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stances {
+    /// The stance is not part of this binding; it fires whatever is in hand. What almost every row
+    /// wants, and what every row wanted before this axis existed.
+    Any,
+    /// Fires only in this stance. Two rows on one key asking for different stances can never both be
+    /// satisfied, which is what lets the arrows walk a list *and* move a piece without the handler
+    /// deciding.
+    Only(Stance),
+    /// Fires in every stance but this one — *"the page you can see owns the keys"*, said in the
+    /// table. See [`Stance::Browsing`].
+    AnyBut(Stance),
+}
+
+impl Stances {
+    /// Does this requirement hold at `live`?
+    pub fn allows(self, live: Stance) -> bool {
+        match self {
+            Stances::Any => true,
+            Stances::Only(want) => want.overlaps(live),
+            Stances::AnyBut(never) => !never.overlaps(live),
+        }
+    }
+
+    /// **Can two requirements ever hold at the same moment?** By enumeration rather than by cases:
+    /// `AnyBut(a)` and `AnyBut(b)` overlap on every *other* stance, which is a fact about how many
+    /// there are — so the answer reads [`Stance::ALL`] instead of encoding the count in an arm that
+    /// a fifth stance would silently falsify.
+    pub fn overlaps(self, other: Stances) -> bool {
+        Stance::ALL
+            .iter()
+            .any(|s| self.allows(*s) && other.allows(*s))
     }
 }
 
@@ -521,6 +582,20 @@ pub enum Action {
     /// cursor, exactly as the library's own pair moves the mesh cursor.
     TilePrev,
     TileNext,
+    /// **Put the open tile down** — `C` on the Tiles tab, and the verb whose absence bricked the
+    /// tab.
+    ///
+    /// "No tile open" was a state you could only *fall* into: the arrival seed, an `Enter` on a row
+    /// the kit had nothing for, or opening a composition the assembler cannot edit — and with
+    /// every verb behind a size guard that returned in silence, the only escape was opening a
+    /// different tile (the 2026-09-03 review's T1/T2). A door needs both directions, so this is the
+    /// other one: the tile is put down and the Tiles page comes back, deliberately.
+    ///
+    /// `C` for close, and it is free on this tab — bare `C` is bound only in `Context::Compose`, and
+    /// `Cmd+C` (copy this tab's text) is legal beside it on the rule `S`/`Cmd+S` already follows.
+    /// It is also the letter this tab retired when the mode key went away, which is the one thing an
+    /// author's hand may already associate with "the Tiles tab, but different".
+    CloseTile,
     /// **Put the cursor in the filter box.** The box was reachable only by mouse, on a tab whose
     /// whole argument is that keystrokes are faster.
     FocusFilter,
@@ -725,16 +800,12 @@ pub struct Binding {
     /// twice: undo declares `Some(false)`, redo `Some(true)`, and the collision test below knows they
     /// can never both be satisfied.
     pub needs_shift: Option<bool>,
-    /// **Which [`Stance`] this binding wants**, on exactly the rule [`Binding::needs_shift`] follows.
-    ///
-    /// `None` — the phase is not part of this binding, and it fires whether or not something is in
-    /// hand. That is what almost every row wants, and it is the default so that adding the axis
-    /// changed no existing row's behaviour.
-    ///
-    /// `Some(s)` — fires only in stance `s`. Two rows on one key asking for different stances can
-    /// never both be satisfied, which is what lets the arrows walk a list *and* move a piece without
-    /// the handler deciding.
-    pub needs_stance: Option<Stance>,
+    /// **What this binding asks of the [`Stance`]**, on exactly the rule [`Binding::needs_shift`]
+    /// follows — and with the third answer that rule does not need. [`Stances`] carries the whole
+    /// argument: `Any` is the default that changed no row when the axis arrived, `Only` is what
+    /// keeps the arrows from walking a list and moving a piece at once, and `AnyBut` is how a verb
+    /// says it belongs to the tile rather than to the page that hides it.
+    pub needs_stance: Stances,
     pub context: Context,
     /// How the BARE key reads in the panel — `S`, `Z`, `up`. The modifier is **not** written here:
     /// [`rows`] prepends [`MOD_NAME`] when `needs_mod`, so the one panel that shows this list says
@@ -773,7 +844,7 @@ pub struct Draft {
     key: KeyCode,
     needs_mod: bool,
     needs_shift: Option<bool>,
-    needs_stance: Option<Stance>,
+    needs_stance: Stances,
     context: Context,
     while_filtering: bool,
     while_journal: bool,
@@ -818,6 +889,23 @@ impl Draft {
     /// forgotten here is simply quiet while the panel is up, which is the correct default.
     pub const fn also_journal(mut self) -> Draft {
         self.while_journal = true;
+        self
+    }
+
+    /// **A verb the page you can see owns** — live in every stance but this one.
+    ///
+    /// Chainable before [`Draft::at`], and a modifier rather than a constructor parameter for
+    /// [`Draft::also_filtered`]'s reason: exclusion is a claim a row has to make. Every tile-editing
+    /// verb on the Tiles tab makes it about [`Stance::Browsing`] — `Del`, `Shift+Del`, `R`, `Space`,
+    /// `[`, `]`, `J` and the tile's own undo pair were all `Stances::Any`, so they fired on the tile
+    /// the Tiles *page* was hiding: `Shift+Del` emptied an off-screen tile and `Space` announced
+    /// *"placing — arrows move the tile"* while the arrows walked the tile list.
+    ///
+    /// Stated here rather than as an `if build.browsing.is_some()` in the handler, because the badge
+    /// overlay reads the census: a guard would have made the key quiet and left the row still
+    /// offering the verb, which is the lie [`Stance`] exists to prevent.
+    pub const fn unless(mut self, stance: Stance) -> Draft {
+        self.needs_stance = Stances::AnyBut(stance);
         self
     }
 }
@@ -1437,6 +1525,12 @@ pub const BINDINGS: &[Binding] = &[
         "left",
         "walk the lists / Shift: x5",
     )
+    // **Alive while a filter box holds the keys**, like its up/down siblings. All four collapse to
+    // ONE badge row promising "up/down walk, left/right switch which list", and only two of them
+    // survived `Holder::Filter` — so half the row a reader was looking at was inert with nothing
+    // saying so (the 2026-09-03 review's M13). Filtering a list and then crossing to the other one
+    // is the ordinary motion this tab is for.
+    .also_filtered()
     .at(Home::Control(ControlId::Pieces)),
     b(
         Action::FocusLibrary,
@@ -1446,6 +1540,12 @@ pub const BINDINGS: &[Binding] = &[
         "right",
         "walk the lists / Shift: x5",
     )
+    // **Alive while a filter box holds the keys**, like its up/down siblings. All four collapse to
+    // ONE badge row promising "up/down walk, left/right switch which list", and only two of them
+    // survived `Holder::Filter` — so half the row a reader was looking at was inert with nothing
+    // saying so (the 2026-09-03 review's M13). Filtering a list and then crossing to the other one
+    // is the ordinary motion this tab is for.
+    .also_filtered()
     .at(Home::Control(ControlId::Pieces)),
     b(
         Action::TypeId,
@@ -1945,6 +2045,17 @@ pub const BINDINGS: &[Binding] = &[
         "flush it to that side",
     )
     .at(Home::Control(ControlId::Members)),
+    // **The tile's own verbs decline the Tiles page**, every one of them, with [`Draft::unless`].
+    //
+    // They were `Stances::Any`, which on this tab means *"including while the right panel is
+    // showing the tile list instead of the tile"* — so `Shift+Del` emptied a tile that was not on
+    // screen, `R` turned a member nobody could see, and `Space` answered *"placing — arrows move
+    // the tile"* while the arrows went on walking the tile list (the 2026-09-03 review's T4).
+    //
+    // `AnyBut` rather than `Only`: `Space` is the door between `Idle` and `Holding` and has to fire
+    // on both sides of it, and `[`/`]`/`J`/`R`/`Del` all act on the focused member whether or not a
+    // piece is in hand. What they have in common is not a stance — it is that the thing they act on
+    // has to be the thing on screen.
     b(
         Action::BuildArm,
         KeyCode::Space,
@@ -1953,6 +2064,7 @@ pub const BINDINGS: &[Binding] = &[
         "Space",
         "take the piece / Esc puts it back",
     )
+    .unless(Stance::Browsing)
     .at(Home::Control(ControlId::Pieces)),
     b(
         Action::BuildDown,
@@ -1962,6 +2074,7 @@ pub const BINDINGS: &[Binding] = &[
         "[",
         "layer",
     )
+    .unless(Stance::Browsing)
     .at(Home::Control(ControlId::Grid)),
     b(
         Action::BuildUp,
@@ -1971,6 +2084,7 @@ pub const BINDINGS: &[Binding] = &[
         "]",
         "layer",
     )
+    .unless(Stance::Browsing)
     .at(Home::Control(ControlId::Grid)),
     // **`J` cycles the rung, latched.** The same key the Map cycles its drawn grid with, and the same
     // argument: Bier's snap-dragging latches every one of its modal commands, and StickyLines'
@@ -1984,6 +2098,7 @@ pub const BINDINGS: &[Binding] = &[
         "J",
         "grid deeper by thirds, wrapping",
     )
+    .unless(Stance::Browsing)
     .at(Home::Control(ControlId::Grid)),
     // **Both stated with `bs`.** A bare `b` is *indifferent* to Shift by design, so it would swallow
     // the shifted chord rather than sit beside it — the same pair `RemoveTile`/`DemoteTile` makes.
@@ -2023,6 +2138,7 @@ pub const BINDINGS: &[Binding] = &[
         "R",
         "turn / remove this / Shift: empty the tile",
     )
+    .unless(Stance::Browsing)
     .at(Home::Control(ControlId::Tile)),
     // **`bs`, both of them.** A bare binding is indifferent to Shift and would swallow the shifted
     // chord — the collision the census exists to catch, and the precedent `RemoveTile`/`DemoteTile`
@@ -2036,6 +2152,7 @@ pub const BINDINGS: &[Binding] = &[
         REMOVE_NAME,
         "turn / remove this / Shift: empty the tile",
     )
+    .unless(Stance::Browsing)
     .at(Home::Control(ControlId::Tile)),
     bs(
         Action::ClearTile,
@@ -2046,6 +2163,7 @@ pub const BINDINGS: &[Binding] = &[
         REMOVE_NAME,
         "turn / remove this / Shift: empty the tile",
     )
+    .unless(Stance::Browsing)
     .at(Home::Control(ControlId::Tile)),
     // **No save key here, on purpose.** `Cmd+S` is Global and already means *save what is open*; a
     // second one in this context would collide with it, and the collision is the census pointing out
@@ -2059,10 +2177,33 @@ pub const BINDINGS: &[Binding] = &[
         "name a new tile",
     )
     .at(Home::Control(ControlId::Tile)),
+    // **The other direction of the same door.** `N` names a tile into existence and this puts one
+    // down; between them, "no tile open" is a state an author chooses rather than one they fall
+    // into. It is a **new key to learn** and it is charged knowingly — see [`Action::CloseTile`] for
+    // the state it exists to make escapable, and `no_context_gains_a_key` for the pin it moves.
+    //
+    // Live on the Tiles page as well (`Stances::Any`), unlike the tile-editing verbs above: closing
+    // is a fact about the *tab*, not an edit to a tile nobody can see, and the page is exactly where
+    // an author who has finished with a tile is standing.
+    b(
+        Action::CloseTile,
+        KeyCode::KeyC,
+        false,
+        Context::Tiles,
+        "C",
+        "close the tile",
+    )
+    .at(Home::Control(ControlId::Tile)),
     // **Its own stack, like every other tab's.** `UndoTile` is the *mesh* tab's, over library edits;
     // this one is over the tile in hand. Two tabs editing different files through one stack would
     // make "undo" mean whichever thing was touched last, which is the shape `Action::UndoTile`'s own
     // note already argues against.
+    //
+    // **And it declines the Tiles page, on this pair's own argument.** `Action::Undo`'s row already
+    // says why the map's undo is not Global: *"An undo you cannot see the effect of is not an
+    // undo."* A tile's undo pressed while the right panel is showing the tile *list* is the same
+    // sentence one level down — it steps a document that is not on screen, and reports the step in
+    // a status line beside a panel that cannot show it.
     bs(
         Action::UndoBuild,
         KeyCode::KeyZ,
@@ -2072,6 +2213,7 @@ pub const BINDINGS: &[Binding] = &[
         "Z",
         "undo / redo",
     )
+    .unless(Stance::Browsing)
     .at(Home::Control(ControlId::Detail)),
     bs(
         Action::RedoBuild,
@@ -2082,6 +2224,7 @@ pub const BINDINGS: &[Binding] = &[
         "Z",
         "undo / redo",
     )
+    .unless(Stance::Browsing)
     .at(Home::Control(ControlId::Detail)),
     b(
         Action::ScanMesh,
@@ -2228,7 +2371,7 @@ pub const BINDINGS: &[Binding] = &[
         false,
         Context::Compose,
         "up",
-        "walk the focused list",
+        "walk the focused list / Shift: x5",
     )
     .at(Home::Control(ControlId::Detail)),
     b(
@@ -2237,7 +2380,7 @@ pub const BINDINGS: &[Binding] = &[
         false,
         Context::Compose,
         "down",
-        "walk the focused list",
+        "walk the focused list / Shift: x5",
     )
     .at(Home::Control(ControlId::Detail)),
     b(
@@ -2421,8 +2564,8 @@ pub const BINDINGS: &[Binding] = &[
 /// without touching a single existing row.
 ///
 /// **[`Home`] is the one axis that could not arrive that way**, and the difference is worth stating:
-/// a default is only honest when "not stated" is a real answer. `needs_stance: None` means *this
-/// binding does not care what is in hand*; there is no corresponding `home: None`, because a verb
+/// a default is only honest when "not stated" is a real answer. `Stances::Any` means *this binding
+/// does not care what is in hand*; there is no corresponding `home: None`, because a verb
 /// with nowhere to be drawn is a verb that vanishes from the only surface that announces it. So the
 /// constructors stop one field short and [`Draft::at`] finishes the row.
 #[allow(clippy::too_many_arguments)]
@@ -2431,7 +2574,7 @@ const fn full(
     key: KeyCode,
     needs_mod: bool,
     needs_shift: Option<bool>,
-    needs_stance: Option<Stance>,
+    needs_stance: Stances,
     context: Context,
     chord: &'static str,
     does: &'static str,
@@ -2458,8 +2601,18 @@ const fn b(
     does: &'static str,
 ) -> Draft {
     // Indifferent to Shift and to what is in hand — see [`Binding::needs_shift`] and
-    // [`Binding::needs_stance`] for why those are the defaults.
-    full(action, key, needs_mod, None, None, context, chord, does)
+    // [`Binding::needs_stance`] for why those are the defaults. A row that wants every stance
+    // *except* one says so with [`Draft::unless`], which is a claim rather than a default.
+    full(
+        action,
+        key,
+        needs_mod,
+        None,
+        Stances::Any,
+        context,
+        chord,
+        does,
+    )
 }
 
 /// A row that cares about Shift. `shift` is `true` for "must be held", `false` for "must be up".
@@ -2477,7 +2630,7 @@ const fn bs(
         key,
         needs_mod,
         Some(shift),
-        None,
+        Stances::Any,
         context,
         chord,
         does,
@@ -2499,7 +2652,7 @@ const fn bp(
         key,
         needs_mod,
         None,
-        Some(stance),
+        Stances::Only(stance),
         context,
         chord,
         does,
@@ -2523,7 +2676,7 @@ const fn bsp(
         key,
         needs_mod,
         Some(shift),
-        Some(stance),
+        Stances::Only(stance),
         context,
         chord,
         does,
@@ -2829,13 +2982,12 @@ pub fn fires_in(want: Context, live: Context) -> bool {
     live != Context::Typing && want.overlaps(live)
 }
 
-/// Does this binding's [`Stance`] requirement hold right now? `None` is always satisfied — the same
-/// shape as [`shift_ok`], and for the same reason: an axis a row does not mention must not gate it.
+/// Does this binding's [`Stance`] requirement hold right now? [`Stances::Any`] is always satisfied —
+/// the same shape as [`shift_ok`], and for the same reason: an axis a row does not mention must not
+/// gate it. The three answers live on [`Stances`] rather than here, so the collision test and the
+/// dispatcher cannot come to different conclusions about the same row.
 fn stance_ok(b: &Binding, live: Stance) -> bool {
-    match b.needs_stance {
-        None => true,
-        Some(want) => want.overlaps(live),
-    }
+    b.needs_stance.allows(live)
 }
 
 /// Every gate a binding must pass except the key itself, in one place so the three entry points below
@@ -3193,6 +3345,7 @@ mod tests {
             Action::TileOpen,
             Action::TilePrev,
             Action::TileNext,
+            Action::CloseTile,
             Action::FocusFilter,
             Action::FocusTagFilter,
             Action::ShowErrors,
@@ -3237,13 +3390,13 @@ mod tests {
                     (a.needs_shift, b.needs_shift),
                     (Some(x), Some(y)) if x != y
                 );
-                // **And the same for the stance**, on the identical rule: two rows asking for
-                // different things to be in hand can never both fire, which is what lets the arrows
+                // **And the same for the stance**, on the identical rule: two rows that can never
+                // be live in the same stance can never both fire, which is what lets the arrows
                 // walk a list and move a piece on one key without a handler deciding between them.
-                let stance_exclusive = matches!(
-                    (a.needs_stance, b.needs_stance),
-                    (Some(x), Some(y)) if !x.overlaps(y)
-                );
+                // Asked of [`Stances`] rather than case-analysed here, so `AnyBut` — the answer
+                // that says a verb belongs to the tile and not to the page hiding it — is judged by
+                // the same rule the dispatcher uses.
+                let stance_exclusive = !a.needs_stance.overlaps(b.needs_stance);
                 if a.key == b.key
                     && a.needs_mod == b.needs_mod
                     && !shift_exclusive
@@ -3544,12 +3697,11 @@ mod tests {
     /// **Every stance a context can be in.** The row tests police two because those are the two a
     /// *reader* compares; the badge tests police four, because a badge is not read — it is looked at,
     /// and an author holding the shortcut key mid-generate is looking at `Proposed`.
-    const STANCES: [Stance; 4] = [
-        Stance::Idle,
-        Stance::Holding,
-        Stance::Proposed,
-        Stance::Browsing,
-    ];
+    ///
+    /// [`Stance::ALL`] rather than a copy of it: `Stances::overlaps` decides key collisions by
+    /// enumerating the same list, and two lists of the stances is exactly the drift that would let a
+    /// fifth one be exclusive to the collision test and invisible to the badges.
+    const STANCES: [Stance; 4] = Stance::ALL;
 
     /// **Nothing falls off the badge overlay.**
     ///
@@ -3782,7 +3934,17 @@ mod tests {
             // KitNext/KitOpen/KitLeave` retired; `PageEnter/PageLeave/TileOpen/TilePrev/TileNext`
             // took their place — the same five keys, the same context, and the drill is now the
             // page pair the author asked for (`right` into Meshes, `left` back to Tiles).
-            (Context::Tiles, 30),
+            // 30 -> 31: `CloseTile`. `C` puts the open tile down, which is a **new key to learn**
+            // and the first this tab has charged since the page pair. It is charged because "no
+            // tile open" was a state with no way out but opening another tile: every verb below
+            // `build_keys`'s size guard returned in silence, so a tile the assembler cannot edit —
+            // an `Anchored` composition captured on the Map — took the whole tab with it (the
+            // 2026-09-03 review's T1 and T2). A door with one direction is what cost the row.
+            //
+            // Costs no *badge* row it shares: `Home::Control(ControlId::Tile)` already carries the
+            // turn/remove/empty row and `N`, and three badges is well inside the eight
+            // `no_home_carries_more_than_it_can_show` allows.
+            (Context::Tiles, 31),
             (Context::Anim, 11),
             (Context::Compose, 7),
         ];

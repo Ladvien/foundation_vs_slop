@@ -314,7 +314,7 @@ pub const STAGE: Vec3 = crate::stages::TILE;
 /// Without this, coming back from a tile left the author at the origin looking at whatever happened
 /// to be there — their pan and zoom silently discarded.
 #[derive(Resource, Default)]
-struct MapView(Option<crate::view::Rig>);
+pub(crate) struct MapView(Option<crate::view::Rig>);
 
 /// Move the camera to the stage on entering the tab, and back on leaving.
 fn stage_camera(
@@ -1850,7 +1850,17 @@ fn accept_derived_edges(
 /// empty of solids, so moving away from a candidate and back does not re-mark cells the author
 /// unmarked in between.
 fn autoscan_candidate(
-    mut last: Local<Option<usize>>,
+    // **The mesh path, not the index.** This was `Local<Option<usize>>` compared against
+    // `state.selected`, and `commit_candidate` removes the imported entry while keeping the same
+    // index — so after every import `selected` named a *different* mesh at an unchanged index and
+    // the guard skipped it. The next candidate then silently had no lattice until the author
+    // pressed `B` or walked away and back, and `Enter` on it imported an unmeasured piece. The
+    // audit's M10.
+    //
+    // `labels.rs` already learned this for the same data and wrote the test down:
+    // `suggestion_keys_are_ids_and_mesh_paths_never_indices`. `focus_on` keys on the path too. This
+    // was the last index-keyed cursor on the tab.
+    mut last: Local<Option<String>>,
     mut project: ResMut<Project>,
     mut state: ResMut<ImportState>,
 ) {
@@ -1860,10 +1870,14 @@ fn autoscan_candidate(
         *last = None;
         return;
     }
-    if *last == Some(state.selected) {
+    let here = state.candidates.get(state.selected).map(|c| c.mesh.clone());
+    if *last == here {
         return;
     }
-    *last = Some(state.selected);
+    last.clone_from(&here);
+    if here.is_none() {
+        return;
+    }
 
     let already_marked = state
         .editing(&project.measured)
@@ -3466,6 +3480,7 @@ impl Plugin for TilesPlugin {
             .add_observer(on_scale_click)
             .add_observer(on_mount_height_click)
             .add_observer(on_candidate_click)
+            .add_observer(on_member_row)
             .add_observer(on_library_click)
             .add_observer(on_pack_click)
             .add_observer(on_excluded_click)
@@ -3958,13 +3973,15 @@ fn tab_shortcuts(
     door: Res<Door>,
     mut mode: ResMut<Mode>,
     mut state: ResMut<ImportState>,
+    // Cleared when leaving the Tiles tab — see `enter_tab`.
+    mut build: ResMut<crate::build::Build>,
 ) {
     for (i, &want) in door.tabs().iter().enumerate() {
         let Some(action) = Action::tab_slot(i) else {
             continue;
         };
         if keys::just_pressed(&keyboard, *live, action) {
-            enter_tab(want, &project, &mut mode, &mut state);
+            enter_tab(want, &project, &mut mode, &mut state, &mut build);
             return;
         }
     }
@@ -3989,6 +4006,7 @@ fn enter_tab(
     project: &Project,
     mode: &mut ResMut<Mode>,
     state: &mut ResMut<ImportState>,
+    build: &mut ResMut<crate::build::Build>,
 ) {
     if **mode == want {
         return;
@@ -4005,6 +4023,14 @@ fn enter_tab(
     //
     // Only the note. A problem is a state the editor is in and outlives a tab on purpose.
     state.status.clear_note();
+    // **And neither does the tile page.** `Build::browsing` is the Tiles tab's page cursor, the
+    // Tiles tab arrives with it set, and nothing cleared it — so leaving for MESHES left the shared
+    // list drawing the kit's tiles under a strip that offers `NOT IMPORTED | MESHES`, neither chip
+    // active, the arrows walking a list nobody could see. The audit's T3, and the same class as the
+    // seed bug one list over. A page belongs to the tab that draws it.
+    if want != Mode::Tiles && build.browsing.is_some() {
+        build.browsing = None;
+    }
     if want == Mode::Meshes && !state.scanned {
         scan(project, state);
     }
@@ -4032,13 +4058,16 @@ fn click_tab(
     project: Option<Res<Project>>,
     mode: Option<ResMut<Mode>>,
     state: Option<ResMut<ImportState>>,
+    // `Option`, like every other door resource an observer takes: a global `Activate`/`Pointer`
+    // observer fires on any screen, and a missing `Res<T>` panics rather than skipping.
+    build: Option<ResMut<crate::build::Build>>,
 ) {
-    let (Ok(tab), Some(project), Some(mut mode), Some(mut state)) =
-        (tabs.get(click.entity), project, mode, state)
+    let (Ok(tab), Some(project), Some(mut mode), Some(mut state), Some(mut build)) =
+        (tabs.get(click.entity), project, mode, state, build)
     else {
         return;
     };
-    enter_tab(tab.0, &project, &mut mode, &mut state);
+    enter_tab(tab.0, &project, &mut mode, &mut state, &mut build);
 }
 
 /// **`R` rescans**, because meshes arrive while the editor is open — an importer that only sees what
@@ -4088,12 +4117,20 @@ pub fn exclude_pack(
     if *mode != Mode::Meshes || !keys::just_pressed(&keyboard, *live, Action::ExcludePack) {
         return;
     }
-    // The pack of whatever is highlighted — the same directory `packs()` groups by.
-    let Some(pack) = state
-        .candidates
-        .get(state.selected)
-        .map(|c| c.mesh.rsplit_once('/').map_or(".", |(d, _)| d).to_owned())
-    else {
+    // **The pack of whatever is highlighted — and `focused_pack` is asked FIRST.**
+    //
+    // This read only `state.selected`, the *mesh* cursor, and never consulted the heading cursor.
+    // Since the arrows learned to stand on a heading (`put_cursor`), standing on pack A's heading
+    // leaves `selected` wherever it last was — so `Shift+R` on A's heading excluded **B**, and wrote
+    // `project.ron` to do it. The audit's M2. `Selected::now` already collapses the two fields in
+    // this precedence for the scroll follower; the same order is the answer here, and the comment
+    // above was right all along about what it should mean by "highlighted".
+    let Some(pack) = state.focused_pack.clone().or_else(|| {
+        state
+            .candidates
+            .get(state.selected)
+            .map(|c| c.mesh.rsplit_once('/').map_or(".", |(d, _)| d).to_owned())
+    }) else {
         state
             .status
             .problem("nothing selected — highlight a mesh in the pack first".to_owned());
@@ -5166,6 +5203,8 @@ fn commit_candidate(
     mut project: ResMut<Project>,
     mut state: ResMut<ImportState>,
     queue: Res<crate::labels::LabelQueue>,
+    // **So the verb can tell whether the row it would act on is on screen.** See the refusal below.
+    filters: Res<crate::filter::Filters>,
 ) {
     let accept = keys::just_pressed(&keyboard, *live, Action::Accept);
     // **Space is the heading key, and only the heading key.** It was unbound on this tab, so
@@ -5174,6 +5213,28 @@ fn commit_candidate(
     // action: a second key on `Accept` would have made Space commit a tile.
     let fold = keys::just_pressed(&keyboard, *live, Action::FoldPack);
     if !accept && !fold {
+        return;
+    }
+    // **A verb does not act on a row nobody can see** — the audit's M7.
+    //
+    // `keep_candidate_selection_visible` corrects the cursor onto a drawn row, but deliberately
+    // does nothing when the filter matches *nothing at all*: its own comment argues, rightly, that
+    // jumping the cursor on a half-typed query is worse than leaving it. The half that was missing
+    // is that `Enter` stayed armed on the invisible row it left behind — so the most natural way to
+    // find a mesh was also the way to import a different one, which is the exact failure the
+    // paragraph above that comment forbids.
+    //
+    // The cursor still never jumps. The refusal goes in the verb, which is where the author can see
+    // it.
+    if accept
+        && state.selected_library_id.is_none()
+        && !candidate_rows(&state, &filters, &project.policy)
+            .iter()
+            .any(|&i| i == state.selected)
+    {
+        state.status.problem(
+            "the highlighted mesh is filtered out — clear the filter to act on it".to_owned(),
+        );
         return;
     }
     // **`Enter` acts on the row the cursor is on.** On a pack heading that means opening or closing
@@ -5378,6 +5439,9 @@ fn remove_tile(
     mut state: ResMut<ImportState>,
     mut suggestions: ResMut<crate::labels::Suggestions>,
     mut generation: ResMut<crate::labels::LabelGeneration>,
+    // See the refusal below — the same rule `commit_candidate` now holds.
+    filters: Res<crate::filter::Filters>,
+    mode: Res<Mode>,
 ) {
     if !keys::just_pressed(&keyboard, *live, Action::RemoveTile) {
         return;
@@ -5388,6 +5452,21 @@ fn remove_tile(
             .note("select a library mesh to send it back".to_owned());
         return;
     };
+    // **And `Del` does not remove a row nobody can see either.** The audit's M7, the destructive
+    // half: `keep_library_selection_visible` leaves the cursor put when the filter matches nothing,
+    // and this took the library entry out anyway. Its own guard's comment names the risk —
+    // *"filtering after selecting could hide the selected tile while it stayed selected, and
+    // `Delete` would still remove it"* — and then leaves the verb armed.
+    let on_tiles = *mode == Mode::Tiles;
+    if !library_ids(&project, &filters, on_tiles, None)
+        .iter()
+        .any(|v| *v == id)
+    {
+        state.status.problem(format!(
+            "`{id}` is filtered out — clear the filter to remove it"
+        ));
+        return;
+    }
     // The mesh path is the reborn candidate's name — captured before the entry is gone, through the
     // same question the Map asks before it deletes anything on this piece's behalf.
     let mesh = match remove_blockers(&id, &project) {
@@ -6374,6 +6453,14 @@ fn on_excluded_click(
     state.excluded_open = !state.excluded_open;
 }
 
+/// **The pointer moves the cursor the same way the arrows do**, which it did not until 2026-09-03.
+///
+/// Both of these wrote one field and left the others, so a click after any arrow walk left the
+/// heading cursor set: `Selected::now` still answered `Header(pack)` and the scroll follower chased
+/// the heading while the inspector showed the clicked mesh. Three readers, two answers — the audit's
+/// M6. `put_cursor` and `focus_on` exist precisely so this cannot happen, and `focus_on`'s own doc
+/// spells it out: *"**The highlight is three facts, so this is three writes**"*. The click paths were
+/// a fourth way to select and went through neither.
 fn on_library_click(
     activate: On<Activate>,
     rows: Query<&LibraryRow>,
@@ -6381,9 +6468,18 @@ fn on_library_click(
 ) {
     if let Ok(row) = rows.get(activate.entity) {
         state.selected_library_id = Some(row.0.clone());
-        state
-            .status
-            .note(format!("`{}` selected — Del removes it", row.0));
+        // The heading cursor is part of the same cursor; leaving it set is two highlights.
+        state.focused_pack = None;
+        // **The chord comes from the census.** It was `"Del removes it"` by hand, while every
+        // keyboard path on this tab formats `keys::binding(Action::RemoveTile).chord` — and
+        // `REMOVE_NAME` is `"Delete"` on macOS, so the click and the arrow named the same key two
+        // different ways (the audit's M14). `keys.rs`: *"nothing else in this crate is allowed to
+        // name a `KeyCode` for an action"*.
+        state.status.note(format!(
+            "`{}` selected — {} removes it",
+            row.0,
+            keys::chord(Action::RemoveTile)
+        ));
     }
 }
 
@@ -6396,6 +6492,8 @@ fn on_candidate_click(
         state.selected = row.0;
         // One selection at a time, or `Del` would have to guess which list it meant.
         state.selected_library_id = None;
+        // And one highlight at a time — see the doc above.
+        state.focused_pack = None;
     }
 }
 
@@ -6870,12 +6968,19 @@ fn draw_preview_footprint(state: Res<ImportState>, project: Res<Project>, mut gi
 /// exactly like `added \`crate\``. Refusals go to the banner now.
 fn refresh_lines(
     state: Res<ImportState>,
+    // **Which tab is up, because one of these two readouts belongs to only one of them.**
+    mode: Res<Mode>,
     mut summaries: Query<&mut Text, (With<ScanSummary>, Without<ActionLine>)>,
     mut actions: Query<&mut Text, (With<ActionLine>, Without<ScanSummary>)>,
 ) {
+    // **The scan summary is the Meshes tab's.** `270 mesh(es) not in the library — 89 with
+    // warnings` is a fact about importing, and it was drawn on the TILES tab too, where it means
+    // nothing and is the first line under the title (the 2026-09-03 review's L3). The panel is
+    // shared between the two tabs; the readout is not.
+    let summary = if *mode == Mode::Meshes { state.summary.as_str() } else { "" };
     for mut t in &mut summaries {
-        if t.0 != state.summary {
-            t.0 = state.summary.clone();
+        if t.0 != summary {
+            t.0 = summary.to_owned();
         }
     }
     for mut t in &mut actions {
@@ -6916,11 +7021,20 @@ impl Shelf {
     /// they did not when the strip drew a fixed pair regardless of tab.
     const ORDER: [Shelf; 3] = [Shelf::Candidates, Shelf::Library, Shelf::Tiles];
 
-    fn label(self, library: usize, candidates: usize, kit: usize) -> String {
+    /// **`shown` of `total`, and it says so when a filter is narrowing.**
+    ///
+    /// Each count is a pair because the number was the one thing on the strip an author could not
+    /// check: a short list under a big number reads as a filter, and a short list under a matching
+    /// number reads as the end of the list, and before 2026-09-03 the chip could not tell you which.
+    /// Now `MESHES (12 of 90)` while a filter is on and `MESHES (90)` when it is not.
+    fn label(self, library: (usize, usize), candidates: (usize, usize), kit: (usize, usize)) -> String {
+        let n = |(shown, total): (usize, usize)| {
+            if shown == total { format!("{shown}") } else { format!("{shown} of {total}") }
+        };
         match self {
-            Shelf::Candidates => format!("NOT IMPORTED ({candidates})"),
-            Shelf::Library => format!("MESHES ({library})"),
-            Shelf::Tiles => format!("TILES ({kit})"),
+            Shelf::Candidates => format!("NOT IMPORTED ({})", n(candidates)),
+            Shelf::Library => format!("MESHES ({})", n(library)),
+            Shelf::Tiles => format!("TILES ({})", n(kit)),
         }
     }
 }
@@ -6947,9 +7061,9 @@ fn shelf_strip(
     p: &mut ChildSpawnerCommands,
     at: Shelf,
     on_tiles: bool,
-    library: usize,
-    candidates: usize,
-    kit: usize,
+    library: (usize, usize),
+    candidates: (usize, usize),
+    kit: (usize, usize),
 ) {
     p.spawn(Node {
         flex_direction: FlexDirection::Row,
@@ -7105,8 +7219,8 @@ fn on_shelf_click(
 /// **The `New Tile +` row at the top of the Tiles page** — the chooser's `+ new (N)` shape, one
 /// panel over. Clicking it opens the same naming prompt `N` opens, through the same field, so the
 /// pointer and the keyboard cannot come to disagree about what a click on this row does.
-fn new_tile_row(p: &mut ChildSpawnerCommands) {
-    crate::chrome::quiet_row(p, false, NewTileRow)
+fn new_tile_row(p: &mut ChildSpawnerCommands, here: bool) {
+    crate::chrome::quiet_row(p, here, NewTileRow)
         .with_children(|row| {
             row.spawn((
                 Text::new("+ New Tile"),
@@ -7162,16 +7276,23 @@ fn tile_rows(p: &mut ChildSpawnerCommands, project: &Project, build: &crate::bui
         ));
         return;
     }
+    // **`+ New Tile` is row zero, and the arrows reach it.** It used to sit above the walk with no
+    // way onto it: two down-presses on a two-row page moved nothing and said nothing (the audit's
+    // L4). It is the shape the chooser's `+ new kit` / `+ new map` rows already have — the first
+    // row of the list, selectable, and `Enter` on it starts a tile.
+    new_tile_row(p, cursor == 0);
     for (i, c) in project.compositions.compositions.iter().enumerate() {
         rows = i + 1;
-        kit_row(p, i, i == cursor, &c.id, c.members.len());
+        // **An anchored composition is listed and marked, never silently opened.** Opening one put
+        // it in `build.open`, where the size guard then killed every verb including `Cmd+S`, with
+        // no verb that closes a tile — the tab was bricked until another tile was opened (the
+        // audit's T2). The row stays because the composition is real; `build::open_saved` refuses
+        // it by name, and this is the warning that arrives before the press rather than after.
+        kit_row(p, rows, rows == cursor, &c.id, c.members.len(), crate::build::has_a_box(c));
     }
-    // **The draft row comes after the committed rows** — last on the page, the way a tile that
-    // does not exist on disk yet should read. Marked with the same `KitRow` index so the scroll
-    // follow and the walk agree about where it is.
     if let Some(d) = crate::build::draft(build, project) {
-        let i = rows;
-        kit_row(p, i, i == cursor, &d.id, d.members.len());
+        let i = rows + 1;
+        kit_row(p, i, i == cursor, &d.id, d.members.len(), crate::build::has_a_box(&d));
     }
 }
 
@@ -7189,7 +7310,14 @@ fn tile_rows(p: &mut ChildSpawnerCommands, project: &Project, build: &crate::bui
 /// **The ASCII `>` marker and the `ACCENT` ink are gone with it.** Selection is the row's fill and
 /// its accent rail now ([`crate::chrome::SELECT_RAIL_W`]), so a cursor drawn into the text as well
 /// would be one fact said twice — and amber means a live edit and nothing else.
-fn kit_row(p: &mut ChildSpawnerCommands, i: usize, here: bool, id: &str, members: usize) {
+fn kit_row(
+    p: &mut ChildSpawnerCommands,
+    i: usize,
+    here: bool,
+    id: &str,
+    members: usize,
+    openable: bool,
+) {
     crate::chrome::list_row(p, here, KitRow(i)).with_children(|row| {
         row.spawn((
             Node {
@@ -7199,10 +7327,18 @@ fn kit_row(p: &mut ChildSpawnerCommands, i: usize, here: bool, id: &str, members
                 ..default()
             },
             Text::new(id.to_owned()),
-            TextColor(TEXT),
+            // `MUTED` for a composition this page cannot open — present on purpose and deliberately
+            // not participating, which is exactly what that ink is for.
+            TextColor(if openable { TEXT } else { MUTED }),
             crate::chrome::font(crate::chrome::text::BODY),
         ));
-        count_cell(row, format!("{members} member(s)"), LABEL);
+        if openable {
+            count_cell(row, format!("{members} member(s)"), LABEL);
+        } else {
+            // The reason, in the count's column, because that is where the eye already is and
+            // because a row that refuses should say so before it is pressed.
+            count_cell(row, "no tile — see COMPOSE".to_owned(), MUTED);
+        }
     });
 }
 
@@ -7308,9 +7444,9 @@ fn paint_label_progress(
     }
     for mut text in &mut heads {
         let want = if queue.paused() {
-            format!("HELD AT {done}/{total}   Shift+L resumes")
+            format!("HELD AT {done}/{total}   {} resumes", keys::chord(Action::SuggestAll))
         } else {
-            format!("LABELING {done}/{total}   Shift+L holds")
+            format!("LABELING {done}/{total}   {} holds", keys::chord(Action::SuggestAll))
         };
         if text.0 != want {
             text.0 = want;
@@ -7478,32 +7614,48 @@ fn rebuild_candidates(
     // **The counts are of what is SHOWN.** A heading reading 318 above a filtered list of four is a
     // heading lying about the thing directly under it — and the count is the one number that says
     // whether you have seen the end of the list, which is why it is here at all.
-    let pane = crate::filter::Pane::Candidates;
-    let in_library = project
-        .library
-        .descriptors
-        .iter()
-        .filter(|d| filters.keeps(pane, &d.id))
-        .count();
-    let not_imported = state
-        .candidates
-        .iter()
-        .filter(|c| filters.keeps(pane, &c.mesh))
-        .count();
+    //
+    // **Counted by asking the builder that draws the rows**, since 2026-09-03. The library count
+    // used to re-filter `descriptors` by the text filter alone, while `library_rows` additionally
+    // narrows to what this kit measured (Meshes) or what is judged (Tiles) — so a brand-new kit
+    // with nothing in it read `MESHES (90)`, which is the audit's M5 and is visible in the capture
+    // of the kit-reset fix. Two predicates for one list is how a readout comes to lie; there is one
+    // now, and the count is `.len()` of it.
+    //
+    // The unfiltered pass is what lets the chip say `12 of 90`. `Filters::default()` keeps
+    // everything, so the same builder answers both questions and they cannot disagree.
+    let unfiltered = crate::filter::Filters::default();
+    let on_tiles = *mode == Mode::Tiles;
+    let pending = Some(&*suggestions);
+    let in_library = (
+        library_rows(&project, &filters, on_tiles, pending).len(),
+        library_rows(&project, &unfiltered, on_tiles, pending).len(),
+    );
+    let members_of = |f: &crate::filter::Filters| {
+        // `.0` is the offered partition; `.1` is the excluded band, which the page counts
+        // separately on its own heading.
+        visible_packs(&state, f, &project.policy)
+            .0
+            .iter()
+            .map(|(_, members)| members.len())
+            .sum::<usize>()
+    };
+    let not_imported = (members_of(&filters), members_of(&unfiltered));
 
     // **Two tabs on the one list, not two lists.** The crate started as a section stacked above the
     // mesh palette in the LEFT controls column, which the author called weird and was: two lists
     // competing for one panel, and the wrong panel. One list owns one page at a time.
     let browsing = build.browsing;
-    // Which question this panel is being asked: compose (judged only) or define (everything).
-    let on_tiles = *mode == Mode::Tiles;
     // The census counts, not this panel -- `census_is_the_one_counter` forbids a panel
     // rendering `compositions.compositions.len()` itself. The TILES chip count includes the
     // named-but-unsaved draft, because the Tiles page draws it as a row — the same
     // `build::page_len` the page's own walk clamps to, so the strip and the list agree.
-    let kit = emerge_core::census::of_catalog(&project.library, &project.compositions.compositions)
+    let tiles_n = emerge_core::census::of_catalog(&project.library, &project.compositions.compositions)
         .compositions
         + usize::from(crate::build::draft(&build, &project).is_some());
+    // The tile list is not text-filtered, so shown and total are the same number and the chip
+    // prints the bare count.
+    let kit = (tiles_n, tiles_n);
 
     // **Which page the Tiles tab is showing.** `browsing` is the cursor: `Some` is the Tiles
     // page — the authored tiles, `New Tile +` at the top — and `None` is the Meshes page, where
@@ -7516,9 +7668,16 @@ fn rebuild_candidates(
         } else {
             Shelf::Library
         }
-    } else if browsing.is_some() {
-        Shelf::Tiles
     } else if state.selected_library_id.is_some() {
+        // **No `Shelf::Tiles` arm here, and its absence is the fix for the audit's T3.**
+        //
+        // There was one, and it contradicted the paragraph directly above it. `enter_tab` never
+        // cleared `browsing`, and the Tiles tab *arrives* with it set — so `TILES` then `1` left
+        // the Meshes tab drawing the kit's tile rows under a strip that draws only
+        // `[Candidates, Library]`, with **neither chip active**, the arrows walking a list that was
+        // not on screen and the scroll follower chasing a third. `enter_tab` clears it now, so this
+        // arm was unreachable as well as wrong; both halves went, because leaving the arm would
+        // leave the contradiction for the next reader to re-derive.
         Shelf::Library
     } else {
         Shelf::Candidates
@@ -7541,8 +7700,8 @@ fn rebuild_candidates(
             // Meshes page (`PageLeave`) comes back. A tile is opened by `Enter` (`TileOpen`),
             // which also lands on the Meshes page so the first drop follows the open.
             if at == Shelf::Tiles {
-                new_tile_row(p);
-                tile_rows(p, &project, &build, browsing.unwrap_or(0));
+                // `+ New Tile` is drawn by `tile_rows` as row zero now, so the walk can reach it.
+                tile_rows(p, &project, &build, browsing.unwrap_or(crate::build::NEW_TILE_ROW));
                 return;
             }
             // **One shelf, because the strip above says which.** The Meshes page carries the
@@ -7705,7 +7864,15 @@ fn draw_pack(
         let Some(c) = state.candidates.get(ix) else {
             continue;
         };
-        crate::chrome::list_row(p, ix == state.selected, CandidateRow(ix)).with_children(|row| {
+        // **`focused_pack.is_none()` is the whole fix for the audit's M4**, and it belongs here
+        // rather than in the cursor. `put_cursor` is careful to write both fields as one cursor and
+        // says why — *"leaving `focused_pack` set while moving to a mesh would highlight a heading
+        // and a row at once, and every reader would then have to decide which it believed"* — but
+        // this row never asked the second field, so crossing onto a heading left the mesh you came
+        // from wearing the fill *and* the accent rail. Two selection rails on screen, on the tab's
+        // most-used gesture. The test that claimed to hold this line only checked the field.
+        let is_here = ix == state.selected && state.focused_pack.is_none();
+        crate::chrome::list_row(p, is_here, CandidateRow(ix)).with_children(|row| {
             // The severity mark first, so a list of 300 can be skimmed for the ones that need
             // attention rather than read. The tint comes from the one severity map, so the mark
             // here and the rail in the detail pane cannot disagree.
@@ -7887,20 +8054,54 @@ fn build_detail(p: &mut ChildSpawnerCommands, build: &crate::build::Build, proje
         } else {
             format!(" yaw {:.0}", m.yaw)
         };
-        line(
-            p,
-            format!(
-                "{} {}  ({:+.2}, {:+.2}) +{:.2}{yaw}",
-                if focused { ">" } else { " " },
-                what,
-                m.at.0,
-                m.at.1,
-                m.lift
-            ),
-            if focused { ACCENT } else { TEXT },
-            crate::chrome::text::LABEL,
-        );
+        // **A list, in the shape every other list in this editor uses** — and the last one that was
+        // not. It was a bare `Text` with `>` written into the string and `ACCENT` for the focused
+        // row: no `Node`, no `Button`, no `Hovered`, no observer, so the one list `Del`, `R` and
+        // `,`/`.` all act on was the one list the pointer could not touch (the 2026-09-03 review's
+        // T6). `kit_row` had exactly this defect fixed seven hundred lines up, and said so.
+        //
+        // Selection is the row's fill and its accent rail now, so the ASCII marker goes with the
+        // amber — a cursor drawn into the text as well would be one fact said twice.
+        crate::chrome::list_row(p, focused, MemberRow(i)).with_children(|row| {
+            row.spawn((
+                Node {
+                    flex_grow: 1.0,
+                    // CHROME-OK: zero, not a spacing step — see [`count_cell`].
+                    min_width: Val::Px(0.0),
+                    ..default()
+                },
+                Text::new(what),
+                TextColor(TEXT),
+                crate::chrome::font(crate::chrome::text::LABEL),
+            ));
+            count_cell(
+                row,
+                format!("({:+.2}, {:+.2}) +{:.2}{yaw}", m.at.0, m.at.1, m.lift),
+                LABEL,
+            );
+        });
     }
+}
+
+/// A clickable member row of the open tile, carrying its index into `Composition::members`.
+#[derive(Component, Clone, Copy)]
+struct MemberRow(usize);
+
+/// **Clicking a member focuses it**, which is the single write `,`/`.` make — so the pointer and
+/// the keyboard move one cursor rather than two. `Build` is `Option<ResMut>` because this is a
+/// global `Activate` observer: it fires anywhere in the application, and a missing `Res<T>` panics
+/// rather than skipping.
+fn on_member_row(
+    activate: On<Activate>,
+    rows: Query<&MemberRow>,
+    build: Option<ResMut<crate::build::Build>>,
+) {
+    let (Ok(row), Some(mut build)) = (rows.get(activate.entity), build) else {
+        return;
+    };
+    // Clamped by the caller's own redraw: the list is rebuilt from `members`, so an index it drew
+    // is an index that existed when it was drawn.
+    build.focus = row.0;
 }
 
 /// **Has the tag filter's text moved since last frame?** — the one filter this pane can show.

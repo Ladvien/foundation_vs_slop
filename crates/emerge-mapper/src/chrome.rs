@@ -1591,15 +1591,28 @@ impl<K> Default for Follow<K> {
 impl<K: PartialEq> Follow<K> {
     /// Give it this frame's selection; it answers whether to scroll **now**.
     ///
-    /// `false` on the frame the selection moves (the layout is still last frame's), `true` on the
-    /// one after, and `false` for ever until it moves again — so the scroll position is written once
-    /// per move rather than sixty times a second, which is what keeps `ScrollPosition`'s change
-    /// detection meaningful for anything else reading it.
+    /// `false` on the frame the selection moves — the layout is still last frame's — and `true` on
+    /// the one after, so the scroll position is written once per move rather than sixty times a
+    /// second.
+    ///
+    /// # Except on a fast walk, where it fires one move stale rather than never
+    ///
+    /// The version above returned `pending` **only on a frame where the selection had not moved**,
+    /// and that is a third way for this to be starved — the one the 2026-09-03 review found after
+    /// the two in the header. A held arrow accelerates to `keys::REPEAT_FAST_SECS` (30 ms) and the
+    /// steps land back-to-back on some frames, each pair silently dropping one correction; at any
+    /// sustained frame time above 30 ms the selection changes every frame and this fires **never**.
+    /// That is the reported symptom exactly: *"I don't see a list of meshes as I press up and down
+    /// arrows, but I see the mesh change."*
+    ///
+    /// So a move that arrives while a correction is already armed **fires anyway**, using a layout
+    /// that is one move behind. That is the right trade and it is only right because of the margin
+    /// [`scroll_to_reveal`] now keeps: one row stale inside a two-row margin is still on screen,
+    /// and the alternative is a list that never scrolls at all.
     pub fn should_scroll(&mut self, now: Option<K>) -> bool {
         if self.last != now {
             self.last = now;
-            self.pending = true;
-            return false;
+            return std::mem::replace(&mut self.pending, true);
         }
         std::mem::take(&mut self.pending)
     }
@@ -1612,9 +1625,29 @@ impl<K: PartialEq> Follow<K> {
 ///
 /// Inputs are **physical** pixels — `ComputedNode` and `UiGlobalTransform`, centre and half-size —
 /// and the answer is the new **logical** `ScrollPosition::y`, or `None` when the row is already
-/// visible or the correction is under half a pixel (the dead-band that keeps a change-detected
-/// write from re-firing layout every frame). A row taller than the list scrolls to its **top**,
-/// the half you read first.
+/// comfortably visible or the correction is under half a pixel (the dead-band that keeps a
+/// change-detected write from re-firing layout every frame). A row taller than the list scrolls to
+/// its **top**, the half you read first.
+///
+/// # It reveals with context, and that is the seed bug
+///
+/// Until 2026-09-03 the correction was exactly `row_bottom - bottom`: enough to put the row's edge
+/// on the viewport's edge and not one pixel more. A test pinned that as correct — *"Touching the
+/// edges exactly is still inside — flush is not off-screen"* — and it is the wrong rule for a list
+/// you walk with the keyboard. Measured live on the Meshes list: after forty presses the selection
+/// is glued to the bottom pixel with twenty-six rows of already-passed context above it and **zero
+/// rows of what is coming below**. Reported as *"I don't see a list of meshes as I press up and down
+/// arrows, but I see the mesh change"* — the list is there, and the part of it that would tell you
+/// where you are going is not.
+///
+/// So the row is revealed with [`CONTEXT_ROWS`] of list either side of it, in units of the row's own
+/// height — no new parameter, and it scales with whatever the caller's rows measure. The margin is
+/// clamped so a viewport too short to hold row-plus-margins asks for the largest margin that still
+/// fits rather than thrashing, which also preserves the over-tall row's scroll-to-top.
+///
+/// **A jump of more than one viewport re-centres instead of creeping.** A `Shift`×5 step, a click,
+/// or a filter that rebuilds the list under the cursor are not walks, and edging such a move to the
+/// margin puts the author at the boundary of a region they have not seen; centring says *here* .
 pub fn scroll_to_reveal(
     row: (f32, f32),
     list: (f32, f32),
@@ -1623,18 +1656,29 @@ pub fn scroll_to_reveal(
 ) -> Option<f32> {
     let (row_top, row_bottom) = (row.0 - row.1, row.0 + row.1);
     let (top, bottom) = (list.0 - list.1, list.0 + list.1);
+    let (row_h, list_h) = (row.1 * 2.0, list.1 * 2.0);
+    // The largest margin that still leaves the row itself room, so a short viewport degrades to
+    // flush rather than to a fight between two margins it cannot satisfy.
+    let margin = (CONTEXT_ROWS * row_h).min(((list_h - row_h) * 0.5).max(0.0));
     // Above the fold, or below it. Never both — the above check winning is what sends an
     // over-tall row to its top.
-    let delta = if row_top < top {
-        row_top - top
-    } else if row_bottom > bottom {
-        row_bottom - bottom
+    let delta = if row_top - margin < top {
+        row_top - margin - top
+    } else if row_bottom + margin > bottom {
+        row_bottom + margin - bottom
     } else {
         return None;
     };
+    // Further than a viewport is a jump, not a step: put the row in the middle.
+    let delta = if delta.abs() > list_h { row.0 - list.0 } else { delta };
     let want = (scroll_y + delta * inverse_scale).max(0.0);
     ((scroll_y - want).abs() > 0.5).then_some(want)
 }
+
+/// **How much list stays visible past the selection.** Two rows: one is enough to prove the list
+/// continues and not enough to read, and the cost of a third is a viewport that scrolls sooner than
+/// the eye asks it to.
+const CONTEXT_ROWS: f32 = 2.0;
 
 /// The scrollbar's track. Marked so [`hide_idle_scrollbars`] can find it and its own width is
 /// stated once.
@@ -2562,7 +2606,7 @@ impl Plugin for ChromePlugin {
 mod scroll_tests {
     use super::{scroll_to_reveal, Follow};
 
-    /// **The arming rule, which is the half that was broken for two days.**
+    /// **The arming rule, which is the half that was broken for two days — and then for longer.**
     ///
     /// `scroll_to_reveal`'s arithmetic was always right and always tested; nothing ever called it,
     /// because the flag that should have said "now" was re-armed every frame by an unrelated write.
@@ -2594,49 +2638,121 @@ mod scroll_tests {
         assert!(f.should_scroll(None));
     }
 
-
-
-    /// A row already inside the fold asks for nothing — the common case, and the one that keeps a
-    /// change-detected `ScrollPosition` from being touched sixty times a second.
+    /// **A held arrow must not starve it, which is the third way this was broken.**
+    ///
+    /// The version before 2026-09-03 returned `pending` only on a frame where the selection had not
+    /// moved. A held arrow reaches `keys::REPEAT_FAST_SECS` — 30 ms — and lands two steps on one
+    /// frame often enough that corrections were being dropped in pairs; at any sustained frame time
+    /// above 30 ms the selection changes every frame and the follow fired **never**. That is the
+    /// reported symptom: the mesh changes, the list does not move.
+    ///
+    /// A move arriving while a correction is already armed now fires on the spot, one move stale,
+    /// which the two-row margin absorbs.
     #[test]
-    fn a_visible_row_asks_for_no_scroll() {
-        // List centred at 200, half 100 → fold [100, 300]. Row at 150, half 10 → inside.
-        assert_eq!(
-            scroll_to_reveal((150.0, 10.0), (200.0, 100.0), 0.0, 1.0),
-            None
-        );
-        // Touching the edges exactly is still inside — flush is not off-screen.
-        assert_eq!(
-            scroll_to_reveal((110.0, 10.0), (200.0, 100.0), 0.0, 1.0),
-            None
-        );
+    fn a_fast_walk_still_scrolls() {
+        let mut f: Follow<usize> = Follow::default();
+
+        // First move arms; nothing to fire yet.
+        assert!(!f.should_scroll(Some(0)));
+        // Now move on every single frame, as a held arrow does. Every one of these must scroll —
+        // under the old rule every one of them returned false, for ever.
+        for step in 1..=10 {
+            assert!(
+                f.should_scroll(Some(step)),
+                "step {step} of a held arrow dropped its correction"
+            );
+        }
+        // And it still settles: one more fire when the walk stops, then silence.
+        assert!(f.should_scroll(Some(10)), "the last move is corrected once the walk ends");
+        assert!(!f.should_scroll(Some(10)), "and then it is quiet");
+    }
+
+
+
+    /// A row with [`super::CONTEXT_ROWS`] of list on both sides asks for nothing — the common case,
+    /// and the one that keeps a change-detected `ScrollPosition` from being touched sixty times a
+    /// second.
+    #[test]
+    fn a_row_with_context_around_it_asks_for_no_scroll() {
+        // List centred at 200, half 100 → fold [100, 300]. Row half 10 → margin is 2 rows = 40.
+        // Comfortable band is therefore [140, 260]; a row at 200 sits in the middle of it.
+        assert_eq!(scroll_to_reveal((200.0, 10.0), (200.0, 100.0), 0.0, 1.0), None);
+        // Exactly two rows clear of each edge is still comfortable.
+        assert_eq!(scroll_to_reveal((150.0, 10.0), (200.0, 100.0), 0.0, 1.0), None);
+        assert_eq!(scroll_to_reveal((250.0, 10.0), (200.0, 100.0), 0.0, 1.0), None);
+    }
+
+    /// **Flush is not comfortable, and that reverses a decision.**
+    ///
+    /// The test here used to assert the opposite — *"Touching the edges exactly is still inside —
+    /// flush is not off-screen"* — and it was true and beside the point. A row on the boundary has
+    /// nothing after it, so a list being walked downward reads as having ended. Measured live on the
+    /// Meshes list before the change: forty presses, selection on the bottom pixel, zero rows of
+    /// what was coming next.
+    #[test]
+    fn a_flush_row_scrolls_to_earn_its_margin() {
+        // Row flush against the bottom edge of fold [100, 300]: it wants 2 rows (40 px) of daylight.
         assert_eq!(
             scroll_to_reveal((290.0, 10.0), (200.0, 100.0), 0.0, 1.0),
-            None
+            Some(40.0)
         );
-    }
-
-    /// Walking down past the fold scrolls down by exactly the overshoot; walking up, up.
-    #[test]
-    fn an_off_screen_row_scrolls_by_its_overshoot() {
-        // Row bottom at 320 against a fold ending at 300: 20 px further down.
+        // And flush against the top edge, the same the other way.
         assert_eq!(
-            scroll_to_reveal((310.0, 10.0), (200.0, 100.0), 40.0, 1.0),
+            scroll_to_reveal((110.0, 10.0), (200.0, 100.0), 100.0, 1.0),
             Some(60.0)
         );
-        // Row top at 80 against a fold starting at 100: 20 px back up.
+    }
+
+    /// **A viewport too short for row-plus-margins degrades to flush** rather than fighting two
+    /// margins it cannot satisfy at once.
+    #[test]
+    fn a_short_viewport_gives_up_its_margin() {
+        // Fold [180, 220] is 40 tall; a 20-tall row leaves 10 either side, not 40.
+        // Row at 215 (spans [205, 225]) overhangs the bottom by 5, and wants 10 more.
         assert_eq!(
-            scroll_to_reveal((90.0, 10.0), (200.0, 100.0), 40.0, 1.0),
-            Some(20.0)
+            scroll_to_reveal((215.0, 10.0), (200.0, 20.0), 0.0, 1.0),
+            Some(15.0)
         );
     }
 
-    /// The answer is logical pixels: a 2x display (inverse scale 0.5) halves the physical delta.
+    /// **A jump of more than a viewport re-centres instead of creeping to the margin.**
+    ///
+    /// A `Shift`×5 step, a click, or a filter rebuilding the list under the cursor are not walks;
+    /// edging such a move to the margin leaves the author on the boundary of a region they have not
+    /// seen.
+    #[test]
+    fn a_page_jump_centres_the_row() {
+        // Fold [100, 300], 200 tall. A row centred at 900 is far past a viewport away, so the
+        // correction is "put it in the middle": 900 - 200 = 700.
+        assert_eq!(
+            scroll_to_reveal((900.0, 10.0), (200.0, 100.0), 0.0, 1.0),
+            Some(700.0)
+        );
+    }
+
+    /// Walking just past the fold scrolls by the overshoot **plus the margin it is owed**.
+    #[test]
+    fn an_off_screen_row_scrolls_by_its_overshoot() {
+        // Row bottom at 320 against a fold ending at 300: 20 px of overshoot, plus a 40 px margin.
+        assert_eq!(
+            scroll_to_reveal((310.0, 10.0), (200.0, 100.0), 40.0, 1.0),
+            Some(100.0)
+        );
+        // Row top at 80 against a fold starting at 100: 20 px back up, plus the same margin.
+        assert_eq!(
+            scroll_to_reveal((90.0, 10.0), (200.0, 100.0), 100.0, 1.0),
+            Some(40.0)
+        );
+    }
+
+    /// The answer is logical pixels: a 2x display (inverse scale 0.5) halves the physical delta —
+    /// margin included, since the margin is measured in the same physical pixels the row is.
     #[test]
     fn the_correction_converts_physical_to_logical() {
+        // 20 px of overshoot plus a 40 px margin is 60 physical, which is 30 logical on top of 40.
         assert_eq!(
             scroll_to_reveal((310.0, 10.0), (200.0, 100.0), 40.0, 0.5),
-            Some(50.0)
+            Some(70.0)
         );
     }
 
@@ -2651,10 +2767,14 @@ mod scroll_tests {
 
     /// A correction under half a pixel is noise, not a scroll — the dead-band that stops a
     /// float-jittering layout from re-marking the resource changed every frame.
+    ///
+    /// Measured against the **comfortable** band rather than the fold, since 2026-09-03: with a
+    /// 20 px row in a 200 px fold the margin is 40, so the band ends at 260 and a row bottom at
+    /// 260.3 is three tenths of a pixel of jitter, not a scroll.
     #[test]
     fn a_sub_pixel_correction_is_swallowed() {
         assert_eq!(
-            scroll_to_reveal((300.3, 0.1), (200.0, 100.0), 0.0, 1.0),
+            scroll_to_reveal((250.3, 10.0), (200.0, 100.0), 0.0, 1.0),
             None
         );
     }

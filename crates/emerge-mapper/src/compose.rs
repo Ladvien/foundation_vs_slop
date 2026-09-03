@@ -163,6 +163,12 @@ struct ComposeLine;
 #[derive(Component)]
 struct ComposeBody;
 
+/// **The receipt line at the foot of the panel** — [`crate::chrome::Status`]'s note, in a fixed slot
+/// no scroll can hide. `tiles::ActionLine` is the same node in the same place on the other tab, so a
+/// confirmation is read in one screen position rather than two.
+#[derive(Component)]
+struct ComposeReceipt;
+
 pub struct ComposePlugin;
 
 impl Plugin for ComposePlugin {
@@ -234,7 +240,28 @@ impl Plugin for ComposePlugin {
     }
 }
 
-/// **Keep `selected` inside the list, at the one place it can leave it.**
+/// **Put the group cursor on `ix`, and the member cursor back at the top.**
+///
+/// One function because there are four verbs that move the group cursor — [`walk`],
+/// [`step_carousel`], [`pick_along`] and the composition row's click — and three of them carried
+/// their own copy of these two lines *and* their own copy of the comment saying why. The fourth, the
+/// click, carried only the first line: clicking a row left the seating cursor pointing into the group
+/// you came from, so the ring landed on whatever member happened to sit at that index and the seat
+/// verbs acted on it. A rule kept in four places is a rule that is three-quarters kept; this is
+/// `tiles::put_cursor`'s argument, on the other tab. [`clamp_selection`] applies it as well, which
+/// makes the rule one function with five callers instead of five transcriptions.
+///
+/// **Focus is deliberately not folded in.** A click hands the arrows to the list it landed in;
+/// [`step_carousel`] must move the group cursor *without* disturbing the focus, which is the whole
+/// reason it has its own keys. One of the two callers would have to be wrong.
+fn select_group(state: &mut ComposeState, ix: usize) {
+    state.selected = ix;
+    // A different group has different members; leaving the old index would point the seat verbs at
+    // whatever happened to sit there.
+    state.member = 0;
+}
+
+/// **Keep both cursors inside their lists, at the one place they can leave them.**
 ///
 /// The list shrinks when a composition is removed or the project is reloaded, and `selected` is a bare
 /// index that knows nothing about either. It used to be clamped inside `lay_out` and nowhere else,
@@ -243,17 +270,38 @@ impl Plugin for ComposePlugin {
 /// and `toggle_arm`'s `.get(5)` answered *"no composition to arm"*. Three readers, three answers, and
 /// the only one that looked right was the picture.
 ///
-/// Clamping where it goes stale means every reader can use the value as given. `member` rides along for
-/// the same reason `walk` resets it: a different group has different members.
+/// Clamping where it goes stale means every reader can use the value as given.
+///
+/// # `member` is clamped in its own right, and that is the change
+///
+/// It used to ride along only when `selected` *moved*, which covers a composition removed and misses
+/// a composition **edited in place** — same index, fewer members, which is what every removal on the
+/// Tiles page and every re-capture from the Map produces. So the member cursor sat past the end while
+/// `rebuild` clamped the highlight for itself and `keep_compose_selection_on_screen` looked for the
+/// unclamped row, found no such row and gave up without saying so. The promise above was true of one
+/// of the two cursors.
+///
+/// Both are clamped here, and the readers were relieved of their own `.min()` calls: `rebuild` and
+/// `draw_stage` now take `member` as given. A `get` that answers `None` for the one frame a project
+/// edit lands in is the honest rendering of an out-of-range index — a `.min()` *invents* a cursor
+/// position, and drawing a ring on a member the seat verbs are not pointed at is the same
+/// three-readers-three-answers fault above, wearing a smaller hat.
 fn clamp_selection(project: Res<Project>, mut state: ResMut<ComposeState>) {
     if !project.is_changed() {
         return;
     }
-    let n = project.compositions.compositions.len();
-    let want = state.selected.min(n.saturating_sub(1));
+    let comps = &project.compositions.compositions;
+    let want = state.selected.min(comps.len().saturating_sub(1));
     if state.selected != want {
-        state.selected = want;
-        state.member = 0;
+        select_group(&mut state, want);
+    }
+    // **Written only when it moved.** `ResMut::deref_mut` marks the resource changed whether or not
+    // the value did, and both `restage_group` and `rebuild` gate on that — an unconditional write
+    // here is a rebuild of the whole pane every frame.
+    let members = member_count(&project, state.selected);
+    let want_member = state.member.min(members.saturating_sub(1));
+    if state.member != want_member {
+        state.member = want_member;
     }
 }
 
@@ -371,6 +419,23 @@ fn spawn_compose_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>)
                 crate::chrome::Control(crate::keys::ControlId::Detail),
             ),
         );
+        // **The receipt, at the foot of the panel and outside the scroll.** `scroll_list` grows, so
+        // this is pinned to the bottom of the dock; `tiles`'s `ActionLine` is the same node in the
+        // same place, so a confirmation is read in one screen position on both tabs.
+        //
+        // It used to be the LAST line `rebuild` pushed into the scrolling body — after MEMBERS,
+        // OFFERS, STALE and DERIVED INTERFACE — so `Enter` armed a composition and put
+        // "`x` armed — the map tab stamps it" off the bottom of a pane that is taller than the
+        // window on any real group. The one verb this tab exists for confirmed itself where the
+        // author could not be looking. `rebuild` makes this argument itself about the position
+        // readout: a message that has to be scrolled to has both the wrong lifetime and the wrong
+        // place.
+        p.spawn((
+            ComposeReceipt,
+            Text::new(""),
+            TextColor(ACCENT),
+            crate::chrome::font(crate::chrome::text::LABEL),
+        ));
     });
 }
 
@@ -448,14 +513,60 @@ fn measure_budget(project: Res<Project>, mut budget: ResMut<Budget>) {
     }
 }
 
-/// Walk the list. Shift steps five, matching every other list in this editor.
+/// How many members the group under the group cursor has. `0` covers both "no such group" and "a
+/// group with nothing in it yet", which every caller treats the same way.
+fn member_count(project: &Project, selected: usize) -> usize {
+    project
+        .compositions
+        .compositions
+        .get(selected)
+        .map_or(0, |c| c.members.len())
+}
+
+/// **What to press when the MEMBERS list is empty**, named after the group it is empty of.
+///
+/// Guidance, not a refusal, which is the distinction `build.rs` draws for the empty tile: *"an author
+/// who pressed an arrow on a tile they have not put anything in yet has not done anything wrong"* —
+/// so this goes in a note the next keystroke replaces, and in the pane as prose, never in the problem
+/// log. The chord is read from the census rather than typed, the rule the two hand-written chords in
+/// `tiles.rs` broke.
+///
+/// **Two arms, because the two envelopes have different ways in.** A `Bounded` group is a tile and the
+/// Tiles page fills tiles; an `Anchored` one is refused there by name, so its members come from the
+/// file or from a fresh capture. Pointing an anchored group at the Tiles page would be sending an
+/// author to a refusal.
+fn nothing_to_walk(c: &Composition) -> String {
+    match c.envelope {
+        Envelope::Bounded { .. } => format!(
+            "`{}` has nothing in it yet — open it on {} and drop a piece in",
+            c.id,
+            Mode::Tiles.label()
+        ),
+        Envelope::Anchored => format!(
+            "`{}` has nothing in it yet, and claims no tile — an anchored group's members come from \
+             `compositions.ron`, or from a fresh capture on the Map with {}",
+            c.id,
+            keys::chord(Action::GroupFromSet)
+        ),
+    }
+}
+
 /// **`left`/`right` choose which list the arrows walk.**
 ///
 /// The Tiles tab's own idiom — two keys for three lists, which is what keeps this context inside the
 /// twelve-row census ceiling with everything else it has to say. The focused list is drawn
 /// differently; see `rebuild`.
+///
+/// The opening line here used to read *"Walk the list. Shift steps five"*, which is [`walk`]'s
+/// sentence and never was this one's: this moves the focus and nothing else.
+///
+/// **Handing the arrows to an empty MEMBERS list says so.** The focus still moves — a mode you can
+/// see is what this pane was rebuilt for, and a `right` that silently declined would be a second
+/// dead key — but the note names the state instead of announcing a list that answers nothing.
+/// `rebuild` drops the `<- arrows` affordance to match, so the pane stops claiming a live key.
 fn cycle_focus(
     mut state: ResMut<ComposeState>,
+    project: Res<Project>,
     keys: Res<keys::Live>,
     input: Res<ButtonInput<KeyCode>>,
 ) {
@@ -467,18 +578,42 @@ fn cycle_focus(
         return;
     };
     state.focus = state.focus.step(by);
-    let said = state.focus.label().to_owned();
+    let empty_members = state.focus == Pane::Members && member_count(&project, state.selected) == 0;
+    let said = match project.compositions.compositions.get(state.selected) {
+        Some(c) if empty_members => nothing_to_walk(c),
+        _ => state.focus.label().to_owned(),
+    };
     state.status.note(said);
 }
 
 /// **`up`/`down` walk whichever list has focus.** Shift strides five, as every list here does.
+///
+/// # They clamp at the ends, where they used to wrap
+///
+/// `rem_euclid` made both lists rings. The crate had already argued the other way twice, in the two
+/// places it made the choice — `build.rs`: *"an author holding an arrow at the end of a list should
+/// stop there rather than wrap to the other end of it"*, and *"a focus that jumps from the last
+/// member to the first is the largest possible move on the smallest possible keystroke."* One editor
+/// cannot answer the same keystroke two ways, so these stop.
+///
+/// [`step_carousel`] keeps its ring and that is not an inconsistency: `O`/`P` are a strip you step
+/// *through* from anywhere on the tab, not a list you read down, and its own doc argues the ring on
+/// exactly those terms.
+///
+/// # Shift is read through the census
+///
+/// It named `KeyCode::ShiftLeft`/`ShiftRight` inline, which is what [`keys::BINDINGS`]'s own header
+/// forbids — *"nothing else in this crate is allowed to name a `KeyCode` for an action"* — and the two
+/// rows this walk answers to said only "walk the focused list". So the stride was a working
+/// accelerator no badge could announce and nobody could discover. The rows now carry `/ Shift: x5`
+/// like every other list walk, and the modifier comes from [`keys::shift_held`].
 fn walk(
     mut state: ResMut<ComposeState>,
     project: Res<Project>,
     keys: Res<keys::Live>,
     input: Res<ButtonInput<KeyCode>>,
 ) {
-    let step = if input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight) { 5 } else { 1 };
+    let step = if keys::shift_held(&input) { 5 } else { 1 };
     let by = if keys::just_pressed(&input, *keys, Action::ComposeNext) {
         step
     } else if keys::just_pressed(&input, *keys, Action::ComposePrev) {
@@ -488,24 +623,34 @@ fn walk(
     };
     let n = match state.focus {
         Pane::Groups => project.compositions.compositions.len(),
-        Pane::Members => project
-            .compositions
-            .compositions
-            .get(state.selected)
-            .map_or(0, |c| c.members.len()),
+        Pane::Members => member_count(&project, state.selected),
     };
     if n == 0 {
+        // **Guidance, not silence.** An empty MEMBERS list can hold the focus (see `cycle_focus`),
+        // and an arrow that answers nothing at all is the defect. The groups list needs nothing
+        // here: `rebuild` states *that* empty case in prose that stays on screen, which is the right
+        // lifetime for a fact about the file rather than about a keypress.
+        if state.focus == Pane::Members {
+            if let Some(said) = project
+                .compositions
+                .compositions
+                .get(state.selected)
+                .map(nothing_to_walk)
+            {
+                state.status.note(said);
+            }
+        }
         return;
     }
-    let wrap = |at: usize| ((at as i64 + by).rem_euclid(n as i64)) as usize;
+    let last = (n - 1) as i64;
+    let to = |at: usize| (at as i64 + by).clamp(0, last) as usize;
     match state.focus {
         Pane::Groups => {
-            state.selected = wrap(state.selected);
-            // A different group has different members; leaving the old index would point the seat
-            // verbs at whatever happened to sit there.
-            state.member = 0;
+            let want = to(state.selected);
+            // Both cursors, through the one writer — see `select_group`.
+            select_group(&mut state, want);
         }
-        Pane::Members => state.member = wrap(state.member.min(n - 1)),
+        Pane::Members => state.member = to(state.member),
     }
 }
 
@@ -1284,11 +1429,17 @@ fn restage_group(
     }
 }
 
-/// **Every visible group's envelope, and the lattice the focal one seats on.**
+/// **Every visible group's envelope, the lattice the focal one seats on, and the member being seated.**
 ///
 /// Drawn rather than spawned: these are not things in the world, they are the tiles the compositions
 /// claim. An anchored group gets neither box nor lattice, because it claims none — an invented box
 /// would be exactly the guess `seated` refuses to make.
+///
+/// **It gets the member ring, and it used to get nothing.** The loop bailed on `Envelope::Anchored`
+/// before drawing anything at all, which took the ring with the box — so on the common case, since
+/// the Map's `M` capture makes anchored groups, walking the members moved a highlight in the panel
+/// and nothing whatever in the viewport. A ring is about *a member's position*, which an anchored
+/// group has; only the envelope and the lattice need a declared size.
 ///
 /// The miniatures draw their boxes at [`ENVELOPE_IDLE`] so the strip reads as *claimed tiles* rather
 /// than floating meshes; only the focal group draws at full [`ACCENT`], and only it gets the lattice
@@ -1304,45 +1455,56 @@ fn draw_stage(
         let Some(c) = project.compositions.compositions.get(slot.index) else {
             continue;
         };
-        let Envelope::Bounded { size } = c.envelope else {
-            continue;
-        };
         let base = COMPOSE_STAGE + Vec3::new(slot.at.0, 0.0, slot.at.1);
         let focal = slot.offset == 0;
-        // Scaled with its group, so the box stays the tile the miniature is actually drawing.
-        let size = (size.0 * slot.scale, size.1 * slot.scale, size.2 * slot.scale);
-        gizmos.cube(
-            Transform::from_translation(base + Vec3::new(0.0, size.1 * 0.5, 0.0))
-                .with_scale(Vec3::new(size.0, size.1, size.2)),
-            if focal { crate::chrome::ACCENT } else { ENVELOPE_IDLE },
-        );
+        if let Envelope::Bounded { size } = c.envelope {
+            // Scaled with its group, so the box stays the tile the miniature is actually drawing.
+            let size = (size.0 * slot.scale, size.1 * slot.scale, size.2 * slot.scale);
+            gizmos.cube(
+                Transform::from_translation(base + Vec3::new(0.0, size.1 * 0.5, 0.0))
+                    .with_scale(Vec3::new(size.0, size.1, size.2)),
+                if focal { crate::chrome::ACCENT } else { ENVELOPE_IDLE },
+            );
+            if focal {
+                // The seating lattice on its floor — `grid::SNAP`, the same quantum `seated` steps by
+                // and the Map snaps to. Drawing anything else here would be the
+                // drawn-grid-disagrees-with-the-snap bug that `editor::Rung`'s note records. The focal
+                // group is always at scale 1, so this is the lattice a seat step actually lands on
+                // rather than a scaled picture of one.
+                let cells = (
+                    (size.0 / step).round().max(1.0) as u32,
+                    (size.2 / step).round().max(1.0) as u32,
+                );
+                gizmos
+                    .grid(
+                        Isometry3d::new(
+                            base + Vec3::Y * 0.002,
+                            Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                        ),
+                        UVec2::new(cells.0, cells.1),
+                        Vec2::splat(step),
+                        crate::chrome::GRID_LINE,
+                    )
+                    .outer_edges();
+            }
+        }
         if !focal {
             continue;
         }
-        // The seating lattice on its floor — `grid::SNAP`, the same quantum `seated` steps by and the
-        // Map snaps to. Drawing anything else here would be the drawn-grid-disagrees-with-the-snap bug
-        // that `editor::Rung`'s note records. The focal group is always at scale 1, so this is the
-        // lattice a seat step actually lands on rather than a scaled picture of one.
-        let cells = (
-            (size.0 / step).round().max(1.0) as u32,
-            (size.2 / step).round().max(1.0) as u32,
-        );
-        gizmos
-            .grid(
-                Isometry3d::new(
-                    base + Vec3::Y * 0.002,
-                    Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
-                ),
-                UVec2::new(cells.0, cells.1),
-                Vec2::splat(step),
-                crate::chrome::GRID_LINE,
-            )
-            .outer_edges();
-        // The member being seated, ringed where it stands.
-        if let Some(m) = c.members.get(state.member.min(c.members.len().saturating_sub(1))) {
+        // **Where the group's contents actually stand.** `slot.centre` is subtracted for the same
+        // reason `restage_group`'s parent transform subtracts it: an anchored group's members sit
+        // wherever they were authored, so what is put in the slot is the *content*. It is `(0, 0)`
+        // for every bounded group and the focal group always stands at scale 1 (`Slot::scale`), so
+        // this is exactly where the mesh is.
+        let content = base - Vec3::new(slot.centre.0, 0.0, slot.centre.1);
+        // The member being seated, ringed where it stands — the index **as given**, see
+        // `clamp_selection`. Nothing here re-derives a cursor position: for the one frame a project
+        // edit can land out of range, no ring is the honest answer, where a `.min()` rings a member
+        // the seat verbs are not pointed at.
+        if let Some(m) = c.members.get(state.member) {
             gizmos.circle(
                 Isometry3d::new(
-                    base + Vec3::new(m.at.0, 0.01, m.at.1),
+                    content + Vec3::new(m.at.0, 0.01, m.at.1),
                     Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
                 ),
                 step * 0.75,
@@ -1494,8 +1656,14 @@ fn place_labels(
 /// editing a member would otherwise cost `left left up right right`, and the whole point of the
 /// carousel is that moving between groups is one keypress from wherever you are.
 ///
-/// Wraps, like [`walk`] does, so the list is a ring to move through even though the strip itself does
-/// not wrap — running out of miniatures is how the stage says which end you are at.
+/// **It wraps, where the panel lists clamp**, and the split is deliberate rather than an oversight.
+/// `O`/`P` are the one way to move between groups from anywhere on the tab, so a ring means the key
+/// always answers; [`walk`]'s two lists are read down and now stop at their ends, for the reason
+/// `build.rs` gives — *"a focus that jumps from the last member to the first is the largest possible
+/// move on the smallest possible keystroke."* Stepping a strip is not a focus move inside a list.
+///
+/// The strip itself still does not wrap: running out of miniatures is how the stage says which end
+/// you are at.
 fn step_carousel(
     keys: Res<ButtonInput<KeyCode>>,
     live: Res<keys::Live>,
@@ -1514,10 +1682,9 @@ fn step_carousel(
     if n == 0 {
         return;
     }
-    state.selected = ((state.selected as i64 + by).rem_euclid(n as i64)) as usize;
-    // A different group has different members; leaving the old index would point the seat verbs at
-    // whatever happened to sit there — the same reason `walk` resets it.
-    state.member = 0;
+    let want = ((state.selected as i64 + by).rem_euclid(n as i64)) as usize;
+    // Both cursors, through the one writer — see `select_group`.
+    select_group(&mut state, want);
 }
 
 /// **Click a miniature to bring it to the middle** — the strip lies on the ground plane, so this is
@@ -1567,9 +1734,8 @@ pub fn pick_along(
     if state.selected == i {
         return false;
     }
-    state.selected = i;
-    // A different group has different members, the same reason `walk` resets it.
-    state.member = 0;
+    // Both cursors, through the one writer — see `select_group`.
+    select_group(state, i);
     true
 }
 
@@ -1585,9 +1751,18 @@ fn rebuild(
     budget: Res<Budget>,
     body: Query<Entity, With<ComposeBody>>,
     lines: Query<Entity, With<ComposeLine>>,
+    mut receipt: Query<&mut Text, With<ComposeReceipt>>,
 ) {
     if !(state.is_changed() || project.is_changed()) {
         return;
+    }
+    // **The receipt, into its fixed slot at the foot of the panel** — see [`ComposeReceipt`] for why
+    // it is no longer the last line of the scrolling body. Compared before writing: `Text` is
+    // change-detected and `Mut::deref_mut` marks it whether or not the value moved.
+    for mut text in &mut receipt {
+        if text.0 != state.status.note_text() {
+            text.0 = state.status.note_text().to_owned();
+        }
     }
     let Ok(root) = body.single() else {
         return;
@@ -1652,22 +1827,28 @@ fn rebuild(
     }
 
     if let Some(c) = comps.get(state.selected) {
+        // **The affordance is drawn only when the arrows have something to walk.** An empty group can
+        // hold the focus (`cycle_focus` argues why) and this heading still read `<- arrows`, so the
+        // pane advertised a live key that answered nothing. The guidance under it is the same shape
+        // `build.rs` gives an empty tile, and it is prose rather than a note because a fact about the
+        // file outlives the keypress that ran into it.
+        let walkable = !c.members.is_empty();
         lines.push(Line::Section(format!(
             "MEMBERS OF `{}`{}",
             c.id,
-            if state.focus == Pane::Members { "  <- arrows" } else { "" }
+            if state.focus == Pane::Members && walkable { "  <- arrows" } else { "" }
         )));
-        let at = state.member.min(c.members.len().saturating_sub(1));
+        if !walkable {
+            lines.push(Line::Prose(nothing_to_walk(c), DIM));
+        }
         for (i, m) in c.members.iter().enumerate() {
-            lines.push(Line::Member { ix: i, text: describe_member(m), at: i == at });
+            // The cursor **as given** — see `clamp_selection`, which is now the only thing that
+            // clamps it. This line's own `.min()` was what hid a stale member cursor from everything
+            // except the scroll follower, which searched for the unclamped row and gave up.
+            lines.push(Line::Member { ix: i, text: describe_member(m), at: i == state.member });
         }
         affordances(&mut lines, c);
         detail(&mut lines, c, comps, &project);
-    }
-
-    // The receipt only. The refusal is the block under the title — see `chrome::Status`.
-    if !state.status.note_text().is_empty() {
-        lines.push(Line::Prose(state.status.note_text().to_owned(), ACCENT));
     }
 
     commands.entity(root).with_children(|p| {
@@ -1736,6 +1917,12 @@ fn rebuild(
 
 /// A click selects the composition, the way a click selects a row in every other list — the arrows
 /// keep working exactly as before; this adds the pointer as a second way in, not a second meaning.
+///
+/// It wrote `selected` and left `member` where it was: clicking a row pointed the seating cursor
+/// into the group you came from, so the ring landed on whatever member sat at that index and the
+/// seat verbs acted on that one. Each of the three keyboard paths had said in its own comment why it
+/// resets the member cursor; [`select_group`] is now the single place that says it, and this is the
+/// caller that was missing.
 fn on_comp_row_click(
     activate: On<bevy::ui_widgets::Activate>,
     rows: Query<&CompRow>,
@@ -1744,7 +1931,9 @@ fn on_comp_row_click(
     let Ok(row) = rows.get(activate.entity) else {
         return;
     };
-    state.selected = row.0;
+    select_group(&mut state, row.0);
+    // The click hands the arrows to the list it landed in. `select_group` deliberately leaves focus
+    // alone, because `step_carousel` has to move the group cursor without disturbing it.
     state.focus = Pane::Groups;
 }
 
@@ -1764,9 +1953,14 @@ fn on_member_row_click(
 /// The body's one font size. Named because [`spawn_line`] derives an advance from it.
 const ROW_PX: crate::chrome::text::Role = crate::chrome::text::BODY;
 
-/// A row's leading indent, in spaces, and what is left. The pane states its structure as leading
-/// spaces (`"    "` under OFFERS, `" ".repeat(7)` in the face table, the hex STALE lines); this is
-/// where that convention is read back so the layout can honour it.
+/// A row's leading indent, in spaces, and what is left. The pane still states some of its structure
+/// as leading spaces — [`affordances`] writes a `Location` at four and each of its interactions at
+/// eight — and this is where that convention is read back so the layout can honour it.
+///
+/// **It named two callers that no longer exist**, both removed by the commit that took the indent out
+/// of them: a face is a `Line::Face` label/value row now rather than `" ".repeat(7)` inside a prose
+/// line, and the hex STALE rows moved inside a `Line::Rail`, whose inset replaced their hand-written
+/// gutter. `affordances` is the only producer of an indent left.
 fn split_indent(text: &str) -> (usize, &str) {
     let rest = text.trim_start_matches(' ');
     (text.len() - rest.len(), rest)

@@ -177,6 +177,33 @@ pub fn blank(id: &str, height: f32) -> Composition {
     }
 }
 
+/// **Whether this tab can open that composition** — does it claim a tile-shaped box?
+///
+/// A tile is `Envelope::Bounded` by definition ([`blank`] makes one, `grammar::from_compositions`
+/// will only take one), and `Envelope::Anchored` is the other thing an author builds: a table and
+/// its chairs, captured on the Map with `M`, positioned relative to its anchor and claiming no tile.
+/// Every verb in this tab reads the box — the drawn grid, the ladder, the flush position, the
+/// envelope refit — so an anchored composition is not a tile this assembler can edit badly, it is
+/// not a tile it can edit at all.
+///
+/// Named rather than matched inline because three places ask: both open paths in `build_keys`, and
+/// `tiles::tile_rows`, which marks the row so the refusal is not the first an author hears of it.
+pub fn has_a_box(comp: &Composition) -> bool {
+    matches!(comp.envelope, Envelope::Bounded { .. })
+}
+
+/// **How that refusal reads**, in one place for the same reason [`has_a_box`] is one predicate.
+///
+/// Two surfaces say it — the `Enter`/`right` that refuses to open the row, and the size guard, for
+/// the case something else ever puts one in hand — and the row that lists it is marked from the same
+/// vocabulary. A refusal spelled twice is a refusal that will one day be spelled two ways.
+///
+/// It names the tab that *can* open it, because "this tab cannot" is only half an answer: COMPOSE
+/// edits anchored groups, and that is where the author is trying to go.
+pub fn claims_no_tile(id: &str) -> String {
+    format!("`{id}` claims no tile — open it on COMPOSE")
+}
+
 /// **Where a member sits when it is flush against one side of the tile.**
 ///
 /// The position is a function of the piece's **own width**, which is why it is a verb rather than a
@@ -558,6 +585,14 @@ pub fn rebind_hosts(
     Ok(())
 }
 
+/// **What the door refuses a verb with when nothing is open**, in one place because two say it.
+///
+/// [`edit`] refuses every edit with it, and `build_keys`'s size guard posts it for the verb that was
+/// refused — which is what makes the guard's answer the door's own words rather than a second
+/// wording of them. It was unreachable from the keyboard until 2026-09-03: the guard returned in
+/// silence, so no verb ever got as far as the door to be told (the review's T1).
+pub const NO_TILE: &str = "no tile open — press N to start one";
+
 /// **The one door every edit to the open tile goes through.**
 ///
 /// Apply the change to a copy, re-resolve the hosts, and keep it only if the result still stands up.
@@ -572,7 +607,7 @@ fn edit<T>(
     act: impl FnOnce(&mut Composition) -> Result<T, String>,
 ) -> Result<T, String> {
     let Some(open) = build.open.as_ref() else {
-        return Err("no tile open — press N to start one".to_owned());
+        return Err(NO_TILE.to_owned());
     };
     let mut next = open.clone();
     let out = act(&mut next)?;
@@ -1186,6 +1221,27 @@ pub fn refit_tile(
     }
 }
 
+/// **Up one page, to the Tiles list** — the landing `left` and `Esc` share.
+///
+/// One function because two keys mean it, and the pair has already drifted once: `Esc` cleared
+/// `browsing` (descending to the Meshes page) while `left` set it, so the tab's two back-out keys
+/// went opposite ways. Written twice, that is two decisions to keep in step; written here, it is
+/// one.
+///
+/// A note rather than a problem when nothing is authored yet: the answer is to make one, and the
+/// `New Tile +` row is where that starts.
+fn ascend(build: &mut Build, state: &mut crate::tiles::ImportState, page: usize, landing: usize) {
+    // `page` counts the `+ New Tile` row, so a page of exactly one is an empty kit.
+    if page <= 1 {
+        state
+            .status
+            .note("no tiles in the kit yet — New Tile +, or build and press Cmd+S".to_owned());
+        build.browsing = Some(NEW_TILE_ROW);
+    } else {
+        build.browsing = Some(landing);
+    }
+}
+
 /// **Every BUILD verb, in one system.**
 ///
 /// One system rather than eight, because the verbs share the tile in hand and Bevy would otherwise
@@ -1265,7 +1321,7 @@ pub fn build_keys(
             {
                 state.selected_library_id = Some(first);
             }
-            build.browsing = Some(0);
+            build.browsing = Some(landing_row(&project, &build));
             if kit == 0 {
                 state.status.note(
                     "no tiles in the kit yet — New Tile +, or build and press Cmd+S".to_owned(),
@@ -1284,7 +1340,9 @@ pub fn build_keys(
     // Walking a list and opening from it. The Tiles page is the right panel's first page — the
     // authored tiles, one row each, with `New Tile +` at the top. `Enter` reopens the tile under
     // the cursor, `right` drills to the Meshes page to pick its members, and `left` at idle comes
-    // back from it. `Esc` still backs out of everything.
+    // back from it. `Esc` agrees with `left`: it ascends from the Meshes page, and on this one — the
+    // top of the tab — it says where the ways out are rather than descending into the Meshes page,
+    // which is what it used to do (T9).
     //
     // Runs before the size guard below: there is no tile in hand while the page is being walked,
     // and the first `right`/`Enter` is what puts one in hand.
@@ -1315,10 +1373,19 @@ pub fn build_keys(
             // still the drill — the author came to pick meshes, and the Meshes page is where the
             // picking happens. Both refuse by flipping the page instead of panicking or
             // dead-ending, because the author's request (drill to Meshes) needs no tile.
-            let Some(comp) = project
-                .compositions
-                .compositions
-                .get(row)
+            // **Row zero is NOT a name prompt here, and that distinction cost a test cluster.**
+            //
+            // `right` means *drill to the Meshes page* — the drill's own note above is right that it
+            // needs no tile. Raising the naming prompt on `right` put the editor into
+            // `Context::Typing`, which is a keyboard-wide mode: the arrows stopped walking the
+            // library and `F` stopped reaching the filter box, on a tab the author had only asked to
+            // drill into. `Enter` (`TileOpen`) is the key that acts on the row, and that is where
+            // `+ New Tile` answers.
+            //
+            // So row zero falls through to the empty-kit arm below, which flips to the Meshes page —
+            // exactly what it did before the row existed.
+            let Some(comp) = row_composition(row)
+                .and_then(|i| project.compositions.compositions.get(i))
                 .cloned()
                 .or_else(|| draft(&build, &project).cloned())
             else {
@@ -1328,6 +1395,23 @@ pub fn build_keys(
                     .note("nothing to open yet — New Tile +, then right again".to_owned());
                 return;
             };
+            // **A composition with no box is refused by name, and the row stays where it is.**
+            //
+            // `Envelope::Anchored` is what the Map's `M` captures — a table and its chairs, holding
+            // no tile — and this tab assembles tiles. Putting one into `build.open` is what bricked
+            // the tab (the 2026-09-03 review's T2): the size guard below then refused every verb,
+            // and there was no close key, so the only way out was opening a different tile.
+            //
+            // The refusal comes from [`open_saved`], the one writer of `build.open`, rather than
+            // from a check here — the alternatives to refusing are both worse: hiding the row lies
+            // about what is in the kit, and converting it silently rewrites what the author
+            // captured. `tiles::tile_rows` marks the row, so the refusal is not the first they hear
+            // of it.
+            //
+            // **And the page does not flip.** The drill's own note above is right that the drill
+            // needs no tile — that is the empty-kit case — and wrong for this one: the author
+            // pointed at a row, and landing on the meshes with a *different* tile in hand would
+            // answer a question they did not ask.
             let already = build
                 .open
                 .as_ref()
@@ -1335,7 +1419,10 @@ pub fn build_keys(
             if !already {
                 let id = comp.id.clone();
                 let n = comp.members.len();
-                open_saved(&mut build, comp);
+                if let Err(e) = open_saved(&mut build, comp) {
+                    state.status.problem(e);
+                    return;
+                }
                 state.status.note(format!(
                     "`{id}` opened — {n} member(s), Cmd+S saves over it"
                 ));
@@ -1344,22 +1431,29 @@ pub fn build_keys(
             return;
         }
         if pressed(Action::TileOpen) {
+            // **Row zero makes one**, the same door `right` and the row's click use.
+            if row == NEW_TILE_ROW {
+                build.naming = Some(NamePrompt { raw: String::new(), then: NameThen::Open });
+                return;
+            }
             // The draft is the last row of the page, and it is in hand by construction — the
             // row the author just named. Committed rows come from the kit.
-            match project
-                .compositions
-                .compositions
-                .get(row)
+            match row_composition(row)
+                .and_then(|i| project.compositions.compositions.get(i))
                 .cloned()
                 .or_else(|| draft(&build, &project).cloned())
             {
+                // Refused by the same door `right` opens through, so the two keys cannot come to
+                // disagree about which rows this tab can open.
                 Some(comp) => {
                     let id = comp.id.clone();
                     let n = comp.members.len();
-                    open_saved(&mut build, comp);
-                    state.status.note(format!(
-                        "`{id}` opened — {n} member(s), Cmd+S saves over it"
-                    ));
+                    match open_saved(&mut build, comp) {
+                        Ok(()) => state.status.note(format!(
+                            "`{id}` opened — {n} member(s), Cmd+S saves over it"
+                        )),
+                        Err(e) => state.status.problem(e),
+                    }
                 }
                 // The row is drawn from this same source this indexes, so this is unreachable
                 // rather than unlikely — said out loud because the alternative is an `unwrap`.
@@ -1373,30 +1467,129 @@ pub fn build_keys(
         // **`left` walks back to the Tiles page** from the Meshes page. A note, not a problem,
         // when nothing is authored yet: the answer is to make one, and the `New Tile +` row is
         // where that starts.
-        if page == 0 {
-            state
+        let landing = landing_row(&project, &build);
+        ascend(&mut build, &mut state, page, landing);
+        return;
+    }
+
+    // **Put the tile down.** The other half of the door `N` opens — see
+    // [`crate::keys::Action::CloseTile`] for the state it exists to make escapable.
+    //
+    // Above the size guard, deliberately: the one composition the assembler cannot edit is exactly
+    // the one an author most needs to put down, and a close verb behind the guard that refuses it
+    // would be the same trap one key further in.
+    if pressed(Action::CloseTile) {
+        // Bound rather than matched in place, so the borrow of `build` ends before the writes.
+        let held = build.open.as_ref().map(|c| (c.id.clone(), c.members.len()));
+        match held {
+            Some((id, n)) => {
+                build.open = None;
+                build.focus = 0;
+                build.placing = false;
+                // **Back to the page**, which is where an author who has finished with a tile is
+                // standing. Leaving the Meshes page up over no tile is T1's dead state, and this
+                // verb exists to leave it rather than to arrive in it.
+                //
+                // **The cursor stays where it was, clamped to what is left.** Closing a *draft* —
+                // a tile named this session and never saved — takes its row off the page with it
+                // (`page_len` counts it), so a cursor on the last row would be left pointing past
+                // the end. Clamped to the committed count for that reason rather than reset to
+                // row 0, which would throw away a walk the author had just done.
+                // `kit` counts committed compositions; the page is that plus the draft plus the
+                // `+ New Tile` row at index 0, so the last valid row is `kit` and not `kit - 1`.
+                build.browsing = Some(build.browsing.unwrap_or(NEW_TILE_ROW).min(kit));
+                // **A closed tile is a document boundary**, so the undo stack goes with it:
+                // `tile_history` clears on `opened` changing, and an undo that reached across a
+                // close would put back a tile the author had deliberately put down — under a name
+                // `Cmd+S` would then save it over. See [`Build::opened`], which makes the same
+                // argument about opening a different one.
+                build.opened = build.opened.wrapping_add(1);
+                state.status.note(format!(
+                    "`{id}` closed — {n} member(s) in it, {} on its row opens it again",
+                    crate::keys::chord(Action::TileOpen)
+                ));
+            }
+            None => state
                 .status
-                .note("no tiles in the kit yet — New Tile +, or build and press Cmd+S".to_owned());
-        } else {
-            build.browsing = Some(0);
+                .note("nothing open to close — the kit's tiles are on this page".to_owned()),
         }
         return;
     }
 
-    // **`Esc` leaves the Tiles page** — the "always backs out" promise, extended one page
-    // further. The old kit-list arm lived below the size guard and cleared `browsing`; the page
-    // must be escapable with no tile open too, so this sits above the guard like the rest of the
-    // page arms. A tile already open is untouched — `Esc` puts a held piece back, it does not
-    // close the tile.
+    // **`Cmd+S` saves the tile *and* the map.** The other half of the branch `editor::keys` guards:
+    // the key is Global because the verb is, and what it saves is whatever the live context has open.
+    // Bound once, so the census still holds every action to exactly one key.
+    //
+    // Both files, because an author reaches this tab from the Map with unsaved work behind them and
+    // `editor::keys` — the only call to `Project::save` in the crate — steps aside for this branch.
+    // Saving only the composition answered *"`kit/tile_1` saved — 3 members"*, which reads as a
+    // successful save, while twenty Map edits stayed in memory and left with the process.
+    //
+    // **Independently, and both reported.** They are two files and neither one's refusal is a reason
+    // to withhold the other: a tile that will not validate must not also cost the map its save.
+    //
+    // **Above the size guard since 2026-09-03**, and that is the whole of T1 for this verb: below
+    // it, `Cmd+S` on a tab with no tile open was a dead key, and [`save`]'s own refusal — *"no tile
+    // open — nothing to save"* — could not be reached from the keyboard at all. [`save`] reads
+    // `build.open` itself and needs no envelope to refuse, so the guard was never its precondition.
+    if pressed(Action::Save) {
+        // **Saving a tile saves the tile.** It used to save the open map in the same breath, back
+        // when every door had one behind it — a convenience for an author who had just stamped the
+        // thing they were editing. The Tiles door has no map, so the second half of that pair has
+        // nothing to write, and a verb whose name is "save the tile" doing two writes was already
+        // more than it said. The Maps door still saves the map, on its own key.
+        match save(&build, &mut project) {
+            Ok(said) => state.status.note(said),
+            Err(e) => state.status.problem(format!("TILE NOT SAVED: {e}")),
+        }
+        return;
+    }
+
+    // **`Esc` goes back, and `left` is which way that is.**
+    //
+    // It used to clear `browsing`, which descends to the Meshes page — *forward*, on the one key
+    // whose job is to back out, and forward into the state where every verb was a silent no-op
+    // (the 2026-09-03 review's T9). The page pair is the shape the tab already has: `right`
+    // (`PageEnter`) descends and `left` (`PageLeave`) ascends, so `Esc` agrees with `left` on both
+    // pages rather than inventing a third direction.
+    //
+    // On the Meshes page it ascends, through the same [`ascend`] the `left` arm calls. On the Tiles
+    // page there is nothing above it inside this tab, so it says where the ways out are instead of
+    // manufacturing one — with the chords read from the census, never written by hand.
+    //
+    // **The piece in hand is the inner layer.** `Esc` peels one per press, and the innermost is a
+    // held piece, which the arm below the guard owns; this one stands aside while `placing` so the
+    // order reads piece, then page.
+    //
     // **The tab is named, because `Action::Cancel` is `Context::Global`.** Without it one `Esc` with
     // the journal open left the Tiles page as well as closing the journal — four consumers of one
     // key, each guessing at the tab from its own state. `Live.0` is the crate's single answer.
     if live.0 == crate::keys::Context::Tiles
-        && build.browsing.is_some()
+        && !build.placing
         && just_pressed(&keyboard, *live, Action::Cancel)
     {
-        build.browsing = None;
-        state.status.note("the meshes".to_owned());
+        match (build.browsing.is_some(), build.open.is_some()) {
+            // **Nothing above the top page, so it says what the ways out are** — and names only the
+            // ones that are really there: the close verb when something is in hand to close, and
+            // `N` when there is not, because on an empty page the way "back" an author wants is
+            // usually forward into a tile. `Cmd+O` is the honest answer to "out of the kit", which
+            // is the direction the key was pressed in.
+            (true, held) => {
+                let local = if held {
+                    format!("{} closes the tile", crate::keys::chord(Action::CloseTile))
+                } else {
+                    format!("{} starts one", crate::keys::chord(Action::BuildNew))
+                };
+                state.status.note(format!(
+                    "already on the tiles — {local}, {} leaves the kit",
+                    crate::keys::chord(Action::MainMenu)
+                ));
+            }
+            (false, _) => {
+                let landing = landing_row(&project, &build);
+                ascend(&mut build, &mut state, page, landing)
+            }
+        }
         return;
     }
 
@@ -1417,11 +1610,68 @@ pub fn build_keys(
         return;
     }
 
-    let Some(size) = build.open.as_ref().and_then(|c| match c.envelope {
-        Envelope::Bounded { size } => Some(size),
-        Envelope::Anchored => None,
-    }) else {
-        return;
+    // **The verbs below this line need a box, and every one of them now says so when there is
+    // none.**
+    //
+    // This guard was a bare `return`, which is what made eleven verbs silent no-ops — `Cmd+S`
+    // among them until it moved above — on a tab that gives no sign nothing is open (T1). Two
+    // states reach it, and they are different answers:
+    //
+    // - **no tile at all**, which is guidance: the refusal is [`edit`]'s own [`NO_TILE`], the
+    //   string every verb here would have been refused with had it got as far as the door. A note,
+    //   because an author who pressed `R` on a tab they have just arrived at has done nothing
+    //   wrong — the same door-manners the empty-tile branches keep.
+    // - **a composition with no box**, which is a problem: something *is* in hand and this tab
+    //   cannot edit it, so the line sticks until it is dealt with, and it is the same refusal
+    //   [`claims_no_tile`] gives on the row it was opened from.
+    //
+    // The chord is read from the census (`keys::chord`) rather than written out, so naming the
+    // refused verb cannot become a lie the day a key moves.
+    let size = match build.open.as_ref().map(|c| c.envelope) {
+        Some(Envelope::Bounded { size }) => size,
+        envelope => {
+            // **Every verb the guard stands in front of, in one list**, so a verb added below
+            // cannot quietly return to declining in silence. The `Stance::Holding` rows — the four
+            // arrows, the four flushes, the member walk — cannot actually fire here, because that
+            // stance needs a focused member and a focused member needs a tile; they are listed
+            // anyway, since which stance a row declares is the census's business to change.
+            const BEHIND_THE_GUARD: &[Action] = &[
+                Action::BuildArm,
+                Action::AlignLeft,
+                Action::AlignRight,
+                Action::AlignForward,
+                Action::AlignBack,
+                Action::MemberPrev,
+                Action::MemberNext,
+                Action::ClearTile,
+                Action::BuildForward,
+                Action::BuildBack,
+                Action::BuildLeft,
+                Action::BuildRight,
+                Action::BuildUp,
+                Action::BuildDown,
+                Action::BuildRung,
+                Action::BuildDrop,
+                Action::BuildSlot,
+                Action::BuildTurn,
+                Action::BuildDropMember,
+            ];
+            if let Some(refused) = BEHIND_THE_GUARD.iter().copied().find(|a| pressed(*a)) {
+                let chord = crate::keys::chord(refused);
+                match envelope {
+                    Some(Envelope::Anchored) => {
+                        // The id is read here rather than above, so the common refusal costs no
+                        // clone: `build` is only borrowed on the branch that names the thing.
+                        let id = build.open.as_ref().map_or(String::new(), |c| c.id.clone());
+                        state
+                            .status
+                            .problem(format!("{chord}: {}", claims_no_tile(&id)));
+                    }
+                    _ => state.status.note(format!("{chord}: {NO_TILE}")),
+                }
+            }
+            return;
+        }
     };
 
     // **Take the piece, or put it back.** The door between the arrows walking the library list and
@@ -1853,30 +2103,6 @@ pub fn build_keys(
         return;
     }
 
-    // **`Cmd+S` saves the tile *and* the map.** The other half of the branch `editor::keys` guards:
-    // the key is Global because the verb is, and what it saves is whatever the live context has open.
-    // Bound once, so the census still holds every action to exactly one key.
-    //
-    // Both files, because an author reaches this tab from the Map with unsaved work behind them and
-    // `editor::keys` — the only call to `Project::save` in the crate — steps aside for this branch.
-    // Saving only the composition answered *"`kit/tile_1` saved — 3 members"*, which reads as a
-    // successful save, while twenty Map edits stayed in memory and left with the process.
-    //
-    // **Independently, and both reported.** They are two files and neither one's refusal is a reason
-    // to withhold the other: a tile that will not validate must not also cost the map its save.
-    if pressed(Action::Save) {
-        // **Saving a tile saves the tile.** It used to save the open map in the same breath, back
-        // when every door had one behind it — a convenience for an author who had just stamped the
-        // thing they were editing. The Tiles door has no map, so the second half of that pair has
-        // nothing to write, and a verb whose name is "save the tile" doing two writes was already
-        // more than it said. The Maps door still saves the map, on its own key.
-        match save(&build, &mut project) {
-            Ok(said) => state.status.note(said),
-            Err(e) => state.status.problem(format!("TILE NOT SAVED: {e}")),
-        }
-        return;
-    }
-
 }
 
 /// **The keystrokes of the tile name prompt.**
@@ -1887,6 +2113,24 @@ pub fn build_keys(
 /// `Enter` opens the named tile (or saves the open one, when the prompt was raised by `Cmd+S`);
 /// `Esc` leaves everything as it was. The name is forced to snake_case as it is typed, the way the
 /// Map's composition prompt teaches the same rule.
+///
+/// # A tab change cancels it, and that is the decision
+///
+/// It used to *survive* one. The guard read `if build.naming.is_none() || *mode != Mode::Tiles`, so
+/// off-tab the prompt kept `editor::Fields::typing()` true — which suppresses every census action —
+/// while this system went on draining the stream, `Enter` and `Escape` included. Those two are the
+/// only ways out of the prompt, so the whole application was keyboard-dead until the author reached
+/// for the mouse and clicked back onto Tiles. The 2026-09-03 review's T8; and the tab change that
+/// gets there is itself a click, since `1`/`2`/`3` are suppressed while typing.
+///
+/// Of the two available fixes — keep it and make it escapable off-tab, or cancel it — cancelling is
+/// the one that makes the state **unrepresentable** rather than merely recoverable. The prompt is
+/// drawn by `chrome::paint_name_box` inside the Tiles panel, and this crate's standing defence of
+/// every mode it has is that the mode is *drawn* ([`Build::placing`]'s note, `keys::Stance`'s). A
+/// prompt that is not on screen has no such defence: keeping it alive would be keeping a mode nobody
+/// can see, which is Raskin's objection exactly. So `Fields::typing()` cannot report a prompt nobody
+/// can answer, because after the frame of the tab change there is no prompt. One typed word is the
+/// cost, against a tab change the author asked for.
 pub fn naming_keys(
     mut events: bevy::prelude::MessageReader<bevy::input::keyboard::KeyboardInput>,
     mode: Res<crate::tiles::Mode>,
@@ -1894,7 +2138,23 @@ pub fn naming_keys(
     project: ResMut<crate::project::Project>,
     mut state: ResMut<crate::tiles::ImportState>,
 ) {
-    if build.naming.is_none() || *mode != crate::tiles::Mode::Tiles {
+    if *mode != crate::tiles::Mode::Tiles {
+        // **Read before writing.** `is_some` goes through `Deref`, so a frame with nothing to cancel
+        // does not dereference `ResMut<Build>` — `drive_build_preview` and the 3-D stage are gated
+        // on that flag, and the D3 defect (2026-08-11, eighteen rebuilds of an identical picture)
+        // is what flagging it on every quiet frame costs.
+        if build.naming.is_some() {
+            build.naming = None;
+            state.status.note(
+                "the tile name was dropped — the prompt belongs to the Tiles tab, and Esc could not \
+                 reach it from here"
+                    .to_owned(),
+            );
+        }
+        events.clear();
+        return;
+    }
+    if build.naming.is_none() {
         events.clear();
         return;
     }
@@ -1988,10 +2248,30 @@ pub fn draft<'a>(build: &'a Build, project: &crate::project::Project) -> Option<
 /// keys as a committed tile. The chip count reads the same number, so the strip never shows a
 /// count the list does not have.
 pub fn page_len(project: &crate::project::Project, build: &Build) -> usize {
-    project.compositions.compositions.len() + usize::from(draft(build, project).is_some())
+    // **Plus one for `+ New Tile`, which is row zero.** It used to sit above the walk with no way
+    // onto it — two down-presses on a two-row page moved nothing and said nothing, which is the
+    // 2026-09-03 review's L4. It is a row now, the shape the chooser's `+ new kit` / `+ new map`
+    // rows already have, and the page's length has to know that or the walk stops one short.
+    project.compositions.compositions.len() + usize::from(draft(build, project).is_some()) + 1
 }
 
-/// **Reopen an authored tile for editing.**
+/// **Row zero of the Tiles page is `+ New Tile`.** Named, because three places index the page and
+/// an off-by-one between them is a cursor pointing at the wrong tile.
+pub const NEW_TILE_ROW: usize = 0;
+
+/// The composition a page row names, or `None` when the row is [`NEW_TILE_ROW`].
+pub fn row_composition(row: usize) -> Option<usize> {
+    row.checked_sub(1)
+}
+
+/// **Where the page opens.** The first real tile when there is one, so arriving does not put the
+/// cursor on a row that makes something; `+ New Tile` only when the kit is empty, where it is the
+/// one thing to do.
+pub fn landing_row(project: &crate::project::Project, build: &Build) -> usize {
+    if page_len(project, build) > 1 { 1 } else { NEW_TILE_ROW }
+}
+
+/// **Reopen an authored tile for editing**, or refuse the composition by name.
 ///
 /// The verb the tab never had. `open_blank` was the only opener, so every tile was a new one and a
 /// tile saved wrong stayed wrong — an author who put a piece in the middle of a tile instead of
@@ -2000,7 +2280,24 @@ pub fn page_len(project: &crate::project::Project, build: &Build) -> usize {
 /// Goes through the same fields `open_blank` sets, including `opened`, because this is a different
 /// document by exactly the argument that field carries: an undo that crossed the boundary would
 /// write one tile's members under another's name.
-pub fn open_saved(build: &mut Build, comp: Composition) {
+///
+/// # The refusal is here because this is the one writer
+///
+/// `build.open` is written by exactly two functions — [`open_named`], which makes a [`blank`], and
+/// this one, which takes whatever it is handed. So this is where *"an anchored composition cannot
+/// enter `build.open`"* is enforceable rather than merely observed: both key paths used to check
+/// nothing, and one `Enter` on a composition captured with the Map's `M` left the tab holding a
+/// group with no box, where the size guard refused every verb and no key could put it down (the
+/// 2026-09-03 review's T2).
+///
+/// A [`Result`] rather than a silent skip, and rather than a check repeated at each call site: the
+/// caller has to say something, the refusal is [`claims_no_tile`]'s single wording, and the next
+/// opener — a click on a row, say — cannot forget to ask. `Err` leaves `build` untouched, so a
+/// refused open costs neither the tile in hand nor its undo stack.
+pub fn open_saved(build: &mut Build, comp: Composition) -> Result<(), String> {
+    if !has_a_box(&comp) {
+        return Err(claims_no_tile(&comp.id));
+    }
     build.depth = DEFAULT_DEPTH;
     build.open = Some(comp);
     build.focus = 0;
@@ -2016,6 +2313,7 @@ pub fn open_saved(build: &mut Build, comp: Composition) {
     build.placing = true;
     build.browsing = None;
     build.opened = build.opened.wrapping_add(1);
+    Ok(())
 }
 
 /// One member of the tile as it currently stands on the stage.
