@@ -137,6 +137,11 @@ enum Line {
     Comp { ix: usize, text: String, selected: bool, armed: bool },
     /// A member row: filled when the seating cursor is on it, clickable.
     Member { ix: usize, text: String, at: bool },
+    /// **A derived face**, as a fixed label column and a band beside it — the shape every other tab
+    /// uses for a `LABEL  value` pair. It was `format!("{name:>5}: ")` padded with `" ".repeat(7)`
+    /// inside a prose line until 2026-09-03; see [`detail`] for why that had to go. An empty `name`
+    /// is a continuation band under the face above it.
+    Face { name: &'static str, band: String },
     /// A severity-railed block — the first line reads first, in the tint.
     Rail { tint: Color, lines: Vec<(String, Color)> },
 }
@@ -330,7 +335,7 @@ fn spawn_compose_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>)
         // The wider of the two panel widths. Measured, not guessed: at `CONTROLS_W` a member line
         // (`chair_north: dining_chair (0.0, -1.0) yaw 180`) wrapped, and a wrapped continuation
         // starts at column zero, which breaks the indentation the list reads by.
-        crate::chrome::TILES_CONTROLS_W,
+        crate::chrome::CONTROLS_W,
         true,
         // Starts hidden: the editor opens in map mode.
         true,
@@ -1076,7 +1081,8 @@ const LABEL_DROP: f32 = 4.0;
 /// did not set the size of — deriving the advance from the same pair keeps the two systems from
 /// disagreeing about how wide a label is. `TextFont::font_size` is a `FontSize` in Bevy 0.19 and does
 /// not divide, so reading it back is not the shortcut it looks like.
-const LABEL_PX: (f32, f32) = (crate::chrome::text::BODY, crate::chrome::text::HINT);
+const LABEL_PX: (crate::chrome::text::Role, crate::chrome::text::Role) =
+    (crate::chrome::text::BODY, crate::chrome::text::HINT);
 
 /// Advance of one glyph at `LABEL_PX.0` — the one measurement, stated beside the size it
 /// belongs to. See [`crate::chrome::BODY_CHAR_W`] for why it lives there.
@@ -1378,7 +1384,7 @@ fn rebuild_labels(
             Text::new(if armed { format!("{} *", c.id) } else { c.id.clone() }),
             // The miniatures name themselves in smaller type, so the strip reads as one focal group
             // among neighbours rather than as five equal things.
-            TextFont::from_font_size(if slot.offset == 0 { LABEL_PX.0 } else { LABEL_PX.1 }),
+            crate::chrome::font(if slot.offset == 0 { LABEL_PX.0 } else { LABEL_PX.1 }),
             TextColor(if slot.offset == 0 { ACCENT } else { DIM }),
             Node {
                 // PLACES-ITSELF-OK: a world-space slot label, put where `place_labels` projects it. Flow
@@ -1430,7 +1436,7 @@ fn place_labels(
     for (label, text, mut node) in &mut labels {
         let placed = carousel.0.slots.get(label.0).and_then(|slot| {
             let advance = LABEL_CHAR_W
-                * if slot.offset == 0 { 1.0 } else { LABEL_PX.1 / LABEL_PX.0 };
+                * if slot.offset == 0 { 1.0 } else { LABEL_PX.1.px() / LABEL_PX.0.px() };
             cam.world_to_viewport(cam_tf, COMPOSE_STAGE + Vec3::new(slot.at.0, 0.0, slot.at.1))
                 .ok()
                 .map(|p| (p, advance))
@@ -1677,7 +1683,7 @@ fn rebuild(
                             row.spawn((
                                 Text::new(text),
                                 TextColor(TEXT),
-                                TextFont::from_font_size(ROW_PX),
+                                crate::chrome::font(ROW_PX),
                             ));
                             if armed {
                                 // The armed mark in its own ink — the same `*` the stage labels
@@ -1685,7 +1691,7 @@ fn rebuild(
                                 row.spawn((
                                     Text::new("  *"),
                                     TextColor(ACCENT),
-                                    TextFont::from_font_size(ROW_PX),
+                                    crate::chrome::font(ROW_PX),
                                 ));
                             }
                         },
@@ -1697,10 +1703,24 @@ fn rebuild(
                             row.spawn((
                                 Text::new(text),
                                 TextColor(TEXT),
-                                TextFont::from_font_size(ROW_PX),
+                                crate::chrome::font(ROW_PX),
                             ));
                         },
                     );
+                }
+                Line::Face { name, band } => {
+                    p.spawn((
+                        Node {
+                            flex_direction: FlexDirection::Row,
+                            column_gap: Val::Px(crate::chrome::GAP_ROW),
+                            ..default()
+                        },
+                        ComposeLine,
+                    ))
+                    .with_children(|row| {
+                        crate::chrome::row_label(row, crate::chrome::COL_LABEL, name);
+                        crate::chrome::row_value(row, band, TEXT, ());
+                    });
                 }
                 Line::Rail { tint, lines } => {
                     crate::chrome::severity_rail(p, tint, ComposeLine).with_children(|block| {
@@ -1742,7 +1762,7 @@ fn on_member_row_click(
 }
 
 /// The body's one font size. Named because [`spawn_line`] derives an advance from it.
-const ROW_PX: f32 = crate::chrome::text::BODY;
+const ROW_PX: crate::chrome::text::Role = crate::chrome::text::BODY;
 
 /// A row's leading indent, in spaces, and what is left. The pane states its structure as leading
 /// spaces (`"    "` under OFFERS, `" ".repeat(7)` in the face table, the hex STALE lines); this is
@@ -1779,7 +1799,7 @@ fn spawn_line(p: &mut ChildSpawnerCommands, text: &str, colour: Color) {
     .with_children(|row| {
         if indent > 0 {
             row.spawn(Node {
-                min_width: Val::Px(indent as f32 * LABEL_CHAR_W * ROW_PX / LABEL_PX.0),
+                min_width: Val::Px(indent as f32 * LABEL_CHAR_W * ROW_PX.px() / LABEL_PX.0.px()),
                 flex_shrink: 0.0,
                 ..default()
             });
@@ -1797,7 +1817,7 @@ fn spawn_line(p: &mut ChildSpawnerCommands, text: &str, colour: Color) {
             },
             Text::new(content.to_owned()),
             TextColor(colour),
-            TextFont::from_font_size(ROW_PX),
+            crate::chrome::font(ROW_PX),
             // The default, stated: this is the column that wraps, against the spacer that never
             // does.
             TextLayout::new(Justify::Left, LineBreak::WordOrCharacter),
@@ -2189,15 +2209,21 @@ fn detail(lines: &mut Vec<Line>, c: &Composition, comps: &[Composition], project
         Err(e) => lines.push(Line::Prose(format!("cannot check staleness: {e}"), DANGER)),
     }
 
-    lines.push(Line::Prose(String::new(), TEXT));
+    // The blank `Text` row that used to stand here is gone. Five of them stood in for `GAP_GROUP`
+    // in this pane, which is why the crowding rule could do nothing for it: `chrome`'s spacing
+    // header is explicit that what makes a group read as a group is its members sitting closer to
+    // each other than to anything else, and a pane whose only separator is one empty line has no
+    // ratios at all. `Line::Section` already carries `GAP_GROUP` above it.
     match composition::interface(c, comps, &project.library, project.lattice.face_bands) {
         Ok(None) => lines.push(Line::Prose(
             "ANCHORED — claims no tile, so it has no boundary for anything to abut".to_owned(),
             DIM,
         )),
         Ok(Some(iface)) => {
-            lines.push(Line::Section(
-                "DERIVED INTERFACE — read off the members, never authored".to_owned(),
+            lines.push(Line::Section("DERIVED INTERFACE".to_owned()));
+            lines.push(Line::Prose(
+                "read off the members, never authored".to_owned(),
+                DIM,
             ));
             for (dir, name) in [
                 (emerge_core::wfc::N, "north"),
@@ -2206,16 +2232,29 @@ fn detail(lines: &mut Vec<Line>, c: &Composition, comps: &[Composition], project
                 (emerge_core::wfc::W, "west"),
             ] {
                 for (i, line) in face_rows(&iface.faces[dir]).into_iter().enumerate() {
+                    // **A face is a label/value row now, not a monospace-padded string.**
+                    //
+                    // It used to be `format!("{name:>5}: ")` for the first band and
+                    // `" ".repeat(7)` for the rest, inside a `Line::Prose` with a four-space
+                    // indent — structure as text, in a pane where every other tab renders
+                    // structure as layout. It aligned only because the shipped face is monospace,
+                    // it broke its own indentation the moment a long fault message wrapped, and
+                    // `docs/ui.md` §3.1 records the game paying for exactly this shape.
+                    //
                     // The face is named once and its bands hang under it, so a doorway reads as one
-                    // side that speaks three ways rather than three sides.
-                    let label =
-                        if i == 0 { format!("{name:>5}: ") } else { " ".repeat(7) };
-                    lines.push(Line::Prose(format!("    {label}{line}"), TEXT));
+                    // side that speaks three ways rather than as three sides — which the blank
+                    // label on continuation rows says in layout instead of in spaces.
+                    lines.push(Line::Face {
+                        name: if i == 0 { name } else { "" },
+                        band: line,
+                    });
                 }
             }
             if iface.is_clean() {
+                // No leading spaces. The indent was a fifth way this pane stated structure as text;
+                // the verdict belongs to the block above it, and `spawn_line`'s own gap says so.
                 lines.push(Line::Prose(
-                    "    clean — this composition can constrain a neighbour".to_owned(),
+                    "clean — this composition can constrain a neighbour".to_owned(),
                     DIM,
                 ));
             } else {

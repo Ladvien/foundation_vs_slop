@@ -1016,7 +1016,7 @@ impl Plugin for EditorPlugin {
                     // Nested: the tuple is at Bevy 0.19's cap of 20. `walk_palette` is a census
                     // action, so it goes in `Act` with the rest of them.
                     (
-                        style_rows,
+                        arm_palette_rows,
                         redraw_edited,
                         cycle_grid.in_set(keys::Phase::Act),
                         walk_palette.in_set(keys::Phase::Act),
@@ -1106,7 +1106,7 @@ fn spawn_cost_readout(mut commands: Commands, frame: Res<crate::chrome::Frame>) 
         bar.spawn((
             crate::tiles::MapRoot,
             Node {
-                padding: UiRect::axes(Val::Px(COST_PAD_X), Val::Px(4.0)),
+                padding: UiRect::axes(Val::Px(COST_PAD_X), Val::Px(crate::chrome::GAP_TIGHT)),
                 // **A reserved column, and the number grows leftwards into it.**
                 //
                 // This is the last child of a row whose spacer pushes everything to the right end, so
@@ -1132,7 +1132,7 @@ fn spawn_cost_readout(mut commands: Commands, frame: Res<crate::chrome::Frame>) 
             p.spawn((
                 Text::new(""),
                 TextColor(DIM),
-                TextFont::from_font_size(crate::chrome::text::BODY),
+                crate::chrome::font(crate::chrome::text::BODY),
                 TriangleTotal,
             ));
         });
@@ -1362,6 +1362,11 @@ fn back_button_clicked(
     );
 }
 
+/// **The Map's left panel scrolls, and this is the pane that does it.** See [`spawn_panel`] for why
+/// it exists at all: this was the one panel in the editor with no scroll area anywhere in it.
+#[derive(Component)]
+struct MapControlsPane;
+
 /// Build the panel's fixed furniture. The palette itself is `rebuild_palette`'s, which is why neither
 /// the project nor the thumbnails are read here — they were parameters that had stopped being used.
 fn spawn_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
@@ -1370,89 +1375,129 @@ fn spawn_panel(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
         &frame,
         crate::chrome::Side::Left,
         crate::chrome::CONTROLS_W,
-        false,
+        // **`true`, where the Map alone passed `false`.** It was the only content-sized panel in
+        // the editor, which is half of why it could not scroll — a `max_height` inside a panel that
+        // is not pinned to the bottom is never reached, the same failure the palette was fixed out
+        // of. One left width and every panel scrollable is the 2026-09-03 decision (F15, D8).
+        true,
         false,
     )
     .insert(crate::tiles::MapRoot)
     .id();
 
     commands.entity(root).with_children(|p| {
-        crate::chrome::title(p, "EMERGE MAPPER");
+        // **`INSPECTOR`, not `EMERGE MAPPER`.**
+        //
+        // This slot held the application's own name while every other panel in the editor named a
+        // job — the 2026-09-03 audit's F12, answered by D9: a panel is named for what it holds,
+        // **left = the thing being inspected, right = the list**. The window says which application
+        // this is twice already (its title and the chrome bar), so the name here was the one word
+        // on screen that told the author nothing about what was under it.
+        //
+        // `title` rather than `list_heading`, which is the other half of the same rule — `title`
+        // for every left dock, `list_heading` for every right dock. The argument is written out
+        // once, at `tiles::spawn_tiles_panel`.
+        crate::chrome::title(p, "INSPECTOR");
 
-        // The readout, in the same two columns as the keys so the whole panel shares one left edge.
-        p.spawn((
-            Node {
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(1.0),
-                margin: UiRect::top(Val::Px(6.0)),
-                ..default()
-            },
-            StatusBlock,
-            crate::notice::CopyPane(&[crate::tiles::Mode::Map]),
-            // The Map's own text pane — where `Cmd+C` copies from, and so where its badge goes.
-            crate::chrome::Control(crate::keys::ControlId::Detail),
-        ))
-        .with_children(|s| {
-            for field in [
-                Field::Name,
-                Field::Brush,
-                Field::Yaw,
-                Field::Map,
-                Field::Under,
-                Field::Last,
-                Field::Hint,
-                Field::Edges,
-            ] {
-                let mut spawned = s.spawn(Node {
-                    flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::Center,
+        // **The body scrolls, through the shared builder.**
+        //
+        // Nothing in this panel could scroll, so the readout, the map-size fields and anything ever
+        // added below them simply ran off the bottom of the window. `chrome::scroll_list` is the
+        // only way to get one — it carries the `ScrollArea` the wheel handler reads and the bar
+        // with its own right gutter, which is what `nobody_spawns_their_own_scroll_container`
+        // exists to enforce.
+        //
+        // FOLLOW-OK: a readout and a field block, not a list. Nothing in here is walked by the
+        // arrows, so there is no selection to keep on screen — the scroll exists for HEIGHT. The
+        // Map's one walked list is `PaletteList`, in the panel across the screen, and that one has
+        // `keep_palette_selection_on_screen`.
+        crate::chrome::scroll_list(p, MapControlsPane).with_children(|p| {
+            // The readout, in the same two columns as the keys so the whole panel shares one left
+            // edge.
+            p.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    // `GAP_TIGHT`, where this was a bare 1: the rows of one block belong to each
+                    // other, and 1 px is not a step on any scale. The margin that used to sit above
+                    // this block is gone with it — `chrome::title` carries the gap below itself now.
+                    row_gap: Val::Px(crate::chrome::GAP_TIGHT),
                     ..default()
-                });
-                if let Some(id) = field.control() {
-                    spawned.insert(crate::chrome::Control(id));
+                },
+                StatusBlock,
+                crate::notice::CopyPane(&[crate::tiles::Mode::Map]),
+                // The Map's own text pane — where `Cmd+C` copies from, and so where its badge goes.
+                crate::chrome::Control(crate::keys::ControlId::Detail),
+            ))
+            .with_children(|s| {
+                for field in [
+                    Field::Name,
+                    Field::Brush,
+                    Field::Yaw,
+                    Field::Map,
+                    Field::Under,
+                    Field::Last,
+                    Field::Hint,
+                    Field::Edges,
+                ] {
+                    let mut spawned = s.spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    });
+                    if let Some(id) = field.control() {
+                        spawned.insert(crate::chrome::Control(id));
+                    }
+                    spawned.with_children(|row| {
+                        // `COL_LABEL`: these hold an ordinary word (`brush`, `under`, `edges`). It
+                        // was a bare 62 — one of the six unnamed label columns the audit counted,
+                        // which is why no two panels in this editor lined their values up (F8).
+                        crate::chrome::row_label(row, crate::chrome::COL_LABEL, field.label());
+                        crate::chrome::row_value(row, "", TEXT, field);
+                    });
                 }
-                spawned.with_children(|row| {
-                    crate::chrome::row_label(row, 62.0, field.label());
-                    crate::chrome::row_value(row, "", TEXT, field);
-                });
-            }
-        });
+            });
 
-        // **Map size.** Stated, adjustable, and drawn in the world — an edge nothing shows is an
-        // edge nobody believes. It is also what gives the flood fill somewhere to stop.
-        p.spawn(Node {
-            flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(2.0),
-            ..default()
-        })
-        .with_children(|s| {
-            // A real `section`, not a hand-rolled 10 px twin — the block's separation now comes
-            // from the heading's own margins (the 2026-08-17 type-role decision).
-            crate::chrome::section(s, "MAP SIZE  (m)");
-            for axis in [Axis::X, Axis::Y, Axis::Z] {
-                s.spawn(Node {
-                    flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::Center,
-                    column_gap: Val::Px(4.0),
-                    ..default()
-                })
-                .with_children(|row| {
-                    crate::chrome::row_label(row, 14.0, axis.label());
-                    // **A field, not a pair of nudges.** Stepping to 48 m from 32 was four clicks
-                    // and no way to say the number; the author knows the size they want, so the
-                    // control should let them state it. Click to focus, type digits, Enter to keep.
-                    crate::chrome::text_field(
-                        row,
-                        Val::Px(56.0),
-                        SizeField(axis),
-                        11.0,
-                        (String::new(), TEXT),
-                        SizeReadout(axis),
-                    );
-                });
-            }
+            // **Map size.** Stated, adjustable, and drawn in the world — an edge nothing shows is an
+            // edge nobody believes. It is also what gives the flood fill somewhere to stop.
+            p.spawn(Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(crate::chrome::GAP_TIGHT),
+                ..default()
+            })
+            .with_children(|s| {
+                // A real `section`, not a hand-rolled 10 px twin — the block's separation now comes
+                // from the heading's own margins (the 2026-08-17 type-role decision).
+                crate::chrome::section(s, "MAP SIZE  (m)");
+                for axis in [Axis::X, Axis::Y, Axis::Z] {
+                    s.spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        align_items: AlignItems::Center,
+                        column_gap: Val::Px(crate::chrome::GAP_TIGHT),
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        // `COL_TIGHT`: the label is a single axis letter, which is exactly what that
+                        // column is for. It was a bare 14.
+                        crate::chrome::row_label(row, crate::chrome::COL_TIGHT, axis.label());
+                        // **A field, not a pair of nudges.** Stepping to 48 m from 32 was four
+                        // clicks and no way to say the number; the author knows the size they want,
+                        // so the control should let them state it. Click to focus, type digits,
+                        // Enter to keep.
+                        //
+                        // `chrome::NUM_FIELD_W`, where this was a bare 56 against the Tiles tab's
+                        // bare 62 — one idea, two numbers, one per file.
+                        crate::chrome::text_field(
+                            row,
+                            Val::Px(crate::chrome::NUM_FIELD_W),
+                            SizeField(axis),
+                            crate::chrome::text::BODY,
+                            (String::new(), TEXT),
+                            SizeReadout(axis),
+                        );
+                    });
+                }
+            });
         });
-
     });
 }
 
@@ -1509,6 +1554,10 @@ fn rebuild_palette(
     thumbs: Option<Res<crate::thumbs::Thumbnails>>,
     filters: Res<crate::filter::Filters>,
     fold: Res<Folded>,
+    // Read for one fact only — which row is armed — so the row spawns already selected rather than
+    // waiting a frame for [`arm_palette_rows`]. It is deliberately NOT in the run condition above:
+    // arming a brush must not respawn a hundred and eighty rows.
+    state: Res<EditorState>,
     lists: Query<Entity, With<PaletteList>>,
 ) {
     for list in &lists {
@@ -1517,15 +1566,23 @@ fn rebuild_palette(
             for (category, members) in palette_categories(&project, &open, &filters) {
                 let folded = fold.0.contains(&category);
                 p.spawn((
+                    // It keeps `HEADER_BG` because it is a signpost over rows rather than one of
+                    // them, and carries `RowRest` so the five states still come from
+                    // `chrome::style_list_rows`.
+                    // CHROME-OK: a group band, not a list row.
                     UiButton,
                     Hovered::default(),
                     CategoryHeader(category.clone()),
+                    // The band's rest fill, carried so `chrome::style_list_rows` gives it the same
+                    // five states every row and chip has. It sensed `Hovered` and nothing repainted
+                    // it.
+                    crate::chrome::RowRest(HEADER_BG),
                     Node {
                         width: Val::Percent(100.0),
                         padding: CHIP_PAD,
                         flex_direction: FlexDirection::Row,
-                        column_gap: Val::Px(6.0),
-                        margin: UiRect::top(Val::Px(4.0)),
+                        column_gap: Val::Px(crate::chrome::GAP_ROW),
+                        margin: UiRect::top(Val::Px(crate::chrome::GAP_ROW)),
                         ..default()
                     },
                     BackgroundColor(HEADER_BG),
@@ -1535,28 +1592,28 @@ fn rebuild_palette(
                     // them — an encoding that survives being glanced at.
                     row.spawn((
                         Node {
-                            width: Val::Px(10.0),
+                            width: Val::Px(crate::chrome::COL_TIGHT),
                             flex_shrink: 0.0,
                             ..default()
                         },
                         Text::new(if folded { ">" } else { "v" }),
                         TextColor(LABEL),
-                        TextFont::from_font_size(crate::chrome::text::LABEL),
+                        crate::chrome::font(crate::chrome::text::LABEL),
                     ));
                     row.spawn((
                         Node {
                             flex_grow: 1.0,
+                            // CHROME-OK: zero, not a spacing step — see `tiles::count_cell`.
+                            min_width: Val::Px(0.0),
                             ..default()
                         },
                         Text::new(category.to_uppercase()),
                         TextColor(LABEL),
-                        TextFont::from_font_size(crate::chrome::text::LABEL),
+                        crate::chrome::font(crate::chrome::text::LABEL),
                     ));
-                    row.spawn((
-                        Text::new(format!("{}", members.len())),
-                        TextColor(LABEL),
-                        TextFont::from_font_size(crate::chrome::text::LABEL),
-                    ));
+                    // The count in a non-wrapping column of its own, through the one builder — F6
+                    // was this same defect on the Kit door's pack headings.
+                    crate::tiles::count_cell(row, format!("{}", members.len()), LABEL);
                 });
 
                 if folded {
@@ -1566,55 +1623,62 @@ fn rebuild_palette(
                     let Some(d) = project.library.descriptors.get(ix) else {
                         continue;
                     };
-                    p.spawn((
-                        UiButton,
-                        Hovered::default(),
-                        PaletteRow(ix),
-                        Node {
-                            width: Val::Percent(100.0),
-                            padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
-                            align_items: AlignItems::Center,
-                            ..default()
-                        },
-                        BackgroundColor(ROW_BG),
-                    ))
-                    .with_children(|row| {
-                        let mut slot = row.spawn((
-                            Node {
-                                width: Val::Px(THUMB_SLOT),
-                                height: Val::Px(THUMB_SLOT),
-                                margin: UiRect::right(Val::Px(8.0)),
-                                flex_shrink: 0.0,
-                                ..default()
-                            },
-                            BackgroundColor(SLOT_BG),
-                        ));
-                        // **By id, not by index.** The library grows on Accept and shrinks on
-                        // remove, and an index into a portrait list that was sized at startup showed
-                        // a blank tile in the first case and the neighbour's picture in the second.
-                        if let Some(image) = thumbs
-                            .as_ref()
-                            .zip(project.library.descriptors.get(ix))
-                            .and_then(|(t, d)| t.image(&d.id))
-                        {
-                            slot.insert(ImageNode::new(image));
-                        }
-                        row.spawn((
-                            Node {
-                                flex_grow: 1.0,
-                                ..default()
-                            },
-                            Text::new(d.id.clone()),
-                            TextColor(TEXT),
-                            TextFont::from_font_size(crate::chrome::text::BODY),
-                        ));
-                        let tris = project.triangles.get(ix).copied().unwrap_or(0);
-                        row.spawn((
-                            Text::new(brief_count(tris)),
-                            TextColor(cost_tint(tris)),
-                            TextFont::from_font_size(crate::chrome::text::LABEL),
-                            TextLayout::new(Justify::Right, LineBreak::NoWrap),
-                        ));
+                    // **`chrome::list_row`, where this was a hand-rolled `UiButton` at
+                    // `axes(8, 4)`.**
+                    //
+                    // It carried no `RowRest`, so the shared repainter could not see it and a
+                    // private `style_rows` restated the whole rest/hover/selected priority one file
+                    // away from the four other lists that take it from `chrome` — the 2026-09-03
+                    // audit's F11. `style_rows` is deleted; the fill, the hover, the press and the
+                    // accent selection rail all come from the builder now, and what is left of it
+                    // is [`arm_palette_rows`], which says only *which* row is armed.
+                    //
+                    // `align_items` is the one thing this row wants that a list row does not
+                    // assume: a fixed-height thumbnail beside auto-height text has to be centred,
+                    // and it is set through `entry` rather than a second `Node`, because a bundle
+                    // carrying two of the same component panics at spawn in Bevy 0.19.
+                    let mut palette_row =
+                        crate::chrome::list_row(p, state.brush == Some(ix), PaletteRow(ix));
+                    palette_row
+                        .entry::<Node>()
+                        .and_modify(|mut n| n.align_items = AlignItems::Center);
+                    palette_row.with_children(|row| {
+                            let mut slot = row.spawn((
+                                Node {
+                                    width: Val::Px(THUMB_SLOT),
+                                    height: Val::Px(THUMB_SLOT),
+                                    margin: UiRect::right(Val::Px(crate::chrome::GAP_ROW)),
+                                    flex_shrink: 0.0,
+                                    ..default()
+                                },
+                                BackgroundColor(SLOT_BG),
+                            ));
+                            // **By id, not by index.** The library grows on Accept and shrinks on
+                            // remove, and an index into a portrait list that was sized at startup
+                            // showed a blank tile in the first case and the neighbour's picture in
+                            // the second.
+                            if let Some(image) = thumbs
+                                .as_ref()
+                                .zip(project.library.descriptors.get(ix))
+                                .and_then(|(t, d)| t.image(&d.id))
+                            {
+                                slot.insert(ImageNode::new(image));
+                            }
+                            row.spawn((
+                                Node {
+                                    flex_grow: 1.0,
+                                    // See `tiles::count_cell`: the id wraps inside its own column
+                                    // rather than pushing the cost out of the row.
+                                    // CHROME-OK: zero is not a spacing step.
+                                    min_width: Val::Px(0.0),
+                                    ..default()
+                                },
+                                Text::new(d.id.clone()),
+                                TextColor(TEXT),
+                                crate::chrome::font(crate::chrome::text::BODY),
+                            ));
+                            let tris = project.triangles.get(ix).copied().unwrap_or(0);
+                            crate::tiles::count_cell(row, brief_count(tris), cost_tint(tris));
                     });
                 }
             }
@@ -2305,20 +2369,43 @@ fn draw_bounds(
     );
 }
 
-fn style_rows(
+/// **Which palette row is armed**, and all that is left of `style_rows`.
+///
+/// `style_rows` restated `chrome::style_list_rows`'s entire rest / hover / selected priority
+/// privately, in the one list that never adopted the shared row (the 2026-09-03 audit's F11). The
+/// priority belongs to `chrome`, which now also owns pressed and disabled; what a tab still knows
+/// and `chrome` cannot is *which* row is the one being acted on, and this says only that.
+///
+/// It has to be a system rather than a value baked in at spawn, because `rebuild_palette` runs on
+/// `Project` / `Folded` / `Filters` and deliberately not on `EditorState` — arming a brush must not
+/// respawn a hundred and eighty rows, which is the same reason `SizeEdit` and `RemovalDrag` were
+/// split out of `EditorState` in the first place.
+///
+/// **All three carriers together.** `chrome::row_shape` sets the fill, the `RowSelected` flag and
+/// the rail's colour as one decision, and a fill that disagreed with the rail is exactly what
+/// `RowSelected` exists to make impossible. Compares before writing: all three are change-detected,
+/// and this runs every frame over every row in the list.
+fn arm_palette_rows(
     state: Res<EditorState>,
-    mut rows: Query<(&PaletteRow, &Hovered, &mut BackgroundColor)>,
+    mut rows: Query<(
+        &PaletteRow,
+        &mut crate::chrome::RowRest,
+        &mut crate::chrome::RowSelected,
+        &mut BorderColor,
+    )>,
 ) {
-    for (row, hovered, mut bg) in &mut rows {
-        let want = if state.brush == Some(row.0) {
-            ROW_SELECTED
-        } else if hovered.0 {
-            ROW_HOVER
-        } else {
-            ROW_BG
-        };
-        if bg.0 != want {
-            bg.0 = want;
+    for (row, mut rest, mut selected, mut border) in &mut rows {
+        let armed = state.brush == Some(row.0);
+        if selected.0 != armed {
+            selected.0 = armed;
+        }
+        let fill = if armed { ROW_SELECTED } else { ROW_BG };
+        if rest.0 != fill {
+            rest.0 = fill;
+        }
+        let edge = if armed { ACCENT } else { Color::NONE };
+        if border.left != edge {
+            *border = BorderColor::all(edge);
         }
     }
 }

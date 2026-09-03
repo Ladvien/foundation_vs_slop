@@ -15,14 +15,13 @@
 //! camera parks here (an arm of `tiles::stage_camera` — never a second `Camera3d`, which silently
 //! breaks every `Single<_, With<Camera3d>>` in the crate).
 
-use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
 
 use emerge_core::rigs::Playback;
 
 use crate::anim_tab::BenchState;
-use crate::chrome::{DIM, LABEL, ROW_BG, ROW_HOVER, ROW_SELECTED, TEXT};
+use crate::chrome::{DIM, LABEL, ROW_BG, ROW_SELECTED, TEXT};
 use crate::tiles::Mode;
 
 /// The bench's staging corner — the third one.
@@ -661,45 +660,45 @@ pub(crate) fn on_chip_click(
     }
 }
 
-/// Repaint the chips' pressed-state and the scrub line, in place.
+/// **Which stage chips are lit, and what the scrub line says.**
+///
+/// The two chip loops used to write `BackgroundColor` directly, each restating
+/// `chrome::style_list_rows`'s lit / hover / rest priority privately. Since 2026-09-03 that is a
+/// **conflict** rather than a duplication: a `chrome::chip` carries [`crate::chrome::RowRest`], so
+/// the shared repainter writes the same component every frame and the two would take turns at it
+/// in whatever order the schedule happened to pick.
+///
+/// What only this module knows is which chip is *on* — soloed, mixed in, or ghosting — so that is
+/// all it writes. `style_list_rows` derives hover, press, disabled and the lit fill from it, and
+/// lit still beats hover there for the same reason it did here: hover says *this is a click
+/// target*, not *this is playing*.
 pub(crate) fn refresh_scrub_ui(
     scrub: Option<Res<BenchScrub>>,
     ab: Option<Res<BenchAb>>,
     cam: Option<Res<BenchCamera>>,
-    mut chips: Query<(&BenchSlotChip, &Hovered, &mut BackgroundColor)>,
-    mut ghost_chips: Query<(&Hovered, &mut BackgroundColor), (With<GhostChip>, Without<BenchSlotChip>)>,
+    mut chips: Query<(&BenchSlotChip, &mut crate::chrome::RowRest)>,
+    mut ghost_chips: Query<
+        &mut crate::chrome::RowRest,
+        (With<GhostChip>, Without<BenchSlotChip>),
+    >,
     mut lines: Query<&mut Text, With<ScrubLine>>,
 ) {
     let Some(scrub) = scrub else { return };
-    // Lit beats hover in both loops; hover is `chrome::ROW_HOVER`'s signifier that the chip is a
-    // click target, not a claim that it is playing.
-    for (chip, hovered, mut bg) in &mut chips {
+    for (chip, mut rest) in &mut chips {
         let lit = match scrub.solo {
             Some(s) => s == chip.0,
             None => scrub.mixed.contains(&chip.0),
         };
-        let want = if lit {
-            ROW_SELECTED
-        } else if hovered.0 {
-            ROW_HOVER
-        } else {
-            ROW_BG
-        };
-        if bg.0 != want {
-            bg.0 = want;
+        let want = if lit { ROW_SELECTED } else { ROW_BG };
+        if rest.0 != want {
+            rest.0 = want;
         }
     }
     let ghost_on = ab.is_some_and(|a| a.0);
-    for (hovered, mut bg) in &mut ghost_chips {
-        let want = if ghost_on {
-            ROW_SELECTED
-        } else if hovered.0 {
-            ROW_HOVER
-        } else {
-            ROW_BG
-        };
-        if bg.0 != want {
-            bg.0 = want;
+    for mut rest in &mut ghost_chips {
+        let want = if ghost_on { ROW_SELECTED } else { ROW_BG };
+        if rest.0 != want {
+            rest.0 = want;
         }
     }
     let want = format!(
@@ -720,9 +719,13 @@ pub(crate) fn spawn_chips(p: &mut ChildSpawnerCommands, rig: &emerge_core::rigs:
     crate::chrome::section(p, "STAGE");
     p.spawn(Node {
         flex_direction: FlexDirection::Row,
-        column_gap: Val::Px(4.0),
+        column_gap: Val::Px(crate::chrome::GAP_TIGHT),
         flex_wrap: FlexWrap::Wrap,
-        row_gap: Val::Px(3.0),
+        // A wrapping row of chips has to be allowed to narrow, or its last member is clipped by
+        // the pane's right edge (the audit's F7).
+        // CHROME-OK: zero is not a spacing step.
+        min_width: Val::Px(0.0),
+        row_gap: Val::Px(crate::chrome::GAP_TIGHT),
         ..default()
     })
     .with_children(|row| {
@@ -736,7 +739,7 @@ pub(crate) fn spawn_chips(p: &mut ChildSpawnerCommands, rig: &emerge_core::rigs:
                 row,
                 BenchSlotChip(i),
                 &format!("{i} {label}"),
-                10.0,
+                crate::chrome::text::CONTROL,
                 TEXT,
                 ROW_BG,
                 Color::NONE,
@@ -748,7 +751,7 @@ pub(crate) fn spawn_chips(p: &mut ChildSpawnerCommands, rig: &emerge_core::rigs:
     if rig.has_gaits() {
         p.spawn(Node {
             flex_direction: FlexDirection::Row,
-            margin: UiRect::top(Val::Px(3.0)),
+            margin: UiRect::top(Val::Px(crate::chrome::GAP_TIGHT)),
             ..default()
         })
         .with_children(|row| {
@@ -756,7 +759,7 @@ pub(crate) fn spawn_chips(p: &mut ChildSpawnerCommands, rig: &emerge_core::rigs:
                 row,
                 GhostChip,
                 "ghost (G): play the measured values over the declared",
-                10.0,
+                crate::chrome::text::CONTROL,
                 TEXT,
                 ROW_BG,
                 Color::NONE,
@@ -766,12 +769,12 @@ pub(crate) fn spawn_chips(p: &mut ChildSpawnerCommands, rig: &emerge_core::rigs:
     p.spawn((
         Text::new("click: solo · mod-click: mix in/out"),
         TextColor(LABEL),
-        TextFont::from_font_size(crate::chrome::text::HINT),
+        crate::chrome::font(crate::chrome::text::HINT),
     ));
     p.spawn((
         Text::new(String::new()),
         TextColor(DIM),
-        TextFont::from_font_size(crate::chrome::text::HINT),
+        crate::chrome::font(crate::chrome::text::HINT),
         ScrubLine,
     ));
 }

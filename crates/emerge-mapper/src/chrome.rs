@@ -23,35 +23,91 @@ use bevy::ui_widgets::ScrollArea;
 
 use crate::keys::{self};
 
-// ── the palette ──────────────────────────────────────────────────────────────────────────────────
+// ── the elevation ladder ─────────────────────────────────────────────────────────────────────────
+//
+// **A ground is a step on a ladder, and the step is measured.** The 2026-09-03 audit's finding was
+// that this palette separated *ink from ground* superbly and *ground from ground* not at all:
+// `PANEL_BG` stood 1.03:1 against `VOID`, `ROW_BG` 1.08:1 against `PANEL_BG`, and hover 1.19:1
+// against a row — with no border and no radius to carry the boundary instead. Reported at the
+// keyboard as *"the layout overall is muddy as hell"*, which is exactly what a screen looks like
+// when every surface edge is below the just-noticeable difference.
+//
+// **WCAG's contrast ratio is the wrong instrument down here** and using it is how the old ladder
+// passed review: the `+0.05` flare term dominates at near-black, so two clearly different darks and
+// two identical darks both score about 1.0. The right instrument for a large flat field is CIE
+// **L\***, where a just-noticeable difference is about 2 and a comfortable one about 4. Measured on
+// the shipped ladder, `VOID`→`PANEL_BG` was **ΔL\* 1.60** — below the JND. Every adjacent pair below
+// is **ΔL\* ≥ 2.95**, and `the_ladder_is_a_ladder` fails the build if one closes up again.
+//
+// Contrast ratio is still the right instrument for *text*, and every ink keeps ≥ 4.5:1 against the
+// grounds it actually renders on — `the_ink_clears_its_grounds` names the pairing per ink, because
+// "every ink on every ground" is a rule this palette cannot satisfy and should not pretend to.
+//
+//    VOID        L*  5.4   the window behind everything
+//    PANEL_BG    L* 10.0   a panel's own ground              ΔL* 4.58
+//    HEADER_BG   L* 13.0   a group heading band              ΔL* 2.95
+//    ROW_BG      L* 15.9   a row, a chip, a field at rest    ΔL* 5.84 over PANEL_BG
+//    SLOT_BG     L* 18.1   an inspector slot, a thumbnail
+//    OVERLAY_BG  L* 19.2   a modal card, above the scrim
+//    ROW_HOVER   L* 21.1   under the pointer                 ΔL* 5.25 over ROW_BG
+//    ROW_SELECTED L* 25.0  the one being acted on            ΔL* 3.89 over ROW_HOVER
+//    PANEL_EDGE  L* 33.1   the hairline that ends a surface
+//
+// Two grounds run the other way on purpose: `ROW_PRESSED` and `FOCUS_BG` are *recessed*, below the
+// surface they sit in, because pushed-in and typed-into are the two states where the metaphor is a
+// well rather than a card.
 
 /// The panel's own ground. Opaque, not the game's translucent HUD panel: an editor panel is a work
 /// surface, and a researcher in a white coat behind a translucent one is unreadable — measured.
-pub const PANEL_BG: Color = Color::srgb(0.058, 0.054, 0.047);
+pub const PANEL_BG: Color = Color::srgb(0.115, 0.107, 0.093);
 /// A row at rest.
-pub const ROW_BG: Color = Color::srgb(0.098, 0.092, 0.082);
+pub const ROW_BG: Color = Color::srgb(0.165, 0.153, 0.134);
 /// A row (or chip, or field) under the pointer and not yet chosen. **One name.** This value lived
 /// as an unnamed literal in the map palette and the tab strip — byte-identical, twice — which is
 /// this module's founding failure one more time. One step above [`ROW_BG`], well short of
 /// [`ROW_SELECTED`]: hover is a signifier that the thing is actionable (Norman's term, via
 /// Seinfeld et al. 2020, `10.1080/07370024.2020.1724790` §3.1), not a claim that it is chosen.
-pub const ROW_HOVER: Color = Color::srgb(0.16, 0.15, 0.14);
+pub const ROW_HOVER: Color = Color::srgb(0.212, 0.197, 0.172);
 /// A row that is armed, selected, or otherwise the one being acted on. **One name.** This was
 /// `ROW_ARMED` in the map tab and `ROW_SELECTED` in the tiles tab, at the same value — two names for
 /// one idea is two things to keep in step.
-pub const ROW_SELECTED: Color = Color::srgb(0.30, 0.28, 0.24);
+///
+/// It steps only ΔL\* 3.9 over [`ROW_HOVER`] and does not need more, because since 2026-09-03
+/// selection also carries a **shape**: [`SELECT_RAIL_W`] of [`ACCENT`] down the row's leading edge.
+/// A fill alone had to shout to be unambiguous, and shouting is what pushed a selected row's ground
+/// so bright that [`LABEL`] on it measured 3.25:1.
+pub const ROW_SELECTED: Color = Color::srgb(0.248, 0.231, 0.201);
+/// **A control with the pointer down on it.** Recessed — *below* [`ROW_BG`], not above — because
+/// pressed is the one state whose metaphor is a well rather than a card, and because a press that
+/// merely brightened would be indistinguishable from the hover it is entered from.
+///
+/// Before 2026-09-03 nothing in this editor acknowledged a click at all: rest, hover and selected
+/// were the whole state machine, so a button that ran a slow verb looked identical during it.
+pub const ROW_PRESSED: Color = Color::srgb(0.110, 0.102, 0.089);
 /// Body text: a value, an id, the thing that changes.
-pub const TEXT: Color = Color::srgb(0.86, 0.84, 0.80);
+pub const TEXT: Color = Color::srgb(0.880, 0.865, 0.835);
 /// Quieter body text. Was `TEXT_DIM` in one tab and `DIM` in the other, same value.
-pub const DIM: Color = Color::srgb(0.58, 0.56, 0.53);
-/// The heading and the live-edit colour.
-pub const ACCENT: Color = Color::srgb(0.90, 0.66, 0.24);
+pub const DIM: Color = Color::srgb(0.700, 0.685, 0.655);
+/// **The one live-edit colour, and nothing else.**
+///
+/// It used to do five jobs — panel title, live edit, selection, an expensive verb, and the tab
+/// strip's active mark — which is four too many for a hue this loud. The 2026-09-03 answer at the
+/// keyboard was to keep exactly one: *a value you are changing right now*. Titles are [`TEXT`],
+/// selection is [`ROW_SELECTED`] plus the rail, and a verb that costs something is an ordinary
+/// command button. The caret in [`field_text`] is the canonical use.
+pub const ACCENT: Color = Color::srgb(0.950, 0.710, 0.300);
 /// The key column. Brighter than the description beside it, because the key is what you scan for.
-pub const KEY: Color = Color::srgb(0.74, 0.71, 0.66);
+pub const KEY: Color = Color::srgb(0.790, 0.770, 0.735);
 /// A label column — quieter than its value, which is the thing that changes.
-pub const LABEL: Color = Color::srgb(0.46, 0.44, 0.42);
-/// A refusal, a blocking finding, an expensive number.
-pub const DANGER: Color = Color::srgb(0.86, 0.36, 0.30);
+///
+/// Raised 2026-09-03: at its old value this measured **3.65:1** on [`ROW_BG`], and it is 10 px type,
+/// which wants more contrast than body text rather than less. It now clears 4.5:1 on every ground a
+/// label renders on.
+pub const LABEL: Color = Color::srgb(0.615, 0.600, 0.575);
+/// **Destructive, and only destructive.** A refusal, a blocking finding, a verb that throws work
+/// away. Since 2026-09-03 it no longer marks *expensive* — that was a second meaning on one hue, and
+/// `rescan mesh` reading the same as `clear this cell` is how an author learns to ignore red.
+pub const DANGER: Color = Color::srgb(0.980, 0.520, 0.460);
 
 /// **Present but switched off** — dimmer than [`LABEL`], which is already the quietest thing that
 /// still asks to be read.
@@ -121,8 +177,10 @@ pub fn stepped_back(color: Color, held: bool) -> Color {
 }
 
 /// It has to stay visible, because a mesh that has silently vanished looks identical to one that was
-/// never scanned — but it must not compete with rows an author can actually act on.
-pub const MUTED: Color = Color::srgb(0.34, 0.32, 0.31);
+/// never scanned — but it must not compete with rows an author can actually act on. Raised
+/// 2026-09-03 from 2.49:1 to clear 4.5:1 on the two grounds an excluded pack header actually sits
+/// on, [`PANEL_BG`] and [`HEADER_BG`].
+pub const MUTED: Color = Color::srgb(0.575, 0.560, 0.540);
 
 /// **The problem banner's fill.** Deeper and more saturated than [`DANGER`], which is a text colour —
 /// red text at [`DANGER`] on [`PANEL_BG`] is legible and quiet, and quiet is the failure being fixed
@@ -130,12 +188,12 @@ pub const MUTED: Color = Color::srgb(0.34, 0.32, 0.31);
 pub const PROBLEM_BG: Color = Color::srgb(0.52, 0.13, 0.10);
 /// What is written on [`PROBLEM_BG`]. Warm rather than pure white, so it belongs to the same palette
 /// as everything else in the panel.
-pub const PROBLEM_TEXT: Color = Color::srgb(1.0, 0.93, 0.90);
+pub const PROBLEM_TEXT: Color = Color::srgb(1.0, 0.94, 0.92);
 
 /// **Machine-proposed, human-unconfirmed** — the VLM labeler's third state. A cool slate,
 /// deliberately neither [`ACCENT`] (amber = a live edit, yours) nor [`DANGER`] (red = wrong):
 /// a proposal is a question, and it must not read as either an answer or an alarm.
-pub const SUGGEST: Color = Color::srgb(0.42, 0.58, 0.66);
+pub const SUGGEST: Color = Color::srgb(0.530, 0.710, 0.810);
 /// **A value a model wrote that nobody has checked** — [`SUGGEST`]'s sibling, one state later.
 ///
 /// [`SUGGEST`] is a proposal *pending*: it sits on [`ROW_BG`], where a mid slate reads fine. This is
@@ -154,19 +212,26 @@ pub const UNCHECKED: Color = scaled(SUGGEST, 1.45);
 /// whether a mesh has been labeled."* Green because it is the one state that means *ready*, and it
 /// has to be told apart at a glance from [`SUGGEST`] — a machine's proposal waiting on a human is a
 /// question, and a judged mesh is an answer.
-pub const LABELED: Color = Color::srgb(0.50, 0.76, 0.46);
+pub const LABELED: Color = Color::srgb(0.550, 0.830, 0.500);
 
 /// Empty preview tile, so an un-baked row reads as "not yet" rather than as a hole in the panel.
 /// `thumbs.rs` carries a third copy of this value as `BACKDROP`, for the booth's own background.
-pub const SLOT_BG: Color = Color::srgb(0.14, 0.135, 0.125);
-/// **A text box that owns the keyboard right now.** The same value as [`SLOT_BG`], and its own name
-/// anyway: "this field is focused" and "this thumbnail is not baked yet" are different sentences,
-/// and a shared constant would weld them — retinting one would retint the other, which nobody
-/// would have chosen (the 2026-08-17 audit's `SLOT_BG`-moonlighting finding).
-pub const FOCUS_BG: Color = Color::srgb(0.14, 0.135, 0.125);
+pub const SLOT_BG: Color = Color::srgb(0.185, 0.172, 0.150);
+/// **A modal card's ground** — the one thing lit while the [`SCRIM`] holds everything else back.
+/// Above [`PANEL_BG`] by ΔL\* 9.2, because a card that reads at the same elevation as the panel
+/// behind it is a panel with a shadow on it rather than a question being asked.
+pub const OVERLAY_BG: Color = Color::srgb(0.195, 0.181, 0.158);
+/// **A text box that owns the keyboard right now** — *recessed*, below [`PANEL_BG`], where every
+/// other state on the ladder is raised. Typed-into is a well; the accent border
+/// ([`focus_edge`]) is what actually announces the focus, and this is the ground it draws on.
+///
+/// It used to be byte-identical to [`SLOT_BG`] with its own name (the 2026-08-17 audit's
+/// moonlighting finding); the name survived the audit and the value has now moved, which is the
+/// whole reason to have named it.
+pub const FOCUS_BG: Color = Color::srgb(0.088, 0.082, 0.071);
 /// A group heading — quieter than a row, because it is a signpost rather than a thing to click on
 /// most of the time.
-pub const HEADER_BG: Color = Color::srgb(0.075, 0.070, 0.063);
+pub const HEADER_BG: Color = Color::srgb(0.140, 0.130, 0.113);
 
 // ── world ink ────────────────────────────────────────────────────────────────────────────────────
 //
@@ -180,15 +245,15 @@ pub const HEADER_BG: Color = Color::srgb(0.075, 0.070, 0.063);
 /// of `srgb(0.035, …)`, a separation of about 0.165. The Map's ground slab raised what the lines
 /// are read against to 0.105, so holding that separation puts them here. Warm-neutral rather than
 /// pure grey, because every other colour in this editor is.
-pub const GRID_LINE: Color = Color::srgb(0.270, 0.262, 0.248);
+pub const GRID_LINE: Color = Color::srgb(0.300, 0.279, 0.243);
 /// A stated extent, brighter than the grid inside it: the map's bounds wireframe on the Map tab,
 /// the subgrid cell lattice on Tiles. Dim enough not to compete with [`GRID_LINE`], bright enough
 /// to find. One warm grey — previously two names at one value, one per tab.
-pub const BOUNDS_LINE: Color = Color::srgb(0.42, 0.38, 0.30);
+pub const BOUNDS_LINE: Color = Color::srgb(0.520, 0.470, 0.370);
 /// The void the panels float over — the clear colour both entry points install. Here because it
 /// was stated twice, byte-for-byte, in `main.rs` and `harness.rs`, and a fact stated more than
 /// once drifts. Darker than [`PANEL_BG`], so a panel reads as a surface laid on nothing.
-pub const VOID: Color = Color::srgb(0.035, 0.033, 0.030);
+pub const VOID: Color = Color::srgb(0.075, 0.070, 0.061);
 
 /// **The window's own chrome** — the bar above the door strip and the band at its foot.
 ///
@@ -202,9 +267,58 @@ pub const VOID: Color = Color::srgb(0.035, 0.033, 0.030);
 /// reads as raised *against* the bar it sits on.
 pub const BAR_BG: Color = scaled(SLOT_BG, 0.78);
 
-/// **The hairline that ends a bar.** Luminance, not hue — `docs/ui.md` §1.3 is explicit that
-/// separation is on luminance alone, and a chrome edge is the last thing that should spend saturation.
-pub const BAR_EDGE: Color = scaled(ROW_SELECTED, 0.62);
+// (`BAR_EDGE` was here until 2026-09-03. It was `ROW_SELECTED × 0.62` — an edge derived from a row
+// fill, which stopped making sense the moment every surface got an edge: a chrome bar's hairline and
+// a panel's hairline are one fact, and this module's whole argument is that a fact stated twice
+// drifts. Its three call sites take [`PANEL_EDGE`].)
+
+// ── edges and corners ────────────────────────────────────────────────────────────────────────────
+//
+// **The other half of the elevation model.** A fill step of ΔL* 4 is a comfortable separation and it
+// is still only a change of shade; what makes a surface read as an *object* is that it has an edge
+// and the edge turns a corner. Before 2026-09-03 this crate had four `BorderRadius` in 58,000 lines
+// (two of them the compass) and no panel border at all, so a panel was a rectangle of very slightly
+// different paint. Gestalt closure does the work a fill cannot: an outline groups its contents
+// whatever their contrast, which is why a bordered panel survives a bright thumbnail landing in it
+// and a fill-only panel does not.
+
+/// **The hairline that ends any surface** — a panel, a modal card, a group band. ΔL\* 23 over
+/// [`PANEL_BG`] and 27.6 over [`VOID`], so the same one line reads against both and a panel does not
+/// need a different edge depending on what is behind it.
+pub const PANEL_EDGE: Color = Color::srgb(0.325, 0.302, 0.263);
+
+/// **A louder edge, for the surface that owns the keyboard.** See [`focus_edge`].
+pub const EDGE_STRONG: Color = Color::srgb(0.440, 0.409, 0.356);
+
+/// **Which panel the keyboard is in**, as an edge rather than as a second selected row.
+///
+/// Asked for 2026-09-03: in the chooser nothing said which of the three columns the arrows were
+/// walking, so `↑` was a guess until it moved something. A focused *row* already exists and cannot
+/// answer this — every column has one, all the time. The panel's own edge can, and it costs no
+/// layout: the border is already there at [`PANEL_EDGE`], and focus lights it.
+pub const fn focus_edge(focused: bool) -> Color {
+    if focused { ACCENT } else { PANEL_EDGE }
+}
+
+/// One hairline. Not two: a 2 px border reads as a frame, and the thing being framed here is a work
+/// surface rather than a picture.
+pub const EDGE_W: f32 = 1.0;
+
+/// **A surface's corner.** Small on purpose — enough that the eye closes the shape, not so much that
+/// a 20 px row turns into a lozenge. Blender's editor rounds at 4–5 px on a panel and 3 on a widget;
+/// this is the same relationship at this editor's density.
+pub const RADIUS_PANEL: f32 = 4.0;
+/// A row, a chip, a field, a button.
+pub const RADIUS_ROW: f32 = 3.0;
+
+/// **The rail that says "this one"** — [`ACCENT`] down the leading edge of the selected row.
+///
+/// Selection used to be carried by fill and by amber *text*, and both were problems: the fill had to
+/// be loud enough to be unambiguous on its own, which pushed [`ROW_SELECTED`] bright enough to fail
+/// contrast for [`LABEL`] on it, and the amber text was one of [`ACCENT`]'s five jobs. A rail is a
+/// shape, so it is unambiguous at any fill, and it re-uses the vocabulary [`severity_rail`] already
+/// established in this same interface — a tinted left edge means *this line is special*.
+pub const SELECT_RAIL_W: f32 = 2.0;
 
 /// A chrome colour scaled toward black, for a quieter sibling of a named colour — so the derived
 /// value cannot drift from its parent the way `compose`'s hand-halved ACCENT could have.
@@ -233,14 +347,23 @@ pub const fn ink(colour: Color) -> [u8; 4] {
 
 // ── layout ───────────────────────────────────────────────────────────────────────────────────────
 
-/// Where the panels start, below the tab strip. One number, so no two panels can disagree about it
-/// and leave a tab half-covered.
 /// **The editor's interface scale**, and the one `main` starts the application at.
 ///
-/// Named here rather than written as `1.2` in two places, because there is now a second screen that
+/// Named here rather than written as a number in two places, because there is a second screen that
 /// legitimately runs at a different one: the menu multiplies `UiScale` by the display's scale factor
 /// so its offscreen capture rasterises sharp (`chooser::fit_capture_to_window`), and hands this back
 /// on the way out. Two owners of one value need one name for it.
+///
+/// **Raised on 2026-09-03, then made a base rather than an answer.** `fit_surface_to_window`
+/// multiplies this by the display's scale factor, which reports *density* and not *size*: on a
+/// 3396 px window reporting a factor of 1, body text rendered at 13 physical pixels and the two
+/// Meshes panels together used under 14 % of the width (the audit's F2).
+///
+/// A larger constant was the first fix and it was wrong in the other direction — it is the density
+/// a **small** window also gets, and at 1280 x 800 two 380 px docks scaled by 1.45 leave almost no
+/// stage, which the badge packer reported by covering its own legend. So the growth belongs where
+/// the window's size is known: this is the density the design is drawn at, and
+/// [`crate::surface::ui_scale_for`] is what a bigger window does with it.
 pub const EDITOR_UI_SCALE: f32 = 1.2;
 
 pub const TAB_STRIP_BOTTOM: f32 = 46.0;
@@ -249,13 +372,16 @@ pub const MARGIN: f32 = 12.0;
 /// Inside a panel.
 pub const PAD: f32 = 12.0;
 
-/// Width of a controls panel — two aligned text columns, so it is set by the widest chord plus its
-/// label.
-pub const CONTROLS_W: f32 = 300.0;
-/// The tiles tab's controls panel is wider, and earns it: below the key list it carries four rows of
-/// tag chips and a findings paragraph, neither of which is a two-column table. At `CONTROLS_W` the
-/// chips wrapped to twice the height and pushed the findings off the bottom of the screen.
-pub const TILES_CONTROLS_W: f32 = 380.0;
+/// **Width of a controls panel — one number for every left dock.**
+///
+/// It was two: `CONTROLS_W` 300 on the Map door and `TILES_CONTROLS_W` 380 on the other three, so
+/// the viewport jumped 80 px when the author changed door, and three of the four callers used a
+/// constant named for one tab. The wider value wins because the reason it exists is still true —
+/// below the key list the Tiles inspector carries four rows of tag chips and a findings paragraph,
+/// neither of which is a two-column table, and at 300 the chips wrapped to twice the height and
+/// pushed the findings off the bottom of the screen. A panel that is 80 px wider than it needs costs
+/// nothing; a viewport that changes size when you change tab costs the author their place.
+pub const CONTROLS_W: f32 = 380.0;
 /// Width of a list panel. Narrower than the controls: a row here is a thumbnail, an id and a number
 /// rather than two text columns. Both panels together leave a little under half the screen for the
 /// map at `UiScale(1.2)`, which is the thing the right edge was chosen to protect.
@@ -370,22 +496,63 @@ pub fn theme() -> bevy::feathers::theme::ThemeProps {
 /// Compose's three hand-made headings 11 → 10, the anim pair un-inverted, and the name box's 18 →
 /// [`TITLE`]. Everything else keeps the size it had and gains a name.
 pub mod text {
+    /// **A type role, and the reason it is not an `f32`.**
+    ///
+    /// The 2026-09-03 audit found the size ratchet had a laundering hole: `chrome_census.rs` scans
+    /// for `from_font_size(<digit>`, and `chip`/`text_field` took `px: f32` and called
+    /// `from_font_size` *inside* `chrome.rs`, which the scan skips. Twenty call sites were passing
+    /// bare `9.0` / `10.0` / `11.0` through a function argument, in a crate whose own test claims a
+    /// size is *"a role, never a number"*.
+    ///
+    /// A regex cannot close that; a type can. A builder takes a [`Role`], a `Role` is only ever one
+    /// of the constants below, and a bare number at a call site is a compile error rather than a
+    /// finding in the next audit.
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    pub struct Role(f32);
+
+    impl Role {
+        /// The role's size in logical pixels. For [`super::font`] and for measurement
+        /// (`chars * BODY_CHAR_W`); **not** a way back to writing numbers at a call site.
+        pub const fn px(self) -> f32 {
+            self.0
+        }
+    }
+
     /// The panel's own name — `EMERGE MAPPER`, `MESHES AND TILES`. One per panel.
-    pub const TITLE: f32 = 15.0;
+    pub const TITLE: Role = Role(15.0);
     /// A tab's word in the strip, and the chooser's column headers.
-    pub const TAB: f32 = 13.0;
+    pub const TAB: Role = Role(13.0);
     /// **The readable default.** A row's value, a field's contents, the problem banner, a census
     /// row — anything the author is reading rather than orienting by. The chord on a badge is
     /// this size on purpose: it is the one thing a badge exists to have read.
-    pub const BODY: f32 = 11.0;
+    pub const BODY: Role = Role(11.0);
     /// A block or list heading. Quiet: uppercase, dim ink, and [`super::GAP_GROUP`] above it.
-    pub const HEADING: f32 = 10.0;
+    pub const HEADING: Role = Role(10.0);
     /// The dim half of a label/value pair, and a log line.
-    pub const LABEL: f32 = 10.0;
+    pub const LABEL: Role = Role(10.0);
+    /// **A control's own word** — the text on a chip, a button, a field. Ten pixels, the same
+    /// number as [`LABEL`] and [`HEADING`], and a seventh role anyway.
+    ///
+    /// `the_type_scale_stays_short` says a seventh role *"is a decision somebody should have to make
+    /// on purpose"*, so here is the purpose. The 2026-09-03 decision was **shape carries kind,
+    /// colour carries severity**: a toggle and a command stopped being the same box. The word on a
+    /// control is therefore a role in its own right — it is the only text in this interface that
+    /// names an *action* rather than describing a value — and the twenty call sites that used to
+    /// pass a bare `10.0` into `chip(px: f32)` had nothing else honest to say.
+    pub const CONTROL: Role = Role(10.0);
     /// Badge descriptions, footnotes, and the always-on hint — the smallest thing on screen, and
     /// never the thing being read. (Badge *chords* moved up to [`BODY`]; the description beside a
     /// chord stays down here, quieter on both axes.)
-    pub const HINT: f32 = 9.0;
+    pub const HINT: Role = Role(9.0);
+}
+
+/// **The only way this crate makes a `TextFont`.**
+///
+/// `TextFont::from_font_size` takes an `f32` and will therefore always accept a number; this takes a
+/// [`text::Role`] and cannot. `the_type_scale_is_a_type` fails the build on a `from_font_size`
+/// outside this module, which is the rule the old digit-matching regex was reaching for.
+pub fn font(role: text::Role) -> TextFont {
+    TextFont::from_font_size(role.px())
 }
 
 /// **One glyph's advance at [`text::BODY`], logical pixels.** The shipped face is
@@ -430,6 +597,54 @@ pub const FIELD_PAD: UiRect = UiRect::axes(Val::Px(4.0), Val::Px(2.0));
 /// A text field's floor. An unstated height lays out at 7 px while empty — this fact was restated
 /// at five sites as a bare `18.0` before it had a name.
 pub const MIN_FIELD_H: f32 = 18.0;
+
+/// **The box a number is typed into**, and the field's third dimension beside [`MIN_FIELD_H`] and
+/// [`FIELD_PAD`].
+///
+/// One idea with two values before 2026-09-03 — 62 in `tiles.rs` for a size and a mount height, 56
+/// in `editor.rs` for a map extent — which is a fact stated twice, one file apart. 62 wins on the
+/// measurement rather than by being the larger: the widest thing typed into one of these is
+/// `12.34` plus the caret, which does not fit in 56 at [`text::BODY`], while the Map's `48` fits
+/// comfortably in 62.
+pub const NUM_FIELD_W: f32 = 62.0;
+
+/// **A command button's inset**, and deliberately larger than [`CHIP_PAD`].
+///
+/// This is half of *shape carries kind* (the 2026-09-03 decision): a **toggle** — a tag, an axis
+/// value, a thing that is on or off — is a [`chip`], and a **command** — `rescan mesh`, `clear this
+/// cell`, a thing that happens once — is a [`button`]. Before that they were the same grey box in
+/// the same row, told apart only by an ink that also meant three other things, so the way to learn
+/// which was which was to press one.
+pub const BUTTON_PAD: UiRect = UiRect::axes(Val::Px(10.0), Val::Px(GAP_ROW));
+
+/// **A modal card's inset.** Roomier than a panel's [`PAD`], because a card is one question with
+/// nothing else on it and the air is what makes it read as lifted rather than as a small panel.
+/// Stated once so the three modals stop disagreeing — they ran 20 / 18 / 18 with gaps of 12 / 10 / 10.
+pub const MODAL_PAD: f32 = 20.0;
+
+/// **The label column of a `LABEL  value` row.**
+///
+/// It was six unnamed literals — 76, 62, 56, 48, 40 and 14 — one per author, which is why no two
+/// panels in this editor lined their values up with each other. Three widths, chosen by what the
+/// column has to hold rather than by which file it is in:
+///
+/// - [`COL_TIGHT`] a single glyph or an axis letter,
+/// - [`COL_LABEL`] an ordinary word (`size`, `mount`, `pieces`),
+/// - [`COL_WIDE`] a phrase (`new work lands here`, `not imported`).
+///
+/// A value that will not fit its column is a [`COL_WIDE`] row, not a seventh number — and since
+/// 2026-09-03 a column is a **floor** rather than a cap, so a label that outgrows even `COL_WIDE`
+/// pushes its own value right instead of drawing on top of it.
+///
+/// **The KIT INFO overlap (`docs/ui_audit.md` F5) lived here**, and measuring it is what showed a
+/// wider constant could not fix it: `new work lands here` plus the inspector's selection mark is 21
+/// characters, which at `text::LABEL` on this monospace face is 126 px of glyphs — over `COL_WIDE`
+/// as well as over the 76 px column it actually had. See [`row_label`].
+pub const COL_TIGHT: f32 = 16.0;
+/// See [`COL_TIGHT`].
+pub const COL_LABEL: f32 = 52.0;
+/// See [`COL_TIGHT`].
+pub const COL_WIDE: f32 = 96.0;
 /// A block heading: quiet, and separated from what came before it.
 ///
 /// The separation is the work — a heading with the same gap above it as below is a label that could
@@ -438,7 +653,7 @@ pub fn section<'a>(parent: &'a mut ChildSpawnerCommands, label: &str) -> EntityC
     parent.spawn((
         Text::new(label.to_owned()),
         TextColor(LABEL),
-        TextFont::from_font_size(text::HEADING),
+        font(text::HEADING),
         Node {
             margin: UiRect::top(Val::Px(GAP_GROUP)).with_bottom(Val::Px(GAP_TIGHT)),
             ..default()
@@ -484,9 +699,13 @@ pub fn panel_root<'a>(
     let mut node = Node {
         width: Val::Px(width),
         flex_direction: FlexDirection::Column,
-        row_gap: Val::Px(6.0),
+        // `GAP_ROW`, not the bare `6.0` that stood here until 2026-09-03 — the one gap every panel in
+        // the editor uses was the one gap that was not on the scale.
+        row_gap: Val::Px(GAP_ROW),
         padding: UiRect::all(Val::Px(PAD)),
         margin: UiRect::all(Val::Px(MARGIN)),
+        border: UiRect::all(Val::Px(EDGE_W)),
+        border_radius: BorderRadius::all(Val::Px(RADIUS_PANEL)),
         ..default()
     };
     if full_height {
@@ -504,7 +723,18 @@ pub fn panel_root<'a>(
         Side::Right => frame.right,
     };
     let panel = commands
-        .spawn((node, BackgroundColor(PANEL_BG), Ground(PANEL_BG), Hovered::default()))
+        .spawn((
+            node,
+            BackgroundColor(PANEL_BG),
+            Ground(PANEL_BG),
+            // The edge and the corner are what make this read as a surface rather than as a
+            // rectangle of slightly different paint — see the elevation-ladder header.
+            BorderColor::all(PANEL_EDGE),
+            // Which panel the keyboard is in is drawn on this border; nothing lights it until a
+            // `Focused` lands, so a panel nobody has focused keeps `PANEL_EDGE`.
+            PanelEdge,
+            Hovered::default(),
+        ))
         .id();
     commands.entity(dock).add_child(panel);
     commands.entity(panel)
@@ -613,6 +843,28 @@ pub struct Control(pub keys::ControlId);
 #[derive(Component)]
 pub struct Ground(pub Color);
 
+/// **A surface whose border says whether the keyboard is in it.** Carried by every [`panel_root`].
+#[derive(Component)]
+pub struct PanelEdge;
+
+/// **Put this on a [`PanelEdge`] to light its border.** The owner of the focus decides — the chooser
+/// moves it with its column, an editor door with its `Context` — because *where the keyboard is* is
+/// a fact those modules already hold and a second definition of it here would be a second answer.
+#[derive(Component)]
+pub struct Focused;
+
+/// Paint [`PanelEdge`] from [`Focused`]. Compares before writing — `BorderColor` is change-detected
+/// and there are thirteen panels, so an unconditional write would dirty the whole interface sixty
+/// times a second for a border that moves twice a session (`tests/no_system_writes_every_frame.rs`).
+fn light_the_focused_panel(mut panels: Query<(&mut BorderColor, Has<Focused>), With<PanelEdge>>) {
+    for (mut border, focused) in &mut panels {
+        let want = focus_edge(focused);
+        if border.top != want {
+            *border = BorderColor::all(want);
+        }
+    }
+}
+
 /// Height of the two bars. Fixed, because a bar that changed height as its content changed would
 /// move the viewport under the author's hands.
 const BAR_H: f32 = 26.0;
@@ -644,7 +896,7 @@ pub fn spawn_frame(mut commands: Commands) {
             }),
             BackgroundColor(BAR_BG),
             Ground(BAR_BG),
-            BorderColor::all(BAR_EDGE),
+            BorderColor::all(PANEL_EDGE),
             bevy::picking::Pickable::IGNORE,
         ))
         .id();
@@ -725,7 +977,7 @@ pub fn spawn_frame(mut commands: Commands) {
             }),
             BackgroundColor(BAR_BG),
             Ground(BAR_BG),
-            BorderColor::all(BAR_EDGE),
+            BorderColor::all(PANEL_EDGE),
             bevy::picking::Pickable::IGNORE,
         ))
         .id();
@@ -758,12 +1010,22 @@ pub fn spawn_frame(mut commands: Commands) {
     });
 }
 
-/// A panel's heading.
+/// **A panel's heading.**
+///
+/// `TEXT`, not `ACCENT`. The amber used to head every left dock, and that was one of the five jobs
+/// the 2026-09-03 decision took off it: amber now means *a value you are changing right now*, and a
+/// panel's name never changes. What separates a title from the rows under it is that it is the
+/// largest thing on the panel ([`text::TITLE`]) and has a group gap below it — size and space, which
+/// is what a heading is supposed to be made of.
 pub fn title(parent: &mut ChildSpawnerCommands, text: &str) {
     parent.spawn((
         Text::new(text.to_owned()),
-        TextColor(ACCENT),
-        TextFont::from_font_size(text::TITLE),
+        TextColor(TEXT),
+        font(text::TITLE),
+        Node {
+            margin: UiRect::bottom(Val::Px(GAP_ROW)),
+            ..default()
+        },
     ));
 }
 
@@ -1108,7 +1370,7 @@ pub fn problem_toast(mut commands: Commands, frame: Res<Frame>) {
             BackgroundColor(PROBLEM_BG),
             Text::new(String::new()),
             TextColor(PROBLEM_TEXT),
-            TextFont::from_font_size(text::BODY),
+            font(text::BODY),
             TextLayout::new(Justify::Left, LineBreak::WordOrCharacter),
             bevy::picking::Pickable::IGNORE,
             ProblemBanner,
@@ -1202,7 +1464,7 @@ pub fn journal_panel(mut commands: Commands, frame: Res<Frame>) {
                 keys::chord(keys::Action::CopyInfo)
             )),
             TextColor(DIM),
-            TextFont::from_font_size(text::LABEL),
+            font(text::LABEL),
         ));
         // A list to scroll: a session's worth of refusals is longer than a screen by design.
         //
@@ -1262,7 +1524,7 @@ pub fn problem_log_line(parent: &mut ChildSpawnerCommands, text: &str, colour: C
             row.spawn((
                 Text::new("•"),
                 TextColor(colour),
-                TextFont::from_font_size(text::LABEL),
+                font(text::LABEL),
                 TextLayout::new(Justify::Left, LineBreak::NoWrap),
             ));
             row.spawn((
@@ -1277,7 +1539,7 @@ pub fn problem_log_line(parent: &mut ChildSpawnerCommands, text: &str, colour: C
                 },
                 Text::new(text.to_owned()),
                 TextColor(colour),
-                TextFont::from_font_size(text::LABEL),
+                font(text::LABEL),
             ));
         });
 }
@@ -1385,6 +1647,9 @@ const BAR_INSET: f32 = 1.0;
 /// The thumb never shrinks below this, or a long list makes it a dot nobody can grab (Fitts, and
 /// upstream's own reason for the parameter).
 const MIN_THUMB: f32 = 18.0;
+/// **What the bar reserves.** Derived from the bar rather than picked, so the lane and the thing it
+/// is a lane for cannot drift apart — the failure this module exists to prevent, one more time.
+pub const SCROLL_GUTTER: f32 = BAR_W + BAR_INSET;
 
 /// **A list that scrolls, and now says so.**
 ///
@@ -1429,9 +1694,16 @@ pub fn scroll_list<'a>(
         .spawn((
             Node {
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(2.0),
+                row_gap: Val::Px(GAP_TIGHT),
                 flex_grow: 1.0,
                 min_height: Val::Px(0.0),
+                // **The bar's own lane, so nothing is drawn under it.** The scrollbar is an overlay
+                // at `BAR_W` inset by `BAR_INSET`, and until 2026-09-03 the content ran straight
+                // beneath it: on the Meshes tab the last chip of a wrapped tag row rendered half
+                // behind the bar (the audit's F7). Padding rather than margin, because a scroll
+                // viewport's padding is *inside* the clip — so the content stops short of the bar
+                // and `content_size` still counts it, which is what `hide_idle_scrollbars` reads.
+                padding: UiRect::right(Val::Px(SCROLL_GUTTER)),
                 overflow: Overflow::scroll_y(),
                 ..default()
             },
@@ -1540,23 +1812,38 @@ pub fn list_heading(parent: &mut ChildSpawnerCommands, text: &str) {
     parent.spawn((
         Text::new(text.to_owned()),
         TextColor(LABEL),
-        TextFont::from_font_size(text::HEADING),
+        font(text::HEADING),
     ));
 }
 
-/// **The fixed label column of a `LABEL  value` row** — the shape the audit found hand-rolled
-/// eight times, differing only in this width. 10 px [`LABEL`], never wrapping, never shrinking:
-/// the label is what keeps the values aligned, so it must hold its column.
+/// **The label column of a `LABEL  value` row** — the shape the audit found hand-rolled eight times,
+/// differing only in this width. 10 px [`LABEL`], never wrapping, never shrinking.
+///
+/// # The column is a floor, not a cap, and that is the F5 fix
+///
+/// It used to be `width: Val::Px(width)`. A `Text` does not shrink to its box and UI overflow is
+/// visible by default, so a label longer than its column simply **drew over the value beside it** —
+/// which is what the menu's KIT INFO row had been doing in every capture: `new work lands here` is
+/// 19 characters, plus the selection mark the inspector prefixes, is 126 px of glyphs starting in a
+/// 76 px column, so `yes` rendered underneath the word `lands`.
+///
+/// Measured by `ChooserSlice` on 2026-09-03, and the measurement is the argument: widening the
+/// constant to [`COL_WIDE`] takes the overlap from ~74 px to ~30 px. It does not remove it, because
+/// no fixed number can — a caller can always be handed a longer string.
+///
+/// So `min_width` holds the alignment that the constant exists for, and `Val::Auto` lets a label
+/// that does not fit push its own value right instead of painting on it. Short labels line up at
+/// exactly the column, which is the whole point, and no call site changes.
 pub fn row_label(row: &mut ChildSpawnerCommands, width: f32, label: &str) {
     row.spawn((
         Node {
-            width: Val::Px(width),
+            min_width: Val::Px(width),
             flex_shrink: 0.0,
             ..default()
         },
         Text::new(label.to_owned()),
         TextColor(LABEL),
-        TextFont::from_font_size(text::LABEL),
+        font(text::LABEL),
         TextLayout::new(Justify::Left, LineBreak::NoWrap),
     ));
 }
@@ -1567,7 +1854,7 @@ pub fn row_value(row: &mut ChildSpawnerCommands, text: impl Into<String>, colour
     row.spawn((
         Text::new(text.into()),
         TextColor(colour),
-        TextFont::from_font_size(text::BODY),
+        font(text::BODY),
         marker,
     ));
 }
@@ -1586,7 +1873,7 @@ pub fn chip<'a>(
     parent: &'a mut ChildSpawnerCommands,
     marker: impl Bundle,
     label: &str,
-    px: f32,
+    role: text::Role,
     ink: Color,
     fill: Color,
     border: Color,
@@ -1604,7 +1891,8 @@ pub fn chip<'a>(
         marker,
         Node {
             padding: CHIP_PAD,
-            border: UiRect::all(Val::Px(1.0)),
+            border: UiRect::all(Val::Px(EDGE_W)),
+            border_radius: BorderRadius::all(Val::Px(RADIUS_ROW)),
             ..default()
         },
         BorderColor::all(border),
@@ -1614,7 +1902,7 @@ pub fn chip<'a>(
         chip.spawn((
             Text::new(label.to_owned()),
             TextColor(ink),
-            TextFont::from_font_size(px),
+            font(role),
             TextLayout::new(Justify::Left, LineBreak::NoWrap),
         ));
     });
@@ -1668,32 +1956,242 @@ pub fn quiet_row<'a>(
     parent.spawn((row_shape(selected), marker))
 }
 
+/// **Whether a row is the chosen one.** Carried rather than baked into the fill alone, because since
+/// 2026-09-03 selection is a fill *and* a rail and the two must not be able to disagree.
+#[derive(Component, Clone, Copy)]
+pub struct RowSelected(pub bool);
+
 /// What a list row looks like, shared by [`list_row`] and [`quiet_row`] so the two cannot drift into
 /// two row shapes — which is the drift this whole module exists to stop.
+///
+/// **The rail is a left border, not a child node**, and the width is reserved whether or not the row
+/// is selected — so selecting a row cannot move its text sideways by two pixels, which is what an
+/// added child or a conditional border would do to a list the author is reading down.
 fn row_shape(selected: bool) -> impl Bundle {
     let rest = if selected { ROW_SELECTED } else { ROW_BG };
     (
         Hovered::default(),
         RowRest(rest),
+        RowSelected(selected),
         Node {
             width: Val::Percent(100.0),
             padding: CHIP_PAD,
+            border: UiRect::left(Val::Px(SELECT_RAIL_W)),
+            // `border_radius` is a `Node` field in Bevy 0.19, not a component — `BorderRadius`
+            // derives `Reflect` and not `Component` (`bevy_ui-0.19.0/src/ui_node.rs:2526`), so a
+            // tuple carrying one is simply not a `Bundle` and the error names the tuple rather than
+            // the offending member.
+            border_radius: BorderRadius::all(Val::Px(RADIUS_ROW)),
             ..default()
         },
+        BorderColor::all(if selected { ACCENT } else { Color::NONE }),
         BackgroundColor(rest),
     )
 }
 
-/// Selection beats hover, hover beats rest — the same priority every hand-rolled repainter uses
-/// (`editor::style_rows`, `tiles::style_tabs`), stated once for every [`list_row`] in the editor.
-fn style_list_rows(mut rows: Query<(&RowRest, &Hovered, &mut BackgroundColor)>) {
-    for (rest, hovered, mut bg) in &mut rows {
-        let want = if hovered.0 && rest.0 == ROW_BG { ROW_HOVER } else { rest.0 };
+/// **The five states, once, for every row / chip / button in the editor.**
+///
+/// Disabled beats pressed beats selected beats hover beats rest. Before 2026-09-03 the middle two
+/// did not exist: rest, hover and selected were the whole machine, so a control that ran a slow verb
+/// looked identical while it ran and a control that could not be used looked exactly like one that
+/// could.
+///
+/// **Why the mouse button is read here rather than trusting `Pressed`.** `bevy_ui::Pressed` is
+/// maintained by `bevy_ui_widgets::ButtonPlugin`'s observers, which match `With<Button>`
+/// (`bevy_ui_widgets-0.19.0/src/button.rs:59`) — and [`quiet_row`] deliberately has no `Button`,
+/// because a global `Activate` observer taking a door's resource panics on the menu. So a quiet row
+/// would have been the one shape in the editor that never acknowledged a click. Hover plus a held
+/// primary button is the same fact one layer down, and it is what the author actually did.
+fn style_list_rows(
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut rows: Query<(
+        &RowRest,
+        &Hovered,
+        Has<bevy::ui::Pressed>,
+        Has<bevy::ui::InteractionDisabled>,
+        &mut BackgroundColor,
+    )>,
+) {
+    let held = mouse.pressed(MouseButton::Left);
+    for (rest, hovered, pressed, disabled, mut bg) in &mut rows {
+        let want = if disabled {
+            // Not a fill of its own: a disabled control drops back to the panel it sits on, so it
+            // reads as part of the surface rather than as a thing that is merely quiet today.
+            PANEL_BG
+        } else if pressed || (hovered.0 && held) {
+            ROW_PRESSED
+        } else if rest.0 == ROW_SELECTED {
+            ROW_SELECTED
+        } else if hovered.0 {
+            ROW_HOVER
+        } else {
+            rest.0
+        };
         if bg.0 != want {
             bg.0 = want;
         }
     }
 }
+
+/// **What a control does, which is the half its shape cannot say.**
+///
+/// Shape says *kind* — a [`chip`] toggles, a [`button`] happens — and this says *severity*, which is
+/// the 2026-09-03 split. It has exactly three values on purpose: before it, `clear this cell` was
+/// red, `rescan mesh` was amber and every other verb was grey, with no rule between them, so red
+/// meant "destructive or expensive or the author felt strongly" and therefore meant nothing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    /// The ordinary case. Most verbs.
+    Plain,
+    /// The one obvious thing to do here — a single button per block at most.
+    Primary,
+    /// **Throws work away.** The only thing in this editor that is red.
+    Destructive,
+}
+
+impl Severity {
+    /// The word's ink. The *fill* is [`ROW_BG`] in every case: a filled red button in a panel of
+    /// grey ones is a stop sign, and most destructive verbs here are ordinary editing.
+    /// Public because `confirm`'s card is built once and repainted per question: which button is
+    /// destructive depends on which question is up, so the mapping has to be readable from outside
+    /// without being restated outside.
+    pub const fn ink(self) -> Color {
+        match self {
+            Severity::Plain => TEXT,
+            Severity::Primary => ACCENT,
+            Severity::Destructive => DANGER,
+        }
+    }
+}
+
+/// **A command button** — a control that makes something happen, as opposed to a [`chip`], which is
+/// a control that is on or off.
+///
+/// The two were the same box until 2026-09-03, in the same row, in the same panel: on the Meshes tab
+/// the tag chips (toggles), `solid`/`edge`/`clear` (cell commands) and `rescan mesh` (an expensive
+/// action) all rendered as one grey rectangle. The only way to learn which was which was to press
+/// one. So a button is now visibly heavier — [`BUTTON_PAD`] rather than [`CHIP_PAD`], and a lit
+/// [`PANEL_EDGE`] border where a chip's border is `Color::NONE` unless it has something to say.
+///
+/// **`marker` must not contain a `Node`** — see [`chip`] for why that is a panic rather than a
+/// warning.
+pub fn button<'a>(
+    parent: &'a mut ChildSpawnerCommands,
+    marker: impl Bundle,
+    label: &str,
+    severity: Severity,
+) -> EntityCommands<'a> {
+    let mut b = parent.spawn((
+        bevy::ui_widgets::Button,
+        Hovered::default(),
+        RowRest(ROW_BG),
+        marker,
+        Node {
+            padding: BUTTON_PAD,
+            border: UiRect::all(Val::Px(EDGE_W)),
+            border_radius: BorderRadius::all(Val::Px(RADIUS_ROW)),
+            flex_shrink: 0.0,
+            ..default()
+        },
+        BorderColor::all(PANEL_EDGE),
+        BackgroundColor(ROW_BG),
+    ));
+    b.with_children(|b| {
+        b.spawn((
+            Text::new(label.to_owned()),
+            TextColor(severity.ink()),
+            font(text::CONTROL),
+            TextLayout::new(Justify::Left, LineBreak::NoWrap),
+        ));
+    });
+    b
+}
+
+/// **One card for every question this application asks.**
+///
+/// Three modals shipped three contracts — the confirm dialog with real buttons, a `TabGroup`, z 900,
+/// a border and `padding: 20`; the token prompt with none of those at z 400 and `padding: 18`; the
+/// name box with a fourth scrim written inline at `srgba(0, 0, 0, 0.72)` next to a constant whose own
+/// doc says it exists so *"a second modal cannot dim by a different amount"*. This is that amount,
+/// that z, that padding, and that card, stated once.
+///
+/// Returns the **card**, not the scrim: the caller fills the card and never sees the layer.
+pub fn modal_card<'a>(commands: &'a mut Commands, root: impl Bundle) -> EntityCommands<'a> {
+    let layer = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                // **Hidden until something shows it, and that is the shell's decision.** Every modal
+                // here is spawned once at `OnEnter` and revealed on demand, so all three callers
+                // used to state this themselves — and a caller cannot state it now, because `root`
+                // may not contain a `Node` (two of one component is a spawn panic in Bevy 0.19) and
+                // this builder returns the *card*, which leaves the layer unreachable.
+                //
+                // `Display::None`, never `Visibility`: a visibility-hidden node still lays out and
+                // still answers hover, and the card carries `Hovered` — so the world would stop
+                // taking clicks for a modal nobody had opened. To show it, flip `Node::display` on
+                // the entity carrying your own `root` marker, which is this layer.
+                display: Display::None,
+                ..default()
+            },
+            BackgroundColor(SCRIM),
+            GlobalZIndex(MODAL_Z),
+            root,
+        ))
+        .id();
+    let card = commands
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                min_width: Val::Px(MODAL_MIN_W),
+                max_width: Val::Px(MODAL_MAX_W),
+                padding: UiRect::all(Val::Px(MODAL_PAD)),
+                row_gap: Val::Px(GAP_GROUP),
+                border: UiRect::all(Val::Px(EDGE_W)),
+                border_radius: BorderRadius::all(Val::Px(RADIUS_PANEL)),
+                ..default()
+            },
+            BackgroundColor(OVERLAY_BG),
+            BorderColor::all(PANEL_EDGE),
+            Hovered::default(),
+        ))
+        .id();
+    commands.entity(layer).add_child(card);
+    commands.entity(card)
+}
+
+// ── the overlay stack, in one place ──────────────────────────────────────────────────────────────
+//
+// Eight overlays shipped with five z-values and **two with none at all** — the session journal and
+// the problem toast, which therefore stacked by spawn order against siblings that had opinions.
+// Written as numbers at five call sites in four files, there was nothing to read to find out what
+// was in front of what; written here, the list *is* the answer and `every_overlay_declares_its_z`
+// fails a build that adds a sixth number somewhere else.
+//
+// Read it top-down: a question you must answer is in front of the keys that teach you the
+// application, which are in front of a readout you glance at.
+
+/// **A modal question.** In front of everything, because nothing else on screen is actionable while
+/// one is up.
+pub const MODAL_Z: i32 = 900;
+/// **The key badges**, which you hold a key to see. Below a modal — a question that has taken the
+/// keyboard is exactly the moment the shortcut layer must not cover its own answer.
+pub const BADGE_Z: i32 = 500;
+/// **The session journal and the problem toast.** Above the panels they are reporting on and below
+/// the badges that name the key which dismisses them. These two carried **no `GlobalZIndex` at all**
+/// until 2026-09-03, which is not "behind everything" but "wherever the spawn order left them".
+pub const NOTICE_Z: i32 = 300;
+/// **The compass**, a persistent readout in the corner of the viewport. Lowest, because it is the
+/// one overlay that is never the thing you are looking at.
+pub const COMPASS_Z: i32 = 100;
+/// A card is at least this wide, so a one-word question does not render as a one-word box.
+pub const MODAL_MIN_W: f32 = 360.0;
+/// And at most this wide, so a refusal naming three descriptors stays a paragraph rather than a line.
+pub const MODAL_MAX_W: f32 = 560.0;
 
 /// **A text field's box** — [`MIN_FIELD_H`] floor, [`FIELD_PAD`] inset, [`ROW_BG`] fill, with its
 /// readout text spawned inside. The audit found this shape six times with three paddings.
@@ -1701,7 +2199,7 @@ pub fn text_field<'a>(
     parent: &'a mut ChildSpawnerCommands,
     width: Val,
     field: impl Bundle,
-    px: f32,
+    role: text::Role,
     initial: (String, Color),
     readout: impl Bundle,
 ) -> EntityCommands<'a> {
@@ -1722,7 +2220,7 @@ pub fn text_field<'a>(
         f.spawn((
             Text::new(initial.0),
             TextColor(initial.1),
-            TextFont::from_font_size(px),
+            font(role),
             readout,
         ));
     });
@@ -1852,19 +2350,19 @@ fn spawn_name_box(mut commands: Commands) {
             .with_children(|b| {
                 b.spawn((
                     Text::new(String::new()),
-                    TextFont::from_font_size(text::BODY),
+                    font(text::BODY),
                     TextColor(LABEL),
                     NameBoxTitle,
                 ));
                 b.spawn((
                     Text::new(String::new()),
-                    TextFont::from_font_size(text::TITLE),
+                    font(text::TITLE),
                     TextColor(ACCENT),
                     NameBoxValue,
                 ));
                 b.spawn((
                     Text::new(String::new()),
-                    TextFont::from_font_size(text::BODY),
+                    font(text::BODY),
                     TextColor(DIM),
                     NameBoxHint,
                 ));
@@ -2040,6 +2538,9 @@ impl Plugin for ChromePlugin {
                     style_list_rows,
                     hide_idle_scrollbars,
                     repaint_where_you_are,
+                    // Ungated for the same reason: both screens have panels, and which one holds
+                    // the keyboard is a question the menu asks louder than the editor does.
+                    light_the_focused_panel,
                 ),
             )
             // **After `Phase::Text`, not in it.** The field consumes the keystroke there; painting
@@ -2373,14 +2874,14 @@ pub fn spawn_chrome_bar(
             b.spawn((
                 Text::new("\u{2039} kits & maps".to_owned()),
                 TextColor(KEY),
-                TextFont::from_font_size(text::BODY),
+                font(text::BODY),
                 bevy::picking::Pickable::IGNORE,
             ));
             b.spawn((
                 BackChord,
                 Text::new(keys::chord(keys::Action::MainMenu)),
                 TextColor(LABEL),
-                TextFont::from_font_size(text::BODY),
+                font(text::BODY),
                 bevy::picking::Pickable::IGNORE,
             ));
         });
@@ -2402,7 +2903,7 @@ pub fn spawn_chrome_bar(
                 Control(keys::ControlId::Title),
                 Text::new(here),
                 TextColor(DIM),
-                TextFont::from_font_size(text::BODY),
+                font(text::BODY),
                 bevy::picking::Pickable::IGNORE,
             ));
         }
@@ -2475,7 +2976,7 @@ pub fn spawn_status_band(mut commands: Commands, frame: Res<Frame>) {
             LabelerLine,
             Text::new(String::new()),
             TextColor(DIM),
-            TextFont::from_font_size(text::LABEL),
+            font(text::LABEL),
             bevy::picking::Pickable::IGNORE,
         ));
         band.spawn((
@@ -2594,7 +3095,7 @@ pub fn shortcut_hint(parent: &mut ChildSpawnerCommands) {
             keys::chord(keys::Action::MainMenu),
         )),
         TextColor(LABEL),
-        TextFont::from_font_size(text::LABEL),
+        font(text::LABEL),
         // **And holding it puts that key's own badge on this line.** The one control whose verb is
         // "show me the verbs" — ExposeHK's admitted weakness is that a modifier-triggered overlay
         // *"has no visual representation to aid discovery until the user … presses its trigger"*, and
