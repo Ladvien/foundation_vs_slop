@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>carnage — play</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav><a href="index.html">← carnage</a></nav>
+
+<div class="play">
+<h1 id="demo-title">loading</h1>
+
+<div class="stage">
+  <canvas id="carnage-canvas" width="1280" height="720"></canvas>
+  <div id="loading">loading … tens of megabytes, about 9 MB on the wire, first load only</div>
+</div>
+
+<!-- Shown when there is no `?demo=` in the URL, and beside the message when there is one nobody
+     recognises. Built from the `DEMOS` allow-list at the bottom of this file with `createElement`
+     and `textContent`, never from the query string. -->
+<div class="play-index" id="demo-index" hidden>
+  <p id="demo-index-lead"></p>
+  <ul id="demo-index-list"></ul>
+</div>
+
+<!-- Static blocks, one per demo, and the script only unhides one. Nothing on this page is built from
+     the query string, so there is nothing to inject into. `scripts/demo_facts.sh` requires one of
+     these per roster entry, because a demo with no legend is a demo nobody can drive. -->
+<div class="keys" id="notes-fault_modes" hidden>
+  <p><kbd>1</kbd> torsion · <kbd>2</kbd> bending · <kbd>3</kbd> axial ·
+     <kbd>4</kbd> direct high energy · <kbd>T</kbd> cycles tissue ·
+     <kbd>[</kbd> <kbd>]</kbd> impulse · <kbd>R</kbd> re-break</p>
+  <p><strong>The same subject, the same seed, four silhouettes.</strong> Sellán et al.
+     (<code>10.1145/3549540</code> §6) say their fault is the same regardless of the directionality of
+     the impact, and name torsion as one of the missing cases. This is that case: a spiral with long
+     sharp ends under torsion, a butterfly wedge under bending, a transverse break under an axial
+     load, comminution under a direct blow.</p>
+  <p><kbd>T</kbd> is the other half. <strong>Cortical bone splits along its own grain</strong> —
+     osteons run along the shaft and its toughness is far lower for a crack running with them — so it
+     yields long sharp slivers; <strong>trabecular bone crushes</strong>, tolerating ~30 % strain
+     against cortical's ~2 %, so it is clamped to three pieces however hard it is hit.</p>
+  <p>Drop the impulse below the greenstick threshold and the bone <em>bends</em> instead of breaking:
+     one fragment, no fault, and a permanent bow. Greenstick is an outcome, not a mode.</p>
+</div>
+
+<div class="keys" id="notes-fragment_energy" hidden>
+  <p><kbd>[</kbd> <kbd>]</kbd> impact energy · <kbd>,</kbd> <kbd>.</kbd> strain rate ·
+     <kbd>T</kbd> tissue · <kbd>H</kbd> the histogram</p>
+  <p><strong>The fragment count is not an artist constant.</strong> Grady's energy balance
+     (<code>10.1063/1.329934</code>) gives a characteristic fragment size
+     <code>s = (24·G_c / (ρ·ε̇²))^(1/3)</code>, and the count is the subject's volume over
+     <code>s³</code> — so a faster load makes smaller pieces, cubically. The energy delivered is a
+     second, hard ceiling: creating <em>n</em> fragments costs <code>G_c</code> per unit of new
+     surface, and a blow cannot buy more than it brought.</p>
+  <p>A pistol leaves two pieces and a wedge. A rifle comminutes. The histogram is drawn against
+     Mott's distribution (<code>10.1098/rspa.1947.0042</code>) — many small, few large.</p>
+</div>
+
+<div class="keys" id="notes-stain_morphology" hidden>
+  <p><kbd>←</kbd> <kbd>→</kbd> impact angle · <kbd>↑</kbd> <kbd>↓</kbd> speed ·
+     <kbd>R</kbd> substrate roughness · <kbd>B</kbd> the old four-splat wall</p>
+  <p>A wall of stains swept over angle and speed. <strong>The aspect ratio is
+     <code>sin θ</code></strong> — the impact-angle relation the whole of bloodstain-pattern analysis
+     rests on (<code>10.1520/jfs2003224</code>). Spines come from Knock &amp; Davison's
+     angle-inclusive law, <code>0.76 · We^0.5 · sin³θ</code> at R² ≈ 0.9
+     (<code>10.1111/j.1556-4029.2007.00505.x</code>), and satellites appear past Mundo's splash
+     threshold <code>K = We^0.5 · Re^0.25 ≥ 57.7</code>.</p>
+  <p><kbd>B</kbd> is the argument, in one keypress. It shows the same wall drawn the old way — four
+     baked textures picked by <code>seed % 4</code> — and the arithmetic beside it:
+     <strong>the probability that four consecutive stains contain a repeat is 90.6 %</strong>, so the
+     expected first visible repeat is the fourth stain. Authoring more textures moves the number and
+     not the shape of the problem.</p>
+</div>
+
+<div class="keys" id="notes-pattern_classes" hidden>
+  <p><kbd>1</kbd> impact spatter · <kbd>2</kbd> arterial · <kbd>3</kbd> cast-off ·
+     <kbd>4</kbd> expirated · <kbd>5</kbd> drip trail · <kbd>6</kbd> transfer ·
+     <kbd>C</kbd> clear</p>
+  <p>The six SWGSTAIN / ASB TR-033 classes, as six <em>mechanisms</em> rather than one cone at six
+     intensities. <strong>The arterial one fires once per systole</strong>, a handful of large
+     discrete stains along an arc whose reach falls as the body loses pressure — not another isotropic
+     spray.</p>
+  <p><strong>Cast-off is tangential, and that is the measured fact rather than the folklore</strong>
+     (Williams et al., <code>10.1111/1556-4029.13855</code>): the drop leaves along the tip's
+     instantaneous velocity, never radially outward, and its diameter is <em>inversely</em>
+     proportional to tip speed. Adam (<code>10.1016/j.forsciint.2019.109934</code>) measured the
+     pendant volume at 150 µL, so a weapon swung repeatedly sheds less each swing — watch the
+     counter.</p>
+  <p>The drip trail's spacing encodes walking speed. The transfer wipe spends a conserved budget, so
+     <strong>a dragged body runs out of blood</strong> — and the shape of that is worth watching
+     rather than guessing at: each contact moves <code>min(load, transfer_rate)</code> out of the
+     budget, so the marks hold their full width while there is blood to give, the <em>last</em> one
+     is narrower because only a fraction was left, and then there are no more. Not a fade: a supply
+     running out. That budget is what makes a pattern tell a story.</p>
+</div>
+
+<div class="keys" id="notes-rheology" hidden>
+  <p><kbd>←</kbd> <kbd>→</kbd> shear rate · <kbd>↑</kbd> <kbd>↓</kbd> hematocrit ·
+     <kbd>[</kbd> <kbd>]</kbd> age · <kbd>Space</kbd> release a rivulet</p>
+  <p>Blood is a <strong>shear-thinning yield-stress fluid</strong>, and the two things you can see
+     follow from that and nothing else. Carreau–Yasuda with Cho &amp; Kensey's constants gives the
+     first: a fast rivulet is thin and races, a slow one thickens and beads.</p>
+  <p>The second is the interesting one. A yield-stress fluid moves only while the driving stress
+     exceeds its own yield stress, so a rivulet <strong>arrests mid-wall</strong> the moment the
+     rising yield stress overtakes the falling drive. <strong>That is what clotting is</strong> —
+     the same comparison, at a different age — so the clot, the arrested rivulet and the pool that
+     stopped creeping are one mechanism rather than three special cases. The plot shows both curves
+     crossing.</p>
+</div>
+
+<div class="keys" id="notes-drying" hidden>
+  <p><kbd>←</kbd> <kbd>→</kbd> scrub the age · <kbd>H</kbd> humidity · <kbd>Space</kbd> play</p>
+  <p>Scrub the age axis and watch four channels move at once. The colour walks
+     <strong>oxyhaemoglobin → methaemoglobin → hemichrome</strong> (Bremmer et al.,
+     <code>10.1016/j.forsciint.2011.07.027</code>) — three stops, not two, which is why old blood is
+     a brown rather than a dark red. The gloss collapses; the <strong>rim dries first</strong>, matte
+     at the edge while the centre is still wet (Smith, Nicloux &amp; Brutin,
+     <code>10.1038/s41598-020-65465-4</code>); and the crust cracks late into a craquelure.</p>
+  <p>Push the humidity past 50 % and a <strong>serum halo</strong> appears <em>outside</em> the pool,
+     where the serum phase-separates and spreads (Laan et al.,
+     <code>10.1016/j.forsciint.2016.08.005</code>). Below the threshold there is none at all, at any
+     age — a refusal rather than a very small number.</p>
+  <p>The channel that matters most is not a colour: <strong>moistness, not hue, is what drives
+     disgust</strong> (Oum, Lieberman &amp; Aylward, <code>10.1080/02699931.2010.496997</code>), so
+     wetness is a specular channel here rather than a tint.</p>
+</div>
+
+<div class="keys" id="notes-gore_tier" hidden>
+  <p><kbd>1</kbd>–<kbd>4</kbd> walk the tier · <kbd>Space</kbd> replay the kill ·
+     <kbd>F</kbd> spam flashes · <kbd>A</kbd> the aim cone</p>
+  <p>The same kill, replayed at four tiers. <strong>Reduction is substitution, never
+     deletion.</strong> At <em>Stylised</em> the emitter still fires, on the same tick, in the same
+     direction, at the same magnitude — it swaps the blood palette for a spark. Vermintide 2's
+     gore-off deleted the channel and made the game <em>harder to read</em>; Gears of War 4 replaced
+     blood with sparks and kept the hit confirmation.</p>
+  <p>The stops map onto <strong>rating descriptors</strong> rather than taste: ESRB's <em>Animated
+     Blood</em>, <em>Blood</em> and <em>Blood and Gore</em> (defined as mutilation of body parts), and
+     PEGI's gross-violence criterion, which turns on emphasis and persistence.</p>
+  <p><kbd>F</kbd> holds down the flash button, and the meter shows the gate
+     <strong>refusing the fourth flash inside any one second</strong> — WCAG 2.1 SC 2.3.1, technique
+     G19, whose safe harbour is 3 Hz. A gore framework is mechanically a saturated-red flash
+     generator, so the limiter lives in it and cannot be configured upward.</p>
+  <p><kbd>A</kbd> draws the aim-exclusion cone: decals that would land on the reticle are refused,
+     because gaze concentrates at screen centre while aiming. Ten degrees, which is the visual-field
+     unit WCAG itself uses — not thirty, which is folklore.</p>
+</div>
+
+<div class="keys" id="notes-wetmap_paint" hidden>
+  <p><kbd>click</kbd> shoot the body · <kbd>Space</kbd> a burst · <kbd>G</kbd> gravity direction ·
+     <kbd>D</kbd> the digest</p>
+  <p>Blood lands where the subject was hit <strong>in UV space</strong>, runs down the actual geometry,
+     pools where the surface turns, and dries in place. Texture-space blood accumulation is
+     AAA-only — The Last of Us Part II's blood and wound render targets — and everywhere it exists it
+     is a GPU render target.</p>
+  <p>Which is why nobody can hash one. <strong>This one is CPU-authoritative</strong>, so the digest
+     on screen is a fact about the canvas: paint the same sequence twice and it matches, move one hit
+     by a single texel and it does not. That makes it the first wetmap that can be a golden.</p>
+  <p>Dry paint does not move. Only wet paint drips or spreads, which is what makes a run stop where
+     it stopped.</p>
+</div>
+
+<div class="keys" id="notes-viscera_spill" hidden>
+  <p><kbd>Space</kbd> spill · <kbd>G</kbd> grab and drag · <kbd>T</kbd> tear the mesentery ·
+     <kbd>R</kbd> reset</p>
+  <p>XPBD Cosserat-style strands: guts spill with weight, coil on the floor, stay tethered by the
+     mesenteric membrane, and then tear. The formulation is Deul et al.'s direct position-based
+     solver for stiff rods (<code>10.1111/cgf.13326</code>) over Bergou et al.'s discrete elastic rods
+     (<code>10.1145/1399504.1360662</code>).</p>
+  <p><strong>Deterministic, and that is a design constraint rather than a happy accident</strong>: a
+     fixed substep count, a fixed iteration count, a fixed constraint order and no early-out. A tear
+     is <em>monotone</em> — once a mesentery link parts it is skipped forever — so it cannot heal and
+     the solver cannot oscillate.</p>
+</div>
+
+<div class="keys" id="notes-carnage_web" hidden>
+  <p><kbd>click</kbd> shoot · <kbd>1</kbd>–<kbd>4</kbd> gore tier · <kbd>T</kbd> tissue ·
+     <kbd>H</kbd> the numbers · <kbd>R</kbd> reset</p>
+  <p><strong>The flagship: one body, one shot, everything at once.</strong> The bone breaks the way
+     that blow loaded it, the blood pattern that fits the wound is thrown, the wetmap it lands on
+     records it in UV space, the guts it opened spill and tether, and the drying it leaves walks the
+     colour and the gloss over the next half minute.</p>
+  <p>Four crates in one frame — <code>bevy_carnage</code>, <code>bloodstain</code>,
+     <code>bevy_wetmap</code>, <code>bevy_viscera</code> — which is also why this demo can only be
+     built from the monorepo: each crate's own mirror contains that crate alone.</p>
+</div>
+
+</div>
+
+<script type="module">
+  // An allow-list, not the raw query string: `import(userInput)` on a page anyone can link to is an
+  // arbitrary-module import.
+  //
+  // `scripts/demo_facts.sh` counts the entries here and holds them against the `DEMOS` array in
+  // `scripts/build_web.sh`, because both failure modes are invisible in a green build: a module built
+  // and not listed here is tens of megabytes nothing can reach, and one listed here and not built is
+  // a link to a 404. It also requires the `notes-<name>` block above.
+  const DEMOS = {
+    fault_modes: "Bone that breaks the way it was loaded",
+    fragment_energy: "How many pieces? Ask the energy, not the artist",
+    stain_morphology: "A stain is a measurement of its own impact",
+    pattern_classes: "Six mechanisms, not one cone at six intensities",
+    rheology: "Blood as a shear-thinning yield-stress fluid",
+    drying: "Oxyhaemoglobin to hemichrome, gloss to matte",
+    gore_tier: "Reduction is substitution, never deletion",
+    wetmap_paint: "A wetmap you can hash",
+    viscera_spill: "Guts that spill, coil, tether and tear",
+    carnage_web: "One body, one shot, all four crates",
+  };
+  // Every module here needs WebGPU. Cargo features are per-package, so `bevy`'s `webgpu` feature is on
+  // for the whole wasm target, and `bevy_render-0.19.0/src/settings.rs` gives it precedence over
+  // `webgl2` on wasm — so there is no WebGL2 build of these ten and nothing to fall back to. Derived
+  // from `DEMOS` rather than written out again, so the two cannot drift.
+  const NEEDS_WEBGPU = new Set(Object.keys(DEMOS));
+  const name = new URLSearchParams(location.search).get("demo");
+  const overlay = document.getElementById("loading");
+  const heading = document.getElementById("demo-title");
+
+  // A function rather than more top-level statements, because a precondition wants a guard clause and
+  // `return` outside a function is a `SyntaxError` in an ES module — the page would fail to parse at
+  // all, which is worse than the missing adapter it was meant to report.
+  async function start() {
+    try {
+      // **Two checks, not one, because they fail differently.** `navigator.gpu` missing is a browser
+      // without WebGPU; `requestAdapter()` returning null is a browser *with* WebGPU and no usable
+      // adapter — a blocklisted driver, a headless run, a VM. The second case passes any object test,
+      // and then Bevy fails asynchronously inside `spawn_app` and the page is a blank canvas with
+      // nothing on it to read.
+      if (NEEDS_WEBGPU.has(name)) {
+        if (!navigator.gpu) {
+          // The message stays on screen: `overlay.remove()` below is the only thing that clears it,
+          // and it runs only once the app is actually up.
+          overlay.textContent =
+            "This demo needs WebGPU. Safari needs 26 or newer; on iOS 25 and older enable " +
+            "Settings \u2192 Safari \u2192 Advanced \u2192 Experimental Features \u2192 WebGPU. " +
+            "WebGPU is also a secure-context API, so an http:// page never has it.";
+          return;
+        }
+        if (!(await navigator.gpu.requestAdapter())) {
+          overlay.textContent =
+            "This browser has WebGPU but no usable GPU adapter, so there is nothing to render with.";
+          return;
+        }
+      }
+      const init = (await import(`./play/pkg/${name}/${name}.js`)).default;
+      // `bevy_winit` calls `event_loop.spawn_app` on wasm, so this resolves and the app keeps running
+      // on the browser's event loop. A rejection here is a real failure, not control flow.
+      await init();
+      overlay.remove();
+    } catch (e) {
+      overlay.textContent = `failed to start: ${e}`;
+      throw e;
+    }
+  }
+
+  // Three states, not two. `URLSearchParams.get` returns **`null`** when the key is absent, so
+  // folding "no demo asked for" into "demo not recognised" prints `unknown demo: null` — a null
+  // nobody typed, on a black canvas, with no way to reach any demo from there.
+  //
+  // The list is built with `createElement` and `textContent`, never from the query string and never
+  // through `innerHTML`, so the note above the key blocks stays literally true.
+  function showIndex(lead) {
+    const index = document.getElementById("demo-index");
+    const list = document.getElementById("demo-index-list");
+    document.getElementById("demo-index-lead").textContent = lead;
+    for (const [demo, title] of Object.entries(DEMOS)) {
+      const item = document.createElement("li");
+      const link = document.createElement("a");
+      link.href = `play.html?demo=${demo}`;
+      link.textContent = demo;
+      item.append(link, document.createTextNode(` — ${title}`));
+      list.append(item);
+    }
+    index.hidden = false;
+    // Nothing to render and no keys that apply, so neither belongs on screen. The canvas goes too: a
+    // black 16:9 box above a list reads as a demo that failed rather than as a menu.
+    document.querySelector(".stage").hidden = true;
+  }
+
+  if (name === null) {
+    heading.textContent = "carnage — play";
+    showIndex(`Pick one of the ${Object.keys(DEMOS).length} demos:`);
+  } else if (!Object.hasOwn(DEMOS, name)) {
+    heading.textContent = "carnage — play";
+    // `textContent`, so a crafted `?demo=` renders as the text it is rather than as markup.
+    showIndex(
+      `There is no demo called \u201c${name}\u201d. ` +
+        `Pick one of the ${Object.keys(DEMOS).length} there are:`,
+    );
+  } else {
+    document.title = `carnage — ${DEMOS[name]}`;
+    heading.textContent = DEMOS[name];
+    document.getElementById(`notes-${name}`).hidden = false;
+    await start();
+  }
+</script>
+</body>
+</html>

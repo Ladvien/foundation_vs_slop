@@ -37,6 +37,15 @@ env:
   # the note in TESTING.md.
   RUST_MIN_STACK: "33554432"
 
+# Declared at the workflow level rather than per job, because the default for a workflow with no
+# block at all is the repository's default token scope — and `actions/deploy-pages` needs
+# `pages: write` plus the OIDC `id-token: write` it exchanges for the deployment. `contents: read` is
+# everything every other job here wants.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
 jobs:
   test:
     name: test (pure-CPU, hard gate)
@@ -306,3 +315,82 @@ jobs:
           echo "  'Determinism model is an unforced decision' — fixed-point core vs per-platform goldens."
           echo "Do NOT ship FVS-C-6 (SCP-173/096 facing math) until it is settled."
 
+
+  # ---------------------------------------------------------------------------
+  # The demo site: ten WebAssembly modules and three hand-written pages.
+  #
+  # Built from this repository because it is the only tree where all four gore
+  # crates — `bevy_carnage`, `bloodstain`, `bevy_wetmap`, `bevy_viscera` — are
+  # visible to one cargo workspace, so it is the only place the flagship
+  # cross-crate demo can be compiled at all.
+  # ---------------------------------------------------------------------------
+  site:
+    name: demo site (ten wasm modules)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The same packages the other jobs install. Nothing in the wasm graph needs
+      # them — winit's x11/wayland deps are target-gated away — but host build
+      # scripts of shared dependencies still run, and this is the cheapest way to
+      # not care which.
+      - name: Install Bevy build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-site-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # **The version comes out of the lockfile, never a literal here.** A
+      # `wasm-bindgen` CLI that disagrees with the crate emits glue for a
+      # different ABI and the module fails to instantiate in the browser with an
+      # error naming neither tool.
+      - name: wasm-bindgen-cli
+        run: |
+          set -euo pipefail
+          WANT=$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/[^0-9.]/,""); print; exit}' Cargo.lock)
+          cargo install wasm-bindgen-cli --version "$WANT" --locked
+
+      # Before the build, because both of its failure modes are invisible in a
+      # green build and it costs a second: a module built but not allow-listed is
+      # tens of megabytes nothing can reach, and one allow-listed but not built is
+      # a link to a 404.
+      - name: demo roster cross-check
+        run: ./scripts/demo_facts.sh
+
+      - name: build
+        run: ./scripts/build_web.sh
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  # Deploys `main` only. **The Pages source has to be set to "GitHub Actions"
+  # once by hand** (or with `gh api -X POST repos/Ladvien/foundation_vs_slop/pages
+  # -f build_type=workflow`); until that is done this step fails with `Not Found`
+  # and no workflow can set it for you.
+  pages:
+    name: deploy to github pages
+    needs: site
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,178 @@
+/* carnage — the demo site's whole stylesheet.
+ *
+ * Hand-written, like the two pages it serves. There is no markdown renderer in this site and no
+ * prose pipeline to maintain: three files, checked in, copied into `web/dist` by
+ * `scripts/build_web.sh`.
+ */
+
+:root {
+  --ink: #e8e2de;
+  --dim: #8b8481;
+  --bg: #0f0d0d;
+  --panel: #171414;
+  --rule: #2a2424;
+  /* Arterial. The one colour this site is entitled to. */
+  --blood: #9b1c1c;
+  --blood-bright: #d92b2b;
+}
+
+* { box-sizing: border-box; }
+
+html {
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.65 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0 auto;
+  max-width: 62rem;
+  padding: 1.5rem 1.25rem 4rem;
+}
+
+a { color: var(--blood-bright); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:hover { color: var(--ink); }
+
+nav { margin-bottom: 1.5rem; font-size: 0.9rem; }
+nav a { color: var(--dim); text-decoration: none; }
+nav a:hover { color: var(--ink); }
+
+h1 { font-size: 1.9rem; line-height: 1.2; margin: 0 0 1rem; letter-spacing: -0.01em; }
+h2 { font-size: 1.25rem; margin: 2.5rem 0 0.75rem; }
+h2::before { content: ""; display: block; height: 1px; background: var(--rule); margin-bottom: 1rem; }
+
+p { margin: 0 0 1rem; }
+strong { color: #fff; }
+em { color: var(--ink); }
+
+code {
+  font: 0.86em ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  background: #221c1c;
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+}
+
+kbd {
+  font: 0.8em ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #2a2222;
+  border: 1px solid var(--rule);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0.1em 0.4em;
+  color: #fff;
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------------------
+ * The stage.
+ *
+ * **The one CSS trap on this site, and it is not optional.** `bevy_winit` writes the canvas size as
+ * INLINE attributes on the element, and an inline style beats a stylesheet rule — so without
+ * `!important` the canvas renders at whatever pixel size the app asked for and ignores the layout
+ * entirely, which on a phone means a 1280-wide canvas in a 390-wide viewport.
+ * ------------------------------------------------------------------------- */
+.stage {
+  position: relative;
+  background: #000;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 1.25rem;
+}
+
+#carnage-canvas {
+  display: block;
+  width: 100% !important;
+  height: auto !important;
+  aspect-ratio: 16 / 9;
+  /* A demo that reads the mouse wants the cursor, not a text caret. */
+  cursor: crosshair;
+  outline: none;
+}
+
+#loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  text-align: center;
+  color: var(--dim);
+  font-size: 0.9rem;
+  background: #000;
+}
+
+/* Key legends and per-demo notes. Every demo also draws its own legend in-app; this is the same text
+ * statically duplicated here, which is what `scripts/demo_facts.sh` requires per roster entry. */
+.keys {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--blood);
+  border-radius: 0 6px 6px 0;
+  padding: 0.9rem 1.1rem;
+  font-size: 0.92rem;
+}
+.keys p { margin: 0 0 0.7rem; }
+.keys p:last-child { margin-bottom: 0; }
+
+.play-index ul { padding-left: 1.2rem; }
+.play-index li { margin-bottom: 0.45rem; }
+.play-index a { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* ---------------------------------------------------------------------------
+ * The front page's demo grid.
+ * ------------------------------------------------------------------------- */
+.lede {
+  font-size: 1.1rem;
+  color: var(--ink);
+  border-left: 3px solid var(--blood);
+  padding-left: 1rem;
+  margin-bottom: 2rem;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 1rem;
+}
+.card h3 { margin: 0 0 0.4rem; font-size: 1rem; }
+.card h3 a { text-decoration: none; }
+.card p { margin: 0; font-size: 0.88rem; color: var(--dim); }
+.card .who {
+  display: inline-block;
+  margin-top: 0.6rem;
+  font: 0.75rem ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--dim);
+}
+
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; margin: 0 0 1.5rem; }
+th, td { text-align: left; padding: 0.4rem 0.7rem; border-bottom: 1px solid var(--rule); }
+th { color: var(--dim); font-weight: 600; }
+
+.warn {
+  background: #1d1414;
+  border: 1px solid #3a2020;
+  border-radius: 6px;
+  padding: 0.8rem 1rem;
+  font-size: 0.9rem;
+  margin-bottom: 2rem;
+}
+
+footer {
+  margin-top: 3rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+  color: var(--dim);
+  font-size: 0.85rem;
+}

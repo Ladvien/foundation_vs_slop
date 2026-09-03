@@ -1,0 +1,67 @@
+[package]
+name = "bevy_wetmap"
+version = "0.1.0"
+edition = "2024"
+description = "CPU-authoritative texture-space blood accumulation for Bevy: paint a world-space hit into a mesh's UVs, then drip, spread, absorb and dry it on an integer tick — and hash the result."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Ladvien/bevy_wetmap"
+keywords = ["bevy", "gamedev", "blood", "gore", "texture"]
+categories = ["game-development", "graphics"]
+# **Published, unlike most of this workspace's mirrored crates, and it is not a preference.**
+#
+# `bevy_carnage` is on crates.io and depends on this crate; a released package may not depend on a
+# path-only dependency, so `bevy_carnage 0.2.0` cannot ship at all unless this one does. The
+# `version` *and* `path` on that dependency is the same rule from the other side.
+publish = true
+
+[dependencies]
+# The umbrella with defaults off, matching `bevy_carnage`'s precedent in the parent workspace. Five
+# features, and each is load-bearing:
+#
+# `bevy_render` is here for exactly three type names — `Extent3d`, `TextureDimension` and
+# `TextureFormat`. They are `wgpu_types` re-exports, and in 0.19 the ONLY public path to them inside the
+# umbrella is `bevy::render::render_resource` (checked: `bevy_image-0.19.0/src/image.rs:24` imports them
+# privately and `bevy_image`'s `lib.rs` re-exports nothing from `wgpu_types`). Every `Image`
+# constructor takes an `Extent3d`, so there is no way to build a canvas without naming it. Depending on
+# `wgpu-types` directly would be a second route to one type and would widen `tests/leaf.rs` for it.
+bevy = { version = "0.19.0", default-features = false, features = [
+    "bevy_asset",  # Assets<Image>, Handle<Image>, RenderAssetUsages
+    "bevy_image",  # Image, Image::new_fill
+    "bevy_mesh",   # Mesh, Indices, VertexAttributeValues, PrimitiveTopology
+    "bevy_render", # render_resource::{Extent3d, TextureDimension, TextureFormat} — see above
+    "bevy_log",    # warn! — a mesh that cannot carry a wetmap has to say so once
+    "std",
+] }
+# **Not `bevy_pbr`, deliberately.** This crate hands back two `Handle<Image>` and never names a
+# material: which material they go on, and whether `perceptual_roughness`/`metallic` are set to `1.0` so
+# the map is authoritative, are the caller's decisions. Taking `bevy_pbr` to write them here would make
+# this crate own a material it cannot know the rest of.
+
+# **The blood model.** `bloodstain::stain::rasterise` is the coverage mask a hit stamps and
+# `bloodstain::dry::appearance` is the drying timeline every texel's colour and roughness comes from, so
+# blood on a wall and blood on a floor age by ONE model rather than by two that drift.
+#
+# `default-features = false` turns `bloodstain/serde` off, and nothing here needs it: this crate
+# serialises nothing. `WetSettings` is six numbers a caller builds in code or lifts out of its own
+# already-`Deserialize` config; adding a `serde` feature to forward would put a dependency in the
+# graph that no type in this crate reads.
+#
+# Path *and* version, because `cargo publish` refuses a path-only dependency.
+bloodstain = { version = "0.1", path = "../bloodstain", default-features = false }
+
+# **Examples only.** The crate's own `bevy` above is trimmed to what a canvas needs. `wetmap_paint`
+# additionally needs a window, an event loop and the 3D render pipeline, so it takes the full umbrella
+# here, where it cannot reach a consumer's dependency graph. `tests/leaf.rs` reads `[dependencies]`
+# only, deliberately.
+[dev-dependencies]
+bevy = { version = "0.19.0" }
+
+# **The wasm demos' extra features.** Target-gated, so a native build resolves none of it.
+#
+# `web` is REQUIRED and not optional polish: without it `std::time::Instant::now()` compiles for
+# `wasm32-unknown-unknown` and then PANICS in the browser, because there is no such clock there.
+# `webgpu` takes precedence over the `webgl2` that Bevy's defaults always pull in
+# (`bevy_render-0.19.0/src/settings.rs` selects `Backends::BROWSER_WEBGPU` on wasm when both are on),
+# so these modules are WebGPU-only and `web/play.html` gates on an adapter before importing them.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+bevy = { version = "0.19", default-features = false, features = ["web", "webgpu"] }
