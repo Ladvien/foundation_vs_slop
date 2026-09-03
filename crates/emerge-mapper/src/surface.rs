@@ -132,7 +132,46 @@ impl Plugin for SurfacePlugin {
         //
         // Doing it at build time is also simply true — the surface is not something a frame makes.
         spawn_surface(app.world_mut());
-        app.add_systems(Update, fit_surface_to_window)
+        app
+            // **A known crash lives here, and two fixes have been tried and eliminated. Read this
+            // before trying a third.**
+            //
+            // Booting straight into a door (`emerge-mapper . <map>`) dies inside two seconds,
+            // reproduced 4/4, while booting through the chooser never does, 0/4:
+            //
+            // ```text
+            // Attachments have differing sizes: the depth attachment's texture view has extent
+            // (3396, 1356, 1) but is followed by the color attachment at index 0's texture view
+            // which has (3440, 1440, 1)
+            // Quitting the application due to Validation RenderError
+            // ```
+            //
+            // Those two extents are the window before and after the compositor finishes sizing it,
+            // and `bevy_render`'s default error handler treats a validation error as **fatal**, so
+            // the application exits rather than dropping a frame. The menu path survives because by
+            // the time the editor's cameras exist the image has settled — which is why this reads as
+            // a Map-door bug and is a startup race.
+            //
+            // **Eliminated 2026-09-03, both measured rather than reasoned about:**
+            //
+            // 1. *The viewport was stale.* `fit_viewport_to_frame` runs after `UiSystems::Layout`,
+            //    which `bevy_ui` chains **after** `CameraUpdateSystems` — so a viewport written here
+            //    is unvalidated until the next frame. Clamping it to the image's own extent is a
+            //    real fix for a real latent invariant and it is kept below, but the crash is
+            //    unchanged: the failing depth extent is the whole previous target, not a dock-hole
+            //    rect, so no viewport produced it.
+            // 2. *The resize landed after the cameras read it.* Moving this system to `PostUpdate`
+            //    `.before(CameraUpdateSystems)` makes the new extent visible to `camera_system` in
+            //    the same frame. The crash is byte-identical, so the two cameras are not
+            //    disagreeing about *when* they read the target.
+            //
+            // What is left, and what the next person should measure first: **three cameras share
+            // this one image** (ground, world, interface) and only the 3-D one has a depth
+            // attachment. `prepare_core_3d_depth_textures` allocates per *target*, so a depth sized
+            // for one camera's extracted target info can meet a colour attachment allocated for
+            // another's. The world camera is the one spawned late — `view::setup` at
+            // `OnEnter(Editor)` — which fits the startup-path evidence exactly.
+            .add_systems(Update, fit_surface_to_window)
             // **After layout, because it reads it.** `PostUpdate` is where `ComputedNode` becomes
             // true for this frame; asking in `Update` would chase the previous one, which is the
             // same one-frame lag `chrome::Follow` exists to name.
@@ -297,6 +336,75 @@ pub const ORDER_UI: isize = -1;
 /// The window, showing the finished surface. Last, so a capture taken this frame shows this frame.
 pub const ORDER_WINDOW: isize = 0;
 
+/// **The interface's scale for a window of this size**, in one place both the runtime and a test can
+/// ask.
+///
+/// # Density is not size, and this editor was answering only one of them
+///
+/// `UiScale` is multiplied by the *display's* `scale_factor`, which says how many physical pixels a
+/// logical one is worth — it says nothing about how much room there is. On a 3396 px window
+/// reporting a factor of 1, the shipped constant left body text at 13 physical pixels and the two
+/// Meshes docks using under 14 % of the width. Reported at the keyboard as a readability complaint,
+/// measured as `docs/ui_audit.md` F2.
+///
+/// **The obvious fix — a larger constant — was tried and is wrong**, and the way it announced itself
+/// is worth keeping: it is the density a *small* window also gets. At 1280 x 800 two
+/// [`crate::chrome::CONTROLS_W`] docks scaled by 1.45 leave almost no stage, and
+/// `no_badge_cluster_draws_through_another` went red because the badge packer had nowhere to put a
+/// legend except on top of a control. A constant cannot answer a question about available room.
+///
+/// So the base is the density the design is drawn at, and a window wider than [`REFERENCE_W`] grows
+/// it in proportion, up to [`MAX_GROWTH`]. Below the reference nothing shrinks: the design has a
+/// smallest legible size and a cramped window needs the *stage* back, not smaller type.
+pub fn ui_scale_for(logical_width: f32, scale_factor: f32) -> f32 {
+    let growth = (logical_width / REFERENCE_W).clamp(1.0, MAX_GROWTH);
+    crate::chrome::EDITOR_UI_SCALE * growth * scale_factor
+}
+
+/// The width the editor's pixel constants were chosen against — a 16:10 laptop's logical width, and
+/// the size below which growth stops.
+const REFERENCE_W: f32 = 1600.0;
+
+/// **How far the interface may grow on a large display.** A cap rather than a straight ratio,
+/// because a dock is a work surface and not a column of prose: past about a quarter again, a wider
+/// monitor should be buying *viewport*, which is the thing an editor actually runs out of.
+const MAX_GROWTH: f32 = 1.25;
+
+#[cfg(test)]
+mod scale_tests {
+    use super::{ui_scale_for, MAX_GROWTH, REFERENCE_W};
+    use crate::chrome::EDITOR_UI_SCALE;
+
+    /// **A small window keeps the density the design was drawn at**, which is the half a larger
+    /// constant broke. 1280 x 800 is the size every headless test lays out at, and the badge packer
+    /// measures its stage in exactly those pixels.
+    #[test]
+    fn a_small_window_is_not_scaled_up() {
+        assert_eq!(ui_scale_for(1280.0, 1.0), EDITOR_UI_SCALE);
+        assert_eq!(ui_scale_for(REFERENCE_W, 1.0), EDITOR_UI_SCALE);
+    }
+
+    /// **A large one grows, and stops.**
+    #[test]
+    fn a_large_window_grows_to_the_cap() {
+        let wide = ui_scale_for(3396.0, 1.0);
+        assert_eq!(wide, EDITOR_UI_SCALE * MAX_GROWTH);
+        assert!(
+            wide > ui_scale_for(REFERENCE_W, 1.0),
+            "a window twice the reference width reads at a larger size, or F2 is not fixed"
+        );
+        // Halfway up the ramp, so the clamp is not the only thing being tested.
+        assert!((ui_scale_for(1800.0, 1.0) - EDITOR_UI_SCALE * 1.125).abs() < 1e-5);
+    }
+
+    /// **Density still multiplies on top**, because a 2x display is a separate question from a wide
+    /// one and the target is sized in physical pixels either way.
+    #[test]
+    fn the_display_factor_still_multiplies() {
+        assert_eq!(ui_scale_for(1280.0, 2.0), EDITOR_UI_SCALE * 2.0);
+    }
+}
+
 /// **Fit the surface to the window, and carry the display's density in `UiScale`.**
 ///
 /// The target is sized in **physical** pixels, and that is what makes the type sharp. Reported at the
@@ -332,7 +440,7 @@ fn fit_surface_to_window(
         window.resolution.physical_height().max(1),
     );
 
-    let want_ui = crate::chrome::EDITOR_UI_SCALE * sf;
+    let want_ui = ui_scale_for(window.resolution.width(), sf);
     if ui_scale.0 != want_ui {
         ui_scale.0 = want_ui;
     }
@@ -378,11 +486,51 @@ fn fit_surface_to_window(
 ///
 /// `Changed<ComputedNode>`-gated and compares before writing, per the standing rule: `Camera` is
 /// change-detected and the render world reads it.
+///
+/// # The viewport is clamped to the image, and that is a crash fix
+///
+/// Reproduced 2026-09-03, twice out of two, by booting straight into a door
+/// (`emerge-mapper . <map>`): the application died inside two seconds with
+///
+/// ```text
+/// Attachments have differing sizes: the depth attachment's texture view has extent
+/// (3396, 1356, 1) but is followed by the color attachment at index 0's texture view
+/// which has (3440, 1440, 1)
+/// Quitting the application due to Validation RenderError
+/// ```
+///
+/// Those two numbers are the window before and after the compositor finished sizing it. The frame
+/// ordering is the whole story, and it is not obvious from either system on its own:
+/// `CameraUpdateSystems` is chained **before** `UiSystems::Layout` in `PostUpdate`
+/// (`bevy_ui-0.19.0/src/lib.rs:147-158`), so `camera_system` — which is what validates a viewport
+/// against its target — has already run by the time this writes one. A viewport written here is
+/// therefore unchecked until the *next* frame, and on a frame where the surface also grew, the pass
+/// is assembled from a rect measured against one size and a target that is another.
+///
+/// Booting through the chooser never hit it, because by the time the editor's cameras exist the menu
+/// has been on screen for many frames and the image has settled — which is exactly why this looked
+/// like a Map-door bug rather than a startup race.
+///
+/// So the rect is clamped against the image's own current extent before it is handed over, and a
+/// rect that cannot be made to fit is **skipped** rather than shrunk to something nobody laid out:
+/// one frame of a slightly stale viewport is invisible, and the alternative is a dead application.
 fn fit_viewport_to_frame(
     slot: Query<(&ComputedNode, &UiGlobalTransform), With<crate::chrome::ViewportSlot>>,
+    surface: Option<Res<Surface>>,
+    images: Res<Assets<Image>>,
     mut camera: Query<&mut Camera, With<crate::view::MainCamera>>,
 ) {
-    let (Ok((node, tf)), Ok(mut camera)) = (slot.single(), camera.single_mut()) else {
+    let (Ok((node, tf)), Some(surface), Ok(mut camera)) =
+        (slot.single(), surface, camera.single_mut())
+    else {
+        return;
+    };
+    let Some(target) = images.get(&surface.image).map(|i| {
+        UVec2::new(
+            i.texture_descriptor.size.width,
+            i.texture_descriptor.size.height,
+        )
+    }) else {
         return;
     };
     let size = node.size();
@@ -392,9 +540,18 @@ fn fit_viewport_to_frame(
         return;
     }
     let min = tf.translation - size / 2.0;
+    let position = min.max(Vec2::ZERO).as_uvec2();
+    // The clamp, and the reason the whole function takes `Assets<Image>`.
+    if position.x >= target.x || position.y >= target.y {
+        return;
+    }
+    let physical_size = size.as_uvec2().min(target - position);
+    if physical_size.x < 1 || physical_size.y < 1 {
+        return;
+    }
     let want = bevy::camera::Viewport {
-        physical_position: min.max(Vec2::ZERO).as_uvec2(),
-        physical_size: size.as_uvec2(),
+        physical_position: position,
+        physical_size,
         ..default()
     };
     // `Viewport` has no `PartialEq` in 0.19, so the two fields that matter are compared by hand

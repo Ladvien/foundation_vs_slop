@@ -303,26 +303,48 @@ impl Plugin for AnimTabPlugin {
     }
 }
 
+/// **The slot table's two fixed columns**, and why they are not `chrome`'s.
+///
+/// The first holds `0 - clip 14`, the second `gait`, and the sub-lines under each row are indented
+/// by [`SLOT_COL`] so a measured number sits under the declared one it is checking. They were three
+/// bare `84`s and a bare `30` — the drift a name exists to stop (the 2026-09-03 audit's F8) — but
+/// they are deliberately **not** [`crate::chrome::COL_WIDE`] (96) and
+/// [`crate::chrome::COL_LABEL`] (52).
+///
+/// Those are the label columns of a two-column `LABEL  value` row. This is a three-column table
+/// whose last column carries the longest string this panel renders
+/// (`0.833s  ph +0.000  1.200m +-10%`), and widening the first two by the 34 px `COL_*` would cost
+/// pushes that string onto a second line — which is the exact failure the 84 was chosen against:
+/// *"at 52 px it wrapped after `clip` and every row became two, which made a ten-slot rig
+/// unreadable."* A measured layout beats a tidy name when the two disagree.
+const SLOT_COL: f32 = 84.0;
+/// See [`SLOT_COL`].
+const KIND_COL: f32 = 30.0;
+
 fn spawn_panels(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
     crate::chrome::panel_root(
         &mut commands,
         &frame,
         crate::chrome::Side::Left,
-        crate::chrome::TILES_CONTROLS_W,
+        crate::chrome::CONTROLS_W,
         true,
         true,
     )
     .insert(AnimRoot)
     .with_children(|p| {
-        crate::chrome::title(p, "ANIMATION");
+        // **`INSPECTOR`, like every other left dock** — left is the thing being inspected, right is
+        // the list (the 2026-09-03 audit's F12, decision D9). `ANIMATION` named the door rather
+        // than the panel's job, and the door strip above already says which door this is. `title`
+        // rather than `list_heading` is the left/right half of the same rule; the argument is
+        // written out once, at `tiles::spawn_tiles_panel`.
+        crate::chrome::title(p, "INSPECTOR");
         p.spawn((
             Text::new(""),
             TextColor(DIM),
-            TextFont::from_font_size(crate::chrome::text::LABEL),
-            Node {
-                margin: UiRect::top(Val::Px(6.0)),
-                ..default()
-            },
+            crate::chrome::font(crate::chrome::text::LABEL),
+            // No `Node` of its own: `chrome::title` carries the gap below itself and `panel_root`'s
+            // `row_gap` carries the rest. The bare 6 that stood here was one of the four different
+            // margins the audit counted above a heading, one per file (F8).
             BenchLine,
         ));
         // FOLLOW-OK: a table, not a list. The slots are read and copied, not walked — there is no
@@ -338,9 +360,7 @@ fn spawn_panels(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
                 crate::notice::CopyPane(&[crate::tiles::Mode::Anim]),
                 crate::chrome::Control(crate::keys::ControlId::Detail),
             ),
-        )
-        .entry::<Node>()
-        .and_modify(|mut n| n.margin.top = Val::Px(8.0));
+        );
     });
 
     crate::chrome::panel_root(
@@ -779,7 +799,7 @@ fn rebuild_list(
                     row.spawn((
                         Text::new((*name).to_owned()),
                         TextColor(TEXT),
-                        TextFont::from_font_size(crate::chrome::text::LABEL),
+                        crate::chrome::font(crate::chrome::text::LABEL),
                     ));
                 });
             }
@@ -867,7 +887,7 @@ fn rebuild_slots(
                         }
                     )),
                     TextColor(if bad > 0 { DANGER } else { TEXT }),
-                    TextFont::from_font_size(crate::chrome::text::BODY),
+                    crate::chrome::font(crate::chrome::text::BODY),
                 ));
                 for (ix, n) in names.iter().enumerate() {
                     let Some(report) = reports.as_ref().and_then(|r| r.by_rig.get(*n)) else {
@@ -894,30 +914,43 @@ fn rebuild_slots(
                     crate::chrome::severity_rail(
                         p,
                         tint,
-                        (UiButton, Hovered::default(), JumpRow(ix), BackgroundColor(ROW_BG)),
+                        (
+                            // A clickable severity rail, whose shape IS the finding's weight — it
+                            // goes through `chrome::severity_rail` and carries `RowRest`, so the
+                            // five states still come from `chrome::style_list_rows`.
+                            // CHROME-OK: a severity rail, not one of the three shapes.
+                            UiButton,
+                            Hovered::default(),
+                            JumpRow(ix),
+                            // The rest fill, carried so `chrome::style_list_rows` gives this rail
+                            // the same five states every row and chip has. It sensed `Hovered` and
+                            // nothing repainted it.
+                            crate::chrome::RowRest(ROW_BG),
+                            BackgroundColor(ROW_BG),
+                        ),
                     )
                     .with_children(|row| {
                         row.spawn(Node {
                             flex_direction: FlexDirection::Row,
-                            column_gap: Val::Px(8.0),
+                            column_gap: Val::Px(crate::chrome::GAP_ROW),
                             ..default()
                         })
                         .with_children(|head| {
                             head.spawn((
                                 Text::new((*n).to_owned()),
                                 TextColor(TEXT),
-                                TextFont::from_font_size(crate::chrome::text::BODY),
+                                crate::chrome::font(crate::chrome::text::BODY),
                             ));
                             head.spawn((
                                 Text::new(word),
                                 TextColor(tint),
-                                TextFont::from_font_size(crate::chrome::text::HINT),
+                                crate::chrome::font(crate::chrome::text::HINT),
                             ));
                         });
                         row.spawn((
                             Text::new(first),
                             TextColor(LABEL),
-                            TextFont::from_font_size(crate::chrome::text::HINT),
+                            crate::chrome::font(crate::chrome::text::HINT),
                         ));
                     });
                 }
@@ -928,14 +961,14 @@ fn rebuild_slots(
                 p.spawn((
                     Text::new("no rig selected"),
                     TextColor(DIM),
-                    TextFont::from_font_size(crate::chrome::text::BODY),
+                    crate::chrome::font(crate::chrome::text::BODY),
                 ));
                 return;
             };
             p.spawn((
                 Text::new(rig.mesh.clone()),
                 TextColor(ACCENT),
-                TextFont::from_font_size(crate::chrome::text::BODY),
+                crate::chrome::font(crate::chrome::text::BODY),
             ));
             // **The staged figure's controls, directly under the rig they belong to.**
             //
@@ -953,7 +986,7 @@ fn rebuild_slots(
                     p.spawn((
                         Text::new("measuring..."),
                         TextColor(DIM),
-                        TextFont::from_font_size(crate::chrome::text::HINT),
+                        crate::chrome::font(crate::chrome::text::HINT),
                     ));
                 }
                 Some(report) => {
@@ -969,13 +1002,13 @@ fn rebuild_slots(
                         p.spawn((
                             Text::new(line),
                             TextColor(colour),
-                            TextFont::from_font_size(crate::chrome::text::HINT),
+                            crate::chrome::font(crate::chrome::text::HINT),
                         ));
                         for d in &report.diff {
                             p.spawn((
                                 Text::new(d.clone()),
                                 TextColor(DANGER),
-                                TextFont::from_font_size(crate::chrome::text::HINT),
+                                crate::chrome::font(crate::chrome::text::HINT),
                                 Node {
                                     // One panel inset of indent — `PAD`, not a bare 12, so the
                                     // provenance block steps in by the same unit the panel does.
@@ -1012,7 +1045,7 @@ fn rebuild_slots(
                 };
                 p.spawn(Node {
                     flex_direction: FlexDirection::Row,
-                    column_gap: Val::Px(6.0),
+                    column_gap: Val::Px(crate::chrome::GAP_ROW),
                     ..default()
                 })
                 .with_children(|row| {
@@ -1020,18 +1053,18 @@ fn rebuild_slots(
                         Node {
                             // Wide enough for "0 - clip 14" on one line. At 52 px it wrapped after
                             // "clip" and every row became two, which made a ten-slot rig unreadable.
-                            min_width: Val::Px(84.0),
+                            min_width: Val::Px(SLOT_COL),
                             flex_shrink: 0.0,
                             ..default()
                         },
                         Text::new(format!("{i} - clip {}", slot.clip)),
                         TextColor(LABEL),
-                        TextFont::from_font_size(crate::chrome::text::LABEL),
+                        crate::chrome::font(crate::chrome::text::LABEL),
                         TextLayout::new(Justify::Left, LineBreak::NoWrap),
                     ));
                     row.spawn((
                         Node {
-                            width: Val::Px(30.0),
+                            width: Val::Px(KIND_COL),
                             flex_shrink: 0.0,
                             ..default()
                         },
@@ -1039,7 +1072,7 @@ fn rebuild_slots(
                         // A gait is the only kind carrying measured numbers, so it is the only one
                         // worth picking out of the column.
                         TextColor(if kind == "gait" { ACCENT } else { DIM }),
-                        TextFont::from_font_size(crate::chrome::text::LABEL),
+                        crate::chrome::font(crate::chrome::text::LABEL),
                     ));
                     row.spawn((
                         Text::new(detail),
@@ -1047,7 +1080,7 @@ fn rebuild_slots(
                         // **The value, not the label** — this is the measured number the author came
                         // to the bench to check. The audit found this pairing rendered inverted,
                         // the declared half larger than the measured one.
-                        TextFont::from_font_size(crate::chrome::text::BODY),
+                        crate::chrome::font(crate::chrome::text::BODY),
                     ));
                     // The transient adopt-exclude chip — gaits only, since adopt writes nothing
                     // else. The durable form is `keep:` in the manifest; this is "not this once".
@@ -1058,7 +1091,7 @@ fn rebuild_slots(
                             row,
                             SkipChip(i),
                             "skip",
-                            9.0,
+                            crate::chrome::text::HINT,
                             if excluded.contains(&i) { TEXT } else { DIM },
                             if excluded.contains(&i) { ROW_SELECTED } else { ROW_BG },
                             Color::NONE,
@@ -1087,9 +1120,9 @@ fn rebuild_slots(
                     p.spawn((
                         Text::new(sub.join(" | ")),
                         TextColor(DIM),
-                        TextFont::from_font_size(crate::chrome::text::HINT),
+                        crate::chrome::font(crate::chrome::text::HINT),
                         Node {
-                            margin: UiRect::left(Val::Px(84.0)),
+                            margin: UiRect::left(Val::Px(SLOT_COL)),
                             ..default()
                         },
                     ));
@@ -1107,9 +1140,9 @@ fn rebuild_slots(
                             p.spawn((
                                 Text::new(line),
                                 TextColor(DIM),
-                                TextFont::from_font_size(crate::chrome::text::HINT),
+                                crate::chrome::font(crate::chrome::text::HINT),
                                 Node {
-                                    margin: UiRect::left(Val::Px(84.0)),
+                                    margin: UiRect::left(Val::Px(SLOT_COL)),
                                     ..default()
                                 },
                             ));
@@ -1132,7 +1165,7 @@ fn rebuild_slots(
                     p.spawn((
                         Text::new(format!("{ok} measurement(s) agree with the manifest")),
                         TextColor(DIM),
-                        TextFont::from_font_size(crate::chrome::text::HINT),
+                        crate::chrome::font(crate::chrome::text::HINT),
                     ));
                 }
                 for f in findings.iter().filter(|f| f.level != Level::Ok) {
@@ -1142,7 +1175,7 @@ fn rebuild_slots(
                             Level::Note => LABEL,
                             _ => DANGER,
                         }),
-                        TextFont::from_font_size(crate::chrome::text::HINT),
+                        crate::chrome::font(crate::chrome::text::HINT),
                     ));
                 }
             }
@@ -1158,7 +1191,7 @@ fn rebuild_slots(
                 // when it has one.
                 p.spawn(Node {
                     flex_direction: FlexDirection::Row,
-                    column_gap: Val::Px(8.0),
+                    column_gap: Val::Px(crate::chrome::GAP_ROW),
                     ..default()
                 })
                 .with_children(|legend| {
@@ -1182,7 +1215,7 @@ fn rebuild_slots(
                         legend.spawn((
                             Text::new(label),
                             TextColor(crate::anim_plots::slot_ui_color(rank)),
-                            TextFont::from_font_size(crate::chrome::text::HINT),
+                            crate::chrome::font(crate::chrome::text::HINT),
                         ));
                         rank += 1;
                     }
@@ -1196,9 +1229,9 @@ fn rebuild_slots(
                     p.spawn((
                         Text::new(caption),
                         TextColor(LABEL),
-                        TextFont::from_font_size(crate::chrome::text::HINT),
+                        crate::chrome::font(crate::chrome::text::HINT),
                         Node {
-                            margin: UiRect::top(Val::Px(4.0)),
+                            margin: UiRect::top(Val::Px(crate::chrome::GAP_ROW)),
                             ..default()
                         },
                     ));
@@ -1228,7 +1261,9 @@ fn rebuild_slots(
                                 // PLACES-ITSELF-OK: the hover readout stacks ON the plot it belongs to,
                                 // filling its wrapper. Two images in one box is what absolute is for.
                                 position_type: PositionType::Absolute,
+                                // CHROME-OK: an absolute overlay's origin, not a spacing step.
                                 left: Val::Px(0.0),
+                                // CHROME-OK: as above.
                                 top: Val::Px(0.0),
                                 width: Val::Px(crate::anim_plots::SHOW_W),
                                 height: Val::Px(crate::anim_plots::SHOW_PLOT_H),
@@ -1244,15 +1279,15 @@ fn rebuild_slots(
                 p.spawn((
                     Text::new(String::new()),
                     TextColor(DIM),
-                    TextFont::from_font_size(crate::chrome::text::HINT),
+                    crate::chrome::font(crate::chrome::text::HINT),
                     crate::anim_plots::PlotReadout,
                 ));
                 p.spawn((
                     Text::new("top-down trace (fwd = up; arrow = declared cycle along measured travel; dim arrow = measured, G)"),
                     TextColor(LABEL),
-                    TextFont::from_font_size(crate::chrome::text::HINT),
+                    crate::chrome::font(crate::chrome::text::HINT),
                     Node {
-                        margin: UiRect::top(Val::Px(4.0)),
+                        margin: UiRect::top(Val::Px(crate::chrome::GAP_ROW)),
                         ..default()
                     },
                 ));

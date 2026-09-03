@@ -3115,13 +3115,22 @@ impl Chooser {
     /// was left in. Always one press per column, which is the whole point: it used to be two from
     /// KITS to MAPS and one from everywhere else, because the walk threaded through POLICY.
     ///
-    /// Wraps, over three stops — "am I at the end" is answerable at a glance with three columns on
-    /// screen, which is the condition [`Self::step`]'s clamping exists for and does not meet.
+    /// **Clamped at both ends, and it wrapped until 2026-09-03.** The old argument was that "am I
+    /// at the end" is answerable at a glance with three columns on screen, so the condition
+    /// [`Self::step`] clamps for was not met here. What the audit found at the keyboard is that it
+    /// is answerable and still surprising: from KITS two presses of `→` land on PROJECTS, which is
+    /// *leftwards* — a carousel in a layout whose whole point (see [`spawn_screen`]) is that left
+    /// to right IS the data model. Decision D13 clamps it, so `→` always means "further right, or
+    /// stay", and the ends of the row of columns are the ends.
     pub fn cross(&mut self, delta: i32) {
         self.problem = None;
         let (at, _) = self.focus.at();
-        let n = Focus::COLUMNS.len();
-        let i = if delta < 0 { (at + n - 1) % n } else { (at + 1) % n };
+        let last = Focus::COLUMNS.len().saturating_sub(1);
+        let i = if delta < 0 {
+            at.saturating_sub(1)
+        } else {
+            at.saturating_add(1).min(last)
+        };
         // Every column's top panel is a list, and all three always draw at least their `+ new …`
         // row — so there is no empty column to skip and no loop to write.
         if let Some(head) = Focus::COLUMNS[i].first() {
@@ -3697,17 +3706,25 @@ mod screen_tests {
         let mut c = chooser(Some("site"));
         assert_eq!(c.focus, Focus::Kits);
 
-        // **One press each, in both directions, wrapping over the three columns.**
+        // **One press each — and since 2026-09-03 (D13) the ends are the ends.** It used to wrap,
+        // so two presses of `→` from KITS landed on PROJECTS, which is leftwards.
         c.cross(1);
         assert_eq!(c.focus, Focus::Maps, "KITS -> MAPS is one press, not two");
         c.cross(1);
-        assert_eq!(c.focus, Focus::Projects, "and on to the last column");
+        assert_eq!(
+            c.focus,
+            Focus::Maps,
+            "MAPS is the rightmost column, so `right` holds rather than reappearing on the left"
+        );
+        c.cross(-1);
+        assert_eq!(c.focus, Focus::Kits, "backwards too");
+        c.cross(-1);
+        assert_eq!(c.focus, Focus::Projects, "and on to the first column");
+        c.cross(-1);
+        assert_eq!(c.focus, Focus::Projects, "which is where `left` stops");
         c.cross(1);
-        assert_eq!(c.focus, Focus::Kits, "three columns, so it wraps");
-        c.cross(-1);
-        assert_eq!(c.focus, Focus::Projects, "backwards too");
-        c.cross(-1);
-        assert_eq!(c.focus, Focus::Maps);
+        c.cross(1);
+        assert_eq!(c.focus, Focus::Maps, "and back across, one column per press");
 
         // **A crossing lands on the column's LIST**, never on the inspector under it — naming a
         // column means its head, not wherever that column was left.
@@ -3776,15 +3793,18 @@ mod screen_tests {
         assert_eq!(c.focus, Focus::Maps, "there are no settings to walk into");
 
         // **Crossing is never affected by any of it.** Every column's top panel is a list and all
-        // three always draw at least their `+ new …` row, so there is no empty column to skip.
-        c.cross(1);
+        // three always draw at least their `+ new …` row, so there is no empty column to skip —
+        // and the walk stops at the first column rather than wrapping past it.
+        c.cross(-1);
+        assert_eq!(c.focus, Focus::Kits);
+        c.cross(-1);
         assert_eq!(
             c.focus,
             Focus::Projects,
             "the projects panel always draws a row — the instruction"
         );
-        c.cross(1);
-        assert_eq!(c.focus, Focus::Kits, "three columns, so it wraps");
+        c.cross(-1);
+        assert_eq!(c.focus, Focus::Projects, "and `left` stops at the leftmost column");
     }
 
     /// The settings rows are walked by the arrows, clamped, like every other panel — and the edge
@@ -4066,6 +4086,12 @@ mod screen_tests {
 pub enum Tone {
     /// The row the arrows are on.
     Selected,
+    /// **The field being typed into right now**, which since 2026-09-03 is the one thing `ACCENT`
+    /// means (decision D6). It used to share [`Tone::Selected`]: amber marked both the row the
+    /// arrows were on and the value under the caret, so when selection went to `TEXT` the live
+    /// edit would have gone with it — and a name half-typed is exactly the case that hue was kept
+    /// for. It reads as selected everywhere else: same fill, same rail, same chevron.
+    Editing,
     /// A kit that has pieces in it — readable at a glance against a blank one.
     Stocked,
     /// A kit with nothing in it, or a map with nothing placed. Not an error.
@@ -4343,7 +4369,7 @@ impl Chooser {
                     } else {
                         clip(name, 18)
                     },
-                    tone: tone_for(live, name.is_empty()),
+                    tone: tone_for(live, self.editing, name.is_empty()),
                 }],
             );
         }
@@ -4361,7 +4387,7 @@ impl Chooser {
                     } else {
                         clip(name, 18)
                     },
-                    tone: tone_for(live, name.is_empty()),
+                    tone: tone_for(live, self.editing, name.is_empty()),
                 }],
             );
         }
@@ -4426,18 +4452,19 @@ impl Chooser {
                 ),
                 tone: tone_for(
                     live(Field::Name),
+                    self.editing,
                     self.creating.is_some() && self.raw.is_empty(),
                 ),
             },
             Row {
                 left: Field::Bounds.label().to_owned(),
                 right: value(Field::Bounds, triple(bounds)),
-                tone: tone_for(live(Field::Bounds), false),
+                tone: tone_for(live(Field::Bounds), self.editing, false),
             },
             Row {
                 left: Field::Origin.label().to_owned(),
                 right: value(Field::Origin, triple(origin)),
-                tone: tone_for(live(Field::Origin), false),
+                tone: tone_for(live(Field::Origin), self.editing, false),
             },
             Row {
                 left: Field::Note.label().to_owned(),
@@ -4447,7 +4474,7 @@ impl Chooser {
                 // whole note is still there in the file and still editable; this panel is a summary,
                 // and a summary that reflows the screen is not one.
                 right: value(Field::Note, clip(note.unwrap_or_default().as_str(), 20)),
-                tone: tone_for(live(Field::Note), false),
+                tone: tone_for(live(Field::Note), self.editing, false),
             },
         ];
         // **A fact, not a field** — the same shape `kit_rows`' `new work lands here` row has. The
@@ -4586,10 +4613,17 @@ fn clip(s: &str, max: usize) -> String {
     format!("{}…", kept.trim_end())
 }
 
-fn tone_for(live: bool, unset: bool) -> Tone {
-    match (live, unset) {
-        (true, _) => Tone::Selected,
-        (_, true) => Tone::Empty,
+/// **What a settings row's value reads as**: amber under the caret, the ordinary loud ink when the
+/// arrows are merely standing on it, and quiet when there is nothing there yet.
+///
+/// `editing` is the argument added on 2026-09-03 with [`Tone::Editing`] — before it, selection and
+/// live edit were one tone, so they could not part company when selection stopped borrowing
+/// `ACCENT` (D6).
+fn tone_for(live: bool, editing: bool, unset: bool) -> Tone {
+    match (live, editing, unset) {
+        (true, true, _) => Tone::Editing,
+        (true, false, _) => Tone::Selected,
+        (_, _, true) => Tone::Empty,
         _ => Tone::Row,
     }
 }
@@ -4613,7 +4647,13 @@ fn triple(t: (f32, f32, f32)) -> String {
 pub fn render(c: &Chooser) -> String {
     let s = c.screen();
     let line = |r: &Row| {
-        let mark = if r.tone == Tone::Selected { ">" } else { " " };
+        // **A row being typed into is still the selected row.** The mark is the non-colour channel
+        // (`docs/ui.md` §1.3), so it answers "which row" and not "which ink".
+        let mark = if matches!(r.tone, Tone::Selected | Tone::Editing) {
+            ">"
+        } else {
+            " "
+        };
         format!("{mark} {:<28}{}\n", r.left, r.right)
     };
     // **Left to right, exactly as the columns are drawn** — see `spawn_screen`. A flat rendering
@@ -4764,6 +4804,10 @@ impl Plugin for ChooserPlugin {
                 paint_chooser,
                 // **After the paint**, because it measures rows the paint may have just respawned.
                 keep_the_chooser_selection_on_screen,
+                // **After the drive**, so the border lights on the same frame the arrow moved the
+                // keyboard rather than one behind it. It reads `Chooser::focus` and writes nothing
+                // the paint depends on, so it is last for ordering's sake and not for the paint's.
+                mark_the_focused_panel,
             )
                 .chain()
                 .run_if(in_state(crate::screen::Screen::Menu)),
@@ -4808,7 +4852,7 @@ fn header(text: &str) -> impl Bundle {
         // **`HEADING`, not `BODY`.** `MAPS`, `KIT INFO` and the rest are headings, and they were
         // rendered at the body role — the same class of misuse the 2026-08-18 type pass found in the
         // four tabs. The role table exists so "what does a heading measure" is answered once.
-        TextFont::from_font_size(crate::chrome::text::HEADING),
+        crate::chrome::font(crate::chrome::text::HEADING),
         // **`KEY`, where `chrome::list_heading` uses `LABEL`**, and this is the one deliberate
         // departure from that builder rather than an oversight. These words carry the *relationship*
         // — `MAPS IN emerge`, `SETTINGS FOR untitled_map` are the only text on the screen stating
@@ -4835,9 +4879,16 @@ fn header(text: &str) -> impl Bundle {
 /// evenly and the panels share the height, so the screen is full at any window size and a catalogue
 /// twice as long does not want a taller window.
 ///
-/// **The columns are capped.** A two-column menu stretched across an ultrawide monitor puts a row's
-/// value a foot from its label, which is the alignment complaint this screen already had once, in
-/// the other direction.
+/// **The columns fill the window, and the cap that stopped them is gone.** It was `COL_MAX = 420`
+/// with `flex_basis: 0`, on the argument that a stretched two-column menu puts a row's value a foot
+/// from its label — the alignment complaint this screen had once, from the other direction. On the
+/// 3396 px window the 2026-09-03 audit measured (F2) that argument cost more than it bought: three
+/// capped columns occupied a centred island with roughly 2,500 px of dead void either side. The
+/// author's answer (D2) is that *"the editor's docks may keep pixel widths — a viewport wants the
+/// space — but the menu has no viewport to protect and must stretch."* So the columns share the
+/// width with `flex_grow` and no ceiling, and the label/value alignment that the cap was really
+/// protecting is now the label column's job: [`crate::chrome::COL_LABEL`] and `COL_WIDE` hold the
+/// values in line at any column width, which a maximum width never actually did.
 fn spawn_screen(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
     // **A menu has no docks and no viewport, and saying so is load-bearing.**
     //
@@ -4859,9 +4910,16 @@ fn spawn_screen(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
         flex_direction: FlexDirection::Row,
         align_items: AlignItems::Stretch,
         justify_content: JustifyContent::Center,
-        column_gap: Val::Px(crate::chrome::PAD),
-        padding: UiRect::all(Val::Px(crate::chrome::PAD * 1.5)),
+        // **The named scale, where this was `PAD` and `PAD * 1.5`.** A gap between two columns is a
+        // gap between blocks — [`crate::chrome::GAP_GROUP`] — and the inset from the window edge is
+        // the same [`crate::chrome::MARGIN`] every dock panel in the editor keeps, so the menu's
+        // outer edge lands where the editor's does rather than one and a half pads in from it. The
+        // arithmetic was the last unnamed spacing number on this screen (`ui_audit.md` F8).
+        column_gap: Val::Px(crate::chrome::GAP_GROUP),
+        padding: UiRect::all(Val::Px(crate::chrome::MARGIN)),
         flex_grow: 1.0,
+        // CHROME-OK: not a gap — a flex item's automatic minimum size is its content, and this is
+        // what lets the body be shorter than the columns inside it so they can scroll.
         min_height: Val::Px(0.0),
         ..default()
     });
@@ -4892,10 +4950,15 @@ fn spawn_screen(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
         // down.
         let column = || Node {
             flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(crate::chrome::GAP_ROW * 2.0),
+            // Between the panels stacked in one column: a block gap, where this was `GAP_ROW * 2`.
+            row_gap: Val::Px(crate::chrome::GAP_GROUP),
             flex_grow: 1.0,
-            flex_basis: Val::Px(0.0),
-            max_width: Val::Px(COL_MAX),
+            // `Percent(0.0)`, so a column's share is decided by `flex_grow` and not by the width of
+            // the longest kit name inside it — a `Val::Px(0.0)` basis is the same intent, and this
+            // is the one that cannot be read as a pixel measurement.
+            flex_basis: Val::Percent(0.0),
+            // CHROME-OK: not a gap — a flex item's automatic minimum size is its content, so
+            // without this a long row name pushes its column wider than its share of the window.
             min_width: Val::Px(0.0),
             ..default()
         };
@@ -4903,17 +4966,19 @@ fn spawn_screen(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
         // **The projects column** — the siblings of this root, plus the verb that makes a new one.
         // A list like the kits' is: row 0 is `+ new project`, real projects are `i + 1`.
         row.spawn(column()).with_children(|col| {
-            col.spawn((list_panel(), ListPanel)).with_children(|p| {
+            col.spawn((list_panel(), ListPanel, PanelFocus(Focus::Projects))).with_children(|p| {
                 p.spawn((header("PROJECTS"), ProjectHeader));
                 crate::chrome::scroll_list(p, ProjectList);
             });
         });
 
         row.spawn(column()).with_children(|col| {
-            col.spawn((list_panel(), ListPanel)).with_children(|p| {
+            col.spawn((list_panel(), ListPanel, PanelFocus(Focus::Kits))).with_children(|p| {
                 p.spawn(header("KITS"));
                 crate::chrome::scroll_list(p, KitList);
             });
+            // **KIT INFO carries no `PanelFocus`** — it is the one menu panel no arrow can stand
+            // in (see `Focus`), so its border never lights.
             col.spawn((info_panel(), InfoPanel)).with_children(|p| {
                 p.spawn((header("KIT INFO"), KitInfoHeader));
                 p.spawn((Node::default(), KitInfoList));
@@ -4922,14 +4987,14 @@ fn spawn_screen(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
             // `project.ron`. Drawn as a second inspector under KIT INFO, the way the map's settings
             // sit under the maps list. A separate panel from KIT INFO because it is a list the
             // arrows can stand in, and the facts sheet is not.
-            col.spawn((info_panel(), InfoPanel)).with_children(|p| {
+            col.spawn((info_panel(), InfoPanel, PanelFocus(Focus::Policy))).with_children(|p| {
                 p.spawn((header("POLICY"), PolicyHeader));
                 p.spawn((Node::default(), PolicyList));
             });
         });
 
         row.spawn(column()).with_children(|col| {
-            col.spawn((list_panel(), ListPanel)).with_children(|p| {
+            col.spawn((list_panel(), ListPanel, PanelFocus(Focus::Maps))).with_children(|p| {
                 p.spawn((header("MAPS"), MapsHeader));
                 // **A scroll container, because the panel is flex now.** It sized itself to the
                 // catalogue while the whole screen did; on the frame it takes the height that is
@@ -4937,7 +5002,7 @@ fn spawn_screen(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
                 // screen saying so.
                 crate::chrome::scroll_list(p, MapList);
             });
-            col.spawn((info_panel(), InfoPanel)).with_children(|p| {
+            col.spawn((info_panel(), InfoPanel, PanelFocus(Focus::Settings))).with_children(|p| {
                 p.spawn((header("MAP INFO"), SettingsHeader));
                 p.spawn((Node::default(), SettingsList));
             });
@@ -4945,19 +5010,13 @@ fn spawn_screen(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
     });
 }
 
-/// **How wide a column is allowed to get.** Two columns filling an ultrawide monitor would put a
-/// row's value a foot from its label — the alignment complaint this screen has already had once,
-/// from the other direction (2026-08-16: *"the alignment of the columns of these list boxes ... don't
-/// align"*).
-const COL_MAX: f32 = 420.0;
-
 /// **The menu's own chrome and status.** The editor fills these two bars with a door's furniture;
 /// the menu has a name and a hint line, and they belong in the same places for the same reason.
 fn spawn_menu_bars(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
     commands.entity(frame.chrome_bar).with_children(|bar| {
         bar.spawn((
             Text::new("emerge-mapper"),
-            TextFont::from_font_size(crate::chrome::text::BODY),
+            crate::chrome::font(crate::chrome::text::BODY),
             TextColor(crate::chrome::LABEL),
         ));
     });
@@ -4967,7 +5026,7 @@ fn spawn_menu_bars(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
         // this editor shouts, and size is what type role a thing has.
         band.spawn((
             Text::new(String::new()),
-            TextFont::from_font_size(crate::chrome::text::BODY),
+            crate::chrome::font(crate::chrome::text::BODY),
             TextColor(crate::chrome::DANGER),
             ProblemLine,
         ));
@@ -4977,7 +5036,7 @@ fn spawn_menu_bars(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
         });
         band.spawn((
             Text::new(String::new()),
-            TextFont::from_font_size(crate::chrome::text::BODY),
+            crate::chrome::font(crate::chrome::text::BODY),
             TextColor(crate::chrome::LABEL),
             HintLine,
         ));
@@ -4988,22 +5047,65 @@ fn spawn_menu_bars(mut commands: Commands, frame: Res<crate::chrome::Frame>) {
 /// re-describe it. The bundle is the one the screen actually spawns; a test that rebuilt the numbers
 /// would be checking its own copy.
 #[cfg(test)]
-fn panel_node(bundle: (Node, BackgroundColor)) -> Node {
+fn panel_node(bundle: MenuPanel) -> Node {
     bundle.0
 }
 
-/// A list panel: takes the height that is left, so a long catalogue does not want a taller window.
-fn list_panel() -> (Node, BackgroundColor) {
+/// **What a menu panel is made of, which is what every other panel in this application is made of.**
+///
+/// The 2026-09-03 audit's F9 counted six menu panels hand-rolling a container while the editor's
+/// seven came out of [`crate::chrome::panel_root`]. **The container stays hand-rolled and the
+/// surface does not.** `panel_root` takes a [`crate::chrome::Frame`] and a
+/// [`crate::chrome::Side`] and is dock-shaped — a pixel width, one of two edges to be pinned to,
+/// `full_height` — and the menu's six are columns in a grid: they have no dock, they share the
+/// width between them (see [`spawn_screen`]), and two of them stack inside one column. Forcing them
+/// through a builder whose whole subject is the dock would mean widening that builder for a caller
+/// with no dock, which is how a shared widget becomes a switch statement.
+///
+/// What there was never a reason for is a second *surface*. So this is exactly the list
+/// `panel_root` spawns, and the six panels differ from the seven only in the fill they pass:
+/// the ground, [`crate::chrome::Ground`] so the held-key overlay can dim it, the hairline
+/// [`crate::chrome::PANEL_EDGE`] and the corner that make a fill read as an object rather than as
+/// slightly different paint, the `Hovered` that answers *"is the pointer over the interface"* for
+/// the whole surface including the gaps between its rows, and the [`crate::chrome::PanelEdge`]
+/// marker that lets [`PanelFocus`] light the border of the panel holding the keyboard.
+type MenuPanel = (
+    Node,
+    BackgroundColor,
+    crate::chrome::Ground,
+    BorderColor,
+    crate::chrome::PanelEdge,
+    bevy::picking::hover::Hovered,
+);
+
+/// One fill, one surface. See [`MenuPanel`].
+fn menu_panel(mut node: Node, fill: Color) -> MenuPanel {
+    node.border = UiRect::all(Val::Px(crate::chrome::EDGE_W));
+    node.border_radius = BorderRadius::all(Val::Px(crate::chrome::RADIUS_PANEL));
     (
+        node,
+        BackgroundColor(fill),
+        crate::chrome::Ground(fill),
+        BorderColor::all(crate::chrome::PANEL_EDGE),
+        crate::chrome::PanelEdge,
+        bevy::picking::hover::Hovered::default(),
+    )
+}
+
+/// A list panel: takes the height that is left, so a long catalogue does not want a taller window.
+fn list_panel() -> MenuPanel {
+    menu_panel(
         Node {
             flex_direction: FlexDirection::Column,
             padding: UiRect::all(Val::Px(crate::chrome::PAD)),
             row_gap: Val::Px(crate::chrome::GAP_ROW),
             flex_grow: 1.0,
+            // CHROME-OK: not a gap — the `min_height: 0` that lets a flex panel be shorter than
+            // its rows, which is what gives the scroll area inside it something to clip.
             min_height: Val::Px(0.0),
             ..default()
         },
-        BackgroundColor(crate::chrome::PANEL_BG),
+        crate::chrome::PANEL_BG,
     )
 }
 
@@ -5011,8 +5113,8 @@ fn list_panel() -> (Node, BackgroundColor) {
 /// the editor already uses for a slot, so it does not read as a third list — looking the same was
 /// the whole problem (see [`PanelKind`]). Sized by its content, because a fact sheet with four rows
 /// in it should not be half the screen.
-fn info_panel() -> (Node, BackgroundColor) {
-    (
+fn info_panel() -> MenuPanel {
+    menu_panel(
         Node {
             flex_direction: FlexDirection::Column,
             padding: UiRect::all(Val::Px(crate::chrome::PAD)),
@@ -5020,7 +5122,7 @@ fn info_panel() -> (Node, BackgroundColor) {
             flex_shrink: 0.0,
             ..default()
         },
-        BackgroundColor(crate::chrome::SLOT_BG),
+        crate::chrome::SLOT_BG,
     )
 }
 
@@ -5032,9 +5134,55 @@ struct ListPanel;
 #[derive(Component)]
 struct InfoPanel;
 
+/// **Which [`Focus`] this panel is the home of**, so the panel holding the keyboard can light its
+/// border — the menu's half of the 2026-09-03 decision D13, *"the panel holding the keyboard lights
+/// its border, in the menu and in the editor's docks."*
+///
+/// Per *panel*, not per column, because [`Focus`] is per panel: `down` off the end of the kit list
+/// carries into POLICY, which is drawn under it in the same column, and a column-wide light would
+/// then say the keyboard is in two places. KIT INFO has no arm here — no arrow can stand in it.
+#[derive(Component, Clone, Copy)]
+struct PanelFocus(Focus);
+
+/// **Put [`crate::chrome::Focused`] on the panel that holds the keyboard, and take it off the rest.**
+///
+/// It *marks*; `chrome::light_the_focused_panel` is what paints, and the split is deliberate — the
+/// owner of the focus decides where the keyboard is (here it is `Chooser::focus`; on a door it is a
+/// `Context`) and the palette decides what that looks like.
+///
+/// Compares before writing. `Focused` is what the painter reacts to, so inserting it on the same
+/// entity every frame would dirty six panels' `BorderColor` sixty times a second for an edge that
+/// moves a few times a session (`tests/no_system_writes_every_frame.rs`).
+fn mark_the_focused_panel(
+    chooser: Res<Chooser>,
+    panels: Query<(Entity, &PanelFocus, Has<crate::chrome::Focused>)>,
+    mut commands: Commands,
+) {
+    for (panel, home, lit) in &panels {
+        let want = home.0 == chooser.focus;
+        if want == lit {
+            continue;
+        }
+        if want {
+            commands.entity(panel).insert(crate::chrome::Focused);
+        } else {
+            commands.entity(panel).remove::<crate::chrome::Focused>();
+        }
+    }
+}
+
 fn colour(tone: Tone) -> Color {
     match tone {
-        Tone::Selected => crate::chrome::ACCENT,
+        // **`TEXT`, not `ACCENT`** — the 2026-09-03 decision D6/D7. Amber used to mark the selected
+        // row's words here, which was one of the five jobs that hue was doing; it keeps exactly one,
+        // *a value being changed right now*. Selection is carried by the row itself — `ROW_SELECTED`
+        // plus the accent rail `chrome::row_shape` draws down its leading edge — so the text on a
+        // chosen row is simply the loudest ordinary ink, which is what a value reads as everywhere
+        // else in this editor.
+        Tone::Selected => crate::chrome::TEXT,
+        // **And this is the one thing amber is left for** — `ACCENT`'s single remaining job, the
+        // value under the caret. See [`Tone::Editing`].
+        Tone::Editing => crate::chrome::ACCENT,
         Tone::Stocked => crate::chrome::LABELED,
         Tone::Empty => crate::chrome::LABEL,
         Tone::Row => crate::chrome::DIM,
@@ -5098,9 +5246,51 @@ enum RowPane {
     Projects,
 }
 
-/// The label column of an inspector row. One number, so `MAP INFO` and `KIT INFO` cannot disagree
-/// about where their values start.
-const INFO_LABEL_W: f32 = 76.0;
+/// **Which of the shared label columns this panel's rows share**, measured rather than picked.
+///
+/// It was `INFO_LABEL_W = 76.0`, one of the six unnamed label widths the 2026-09-03 audit found
+/// (F8) — and it was the one that overlapped: `new work lands here` plus the selection mark is 21
+/// glyphs, 126 px at this size, so the value was drawn on top of the label in every capture of the
+/// menu (F5). The columns are [`crate::chrome::COL_LABEL`] for a word and `COL_WIDE` for a phrase,
+/// and `chrome::row_label` treats either as a **floor** rather than a cap, so a label longer than
+/// its column pushes its own value right instead of painting over it.
+///
+/// **One answer per panel, from its widest label** — not per row. A column is a column because
+/// every value in it starts at the same x; deciding row by row would put KIT INFO's `pieces` value
+/// at 52 and its `excluded` value at 96, which is two columns wearing one name. Panels may differ
+/// from each other, which is the point of having named widths at all: MAP INFO holds `bounds` and
+/// sits at [`crate::chrome::COL_LABEL`], KIT INFO holds a phrase and sits at `COL_WIDE`, and they
+/// are in different columns of the screen so nothing lines up across them anyway.
+fn label_col(rows: &[Row]) -> f32 {
+    // FiraMono is monospace, so `chars * advance` is exact rather than an estimate — see
+    // `chrome::BODY_CHAR_W`, which is stated at the body role. A label renders one role down.
+    let advance = crate::chrome::BODY_CHAR_W * crate::chrome::text::LABEL.px()
+        / crate::chrome::text::BODY.px();
+    // `+ 2` for the mark and the space `fill` puts in front of every label.
+    let widest = rows
+        .iter()
+        .map(|r| r.left.chars().count().saturating_add(2))
+        .max()
+        .unwrap_or(0);
+    if widest as f32 * advance <= crate::chrome::COL_LABEL {
+        crate::chrome::COL_LABEL
+    } else {
+        crate::chrome::COL_WIDE
+    }
+}
+
+/// **An inspector's `LABEL  value` row** — a real flex row, so the value is laid out *after* the
+/// label column rather than positioned over it. Both inspector paths in [`fill`] spawn this one
+/// shape; the policy panel's version is the same row inside a [`crate::chrome::quiet_row`],
+/// because a policy entry is selectable and a fact is not.
+fn info_row() -> Node {
+    Node {
+        flex_direction: FlexDirection::Row,
+        column_gap: Val::Px(crate::chrome::GAP_ROW),
+        width: Val::Percent(100.0),
+        ..default()
+    }
+}
 
 /// **Rebuild one list, in the editor's own row vocabulary.**
 ///
@@ -5138,9 +5328,14 @@ fn fill(commands: &mut Commands, at: Entity, rows: &[Row], kind: PanelKind, pane
             ..default()
         });
     }
+    // **One label column for the whole panel** — see [`label_col`]. Decided before the loop,
+    // because a column decided row by row is not a column.
+    let col = label_col(rows);
     for (i, r) in rows.iter().enumerate() {
         let c = colour(r.tone);
-        let selected = r.tone == Tone::Selected;
+        // **A row being typed into is the selected row**, and carries the fill, the rail and the
+        // mark — only its ink differs (see [`Tone::Editing`]).
+        let selected = matches!(r.tone, Tone::Selected | Tone::Editing);
         // **The chevron points into the column this row opens.** Only a list has one; a settings row
         // opens nothing, and giving it the same mark would restate the confusion this is fixing.
         let mark = match (kind, selected) {
@@ -5163,12 +5358,13 @@ fn fill(commands: &mut Commands, at: Entity, rows: &[Row], kind: PanelKind, pane
                 row.with_children(|line| {
                     line.spawn((
                         Text::new(left.clone()),
-                        TextFont::from_font_size(crate::chrome::text::BODY),
+                        crate::chrome::font(crate::chrome::text::BODY),
                         TextColor(c),
                         Node {
                             flex_grow: 1.0,
-                            // A flex item's automatic minimum size is its content, so without this
-                            // the label refuses to shrink and pushes the value out of the row.
+                            // CHROME-OK: not a gap — a flex item's automatic minimum size is its
+                            // content, so without this the label refuses to shrink and pushes the
+                            // value out of the row.
                             min_width: Val::Px(0.0),
                             ..default()
                         },
@@ -5176,7 +5372,7 @@ fn fill(commands: &mut Commands, at: Entity, rows: &[Row], kind: PanelKind, pane
                     if !right.is_empty() {
                         line.spawn((
                             Text::new(right.clone()),
-                            TextFont::from_font_size(crate::chrome::text::BODY),
+                            crate::chrome::font(crate::chrome::text::BODY),
                             TextColor(c),
                             TextLayout::new(Justify::Right, LineBreak::NoWrap),
                             Node { flex_shrink: 0.0, ..default() },
@@ -5195,18 +5391,14 @@ fn fill(commands: &mut Commands, at: Entity, rows: &[Row], kind: PanelKind, pane
                     row.insert(ChooserRow { pane: RowPane::Policy, index: i });
                     row.observe(on_row_click);
                     row.with_children(|line| {
-                        crate::chrome::row_label(line, INFO_LABEL_W, &left);
-                        crate::chrome::row_value(line, right.clone(), c, ());
+                        line.spawn(info_row()).with_children(|line| {
+                            crate::chrome::row_label(line, col, &left);
+                            crate::chrome::row_value(line, right.clone(), c, ());
+                        });
                     });
                 } else {
-                    p.spawn(Node {
-                        flex_direction: FlexDirection::Row,
-                        column_gap: Val::Px(crate::chrome::GAP_ROW),
-                        width: Val::Percent(100.0),
-                        ..default()
-                    })
-                    .with_children(|line| {
-                        crate::chrome::row_label(line, INFO_LABEL_W, &left);
+                    p.spawn(info_row()).with_children(|line| {
+                        crate::chrome::row_label(line, col, &left);
                         crate::chrome::row_value(line, right.clone(), c, ());
                     });
                 }
@@ -5961,6 +6153,25 @@ fn open_the_selection(
     next: &mut NextState<crate::screen::Screen>,
 ) {
     {
+        // **`Enter` on a `+ new …` row starts the name prompt**, which is the verb the status band
+        // has been advertising all along: `Enter new project`, `Enter new kit`, `Enter new map`.
+        //
+        // On the projects column it did nothing whatsoever — `ui_audit.md` F4, verified on a
+        // full-frame capture: no prompt, no project, no refusal, no status line. The arm below
+        // reaches for `projects[project - 1]`, and row 0 has no such entry, so the `if let` missed
+        // and the function returned. On the other two columns it was worse than nothing: they fell
+        // through to `launch_args`, whose refusal for this row reads *"that row makes a new one —
+        // press Enter on it"*, naming the key that had just been pressed.
+        //
+        // **The verb existed and only its doorway was missing**: `start_new` → `commit_field` →
+        // `make_it` → [`create_project`] is the same chain `N` has always walked, and
+        // `create_project` byte-copies this project's `vocab.ron` and writes the empty `kits.ron`.
+        // One arm for all three columns, because every column's row 0 is the same promise — and
+        // `on_new_row` is false in POLICY and MAP INFO, which have no such row.
+        if chooser.on_new_row() {
+            chooser.start_new();
+            return;
+        }
         // **There is no `Ctrl+Enter` here any more.** Both a kit and a map are made by pressing
         // `Enter` on the name (see [`keep_field`]); a chord that made the same thing a second way
         // would be the way nobody found.

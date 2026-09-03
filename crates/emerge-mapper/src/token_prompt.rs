@@ -30,10 +30,9 @@
 //! refusal keeps you in the field. `Esc` closes without writing.
 
 use bevy::input::keyboard::{Key, KeyboardInput};
-use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 
-use crate::chrome::{ACCENT, DANGER, DIM, LABEL, PANEL_BG, SCRIM, text};
+use crate::chrome::{self, ACCENT, DANGER, DIM, LABEL, text};
 use crate::keys;
 use crate::project::Project;
 
@@ -136,79 +135,66 @@ struct TokenPromptRoot;
 
 
 fn spawn_token_prompt(mut commands: Commands) {
-    commands
-        .spawn((
-            TokenPromptRoot,
-            Node {
-                // PLACES-ITSELF-OK: a modal is not a panel; `chrome::Frame` owns where panels go —
-                // the scrim must cover the whole viewport (see `confirm.rs`'s identical root).
-                position_type: PositionType::Absolute,
-                left: Val::Px(0.0),
-                top: Val::Px(0.0),
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                display: Display::None,
-                ..default()
-            },
-            // The same two rules `chrome::spawn_name_box` states: the full-screen container must
-            // not eat world clicks, and the dialog itself must answer the pointer-over-UI question.
-            bevy::picking::Pickable::IGNORE,
-            GlobalZIndex(400),
-            BackgroundColor(SCRIM),
-        ))
-        .with_children(|p| {
-            p.spawn((
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    padding: UiRect::all(Val::Px(crate::chrome::PAD * 1.5)),
-                    row_gap: Val::Px(crate::chrome::GAP_ROW * 2.0),
-                    min_width: Val::Px(360.0),
-                    ..default()
-                },
-                BackgroundColor(PANEL_BG),
-                Hovered::default(),
-            ))
-            .with_children(|b| {
-                b.spawn((
-                    Text::new(String::new()),
-                    TextFont::from_font_size(text::BODY),
-                    TextColor(LABEL),
-                    Line::Title,
-                ));
-                b.spawn((
-                    Text::new(String::new()),
-                    TextFont::from_font_size(text::BODY),
-                    TextColor(ACCENT),
-                    Line::Axis,
-                ));
-                b.spawn((
-                    Text::new(String::new()),
-                    TextFont::from_font_size(text::BODY),
-                    TextColor(DIM),
-                    Line::Name,
-                ));
-                b.spawn((
-                    Text::new(String::new()),
-                    TextFont::from_font_size(text::BODY),
-                    TextColor(DIM),
-                    Line::Note,
-                ));
-                b.spawn((
-                    Text::new(String::new()),
-                    TextFont::from_font_size(text::BODY),
-                    TextColor(DANGER),
-                    Line::Problem,
-                ));
-                b.spawn((
-                    Text::new(String::new()),
-                    TextFont::from_font_size(text::HINT),
-                    TextColor(DIM),
-                    Line::Hint,
-                ));
-            });
-        });
+    // **The shared modal shell**, where this hand-rolled its own.
+    //
+    // It carried its own scrim, its own z (400 against the confirm dialog's 900), its own padding
+    // (`PAD * 1.5` = 18 against 20) and its own row gap (`GAP_ROW * 2` = 10 against 12) — the
+    // 2026-09-03 audit's F14: two modals, two contracts. `chrome::modal_card` is that one
+    // contract, stated once: one [`crate::chrome::SCRIM`], one `MODAL_Z`, one `MODAL_PAD`, and a
+    // card on `OVERLAY_BG` with an edge and a corner, spawned hidden.
+    //
+    // `TokenPromptRoot` lands on the **scrim layer**, which is the node [`paint_token_prompt`]
+    // flips `Node::display` on — so the show/hide half is untouched and only the box goes.
+    //
+    // **`Pickable::IGNORE` is gone from the root, on purpose.** It was there so a full-screen
+    // container could not eat world clicks, which is right for `chrome::spawn_name_box`: that is a
+    // prompt you are meant to be able to click past. This is a *question* — `Enter` on the note
+    // keeps it, `Esc` cancels, and while it is open `editor::not_typing` has stood every tab verb
+    // down. A click reaching the map underneath and placing a piece nobody asked for, in the one
+    // moment the keyboard is captured, is precisely the bug the typing guard exists to prevent. So
+    // the scrim eats it, the way `confirm`'s always has. One shell, one contract.
+    //
+    // The card keeps its own `Hovered` (`modal_card` puts one there) so the "is the pointer over
+    // UI" question still answers yes over an open dialog — without it, scrolling on a visible
+    // prompt zoomed the world behind it.
+    crate::chrome::modal_card(&mut commands, TokenPromptRoot).with_children(|b| {
+        b.spawn((
+            Text::new(String::new()),
+            chrome::font(text::BODY),
+            TextColor(LABEL),
+            Line::Title,
+        ));
+        b.spawn((
+            Text::new(String::new()),
+            chrome::font(text::BODY),
+            TextColor(ACCENT),
+            Line::Axis,
+        ));
+        b.spawn((
+            Text::new(String::new()),
+            chrome::font(text::BODY),
+            TextColor(DIM),
+            Line::Name,
+        ));
+        b.spawn((
+            Text::new(String::new()),
+            chrome::font(text::BODY),
+            TextColor(DIM),
+            Line::Note,
+        ));
+        b.spawn((
+            Text::new(String::new()),
+            chrome::font(text::BODY),
+            TextColor(DANGER),
+            Line::Problem,
+        ));
+        b.spawn((
+            Text::new(String::new()),
+            chrome::font(text::HINT),
+            TextColor(DIM),
+            Line::Hint,
+        ));
+    });
 }
 
 /// Which line of the dialog a `Text` is, so one query can paint all of them.

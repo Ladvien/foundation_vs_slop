@@ -609,7 +609,7 @@ fn paint_journal(
                 p.spawn((
                     bevy::prelude::Text::new("nothing has gone wrong yet".to_owned()),
                     bevy::prelude::TextColor(crate::chrome::DIM),
-                    bevy::prelude::TextFont::from_font_size(crate::chrome::text::LABEL),
+                    crate::chrome::font(crate::chrome::text::LABEL),
                     crate::chrome::ProblemLogLine,
                 ));
                 return;

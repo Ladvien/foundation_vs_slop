@@ -14,9 +14,9 @@
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use bevy::ui_widgets::{Activate, Button as UiButton};
+use bevy::ui_widgets::Activate;
 
-use crate::chrome::{ACCENT, CHIP_PAD, DIM, FOCUS_BG, ROW_BG, ROW_HOVER, TEXT};
+use crate::chrome::{ACCENT, DIM, FOCUS_BG, ROW_BG, ROW_HOVER, TEXT};
 
 /// Which list a box narrows.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
@@ -67,10 +67,16 @@ impl Pane {
 
 /// The filter text of each list, and which box is taking keys.
 ///
-/// **Its own resource, and deliberately not a field on `EditorState`.** `rebuild_palette` runs on
-/// `resource_changed::<EditorState>`, and every keystroke here has to rebuild the list it filters —
-/// so this one is watched on purpose, where `SizeEdit` and `RemovalDrag` were split out to avoid
-/// exactly that. The difference is whether the rebuild is the point.
+/// **Its own resource, and deliberately not a field on `EditorState`.** Every keystroke here has to
+/// rebuild the list it filters, so this resource is named in `editor::rebuild_palette`'s run
+/// condition on purpose — where `SizeEdit`, `RemovalDrag` and `EditorState` itself are deliberately
+/// kept out of it, because arming a brush must not respawn a hundred and eighty rows. The
+/// difference is whether the rebuild is the point.
+///
+/// (This paragraph used to say `rebuild_palette` ran on `resource_changed::<EditorState>`. It never
+/// did — the condition is `Project` / `Folded` / `Filters` / `ThumbGeneration` — and the claim was
+/// load-bearing enough that `editor::arm_palette_rows` exists precisely because it is false: the
+/// palette's selection has to be written onto rows that already exist.)
 #[derive(Resource, Default)]
 pub struct Filters {
     palette: String,
@@ -173,19 +179,22 @@ pub struct FilterBox(pub Pane);
 pub struct FilterText(pub Pane);
 
 /// Spawn a filter box above a list.
+///
+/// **`chrome::text_field`, where this hand-rolled the same box.** It was one of the five modules
+/// the 2026-09-03 audit found using no shared builder at all (F9), and what it had built by hand
+/// was a text field: a box that owns the keyboard, with a readout inside it. Adopting the builder
+/// costs the `CHIP_PAD` inset and buys `FIELD_PAD`, a [`crate::chrome::MIN_FIELD_H`] floor (an
+/// unstated field height lays out at 7 px while empty) and the same shape as the four other fields
+/// in the editor — which is the whole of D4.
 pub fn spawn(parent: &mut ChildSpawnerCommands, pane: Pane) {
-    let mut b = parent.spawn((
-        UiButton,
-        Hovered::default(),
+    let mut b = crate::chrome::text_field(
+        parent,
+        Val::Percent(100.0),
         FilterBox(pane),
-        Node {
-            width: Val::Percent(100.0),
-            padding: CHIP_PAD,
-            flex_shrink: 0.0,
-            ..default()
-        },
-        BackgroundColor(ROW_BG),
-    ));
+        crate::chrome::text::BODY,
+        (placeholder(pane).to_owned(), DIM),
+        FilterText(pane),
+    );
     // **Which census control this box *is*, and the one pane that is not one.**
     //
     // One `ControlId::Filter` covers the three list boxes: they live in different tabs' panels, so
@@ -198,14 +207,6 @@ pub fn spawn(parent: &mut ChildSpawnerCommands, pane: Pane) {
     if pane != Pane::Tags {
         b.insert(crate::chrome::Control(crate::keys::ControlId::Filter));
     }
-    b.with_children(|b| {
-        b.spawn((
-            Text::new(placeholder(pane)),
-            TextColor(DIM),
-            TextFont::from_font_size(crate::chrome::text::BODY),
-            FilterText(pane),
-        ));
-    });
 }
 
 /// **What an empty box says it will narrow.**
