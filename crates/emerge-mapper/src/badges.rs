@@ -469,7 +469,9 @@ fn spawn_layer(mut commands: Commands, frame: Res<chrome::Frame>) {
             Node {
                 // PLACES-ITSELF-OK: a layer, not a panel — see above.
                 position_type: PositionType::Absolute,
+                // CHROME-OK: an absolute layer's origin, not a spacing step.
                 left: Val::Px(0.0),
+                // CHROME-OK: as above.
                 top: Val::Px(0.0),
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
@@ -485,7 +487,7 @@ fn spawn_layer(mut commands: Commands, frame: Res<chrome::Frame>) {
             // Above the panels (0), the compass (100), the tab strip (101) and the name box (400).
             // Below `confirm`'s 900, deliberately: a question you have to answer outranks a hint
             // about keys.
-            GlobalZIndex(500),
+            GlobalZIndex(chrome::BADGE_Z),
             BackgroundColor(VEIL),
         ))
         .id();
@@ -790,7 +792,7 @@ fn rebuild_badges(
                         // beside a control whose own words are already the verb.
                         padding: if labelled { chrome::CHIP_PAD } else { UiRect::ZERO },
                         border: if labelled {
-                            UiRect::all(Val::Px(1.0))
+                            UiRect::all(Val::Px(chrome::EDGE_W))
                         } else {
                             UiRect::ZERO
                         },
@@ -2210,7 +2212,7 @@ fn one_badge(
             border: if boxed {
                 UiRect::ZERO
             } else {
-                UiRect::all(Val::Px(1.0))
+                UiRect::all(Val::Px(chrome::EDGE_W))
             },
             flex_direction: FlexDirection::Row,
             // **Start, not Center.** A wrapped description is two lines tall and
@@ -2250,7 +2252,7 @@ fn one_badge(
             TextColor(KEY),
             // The chord is the one thing a badge exists to have read, so it gets the reading
             // size — the descriptions stay at `HINT`, quieter on both axes.
-            TextFont::from_font_size(chrome::text::BODY),
+            chrome::font(chrome::text::BODY),
             // A chord with a space in it is one token to a reader and two to a
             // line-breaker.
             TextLayout::new(Justify::Left, LineBreak::NoWrap),
@@ -2295,7 +2297,7 @@ fn one_badge(
     // Quieter than the chord: the chord is what the eye scans
     // for, the words are what tell it whether to stop.
     TextColor(chrome::DIM),
-    TextFont::from_font_size(chrome::text::HINT),
+    chrome::font(chrome::text::HINT),
     TextLayout::new(Justify::Left, LineBreak::WordBoundary),
     bevy::picking::Pickable::IGNORE,
                 ));

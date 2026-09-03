@@ -1627,6 +1627,13 @@ fn the_menu_columns_run_project_then_kits_then_maps() {
     // **And `left`/`right` walk them in that order**, one press per column, so the key and the
     // layout cannot come to disagree again. There is no `Tab`: the rest of the editor navigates
     // with arrows and nothing else — see `Focus`.
+    //
+    // **They clamp at the ends; they used to wrap.** Reported at the keyboard 2026-09-03: two right
+    // presses from KITS landed back on PROJECTS, which reads as the selection having jumped rather
+    // than as the end of a row — and nothing on screen said which column had the keyboard, so there
+    // was no way to tell the wrap from a misfire. Both halves were fixed together: the panel holding
+    // the keyboard lights its border (`chrome::Focused`), and the walk stops at the edge, because a
+    // three-item row of columns is an ordered row and not a carousel.
     use emerge_mapper::chooser::Focus;
     let mut chooser = app.world_mut().resource_mut::<emerge_mapper::chooser::Chooser>();
     chooser.focus = Focus::Projects;
@@ -1637,8 +1644,18 @@ fn the_menu_columns_run_project_then_kits_then_maps() {
     }
     assert_eq!(
         walk,
-        vec![Focus::Projects, Focus::Kits, Focus::Maps, Focus::Projects],
-        "one press per column, in the order they are drawn, wrapping over the three"
+        vec![Focus::Projects, Focus::Kits, Focus::Maps, Focus::Maps],
+        "one press per column, in the order they are drawn, stopping at the right-hand end"
+    );
+
+    // The other end, which is the half a wrap test never covered.
+    for _ in 0..3 {
+        chooser.cross(-1);
+    }
+    assert_eq!(
+        chooser.focus,
+        Focus::Projects,
+        "and walking back stops at the left-hand end rather than reappearing on MAPS"
     );
 }
 
@@ -12032,8 +12049,8 @@ fn a_badge_chord_reads_at_body_size() {
         .build("m");
     let mut app = badges_up(&root, emerge_mapper::tiles::Mode::Map);
 
-    let body = TextFont::from_font_size(emerge_mapper::chrome::text::BODY).font_size;
-    let hint = TextFont::from_font_size(emerge_mapper::chrome::text::HINT).font_size;
+    let body = emerge_mapper::chrome::font(emerge_mapper::chrome::text::BODY).font_size;
+    let hint = emerge_mapper::chrome::font(emerge_mapper::chrome::text::HINT).font_size;
     let (mut chords, mut descs) = (0usize, 0usize);
     {
         let mut roots_q = app.world_mut().query_filtered::<Entity, With<Badge>>();

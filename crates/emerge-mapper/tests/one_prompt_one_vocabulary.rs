@@ -86,18 +86,24 @@ fn only_confirm_reads_the_answer_keys() {
 /// The old questions rendered where this editor puts commentary — bottom-left, same colour as
 /// `baked 82 palette thumbnails`. A question that blocks progress has to be the thing on screen, so
 /// the panel is centred over a scrim and the scrim eats the click.
+///
+/// **Where those facts live moved on 2026-09-03, and this test moved with them.** Three modals
+/// shipped three contracts — different z, different padding, different scrim, one of them written
+/// inline as `srgba(0, 0, 0, 0.72)` beside a constant whose own doc says it exists so a second modal
+/// cannot dim by a different amount. They share `chrome::modal_card` now, so the scrim, the
+/// centring and the z-index are *its* properties and asserting them against `confirm.rs`'s source
+/// text would fail on a change that improved exactly the thing this test is about.
+///
+/// So each half is checked where it is: confirm goes through the shell, and the shell has the
+/// properties. What stays in `confirm.rs` is what is genuinely confirm's — that both answers are
+/// clickable, and that the question is not *also* written into the band it was moved off.
 #[test]
 fn the_prompt_is_centred_and_blocks_what_is_behind_it() {
     let src = read("src/confirm.rs");
     for (needle, why) in [
-        ("SCRIM", "the backdrop dims the application, so the question is the only lit thing"),
         (
-            "justify_content: JustifyContent::Center",
-            "centred — the whole point of the move off the status band",
-        ),
-        (
-            "GlobalZIndex",
-            "above every panel, or a dock draws over the question",
+            "modal_card",
+            "one shell for every question, so a second modal cannot dim, pad or stack differently",
         ),
         (
             "ConfirmButton",
@@ -106,6 +112,27 @@ fn the_prompt_is_centred_and_blocks_what_is_behind_it() {
     ] {
         assert!(src.contains(needle), "confirm.rs lost `{needle}` — {why}");
     }
+
+    let shell = read("src/chrome.rs");
+    let card = shell
+        .split_once("pub fn modal_card")
+        .map(|(_, rest)| rest)
+        .unwrap_or_else(|| panic!("`chrome::modal_card` is the shell every question is asked in"));
+    for (needle, why) in [
+        ("SCRIM", "the backdrop dims the application, so the question is the only lit thing"),
+        (
+            "justify_content: JustifyContent::Center",
+            "centred — the whole point of the move off the status band",
+        ),
+        (
+            "GlobalZIndex(MODAL_Z)",
+            "above every panel, or a dock draws over the question — and named, so two overlays \
+             cannot disagree about which is in front",
+        ),
+    ] {
+        assert!(card.contains(needle), "`chrome::modal_card` lost `{needle}` — {why}");
+    }
+
     assert!(
         !src.contains("status.note") && !src.contains("status.problem"),
         "the prompt must not write itself into the status line as well; that is the band it was \
