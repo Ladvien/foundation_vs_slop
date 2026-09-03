@@ -3480,6 +3480,7 @@ impl Plugin for TilesPlugin {
             .add_observer(on_scale_click)
             .add_observer(on_mount_height_click)
             .add_observer(on_candidate_click)
+            .add_observer(on_member_row)
             .add_observer(on_library_click)
             .add_observer(on_pack_click)
             .add_observer(on_excluded_click)
@@ -6967,12 +6968,19 @@ fn draw_preview_footprint(state: Res<ImportState>, project: Res<Project>, mut gi
 /// exactly like `added \`crate\``. Refusals go to the banner now.
 fn refresh_lines(
     state: Res<ImportState>,
+    // **Which tab is up, because one of these two readouts belongs to only one of them.**
+    mode: Res<Mode>,
     mut summaries: Query<&mut Text, (With<ScanSummary>, Without<ActionLine>)>,
     mut actions: Query<&mut Text, (With<ActionLine>, Without<ScanSummary>)>,
 ) {
+    // **The scan summary is the Meshes tab's.** `270 mesh(es) not in the library — 89 with
+    // warnings` is a fact about importing, and it was drawn on the TILES tab too, where it means
+    // nothing and is the first line under the title (the 2026-09-03 review's L3). The panel is
+    // shared between the two tabs; the readout is not.
+    let summary = if *mode == Mode::Meshes { state.summary.as_str() } else { "" };
     for mut t in &mut summaries {
-        if t.0 != state.summary {
-            t.0 = state.summary.clone();
+        if t.0 != summary {
+            t.0 = summary.to_owned();
         }
     }
     for mut t in &mut actions {
@@ -7436,9 +7444,9 @@ fn paint_label_progress(
     }
     for mut text in &mut heads {
         let want = if queue.paused() {
-            format!("HELD AT {done}/{total}   Shift+L resumes")
+            format!("HELD AT {done}/{total}   {} resumes", keys::chord(Action::SuggestAll))
         } else {
-            format!("LABELING {done}/{total}   Shift+L holds")
+            format!("LABELING {done}/{total}   {} holds", keys::chord(Action::SuggestAll))
         };
         if text.0 != want {
             text.0 = want;
@@ -8046,20 +8054,54 @@ fn build_detail(p: &mut ChildSpawnerCommands, build: &crate::build::Build, proje
         } else {
             format!(" yaw {:.0}", m.yaw)
         };
-        line(
-            p,
-            format!(
-                "{} {}  ({:+.2}, {:+.2}) +{:.2}{yaw}",
-                if focused { ">" } else { " " },
-                what,
-                m.at.0,
-                m.at.1,
-                m.lift
-            ),
-            if focused { ACCENT } else { TEXT },
-            crate::chrome::text::LABEL,
-        );
+        // **A list, in the shape every other list in this editor uses** — and the last one that was
+        // not. It was a bare `Text` with `>` written into the string and `ACCENT` for the focused
+        // row: no `Node`, no `Button`, no `Hovered`, no observer, so the one list `Del`, `R` and
+        // `,`/`.` all act on was the one list the pointer could not touch (the 2026-09-03 review's
+        // T6). `kit_row` had exactly this defect fixed seven hundred lines up, and said so.
+        //
+        // Selection is the row's fill and its accent rail now, so the ASCII marker goes with the
+        // amber — a cursor drawn into the text as well would be one fact said twice.
+        crate::chrome::list_row(p, focused, MemberRow(i)).with_children(|row| {
+            row.spawn((
+                Node {
+                    flex_grow: 1.0,
+                    // CHROME-OK: zero, not a spacing step — see [`count_cell`].
+                    min_width: Val::Px(0.0),
+                    ..default()
+                },
+                Text::new(what),
+                TextColor(TEXT),
+                crate::chrome::font(crate::chrome::text::LABEL),
+            ));
+            count_cell(
+                row,
+                format!("({:+.2}, {:+.2}) +{:.2}{yaw}", m.at.0, m.at.1, m.lift),
+                LABEL,
+            );
+        });
     }
+}
+
+/// A clickable member row of the open tile, carrying its index into `Composition::members`.
+#[derive(Component, Clone, Copy)]
+struct MemberRow(usize);
+
+/// **Clicking a member focuses it**, which is the single write `,`/`.` make — so the pointer and
+/// the keyboard move one cursor rather than two. `Build` is `Option<ResMut>` because this is a
+/// global `Activate` observer: it fires anywhere in the application, and a missing `Res<T>` panics
+/// rather than skipping.
+fn on_member_row(
+    activate: On<Activate>,
+    rows: Query<&MemberRow>,
+    build: Option<ResMut<crate::build::Build>>,
+) {
+    let (Ok(row), Some(mut build)) = (rows.get(activate.entity), build) else {
+        return;
+    };
+    // Clamped by the caller's own redraw: the list is rebuilt from `members`, so an index it drew
+    // is an index that existed when it was drawn.
+    build.focus = row.0;
 }
 
 /// **Has the tag filter's text moved since last frame?** — the one filter this pane can show.

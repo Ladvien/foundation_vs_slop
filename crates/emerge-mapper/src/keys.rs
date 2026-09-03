@@ -1525,6 +1525,12 @@ pub const BINDINGS: &[Binding] = &[
         "left",
         "walk the lists / Shift: x5",
     )
+    // **Alive while a filter box holds the keys**, like its up/down siblings. All four collapse to
+    // ONE badge row promising "up/down walk, left/right switch which list", and only two of them
+    // survived `Holder::Filter` — so half the row a reader was looking at was inert with nothing
+    // saying so (the 2026-09-03 review's M13). Filtering a list and then crossing to the other one
+    // is the ordinary motion this tab is for.
+    .also_filtered()
     .at(Home::Control(ControlId::Pieces)),
     b(
         Action::FocusLibrary,
@@ -1534,6 +1540,12 @@ pub const BINDINGS: &[Binding] = &[
         "right",
         "walk the lists / Shift: x5",
     )
+    // **Alive while a filter box holds the keys**, like its up/down siblings. All four collapse to
+    // ONE badge row promising "up/down walk, left/right switch which list", and only two of them
+    // survived `Holder::Filter` — so half the row a reader was looking at was inert with nothing
+    // saying so (the 2026-09-03 review's M13). Filtering a list and then crossing to the other one
+    // is the ordinary motion this tab is for.
+    .also_filtered()
     .at(Home::Control(ControlId::Pieces)),
     b(
         Action::TypeId,
