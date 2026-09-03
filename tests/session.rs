@@ -358,6 +358,92 @@ fn gib_spawn_positions_stay_identical_under_load() {
     }
 }
 
+/// **One gib per frontier piece, never one per tree node.**
+///
+/// `FractureCache::fragments` hands back *every* node of the fracture hierarchy — parents and their
+/// children both — while `leaves` hands back the finest frontier, an antichain that tiles the subject
+/// exactly once. For `R` root cells and `T` leaves the array holds `2T − R` nodes, so iterating it put
+/// `2T − R` rigid bodies in the scene where `T` were meant, each parent physically overlapping its own
+/// two children, every duplicate charged against `max_gibs` and the crab economy. Measured on the
+/// shipped figurine: **40 nodes, 23 leaves**.
+///
+/// The inequality between those two counts is the whole bug, so it is asserted directly rather than
+/// through a hash: a golden would have moved for this change and been re-blessed without anyone
+/// learning what moved. `assert_ne!` on the node count is what makes the test able to fail — if a
+/// future bake ever produced a flat tree the two numbers would coincide and this oracle would become
+/// vacuous, so it says so out loud.
+#[test]
+fn a_unit_crunch_spawns_one_gib_per_frontier_piece() {
+    use bevy::prelude::{Entity, With};
+    use foundation_vs_slop::carnage::CarnageCache;
+    use foundation_vs_slop::config::GameConfig;
+    use foundation_vs_slop::gore::GibKey;
+    use foundation_vs_slop::squad::{FigurineSource, Unit};
+
+    /// Every live gib's key. A duplicate here would mean two chunks share an identity, which is what
+    /// `GibRing` eviction and the crab economy key on.
+    fn gib_keys(app: &mut bevy::prelude::App) -> Vec<u64> {
+        let world = app.world_mut();
+        world.query::<&GibKey>().iter(world).map(|k| k.0).collect()
+    }
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = app_at_stable_kill_point(&cfg);
+
+    // What the bake says this squad's deaths *should* produce, and what the buggy read would have.
+    let (want_leaves, want_nodes) = {
+        let world = app.world_mut();
+        let sources: Vec<_> = {
+            let mut q = world.query_filtered::<(Entity, &FigurineSource), With<Unit>>();
+            q.iter(world).map(|(_, f)| f.0.id()).collect()
+        };
+        assert!(!sources.is_empty(), "precondition: the squad is alive at the kill point");
+        let cache = world.resource::<CarnageCache>();
+        sources.iter().fold((0usize, 0usize), |(l, n), s| {
+            (l + cache.leaves(*s).len(), n + cache.fragments(*s).map_or(0, |f| f.len()))
+        })
+    };
+    assert_ne!(
+        want_leaves, want_nodes,
+        "precondition: the fracture tree must have interior nodes, or this oracle cannot fail \
+         ({want_leaves} leaves, {want_nodes} nodes)"
+    );
+
+    // Meat chunks ride the same `GibKey`/`Carryable` shape and spawn for every death, so they are part
+    // of the delta and have to be accounted for rather than filtered — read from the authored config,
+    // never hard-coded, because it is an evolvable world-genome dial.
+    let meat_per_death = {
+        let gc = app.world().resource::<GameConfig>();
+        foundation_vs_slop::gore::GoreDynamics::from_config(&gc.gore, &gc.fracture).meat_count as usize
+    };
+    let squad = {
+        let world = app.world_mut();
+        world.query_filtered::<Entity, With<Unit>>().iter(world).count()
+    };
+
+    let before = gib_keys(&mut app).len();
+    kill_squad(&mut app);
+    step(&mut app, &cfg, 1);
+    let after = gib_keys(&mut app);
+
+    let spawned = after.len() - before;
+    assert_eq!(
+        spawned,
+        want_leaves + squad * meat_per_death,
+        "a squad wipe spawned {spawned} gibs; the frontier is {want_leaves} fragments plus \
+         {squad}×{meat_per_death} meat chunks. Spawning the whole array instead would give \
+         {}.",
+        want_nodes + squad * meat_per_death
+    );
+
+    let mut keys = after.clone();
+    // SORT-OK: raw u64 keys, and the assertion below is exactly that they are all distinct.
+    keys.sort_unstable();
+    keys.dedup();
+    assert_eq!(keys.len(), after.len(), "two live gibs share a GibKey");
+}
+
 /// Reps per trial. G0 split ~30% of rollouts under load, so 10 reps miss a same-rate splitter <3%.
 const REPS: usize = 10;
 

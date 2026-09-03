@@ -59,15 +59,27 @@ pub struct Bore {
     /// that constant.
     pub radius: f32,
     /// How many faces the barrel has: the channel is an `n`-gon prism, not a cylinder, because a
-    /// plane is the only cut this crate makes. `3` is a triangular gouge, `8` reads as round at any
-    /// size a bullet is, `24` is smooth and costs 24 shards per cell. Refused below 3 or above
-    /// `MAX_SIDES`.
+    /// plane is the only cut this crate makes. `3` is a triangular gouge, `24` is smooth and costs
+    /// 24 shards per cell. Refused below 3 or above `MAX_SIDES`.
+    ///
+    /// [`Bore::new`] derives this from [`Self::radius`] via [`sides_for`], because roundness is a
+    /// property of the hole's *size on screen* and a constant cannot be right at both ends of a
+    /// calibre dial. Override it to spend or save the shards deliberately.
     pub sides: u32,
     /// **How ragged the barrel is**, in `[0, 1]`. Each of the `sides` planes is pulled *inward* by up
     /// to this fraction of the radius, by a hash of its own index and the entry point — so the tear
     /// is a property of where the shot landed, needs no seed threaded down, and comes back identical
     /// on every run. `0.0` is a clean bore. The bite is inward only, so `radius` stays the bound on
     /// the entry hole rather than becoming its average.
+    ///
+    /// **The top of the range narrows the channel as well as roughening it, and that is the honest
+    /// reading of an inward-only bite.** Measured offscreen on `examples/bullet_holes.rs`' own first
+    /// shot, radius 0.035: at `0.15` the hole is round with an irregular rim, at `0.35` it reads as a
+    /// shrunken polygon, and at `1.0` a facet may reach the axis and leave a sliver rather than a
+    /// hole — a later shot down that channel then finds no material and is reported by
+    /// [`apply`]'s `reached no proxy cell` warning. Bounding the bite was tried and **rejected**: it
+    /// moves the facets into the sliver-prone zone of the clipper and opens shards, which
+    /// `every_plug_is_a_closed_convex_solid` catches. Choose the dial, not a floor under it.
     pub jaggedness: f32,
     /// **How much wider the far end is**, as a fraction of `radius`: the exit radius is
     /// `radius * (1 + flare)`. Tilts each barrel plane instead of adding any, so the channel stays a
@@ -93,14 +105,49 @@ pub struct Bore {
     pub shatter: u32,
 }
 
+/// **The flat-face sag a channel is allowed**, subject-local, where a character is about 1.0 tall.
+///
+/// An inscribed `n`-gon's face sits `radius · (1 - cos(π/n))` inside the true circle, and that
+/// distance — not the side count — is what reads as polygonal. Measured on the blocked-out humanoid
+/// at the two calibres `examples/bullet_holes.rs` offers: at 8 sides the sag is 2.66 mm for a 0.035
+/// bullet and **6.09 mm for a 0.080 cannon**, which is why one constant side count looked round at
+/// one end of that dial and like a shoved polygon at the other.
+///
+/// 1.5 mm is a little under a tenth of the smallest calibre's radius, and it is the number that buys
+/// the fat hole its facets without buying them for the pinhole: the same five channels bake in 4.4 ms
+/// at 8 sides and 17.5 ms at 16, so the shards are a real budget — the same one
+/// `bullet_holes`' twelve-channel cap was bought out of.
+pub const MAX_SAG: f32 = 1.5e-3;
+
+/// **The fewest barrel faces that keep a channel of this radius under [`MAX_SAG`]**, in
+/// `MIN_ROUND_SIDES..=MAX_SIDES`.
+///
+/// Inverts the sag: `sag = r·(1 - cos(π/n))` gives `n = π / acos(1 - sag/r)`, rounded up. A radius at
+/// or below the sag cannot be improved by faces — it is smaller than the error it is being held to —
+/// so it takes the floor.
+pub fn sides_for(radius: f32) -> u32 {
+    if !(radius > MAX_SAG) || !radius.is_finite() {
+        return MIN_ROUND_SIDES;
+    }
+    // `1 - sag/r` is in `(0, 1)` here, so `acos` is finite and non-zero.
+    let n = core::f32::consts::PI / (1.0 - MAX_SAG / radius).acos();
+    if !n.is_finite() {
+        return MAX_SIDES;
+    }
+    (n.ceil() as u32).clamp(MIN_ROUND_SIDES, MAX_SIDES)
+}
+
 impl Bore {
-    /// A bore with the shipped channel dials — 8 sides, a little raggedness, a little flare, and a
-    /// plug that comes apart into four.
+    /// A bore with the shipped channel dials — a little raggedness, a little flare, a plug that comes
+    /// apart into four, and **as many barrel faces as this radius needs** ([`sides_for`]).
     ///
     /// Assign to the rest, the way [`crate::CutSettings::new`] is used:
     /// `Bore { jaggedness: 0.0, ..Bore::new(a, b, 0.04) }`.
     pub fn new(from: Vec3, to: Vec3, radius: f32) -> Self {
-        Bore { from, to, radius, sides: 8, jaggedness: 0.35, flare: 0.25, shatter: 4 }
+        // `jaggedness: 0.15` rather than the 0.35 this shipped with: the bite is inward-only, and
+        // measured on `examples/bullet_holes.rs`' first shot 0.35 read as a shrunken polygon where
+        // 0.15 reads as a round hole with a torn edge. See the field's own doc for the capture.
+        Bore { from, to, radius, sides: sides_for(radius), jaggedness: 0.15, flare: 0.25, shatter: 4 }
     }
 }
 
@@ -117,11 +164,18 @@ impl Bore {
 const MIN_RADIUS: f32 = 1.0e-2;
 /// Barrel faces beyond which the shard count is the cost and the roundness is not the benefit: 24
 /// planes already read as smooth, and each one is a shard with its own two meshes.
-const MAX_SIDES: u32 = 24;
+pub const MAX_SIDES: u32 = 24;
+/// **The fewest faces [`sides_for`] will derive**, as opposed to the fewest [`prism`] will accept.
+///
+/// A caller asking for a triangular gouge gets one; a caller asking for *a channel of this radius*
+/// never gets fewer than eight, because below that the facets are visible however small the hole is
+/// and the shards saved are a handful.
+pub const MIN_ROUND_SIDES: u32 = 8;
 /// **The most pieces one plug may become.** Each is an entity with two meshes and its own trajectory,
 /// and a plug is small: past a dozen the pieces are below the size anything can be seen at, so the
 /// cost is real and the benefit is not.
 const MAX_SHATTER: u32 = 12;
+
 
 /// The bore's outward half-space planes: `sides` barrel planes, then the entry and exit caps.
 ///
@@ -375,7 +429,21 @@ pub(crate) fn shatter(
         let s = seed
             .wrapping_add(cut.wrapping_mul(2_654_435_761))
             .wrapping_add(live.len() as u32);
-        let plane = choose_plane(&live[i].0, s, weak_axis, plane_jitter);
+        // **A plug shatters direction-blind, deliberately.** The debris a bore ejects has no long
+        // axis and no tension face — it is already off the subject — so the loading-mode policy has
+        // nothing to say about it, and passing one through would invent a morphology for a coin of
+        // meat. `WeakAxis` is what this loop always used.
+        let Some(plane) = choose_plane(
+            &live[i].0,
+            s,
+            weak_axis,
+            plane_jitter,
+            &crate::FaultPolicy::WeakAxis,
+            cut,
+            &crate::soup::MorphologyDials { spiral_pitch_deg: 0.0, greenstick_impulse: 0.0 },
+        ) else {
+            continue;
+        };
         cut += 1;
         // **`FaceKind::Cut`, not `Bore`.** A shatter face is a fracture face on a piece of debris, so
         // it should be crumpled and rounded like every other one. The plug's *barrel* faces stay
@@ -400,20 +468,25 @@ pub(crate) fn shatter(
 /// The returned prisms are the ones the caller must also [`carve`] out of the skin, in the same
 /// order. A bore that reached no proxy cell is **not** in that list and contributes no plug: a
 /// channel that touched no solid must not open the skin, and it cannot have ejected anything either.
+///
+/// The fourth return is **which** of `bores` those prisms came from, as ascending indices. A caller
+/// that keeps an accumulating channel list needs this to prune it, because a bore whose material is
+/// already gone will never carve again and re-attempting it costs a full bake forever.
 pub(crate) fn apply(
     cells: &[ProxyCell],
     bores: &[Bore],
-) -> (Vec<ProxyCell>, Vec<Vec<Plane>>, Vec<Plug>) {
+) -> (Vec<ProxyCell>, Vec<Vec<Plane>>, Vec<Plug>, Vec<u32>) {
     // With an empty `bores` this is one clone of a handful of cells and the pipeline is otherwise
     // byte-identical. One path, no `if bores.is_empty()` branch to diverge.
     let mut cells: Vec<ProxyCell> = cells.to_vec();
     let mut landed: Vec<Vec<Plane>> = Vec::new();
+    let mut landed_bores: Vec<u32> = Vec::new();
     let mut plugs: Vec<Plug> = Vec::new();
     let cells_before = cells.len();
     let mut ejected = 0.0f32;
     let mut consumed = 0usize;
 
-    for bore in bores {
+    for (index, bore) in bores.iter().enumerate() {
         let Some(prism) = prism(bore) else { continue }; // already warned
         let axis = (bore.to - bore.from).normalize_or_zero();
         let mut next: Vec<ProxyCell> = Vec::with_capacity(cells.len());
@@ -449,6 +522,7 @@ pub(crate) fn apply(
         }
         cells = next;
         landed.push(prism);
+        landed_bores.push(index as u32);
         plugs.append(&mut mine);
     }
 
@@ -464,7 +538,7 @@ pub(crate) fn apply(
             info!("carnage: {consumed} of those cells were swallowed whole and left as plugs");
         }
     }
-    (cells, landed, plugs)
+    (cells, landed, plugs, landed_bores)
 }
 
 #[cfg(test)]
@@ -715,9 +789,10 @@ mod tests {
         let baked = bake(&cube, &proxy, 1, vec![through_y(0.1, 8, 0.0, 0.0)]);
         let ids = baked.tree.leaves();
         assert!(ids.len() > 2, "the bore should have made several shards, got {}", ids.len());
+        // Tier A only — bonds are a question about cells, so no mesh has to be built to answer it.
         let members: Vec<(crate::FragmentId, &ProxyCell)> = ids
             .iter()
-            .filter_map(|id| baked.fragments.get(id.index()).map(|f| (*id, &f.cell)))
+            .filter_map(|id| baked.solids().get(id.index()).map(|s| (*id, &s.cell)))
             .collect();
         let graph = BondGraph::of(&members, baked.tree.len());
         let found = graph.islands(&ids, &BondSet::new(&graph));
@@ -823,6 +898,48 @@ mod tests {
         }
     }
 
+    /// **A channel's facets are held to a sag, not to a side count** — which is the whole reason the
+    /// derivation exists: at a fixed 8 sides a 0.035 bullet sags 2.66 mm and a 0.080 cannon sags
+    /// 6.09 mm on a subject about 1.0 tall, so one constant read as round at one calibre and as a
+    /// shoved polygon at the other. Prediction: every radius a caller can ask for lands under
+    /// [`MAX_SAG`] unless it is already at [`MAX_SIDES`], and the count never falls below
+    /// [`MIN_ROUND_SIDES`].
+    #[test]
+    fn a_channels_facets_are_held_to_a_sag_at_every_calibre() {
+        let sag = |r: f32, n: u32| r * (1.0 - (core::f32::consts::PI / n as f32).cos());
+        for radius in [MIN_RADIUS, 0.015f32, 0.025, 0.035, 0.05, 0.08, 0.2, 0.5] {
+            let n = sides_for(radius);
+            assert!(
+                (MIN_ROUND_SIDES..=MAX_SIDES).contains(&n),
+                "radius {radius} derived {n} sides, outside the bounds prism() accepts"
+            );
+            if n < MAX_SIDES {
+                assert!(
+                    sag(radius, n) <= MAX_SAG,
+                    "radius {radius} at {n} sides sags {} m, over the {MAX_SAG} m budget",
+                    sag(radius, n)
+                );
+                // Minimal: one face fewer would break the budget, so no shard is spent for nothing.
+                if n > MIN_ROUND_SIDES {
+                    assert!(
+                        sag(radius, n - 1) > MAX_SAG,
+                        "radius {radius} spends {n} sides where {} would do",
+                        n - 1
+                    );
+                }
+            }
+        }
+        // A pinhole cannot be improved by faces and must not spin up to the cap chasing it.
+        assert_eq!(sides_for(MAX_SAG * 0.5), MIN_ROUND_SIDES);
+        assert_eq!(sides_for(0.0), MIN_ROUND_SIDES, "a zero radius is refused later, not here");
+        assert_eq!(sides_for(f32::NAN), MIN_ROUND_SIDES);
+        // The dial the demo offers, in the direction it must move.
+        assert!(
+            sides_for(0.08) > sides_for(0.015),
+            "a fatter channel must buy more facets, not the same eight"
+        );
+    }
+
     /// **A bore that swallows a cell whole removes it**, loudly and without a sliver left behind.
     ///
     /// Two cells side by side; a channel wide enough to contain one of them. Prediction: the
@@ -852,6 +969,27 @@ mod tests {
         );
         assert_eq!(left.len(), 1, "one of the two cells should be gone, got {} left", left.len());
         assert_eq!(left[0], cells[1], "the cell the bore missed must come back untouched");
+    }
+
+    /// **A second shot down the same channel carves nothing, and `apply` says which one did.**
+    ///
+    /// This is the contract a caller accumulating a channel list prunes with: the dead bore can never
+    /// carve again, so keeping it costs a full bake for nothing, forever. Prediction: the first bore
+    /// is reported as landed, the identical second one is not, and the cells are the same as if only
+    /// the first had been applied.
+    #[test]
+    fn only_the_bores_that_carved_are_reported_as_landed() {
+        let cells = vec![ProxyCell::from_box(Vec3::ZERO, Vec3::new(0.5, 1.0, 0.5))];
+        let shot = through_y(0.5, 8, 0.0, 0.0);
+
+        let (once, _, _, first) = apply(&cells, &[shot]);
+        assert_eq!(first, vec![0], "the only bore fired must be the one that landed");
+
+        let (twice, prisms, plugs, landed) = apply(&cells, &[shot, shot]);
+        assert_eq!(landed, vec![0], "the second shot down an open channel reaches no cell");
+        assert_eq!(prisms.len(), 1, "and contributes no prism to carve out of the skin");
+        assert_eq!(plugs.len(), 1, "and ejects nothing");
+        assert_eq!(twice, once, "so the subject is exactly what one shot left");
     }
 
     /// **The bore conserves volume now: shards plus plug is the cell, exactly.**
@@ -944,14 +1082,14 @@ mod tests {
 
         assert_eq!(baked.ejecta.len(), 1, "one bore through one cell is one plug");
         assert_eq!(
-            baked.fragments.len(),
+            baked.len(),
             ids.len(),
             "at target 1 every node is a leaf, so a plug must not have been added as one"
         );
         let plug = &baked.ejecta[0].cell;
-        for (i, f) in baked.fragments.iter().enumerate() {
+        for (i, s) in baked.solids().iter().enumerate() {
             assert_ne!(
-                f.cell.points(),
+                s.cell.points(),
                 plug.points(),
                 "fragment {i} IS the plug — it was added to the proxy instead of ejected"
             );
@@ -960,7 +1098,7 @@ mod tests {
         // And the shards it left behind are still one island, with the plug gone.
         let members: Vec<(crate::FragmentId, &ProxyCell)> = ids
             .iter()
-            .filter_map(|id| baked.fragments.get(id.index()).map(|f| (*id, &f.cell)))
+            .filter_map(|id| baked.solids().get(id.index()).map(|s| (*id, &s.cell)))
             .collect();
         let graph = BondGraph::of(&members, baked.tree.len());
         assert_eq!(

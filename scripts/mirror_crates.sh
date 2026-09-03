@@ -49,14 +49,21 @@ CRATES=(
     # same as every other crate but the direction of the FIRST move was inward. Its nested
     # `crates/bevy_debugger_bevy` travels with it — one mirror, both halves.
     bevy_debugger_mcp
-    # **`bevy_carnage` is deliberately absent, and it is the only crate that ever left this list.**
-    # It was a mirror of `crates/` under its former name until 2026-08-16, when the arrow was reversed:
-    # `Ladvien/bevy_carnage` became the source of truth and this repo an ordinary consumer of it,
-    # pinned by rev in the root manifest. A `subtree split` carries only commits, so the crate's own
-    # audit harness could never reach the published repository from here — which is the whole reason
-    # the direction changed. Mirroring it now would push this monorepo's history OVER the repository
-    # that is upstream of it. Its work arrives by moving the pin; see the dependency's comment in
-    # `Cargo.toml`.
+    # Vendored by `git subtree add` like `bevy_debugger_mcp` above, and mirrored for the same reason it
+    # can be: the add recorded a `git-subtree-split` trailer, so a split rejoins the mirror's own history
+    # and the non-forced push below fast-forwards. It is also the one mirrored crate that publishes to
+    # crates.io; the registry release is cut from this tree, never from the mirror.
+    bevy_carnage
+    # **The three carved out of `bevy_carnage` on 2026-09-02.** Extracted from this tree rather than
+    # vendored into it, so the flow is the ordinary one: monorepo → mirror, split from
+    # `crates/<name>/`, nothing ever edited on the far side.
+    #
+    # `bloodstain` is engine-free with no math library in its public API — the property that lets it
+    # be depended on by anything, which is exactly why it came out. The other two are ecosystem Bevy
+    # libraries with no game in them.
+    bloodstain
+    bevy_wetmap
+    bevy_viscera
 )
 
 # Mirrors that are created PUBLIC. Everything absent from this list is created private — see the
@@ -86,6 +93,17 @@ PUBLIC_CRATES=(
     bevy_stigmergy
     det_rng
     map_elites
+    # The three carved out of `bevy_carnage`. Public for the same reason as the rest of this list:
+    # each answers a question the engine does not. `bloodstain` is blood as a *material* and needs no
+    # engine at all; `bevy_wetmap` is the first texture-space blood accumulation that is
+    # CPU-authoritative and therefore hashable; `bevy_viscera` is an XPBD rope solver with a tearing
+    # membrane. None needs any of the game, and all three are MIT-or-Apache.
+    #
+    # **Listed here BEFORE their first mirror**, which is what makes the new repositories public
+    # without a hand edit afterwards — this list only drives creation.
+    bloodstain
+    bevy_wetmap
+    bevy_viscera
 )
 
 cd "$(git rev-parse --show-toplevel)"

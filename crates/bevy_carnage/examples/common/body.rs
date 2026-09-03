@@ -19,11 +19,42 @@ use std::collections::HashSet;
 
 use bevy::prelude::*;
 use bevy_carnage::{
-    Bore, BondGraph, BondSet, CutSettings, FragmentId, FragmentTree, ProxyCell, Reach, capsule,
-    directional, fracture_mesh, hash_f32, radial, spread, swept_triangle,
+    BloodSettings, Bore, BondGraph, BondSet, CarnageSettings, CutSettings, FragmentId, FragmentTree,
+    Impact, Pool, ProxyCell, Reach, Stain, StainShape, absorb, capsule, directional, fracture_mesh,
+    hash_f32, radial, spread, spread_pools, stain_shape, swept_triangle,
 };
+// **The decal half, and it is gated because the crate's own is.** `PoolDecal`, `spawn_pool` and
+// `update_pool_decals` live behind `bevy_carnage`'s `vfx` feature, and the web demos build with that
+// feature OFF — `bevy_hanabi`'s wasm support is WebGPU-compute-only, so `scripts/build_web.sh`
+// passes `--no-default-features --features serde`. Without this gate, importing this subject would
+// fail to compile for the browser, which is the whole reason the recorder was split out one file
+// over.
+//
+// **Not a fallback.** With `vfx` off there is no decal renderer to draw a slick *with*: the pools
+// still form, still merge, still spread and are still read by `Pools`, because that half is core.
+// Only the drawing is absent, and it is absent because the thing that draws is.
+#[cfg(feature = "vfx")]
+use bevy::pbr::decal::ForwardDecalMaterial;
+#[cfg(feature = "vfx")]
+use bevy_carnage::{PoolDecal, StainMasks, spawn_pool, update_pool_decals};
 
 use super::material;
+
+/// **What a pool decal is, in a query filter.**
+///
+/// With `vfx` on this is the crate's own `PoolDecal`. With it off there is no decal renderer, so
+/// nothing spawns one — and this is a marker component no entity ever carries, which makes the two
+/// filters below say exactly the true thing (`Without<DecalTag>` matches everything,
+/// `With<DecalTag>` matches nothing) instead of needing two versions of each query.
+#[cfg(feature = "vfx")]
+type DecalTag = PoolDecal;
+/// See [`DecalTag`].
+#[cfg(not(feature = "vfx"))]
+#[derive(Component)]
+pub struct NoDecals;
+/// See [`DecalTag`].
+#[cfg(not(feature = "vfx"))]
+type DecalTag = NoDecals;
 
 /// Finest fragment count. Higher than `explode.rs`'s because a localised hit should be able to take
 /// something *small* off — at a dozen pieces every hit removes a quarter of the body.
@@ -52,6 +83,11 @@ pub const SOFTENINGS: [f32; 4] = [0.0, 0.25, 0.5, 0.75];
 /// **The first entry is the six body parts**, because `frontier_of(6)` on a six-cell proxy is the
 /// roots — uncut. That is dismemberment; the last entry is gibs; the two in between are the range.
 pub const GRANULARITIES: [usize; 4] = [6, 12, 20, TARGET];
+
+/// Every index into [`GRANULARITIES`] — **for the one example that cycles the dial against a single
+/// cached bake.** Anything that stands at one granularity asks for that one instead; see
+/// [`Baked::bake`].
+pub const ALL_FRONTIERS: [usize; GRANULARITIES.len()] = [0, 1, 2, 3];
 
 /// **Where the demo's shots land**: `(frame, entry point, radius, shatter)`, subject-local.
 ///
@@ -142,6 +178,25 @@ pub fn parts() -> Vec<(&'static str, Vec3, Vec3)> {
     ]
 }
 
+/// The frontmost face any part has, subject-local — the plane a shot that enters nothing rides.
+pub fn subject_front_z() -> f32 {
+    parts().into_iter().map(|(_, c, h)| c.z + h.z).fold(f32::NEG_INFINITY, f32::max)
+}
+
+/// **Where a shot down `-Z` at `(x, y)` breaks the skin**, subject-local.
+///
+/// The parts do not overlap in `x`/`y`, so at most one contains the aim; the fold takes the frontmost
+/// anyway rather than asserting that. A shot that enters nothing gets [`subject_front_z`], so the
+/// marker stays in one readable plane and a miss looks like a miss.
+pub fn entry_plane_z(at: Vec3) -> f32 {
+    let entered = parts()
+        .into_iter()
+        .filter(|(_, c, h)| (at.x - c.x).abs() <= h.x && (at.y - c.y).abs() <= h.y)
+        .map(|(_, c, h)| c.z + h.z)
+        .fold(f32::NEG_INFINITY, f32::max);
+    if entered.is_finite() { entered } else { subject_front_z() }
+}
+
 /// Which body part a fragment came out of, by walking the hierarchy back to its root cell.
 pub fn part_of(id: FragmentId, tree: &FragmentTree) -> &'static str {
     let root = tree.root_of(id).unwrap_or(id);
@@ -166,13 +221,18 @@ pub struct Part {
 #[derive(Resource)]
 pub struct Baked {
     pub tree: FragmentTree,
-    /// Indexed by [`FragmentId`], parallel to the tree.
-    pub parts: Vec<Part>,
+    /// Indexed by [`FragmentId`], parallel to the tree. `None` for a node whose Tier B was never
+    /// asked for — see [`Baked::bake`], which materialises only the granularities the demo offers.
+    pub parts: Vec<Option<Part>>,
     /// **What the bores pushed out**, in the order the shots were fired. Empty with no bores.
     ///
     /// Off the tree and off the bond graph, because the crate keeps it off both — so nothing here has
     /// to remember that a plug is not a frontier piece.
     pub gore: Vec<GorePart>,
+    /// **Which of the bake's `bores` actually carved something**, as indices into the list handed to
+    /// [`Baked::bake`]. A caller accumulating channels prunes its list with this; see
+    /// `bullet_holes.rs`.
+    pub landed_bores: Vec<u32>,
 }
 
 /// One ejected plug, resolved to handles at bake time exactly like a [`Part`].
@@ -205,7 +265,11 @@ impl Baked {
     /// `bores` are channels subtracted from the proxy before any cut — see [`bore_at`]. Taking them
     /// here rather than in each caller is what keeps the windowed demo and the recorder honest: there
     /// is one bake definition, so a hole in the GIF is a hole you can reproduce by keypress.
-    pub fn bake(world: &mut World, soften: f32, bores: &[Bore]) -> Baked {
+    ///
+    /// `frontiers` are indices into [`GRANULARITIES`] — the granularities this caller can actually
+    /// stand at. An index outside the array is skipped rather than panicking: that is a caller typo,
+    /// and a bake with no frontier draws nothing, which is visible immediately.
+    pub fn bake(world: &mut World, soften: f32, bores: &[Bore], frontiers: &[usize]) -> Baked {
         let owned = subject();
         let parts: Vec<(&Mesh, Mat4)> = owned.iter().map(|(m, x)| (m, *x)).collect();
         let cut = CutSettings {
@@ -214,11 +278,11 @@ impl Baked {
             bores: bores.to_vec(),
             ..CutSettings::new(TARGET, MIN_FRACTION, SEED)
         };
-        let baked = fracture_mesh(&parts, &proxy(), &cut);
+        let mut baked = fracture_mesh(&parts, &proxy(), &cut);
 
         info!(
             "baked {} fragments ({} finest, {} cuts) with {} bonds, and {} ejected plug(s)",
-            baked.fragments.len(),
+            baked.len(),
             baked.tree.leaves().len(),
             baked.tree.cuts(),
             baked.bonds.len(),
@@ -226,8 +290,30 @@ impl Baked {
         );
         info!("soften {soften:.2} — rounding the drawn surface only; the colliders are unchanged");
 
-        let gore = baked
-            .ejecta
+        // **Only the frontiers this caller can ever stand at get meshes.** The tree keeps every piece
+        // the cut loop split, and the interior levels are pure waste unless something draws them — so
+        // ask for exactly the granularities the caller named and leave the rest unmaterialised. Not
+        // just the leaves: `frontier_of` legitimately returns interior ids, which is the whole point
+        // of the granularity dial. And not the leaves *as well*: at `GRANULARITIES[3] == TARGET` the
+        // finest frontier already is the leaves, so a caller standing there loses no mesh, while a
+        // caller standing at the roots was paying for every gib it can never draw.
+        let mut wanted: Vec<FragmentId> = frontiers
+            .iter()
+            .filter_map(|&i| GRANULARITIES.get(i))
+            .flat_map(|g| baked.tree.frontier_of(*g))
+            .collect();
+        // SORT-OK: by tree index, which is unique per node; the dedup below is the whole purpose.
+        wanted.sort_unstable_by_key(|id| id.index());
+        wanted.dedup();
+
+        let node_count = baked.len();
+        // Taken out before `into_pick` consumes the bake. Both are whole-bake facts that no frontier
+        // query touches.
+        let tree = std::mem::take(&mut baked.tree);
+        let ejecta = std::mem::take(&mut baked.ejecta);
+        let landed_bores = std::mem::take(&mut baked.landed_bores);
+
+        let gore = ejecta
             .into_iter()
             .map(|e| {
                 let lowest = e.cell.points().iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
@@ -245,23 +331,23 @@ impl Baked {
             })
             .collect();
 
-        let parts = baked
-            .fragments
-            .into_iter()
-            .map(|f| {
-                let lowest = f.cell.points().iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
-                let meshes = &mut world.resource_mut::<Assets<Mesh>>();
-                Part {
-                    outer: f.outer.map(|m| meshes.add(m)),
-                    cap: f.cap.map(|m| meshes.add(m)),
-                    center_local: f.center_local,
-                    drop_to_rest: (f.cell.center().y - lowest).max(0.0),
-                    volume: f.cell.volume().max(1.0e-6),
-                    cell: f.cell,
-                }
-            })
-            .collect();
-        Baked { tree: baked.tree, parts, gore }
+        // Index-parallel with the tree still, so `parts.get(id.index())` keeps working — a node
+        // nobody asked to draw is simply `None`, exactly as `Part::outer` is already `None` for a
+        // fragment with no skin.
+        let mut parts: Vec<Option<Part>> = (0..node_count).map(|_| None).collect();
+        for f in baked.into_pick(&wanted) {
+            let lowest = f.cell.points().iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+            let meshes = &mut world.resource_mut::<Assets<Mesh>>();
+            parts[f.id.index()] = Some(Part {
+                outer: f.outer.map(|m| meshes.add(m)),
+                cap: f.cap.map(|m| meshes.add(m)),
+                center_local: f.center_local,
+                drop_to_rest: (f.cell.center().y - lowest).max(0.0),
+                volume: f.cell.volume().max(1.0e-6),
+                cell: f.cell,
+            });
+        }
+        Baked { tree, parts, gore, landed_bores }
     }
 
     /// The adjacency for one frontier.
@@ -271,8 +357,10 @@ impl Baked {
     /// subject falls apart on the first blow. Rebuilt per frontier instead — cheap, because the
     /// match is over a few dozen convex cells.
     pub fn graph_for(&self, ids: &[FragmentId]) -> BondGraph {
-        let members: Vec<(FragmentId, &ProxyCell)> =
-            ids.iter().filter_map(|&id| self.parts.get(id.index()).map(|p| (id, &p.cell))).collect();
+        let members: Vec<(FragmentId, &ProxyCell)> = ids
+            .iter()
+            .filter_map(|&id| self.parts.get(id.index())?.as_ref().map(|p| (id, &p.cell)))
+            .collect();
         BondGraph::of(&members, self.tree.len())
     }
 }
@@ -341,25 +429,28 @@ pub struct Gore {
     pub settled: u32,
 }
 
-/// **A blood pool: not a mesh gib but a flat stain**, lying on the floor where a plug came to rest.
+/// **Every slick on the floor.** The crate's [`bevy_carnage::Pool`] model, held by the demo.
 ///
-/// Deliberately the end of the chain rather than another chunk. A gib that keeps its geometry forever
-/// is what makes a floor look like a bin of debris; real spilled material stops being an object and
-/// becomes a mark. The disc grows for [`POOL_SPREAD_FRAMES`] and then holds, because a stain that
-/// appears at full size reads as a decal being switched on.
-#[derive(Component)]
-pub struct Pool {
-    /// Frames since it formed, while it is still spreading.
-    pub age: u32,
-    /// The radius it spreads to.
-    pub radius: f32,
-}
+/// This replaced a hand-rolled example-local `Pool` component that spawned one scaled `Circle` disc
+/// per landed plug and **never merged** — no proximity test, no spatial hash, no query over existing
+/// pools — so a dozen plugs landing together left a dozen coincident discs stacked at `y = 0.006`.
+/// Two paths for one feature is what that was; there is now one, and it lives in the crate where the
+/// consuming game reads it too.
+#[derive(Resource, Default)]
+pub struct Pools(pub Vec<bevy_carnage::Pool>);
+
+/// **This module's own fixed-tick counter**, advanced once per [`bleed`] call.
+///
+/// [`bevy_carnage::absorb`] stamps a fresh pool with the tick it opened on, so the drying model can
+/// age it without the caller keeping a parallel table. `bleed` runs exactly once per frame in every
+/// example that drives it, so counting its calls *is* the fixed tick — and keeping the counter here,
+/// beside its only consumer, is what stops six examples initialising a resource none of them reads.
+#[derive(Resource, Default)]
+pub struct BleedTick(pub u32);
 
 /// Frames a plug stays a mesh after touching down, before it becomes a pool. Short on purpose: it is
 /// the beat between "it landed" and "it spread", and any longer reads as debris that forgot to melt.
 pub const GORE_SETTLE: u32 = 3;
-/// How long a pool takes to spread to full size.
-pub const POOL_SPREAD_FRAMES: u32 = 10;
 
 /// **How fast a plug leaves.** Faster than a mid-sized gib, because a plug was *pushed* by the thing
 /// that made the channel rather than shaken loose by it — but chosen for the frame, not from
@@ -375,10 +466,13 @@ pub const GORE_SPEED: f32 = 1.6;
 /// How wide the ejection cone is, as a fraction of the axial speed. Zero would send every plug down
 /// the same line, which reads as a mechanism rather than as a spray.
 pub const GORE_SPREAD: f32 = 0.30;
-/// How much bigger a pool is than the cube root of the volume that made it — spilled material
-/// spreads far wider than the lump it came from, and without this a 0.0007-volume plug leaves a stain
-/// you cannot see.
-pub const POOL_SPREAD: f32 = 1.9;
+/// How much bigger the *stain* a landed plug makes is than the cube root of the volume that made it —
+/// spilled material wets far more floor than the lump it came from, and without this a 0.0007-volume
+/// plug leaves a mark you cannot see.
+///
+/// This is the radius handed to [`bevy_carnage::absorb`] as one stain. How the resulting slick then
+/// *spreads* is the crate's `pool_spread`/`pool_spread_rate`, not this.
+pub const GORE_STAIN_SPREAD: f32 = 1.9;
 
 /// Thrown out along the channel, with a hashed cone and spin — deterministic, no RNG dependency.
 ///
@@ -410,14 +504,9 @@ pub struct BodyMaterials {
     pub skin: Handle<StandardMaterial>,
     pub interior: Handle<StandardMaterial>,
     pub aim: Handle<StandardMaterial>,
-    /// A blood pool. **Darker and wetter than the interior**, because a pool is a film of liquid on a
-    /// lit floor rather than a cut face: the colour drops again and the roughness goes right down, so
-    /// what identifies it is the specular highlight travelling across it as the camera moves.
-    pub pool: Handle<StandardMaterial>,
-    /// One unit-radius disc, scaled per pool. **One mesh for every pool there will ever be** — a
-    /// fresh `Circle` per landing is a new asset per drop of blood, which is how a demo ends up with
-    /// a thousand meshes for a thing that is visually a stain.
-    pub disc: Handle<Mesh>,
+    // **No pool material and no disc mesh, deliberately.** A slick is a `bevy_carnage` forward decal
+    // now (`decal::spawn_pool`), which shares the crate's four generated splat textures — so this
+    // file no longer owns a second, plainer way to draw blood on a floor.
 }
 
 impl BodyMaterials {
@@ -436,8 +525,6 @@ impl BodyMaterials {
             // paint.
             interior: material(world, Color::srgb(0.46, 0.07, 0.07), 0.42),
             aim,
-            pool: material(world, Color::srgb(0.17, 0.019, 0.024), 0.16),
-            disc: world.resource_mut::<Assets<Mesh>>().add(Mesh::from(Circle::new(1.0))),
         }
     }
 }
@@ -510,7 +597,7 @@ pub fn stand(world: &mut World, granularity: usize) {
 /// back into the subject and throw it again.
 pub fn clear(world: &mut World) {
     let doomed: Vec<Entity> = world
-        .query_filtered::<Entity, (Or<(With<Attached>, With<Chunk>)>, Without<Gore>, Without<Pool>)>()
+        .query_filtered::<Entity, (Or<(With<Attached>, With<Chunk>)>, Without<Gore>, Without<DecalTag>)>()
         .iter(world)
         .collect();
     for e in doomed {
@@ -525,11 +612,17 @@ pub fn clear(world: &mut World) {
 /// blood behind would say the subject had been shot when it had not.
 pub fn wipe(world: &mut World) {
     let doomed: Vec<Entity> = world
-        .query_filtered::<Entity, Or<(With<Gore>, With<Pool>)>>()
+        .query_filtered::<Entity, Or<(With<Gore>, With<DecalTag>)>>()
         .iter(world)
         .collect();
     for e in doomed {
         world.entity_mut(e).despawn();
+    }
+    // **And the model, not just the decals.** `PoolDecal` holds an index into [`Pools`]; leaving the
+    // list behind would have the next slick spawn with an index into stale entries and refresh the
+    // wrong radius — and `absorb` would keep merging fresh blood into pools nobody can see.
+    if let Some(mut pools) = world.get_resource_mut::<Pools>() {
+        pools.0.clear();
     }
 }
 
@@ -595,16 +688,20 @@ pub fn spawn_gore(world: &mut World) {
     }
 }
 
-/// **A plug that has stopped stops being a mesh.** Replace each settled [`Gore`] chunk with a flat
-/// [`Pool`], and spread the pools that are still young.
+/// **A plug that has stopped stops being a mesh.** Each settled [`Gore`] chunk becomes one stain, the
+/// stains are folded into [`Pools`], and every pool spreads one tick.
 ///
-/// One system for both halves because they are one transition: a gib whose geometry persists forever
-/// is what makes a floor read as a bin of debris, and the fix is not smaller gibs but material that
+/// One system for all three because they are one transition: a gib whose geometry persists forever is
+/// what makes a floor read as a bin of debris, and the fix is not smaller gibs but material that
 /// stops being an object once it has spilled.
+///
+/// **The merge is the crate's**, [`bevy_carnage::absorb`] and [`bevy_carnage::spread_pools`]. The
+/// version this replaced spawned one disc per plug and never merged, so a cluster of plugs landing
+/// together left a stack of coincident circles instead of a slick.
 pub fn bleed(world: &mut World) {
     // Which chunks have come to rest? Read first, mutate after — a plug is despawned in the same
-    // frame it becomes a pool, so the two cannot share a query.
-    let mut landed: Vec<(Entity, Vec3, f32)> = Vec::new();
+    // frame it becomes a stain, so the two cannot share a query.
+    let mut landed: Vec<(Entity, bevy_carnage::Stain)> = Vec::new();
     {
         let mut q = world.query::<(Entity, &mut Gore, &mut Chunk, &mut Transform)>();
         for (e, mut gore, mut chunk, mut transform) in q.iter_mut(world) {
@@ -637,49 +734,114 @@ pub fn bleed(world: &mut World) {
             }
             if gore.settled >= GORE_SETTLE {
                 // Sized by the cube root of the volume, because that is the plug's linear dimension,
-                // times a spread factor: liquid covers far more floor than the lump it came from.
-                let radius = gore.volume.cbrt() * POOL_SPREAD;
-                landed.push((e, transform.translation, radius));
+                // times a spread factor: liquid wets far more floor than the lump it came from.
+                let at = Vec3::new(transform.translation.x, 0.0, transform.translation.z);
+                landed.push((
+                    e,
+                    Stain {
+                        at: [at.x, at.y, at.z],
+                        radius: gore.volume.cbrt() * GORE_STAIN_SPREAD,
+                        // From the plug's own landing point, never from its `Entity` — an entity id
+                        // is a slot index assigned by allocation order, which is the one thing this
+                        // crate refuses to seed from anywhere.
+                        seed: at.x.to_bits() ^ at.z.to_bits().rotate_left(16),
+                    },
+                ));
             }
         }
     }
 
+    let settings = world.get_resource::<CarnageSettings>().cloned().unwrap_or_default();
+    let tick = {
+        let mut clock = world.get_resource_or_insert_with(BleedTick::default);
+        clock.0 = clock.0.wrapping_add(1);
+        clock.0
+    };
+
+    // Fold the fresh stains in. A new pool gets a decal; a stain that merged into an existing pool
+    // just grows the one already drawn, which is the whole point of the model.
     if !landed.is_empty() {
-        let Some((disc, pool)) =
-            world.get_resource::<BodyMaterials>().map(|m| (m.disc.clone(), m.pool.clone()))
-        else {
-            return;
-        };
-        for (entity, at, radius) in landed {
-            world.entity_mut(entity).despawn();
-            // **A hair above the floor, and rotated flat.** `Circle` faces `+Z`, so a quarter turn
-            // about `X` lays it down; the lift is what keeps it from z-fighting the floor plane.
-            world.spawn((
-                Pool { age: 0, radius },
-                Mesh3d(disc.clone()),
-                MeshMaterial3d(pool.clone()),
-                Transform {
-                    translation: Vec3::new(at.x, 0.006, at.z),
-                    rotation: Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
-                    scale: Vec3::splat(radius * 0.35),
-                },
-            ));
+        for (entity, _) in &landed {
+            world.entity_mut(*entity).despawn();
         }
+        let stains: Vec<Stain> = landed.into_iter().map(|(_, s)| s).collect();
+        let mut pools = world.get_resource_or_insert_with(Pools::default);
+        let before = pools.0.len();
+        absorb(&mut pools.0, &stains, tick, &settings.blood);
+        // Only the pools `absorb` appended are new; everything before `before` already has a decal.
+        // Indices are stable because `absorb` only ever pushes.
+        let fresh: Vec<(usize, Pool)> =
+            pools.0.iter().enumerate().skip(before).map(|(i, p)| (i, *p)).collect();
+
+        // Drawing a slick needs the decal renderer, which is `vfx`. The pools themselves are core
+        // and were already folded above, so with `vfx` off this is the one thing that is missing and
+        // nothing downstream of it is.
+        #[cfg(feature = "vfx")]
+        if !fresh.is_empty() {
+            // The mask cache comes out of the world for the duration and goes back in: `spawn_pool`
+            // needs it, both asset stores and a `Commands` at once, and all four are borrows of the
+            // same `World`. Taken rather than borrowed is the only order that satisfies them.
+            let mut masks = world.remove_resource::<StainMasks>().unwrap_or_default();
+            world.resource_scope(|world: &mut World, mut images: Mut<Assets<Image>>| {
+                world.resource_scope(
+                    |world: &mut World,
+                     mut materials: Mut<Assets<ForwardDecalMaterial<StandardMaterial>>>| {
+                        // `commands` is scoped and dropped before `flush`, matching
+                        // `examples/carnage.rs`'s stain-stamping block — a `Commands` holds the world
+                        // mutably, and flushing while it is still live is the one thing that shape
+                        // gets wrong.
+                        {
+                            let mut commands = world.commands();
+                            for (index, pool) in &fresh {
+                                spawn_pool(
+                                    &mut commands,
+                                    &mut masks,
+                                    &mut images,
+                                    &mut materials,
+                                    *index,
+                                    pool,
+                                    &pool_shape(pool, &settings.blood),
+                                );
+                            }
+                        }
+                        world.flush();
+                    },
+                );
+            });
+            world.insert_resource(masks);
+        }
+        #[cfg(not(feature = "vfx"))]
+        let _ = fresh;
     }
 
-    // Spread the young ones. A stain that appears at full size reads as a decal being switched on.
-    let mut q = world.query::<(&mut Pool, &mut Transform)>();
-    for (mut p, mut transform) in q.iter_mut(world) {
-        if p.age >= POOL_SPREAD_FRAMES {
-            continue;
-        }
-        p.age += 1;
-        let t = p.age as f32 / POOL_SPREAD_FRAMES as f32;
-        // Ease out, so it rushes out and then creeps — which is what a thin liquid does on a flat
-        // surface as surface tension catches up with it.
-        let eased = 1.0 - (1.0 - t) * (1.0 - t);
-        transform.scale = Vec3::splat(p.radius * (0.35 + 0.65 * eased));
+    // Spread every pool one tick and push the new radii onto their decals. A slick that appeared at
+    // full size would read as a decal being switched on.
+    let Some(mut pools) = world.get_resource_mut::<Pools>() else { return };
+    spread_pools(&mut pools.0, &settings.blood);
+    #[cfg(feature = "vfx")]
+    {
+        let snapshot = std::mem::take(&mut pools.0);
+        let mut q = world.query::<(&PoolDecal, &mut Transform)>();
+        update_pool_decals(&snapshot, q.iter_mut(world));
+        world.resource_mut::<Pools>().0 = snapshot;
     }
+}
+
+/// **The silhouette one slick is drawn with.**
+///
+/// A pool has no droplet: it is what is left after many landed and merged, so there is no single
+/// impact to read and no honest direction of travel. It gets a **perpendicular** impact built from
+/// what the pool does know — its own width — which is exactly the case `stain_shape` answers with a
+/// round mask and no spine axis, and which is what a slick looks like.
+pub fn pool_shape(pool: &Pool, s: &BloodSettings) -> StainShape {
+    let impact = Impact {
+        speed: 0.0,
+        diameter: pool.radius * 2.0,
+        angle_rad: std::f32::consts::FRAC_PI_2,
+        roughness: s.substrate_roughness,
+        travel: [0.0, 0.0],
+    };
+    stain_shape(&impact, s, pool.seed)
 }
 
 /// One fragment, attached if `launch` is `None` and flying if it is.
@@ -689,7 +851,8 @@ pub fn bleed(world: &mut World) {
 pub fn spawn_fragment(world: &mut World, id: FragmentId, launch: Option<(Vec3, Vec3)>) {
     let Some((outer, cap, center, rest)) = world.get_resource::<Baked>().and_then(|b| {
         b.parts
-            .get(id.index())
+            .get(id.index())?
+            .as_ref()
             .map(|p| (p.outer.clone(), p.cap.clone(), p.center_local, p.drop_to_rest))
     }) else {
         return;
@@ -782,11 +945,11 @@ pub fn strike(world: &mut World, blow: Blow, at: Vec3) -> Outcome {
         world.entity_mut(*entity).despawn();
         let center = world
             .get_resource::<Baked>()
-            .and_then(|b| b.parts.get(id.index()).map(|p| p.center_local))
+            .and_then(|b| b.parts.get(id.index())?.as_ref().map(|p| p.center_local))
             .unwrap_or(Vec3::ZERO);
         let volume = world
             .get_resource::<Baked>()
-            .and_then(|b| b.parts.get(id.index()).map(|p| p.volume))
+            .and_then(|b| b.parts.get(id.index())?.as_ref().map(|p| p.volume))
             .unwrap_or(REFERENCE_VOLUME);
         let (velocity, spin) = launch(*id, center, at, volume);
         spawn_fragment(world, *id, Some((velocity, spin)));

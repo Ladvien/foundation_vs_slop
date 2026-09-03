@@ -18,11 +18,26 @@ members = [
     # a crate unfixable at exactly the moment it needs fixing. Brought in with `git subtree add`,
     # history intact — all 32 `AG-*` commits are in this repo's log.
     #
-    # **The cost, paid deliberately: this crate does not mirror back.** Its history and this one are
-    # unrelated — none of AG-025..AG-031 existed here — so a `subtree split` push to
-    # `Ladvien/bevy_carnage` would not fast-forward, and this repo never forces one. So it is absent
-    # from `CRATES` in `scripts/mirror_crates.sh`, and the monorepo is now its source of truth.
+    # It mirrors back AND publishes, and the "unrelated histories" note that used to sit here was wrong.
+    # `git subtree add` recorded `git-subtree-split: 1434a39` on `eacb160` and made that commit its
+    # second parent, so `Ladvien/bevy_carnage`'s `main` is an ANCESTOR of this history — a split push
+    # fast-forwards. Direction is one-way: this tree is the source of truth, `scripts/mirror_crates.sh`
+    # pushes the mirror, and `cargo publish -p bevy_carnage` cuts the crates.io release from the same
+    # commit. The game keeps the path dependency below deliberately — depending on the published version
+    # would restore exactly the pin that made this crate unfixable while it needed sustained work.
     "crates/bevy_carnage",
+    # Blood as a MATERIAL, engine-free: Carreau-Yasuda rheology with a Casson yield stress, the
+    # Comiskey percolation spatter model, procedural stain morphology, the SWGSTAIN pattern taxonomy,
+    # and the drying timeline. Carved out of `bevy_carnage` because none of it needs Bevy and all of it
+    # is reusable; its public API is `[f32; 3]` rather than a glam type, because this workspace
+    # resolves TWO glam versions and a leaf that names neither cannot collide with either.
+    "crates/bloodstain",
+    # Texture-space blood accumulation, CPU-authoritative so it can be hashed. Everywhere else this
+    # exists it is a GPU render target, which is why nobody can make it deterministic.
+    "crates/bevy_wetmap",
+    # XPBD Cosserat-style strands with a tearing mesenteric membrane: guts that spill, coil, tether
+    # and tear. Fixed substep and iteration count with a fixed constraint order, so it is a golden.
+    "crates/bevy_viscera",
     # The agent debugger, vendored whole so it can be USED and EVOLVED here rather than pinned to a
     # rev of someone else's history. Two members because the repo has two independent halves: the MCP
     # server binary (a separate process, speaks MCP to an agent and BRP to the game) and the companion
@@ -262,3 +277,25 @@ codegen-units = 1
 [profile.dist]
 inherits = "release"
 lto = "fat"
+
+# **The web demos' profile.** Profiles only exist in a workspace root, so this is the only place it
+# can go — `crates/bevy_carnage/Cargo.toml` cannot declare one, and `scripts/build_web.sh` passes
+# `--profile wasm-release` for every module it builds.
+#
+# `opt-level = "s"` rather than `3`: a Bevy wasm module is tens of megabytes and the number a visitor
+# pays is the gzipped download, not the local frame time of a demo that renders a dozen fragments.
+# `lto = "thin"` and one codegen unit for the same reason.
+#
+# **No `panic` key, deliberately.** Unwinding is what `wasm-bindgen`'s generated glue and Bevy's own
+# wasm path are built against; `panic = "abort"` is the shape that is *not* known to work here, and
+# this profile matches the reference site's, which does.
+#
+# `strip = "debuginfo"` and not `"symbols"`: a stripped symbol table costs nothing on the wire once
+# `wasm-bindgen --remove-name-section` has run, and keeping the option honest is worth more than the
+# bytes.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

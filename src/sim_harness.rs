@@ -1130,7 +1130,12 @@ pub fn autogib_ready(app: &mut App) -> bool {
         return false;
     }
     let cache = world.resource::<crate::carnage::CarnageCache>();
-    sources.iter().all(|s| cache.fragments(*s).is_some())
+    // `is_baked`, not `fragments(..).is_some()`. The crate builds a fragment's drawn meshes on
+    // request now, so the slot vector exists from the instant of the bake with every slot still
+    // empty — `.is_some()` on it would be true before anything was drawn, which is a silently wrong
+    // readiness gate. `is_baked` is the accessor written for this exact question, and it also tells
+    // "baked and empty" (a degenerate mesh) from "not yet baked".
+    sources.iter().all(|s| cache.is_baked(*s))
 }
 
 /// Step until [`autogib_ready`], up to `max_ticks`. Returns the ticks spent, or `None` if the bake never

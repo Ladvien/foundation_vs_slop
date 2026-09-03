@@ -30,7 +30,8 @@ use bevy::prelude::*;
 
 mod common;
 use common::body::{self, Blow, Chunk};
-use common::{Recorder, arg, light_and_floor};
+use common::recorder::Recorder;
+use common::{arg, light_and_floor};
 
 /// Capture size, matching `capture.rs` so the two GIFs sit together on a page.
 const WIDTH: u32 = 720;
@@ -65,7 +66,7 @@ fn main() {
     let Some(mut rec) = Recorder::new(WIDTH, HEIGHT, camera, &out) else { return };
 
     light_and_floor(rec.world());
-    let baked = body::Baked::bake(rec.world(), SOFTEN, &[]);
+    let baked = body::Baked::bake(rec.world(), SOFTEN, &[], &[GRANULARITY]);
     let materials = body::BodyMaterials::new(rec.world());
     let damage = body::Damage::fresh(&baked, GRANULARITY);
     rec.world().insert_resource(baked);

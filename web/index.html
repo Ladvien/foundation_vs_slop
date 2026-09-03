@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>carnage — blood as a material, bone that breaks by loading mode</title>
+<meta name="description" content="Ten playable WebAssembly demos of a deterministic gore framework for Bevy: blood as a shear-thinning yield-stress fluid, fracture that knows how it was loaded, a wetmap you can hash, and viscera that tether and tear.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>carnage</h1>
+
+<p class="lede">
+  A gore framework for <a href="https://bevy.org">Bevy</a> built the other way round: the blood is a
+  <strong>material</strong>, the bone breaks the way it was <strong>loaded</strong>, and every visual
+  is deterministic enough to hash. Ten demos, each one thing, each running in your browser.
+</p>
+
+<div class="warn">
+  <strong>⚠ Vibe Coded.</strong> Written by an AI agent working from a human's direction. It is used
+  in a shipping game and covered by tests, but it has had no line-by-line human audit. Read it before
+  you trust it. — <strong>These demos need WebGPU</strong> and a secure context: Chrome, Edge, or
+  Safari 26+.
+</div>
+
+<h2>The demos</h2>
+
+<ul class="grid">
+  <li class="card">
+    <h3><a href="play.html?demo=fault_modes">fault_modes</a></h3>
+    <p>The same subject, the same seed, four silhouettes: a torsional spiral, a bending butterfly, a
+      transverse axial break, and comminution. Cortical bone splinters; trabecular bone crushes.</p>
+    <span class="who">bevy_carnage</span>
+  </li>
+  <li class="card">
+    <h3><a href="play.html?demo=fragment_energy">fragment_energy</a></h3>
+    <p>How many pieces? Grady's energy balance answers it, and the energy delivered is a hard ceiling.
+      A pistol wedges; a rifle comminutes.</p>
+    <span class="who">bevy_carnage</span>
+  </li>
+  <li class="card">
+    <h3><a href="play.html?demo=stain_morphology">stain_morphology</a></h3>
+    <p>Aspect ratio is <code>sin θ</code>, spines follow the blood-specific law, satellites need a
+      splash threshold. Press <kbd>B</kbd> for the four-texture wall this replaced.</p>
+    <span class="who">bevy_carnage + bloodstain</span>
+  </li>
+  <li class="card">
+    <h3><a href="play.html?demo=pattern_classes">pattern_classes</a></h3>
+    <p>Six forensic classes as six mechanisms. One arterial arc per systole, cast-off released
+      tangentially, and a transfer smear that runs out of blood.</p>
+    <span class="who">bevy_carnage + bloodstain</span>
+  </li>
+  <li class="card">
+    <h3><a href="play.html?demo=rheology">rheology</a></h3>
+    <p>Rivulets thin and race, then thicken, bead, and <strong>arrest mid-wall</strong> when the yield
+      stress overtakes the drive. Clotting is visibly the same mechanism.</p>
+    <span class="who">bloodstain</span>
+  </li>
+  <li class="card">
+    <h3><a href="play.html?demo=drying">drying</a></h3>
+    <p>Scrub the age: oxyHb → metHb → hemichrome, gloss collapsing, the rim drying first, a serum halo
+      above 50 % humidity, and a late craquelure.</p>
+    <span class="who">bloodstain</span>
+  </li>
+  <li class="card">
+    <h3><a href="play.html?demo=gore_tier">gore_tier</a></h3>
+    <p>Four tiers where reduction is <em>substitution</em>. A flash meter refusing the fourth flash in
+      a second, and the aim-exclusion cone drawn.</p>
+    <span class="who">bevy_carnage</span>
+  </li>
+  <li class="card">
+    <h3><a href="play.html?demo=wetmap_paint">wetmap_paint</a></h3>
+    <p>Blood lands in UV space, runs down the real geometry, and dries in place — with a digest on
+      screen, because this wetmap is CPU-authoritative.</p>
+    <span class="who">bevy_wetmap</span>
+  </li>
+  <li class="card">
+    <h3><a href="play.html?demo=viscera_spill">viscera_spill</a></h3>
+    <p>XPBD strands: guts spill with weight, coil on the floor, stay tethered by the mesentery, then
+      tear. A tear is monotone, so it cannot heal.</p>
+    <span class="who">bevy_viscera</span>
+  </li>
+  <li class="card">
+    <h3><a href="play.html?demo=carnage_web">carnage_web</a></h3>
+    <p><strong>The flagship.</strong> One body, one shot: the bone morphology, the blood pattern that
+      fits it, the wetmap it lands on, the guts it opens, the drying it leaves.</p>
+    <span class="who">all four crates</span>
+  </li>
+</ul>
+
+<h2>What is actually new here</h2>
+
+<p>
+  Games treat blood as a decal with a lifetime and fracture as a shape-shattering operation. Both are
+  reductions that throw away the thing a player can see. So each of these is modelled from the
+  measurement instead:
+</p>
+
+<table>
+  <tr><th>Idea</th><th>What it changes</th><th>Source</th></tr>
+  <tr>
+    <td>Blood is a shear-thinning yield-stress fluid</td>
+    <td>A fast rivulet is thin and races; a flow <em>stops where it is</em> when its yield stress
+      overtakes the drive. Clotting is that, not a timer.</td>
+    <td>Carreau–Yasuda with Cho &amp; Kensey's constants</td>
+  </tr>
+  <tr>
+    <td>Fracture knows its loading mode</td>
+    <td>Spiral, butterfly, transverse, comminuted — and greenstick, which is an outcome rather than a
+      mode.</td>
+    <td><code>10.1145/3549540</code> §6 names the gap; <code>10.3233/BME-1991-1102</code>,
+      <code>10.1016/j.forsciint.2021.110899</code> fill it</td>
+  </tr>
+  <tr>
+    <td>Fragment count from the energy</td>
+    <td>A faster load makes smaller pieces, cubically, and the energy delivered caps how much surface
+      can exist.</td>
+    <td><code>10.1063/1.329934</code>, <code>10.1098/rspa.1947.0042</code></td>
+  </tr>
+  <tr>
+    <td>Stains derived, not authored</td>
+    <td>Four baked splats picked by <code>seed % 4</code> repeat by the fourth stain, 90.6 % of the
+      time. A derived stain repeats only when the impact does.</td>
+    <td><code>10.1520/jfs2003224</code>,
+      <code>10.1111/j.1556-4029.2007.00505.x</code></td>
+  </tr>
+  <tr>
+    <td>A wetmap that is CPU-authoritative</td>
+    <td>Everywhere else this is a GPU render target, which is why nobody can hash one. This one has a
+      digest.</td>
+    <td>—</td>
+  </tr>
+  <tr>
+    <td>Reduction is substitution</td>
+    <td>Turning gore down keeps the hit confirmation and swaps the palette. Deleting the channel makes
+      a game harder to read.</td>
+    <td>ESRB / PEGI descriptors; WCAG 2.1 SC 2.3.1 for the flash gate</td>
+  </tr>
+</table>
+
+<h2>The crates</h2>
+
+<table>
+  <tr><th>Crate</th><th>What it is</th><th>Licence</th></tr>
+  <tr>
+    <td><a href="https://github.com/Ladvien/bevy_carnage"><code>bevy_carnage</code></a></td>
+    <td>Deterministic runtime gore: prefracture with loading-mode morphology, bullet bores, wounds,
+      bond-graph severance, hit feel, and the tone/accessibility policy surface.</td>
+    <td>MIT OR Apache-2.0</td>
+  </tr>
+  <tr>
+    <td><a href="https://github.com/Ladvien/bloodstain"><code>bloodstain</code></a></td>
+    <td>Blood as a material — engine-free, <code>no_std</code>, no math library in its public API.
+      Rheology, percolation spatter, stain morphology, the forensic pattern taxonomy, drying, and an
+      inverse solver that reads the wound back out of the stains.</td>
+    <td>MIT OR Apache-2.0</td>
+  </tr>
+  <tr>
+    <td><a href="https://github.com/Ladvien/bevy_wetmap"><code>bevy_wetmap</code></a></td>
+    <td>Texture-space blood accumulation, CPU-authoritative and therefore hashable.</td>
+    <td>MIT OR Apache-2.0</td>
+  </tr>
+  <tr>
+    <td><a href="https://github.com/Ladvien/bevy_viscera"><code>bevy_viscera</code></a></td>
+    <td>XPBD Cosserat-style strands with a tearing mesenteric membrane.</td>
+    <td>MIT OR Apache-2.0</td>
+  </tr>
+</table>
+
+<footer>
+  Built from <a href="https://github.com/Ladvien/foundation_vs_slop">Ladvien/foundation_vs_slop</a>,
+  the only tree where all four crates are visible to one cargo workspace. Every demo builds its
+  geometry in code and ships no asset files.
+</footer>
+
+</body>
+</html>

@@ -26,7 +26,8 @@ use bevy::prelude::*;
 
 mod common;
 use common::body::{self, Chunk, ORIGIN, SHOTS};
-use common::{Recorder, arg, light_and_floor};
+use common::recorder::Recorder;
+use common::{arg, light_and_floor};
 use bevy_carnage::Bore;
 
 /// Capture size, matching the other recorders so the GIFs sit together on a page.
@@ -71,11 +72,25 @@ fn main() {
     let camera = Transform::from_xyz(1.30, 1.20, 1.75).looking_at(ORIGIN - Vec3::Y * 0.16, Vec3::Y);
     let Some(mut rec) = Recorder::new(WIDTH, HEIGHT, camera, &out) else { return };
 
+    // **`DepthPrepass` on the camera the recorder already spawned.** The pools this clip exists to
+    // show are forward decals now, and a forward decal without a prepass renders as an opaque quad or
+    // not at all — so they would be missing from the very frames that are the point.
+    // `Recorder::new` spawns exactly one `Camera3d` and gives it no prepass.
+    let cameras: Vec<Entity> =
+        rec.world().query_filtered::<Entity, With<Camera3d>>().iter(rec.world()).collect();
+    for entity in cameras {
+        rec.world().entity_mut(entity).insert(bevy::core_pipeline::prepass::DepthPrepass);
+    }
     light_and_floor(rec.world());
     let mut bores: Vec<Bore> = Vec::new();
     // Nothing has been thrown yet. The counter lives in the world so `spawn_gore` stays idempotent
     // across the four re-bakes this clip performs.
     rec.world().init_resource::<body::Thrown>();
+    rec.world().init_resource::<body::Pools>();
+    // **No splat setup, and none is needed.** `body::bleed` draws its slicks as the crate's forward
+    // decals, whose masks are now rasterised from each stain's own silhouette into a `StainMasks`
+    // cache — a `Default` resource `body::bleed` takes out of the world and puts back — so there is
+    // no `Startup` system to register before `warm_up` and no plugin to bring in for it.
     rebake(&mut rec, &bores);
     rec.warm_up(4);
     // Added after the scene, so the frames before the first shot are perfectly still — the same
@@ -128,7 +143,7 @@ fn main() {
 /// re-baking on every shot neither recalls debris already in the air nor duplicates it.
 fn rebake(rec: &mut Recorder, bores: &[Bore]) {
     body::clear(rec.world());
-    let baked = body::Baked::bake(rec.world(), SOFTEN, bores);
+    let baked = body::Baked::bake(rec.world(), SOFTEN, bores, &[GRANULARITY]);
     let damage = body::Damage::fresh(&baked, GRANULARITY);
     rec.world().insert_resource(baked);
     let materials = body::BodyMaterials::new(rec.world());

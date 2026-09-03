@@ -4,11 +4,11 @@
 
 **Deterministic runtime gore for Bevy.** Plane-cut a character's own meshes into watertight-capped chunks, bore bullet channels through them, and drive blood, spatter and impact feel off the wounds that result.
 
-![A blue blocked-out humanoid standing intact, then bursting into tumbling rounded chunks whose cut faces are raw red while their outer surfaces stay blue](docs/explode.gif)
+![A blue blocked-out humanoid standing intact, then bursting into tumbling rounded chunks whose cut faces are raw red while their outer surfaces stay blue](https://raw.githubusercontent.com/Ladvien/bevy_carnage/main/docs/explode.gif)
 
 That is `examples/explode.rs` at its own 0.4× playback. The subject is intact, then it *is* its own fragments — the "break" is one despawn and a spawn, because the fracture was computed long before. **The red is not a colour choice, it is the whole idea:** every fragment comes back as two meshes, the subject's own surface and the faces this cut just created, so the inside can take a different material. Render both with the skin material and the same fragments stop looking broken and start looking disassembled.
 
-> **This repository is the source of truth.** Work is done here, verified here against this lockfile, and pushed here; [`Ladvien/foundation_vs_slop`](https://github.com/Ladvien/foundation_vs_slop) is an ordinary consumer that depends on the crate as a git dependency pinned to a rev. Two earlier arrangements are recorded in `BACKLOG.md` because each cost a session, and neither is live — at one point the crate was vendored into that monorepo as a workspace member with this repository re-derived by `git subtree split`, and an earlier revision of this banner asserted that arrangement as permanent. **The stale-read hazard it named is real in either direction:** a `subtree split` carries only *commits*, so anything living uncommitted in a working tree cannot arrive on the far side at all — which is exactly how a research agent once read a copy, found no `isomesh` and no audit harness, and reported both as missing when both existed. Read the tree you are about to change, not a copy of it.
+> **This repository is a mirror; [`Ladvien/foundation_vs_slop`](https://github.com/Ladvien/foundation_vs_slop) is the source of truth.** The crate is vendored there as a workspace member at `crates/bevy_carnage/`, developed and verified there against that lockfile, and this repository is re-derived from it by `git subtree split`. The flow is one-way and has exactly three stops: **monorepo → this mirror → crates.io**. An earlier revision of this banner claimed the arrow pointed the other way — it did, between 2026-08-16 and 2026-09-01, and `BACKLOG.md` records why it was reversed: the crate was pinned by rev in the game, so every fix meant a sibling clone, a push and a rev bump, which is not a way to do sustained work. **The stale-read hazard that arrangement named is still real:** a `subtree split` carries only *commits*, so anything sitting uncommitted in the monorepo's working tree cannot arrive here.
 
 ## Features
 
@@ -30,11 +30,9 @@ That is `examples/explode.rs` at its own 0.4× playback. The subject is intact, 
 
 ## Install
 
-Not on crates.io (`publish = false`). Depend on it by git, pinned to a rev:
-
 ```toml
 [dependencies]
-bevy_carnage = { git = "https://github.com/Ladvien/bevy_carnage", rev = "..." }
+bevy_carnage = "0.1"
 ```
 
 Requires **Bevy 0.19** and a Rust toolchain with **edition 2024**.
@@ -100,7 +98,9 @@ let cut = CutSettings::new(
     0.15,        // stop cutting below this fraction of the subject's size
     0xC0FFEE,    // seed — same seed, same pieces, every run
 );
-let baked = fracture_mesh(&[(&body, Mat4::IDENTITY)], &proxy, &cut);
+// Tier A — the convex cells — exists for every node the instant this returns. The drawn meshes are
+// built for the nodes you ask for, which is why the accessors take `&mut`.
+let mut baked = fracture_mesh(&[(&body, Mat4::IDENTITY)], &proxy, &cut);
 
 assert_eq!(baked.frontier_of(3).len(), 3);   // one bake, read back as three pieces
 let pieces = baked.leaves();                 // ...or as all of them
@@ -112,7 +112,7 @@ assert!(pieces.iter().all(|p| p.outer.is_some() || p.cap.is_some()));
 
 **[docs/DEMOS.md](docs/DEMOS.md) — all six examples, with recordings**, what each is for, and how to regenerate the clips.
 
-![A blue blocked-out humanoid standing; a projectile takes off its arm, another its head, a slash takes the other arm, a blade through the waist takes both legs and a blast finishes the torso](docs/sever.gif)
+![A blue blocked-out humanoid standing; a projectile takes off its arm, another its head, a slash takes the other arm, a blade through the waist takes both legs and a blast finishes the torso](https://raw.githubusercontent.com/Ladvien/bevy_carnage/main/docs/sever.gif)
 
 That is `examples/sever.rs`, on a fixed script. The subject **stays standing** between blows and what comes off depends on where you hit it. Run it and you aim it yourself:
 
@@ -121,6 +121,8 @@ cargo run --release --example carnage          # needs a GPU
 cargo run --release --example sever            # needs a GPU
 cargo run --release --example explode          # needs a GPU
 cargo run --release --example bullet_holes     # needs a GPU
+cargo run --release --example ribbons          # needs a GPU — a blood strand per flying chunk
+cargo run --release --example entrails         # needs a GPU — torso chunks pull their guts out
 cargo run --release --example fracture_cube    # terminal only — no window, no GPU
 ```
 
@@ -132,11 +134,11 @@ cargo run --release --example fracture_cube    # terminal only — no window, no
   R               reset
 ```
 
-![A blue blocked-out humanoid standing still while five shots punch through it one at a time, each leaving a small dark-red hole in the blue skin and throwing a handful of rounded red chunks out the far side that arc down, land and spread into overlapping dark pools on the floor, then the camera orbits a third of a turn to show the wider exit wounds and the spatter together](docs/holes.gif)
+![A blue blocked-out humanoid standing still while five shots punch through it one at a time, each leaving a small dark-red hole in the blue skin and throwing a handful of rounded red chunks out the far side that arc down, land and spread into overlapping dark pools on the floor, then the camera orbits a third of a turn to show the wider exit wounds and the spatter together](https://raw.githubusercontent.com/Ladvien/bevy_carnage/main/docs/holes.gif)
 
 That is `examples/bullet_holes.rs`, on a fixed script. Each shot is a `Bore` — a segment, a radius and three look dials — subtracted from the proxy before any cut, so the hole has a wall rather than being painted on a surface, and the plug it removed is thrown out the exit side as a chunk of gore that lands and becomes a flat stain. The subject keeps standing because the shards around a channel share their radial faces bit-for-bit and the bond graph reads them as one island. Run it and you aim it yourself, with `[`/`]` for calibre, `J` for raggedness, `F` for exit flare and `K` for how many pieces the plug breaks into.
 
-![A blue blocked-out humanoid; a shot punches a channel through its chest which mists blood from the hole, then four blows in turn take an arm, the head, the other arm and both legs, each cut throwing a red spray outward along the face it opened while dark stains pile up on the floor beneath; the severed pieces keep pulsing blood at a heartbeat's rate as they lie there, the pulses weaken, and by the end the floor is soaked and the bleeding has stopped](docs/carnage.gif)
+![A blue blocked-out humanoid; a shot punches a channel through its chest which mists blood from the hole, then four blows in turn take an arm, the head, the other arm and both legs, each cut throwing a red spray outward along the face it opened while dark stains pile up on the floor beneath; the severed pieces keep pulsing blood at a heartbeat's rate as they lie there, the pulses weaken, and by the end the floor is soaked and the bleeding has stopped](https://raw.githubusercontent.com/Ladvien/bevy_carnage/main/docs/carnage.gif)
 
 That is `examples/carnage.rs`, on a fixed script — and it is the one clip that shows the whole crate at once. **A bullet hole and a severance are geometrically different openings, and they bleed through the same code**: frame 18 is a bore, the rest are severances, and nothing downstream can tell them apart beyond a `WoundKind` mixed into a seed. The spray leaves each cut along that cut's own normal, the floor stains are solved on the CPU and would exist with the render feature off, and every severed piece keeps pulsing at its own heartbeat until it clots. Run it and you aim it yourself, with `1`–`5` for the five blows and `6` to shoot a channel through.
 
@@ -164,7 +166,7 @@ The cost of that choice is the proxy itself: **you supply it.** See "What it del
 | `FractureProxy(Vec<ProxyCell>)` | `Component` | Your convex decomposition, subject-local. Required |
 | `DetachedPart` | `Component` | A subtree pruned out and baked as one intact chunk — a carried weapon, a hat |
 | `FractureSettings` | `Resource` | Twelve bake dials. `init_resource`d, so yours wins if inserted first |
-| `bake_fractures` | fn | The system itself, public only so it can be named in an ordering constraint |
+| `bake_fractures` / `materialise_fragments` | fn | The two systems, chained. Public so they can be named in an ordering constraint |
 
 ### Reading a bake back
 
@@ -176,6 +178,8 @@ The cost of that choice is the proxy itself: **you supply it.** See "What it del
 | `FractureCache::tree(source)` | The hierarchy itself: `FragmentTree`, `TreeNode`, `FragmentId` |
 | `FractureCache::bonds(source)` | The `BondGraph` for the finest frontier |
 | `FractureCache::detached_chunk(source)` / `is_baked(source)` | The pruned part; whether the bake has happened |
+| `FractureCache::solids(source)` | Tier A for **every** node — the convex cells, present the instant the bake finishes |
+| `FractureCache::request(source, ids)` / `ready(source, ids)` | Ask for a frontier's drawn meshes a frame ahead; check they arrived |
 | `Fragment` | `id`, two mesh handles, the convex `cell`, `center_local`, `half_extents` |
 
 ### Where the blow landed
@@ -199,7 +203,7 @@ Each query returns a `Reach` — a severity in `[0, 1]` per bond — and **you**
 | item | what it is for |
 |---|---|
 | `fracture_mesh(parts, proxy, &CutSettings)` | The whole pipeline. Meshes in, `Fracture` out |
-| `Fracture` | `fragments` + `tree` + `bonds`, with `leaves()`, `frontier_of()`, `at_depth()` |
+| `Fracture` | `solids()` + `tree` + `bonds`, with `leaves()`, `frontier_of()`, `at_depth()` (all `&mut`: Tier B is built on request) |
 | `CutSettings` | The geometry dials for one bake, without the ECS sizing policy |
 | `ProxyCell` | One convex cell. `from_box`, `points()` (→ your collider), `volume()` (→ mass) |
 | `audit_proxy` / `audit_render` / `SolidAudit` / `SurfaceReport` | Measure what the fracture produced |
@@ -274,17 +278,45 @@ Note what this does *not* claim. Fragment geometry is `f32` arithmetic, so cross
 
 ## Status
 
-**0.1.0, pre-release, and not published to crates.io.** It is used in one shipping game, which consumes it by rev.
+**`0.2.0`, published to crates.io, and pre-release in the sense that matters: the API can still move.** It is used in one shipping game — [`Ladvien/foundation_vs_slop`](https://github.com/Ladvien/foundation_vs_slop), which is also where it is developed and consumes it by path, not by version.
+
+### What `0.2.0` broke, and why it was a de-duplication rather than a rename
+
+**The whole blood model moved out to [`bloodstain`](https://github.com/Ladvien/bloodstain)** — the Comiskey percolation spatter, the pools, the bleed schedule, `hash_f32` and `WoundKind`. None of it needed Bevy and all of it was reusable, so it is now an engine-free `no_std` crate with **no math library in its public API** (`[f32; 3]` everywhere), which is the property that lets anything depend on it.
+
+This crate **re-exports every moved name**, so `use bevy_carnage::{Droplet, Stain, Pool, Bleed, hash_f32}` resolves exactly as it did at `0.1.1`, and `bevy_carnage::blood` reaches the rest. Four things do break:
+
+| what changed | from | to |
+|---|---|---|
+| The blood dials moved under one field | `settings.droplets_per_m2` | `settings.blood.droplets_per_m2` — one dial, one owner |
+| A wound announces its forensic class | `Wounded { .. }` | `Wounded { .., class: PatternClass }`, and `Wound::to_world(&xf, class)` |
+| Cessation is a material comparison, not a timer | `bleed::clotted(..)` | `flows(driving_stress(..), yield_stress(..))` — the same predicate that arrests a rivulet on a wall |
+| Stains are derived, not chosen from four textures | `SPLAT_VARIANTS`, `splat_image(variant)` | `StainMasks` + `bloodstain::stain::rasterise` from the stain's own `StainShape` |
+
+The last one is the one worth the break. Four baked splats picked by `seed % 4` contain a repeat among any four consecutive stains with probability `1 − 4!/4⁴ = 90.6 %`, so a floor read as tiled by the fourth stain; a derived stain repeats only when the impact does.
+
+`Bleed` is now a plain value (its crate has no ECS); the component is `Bleeding`, a newtype that derefs to it.
+
+### New in `0.2.0`
 
 | area | state |
 |---|---|
+| **Fracture that knows how it was loaded** | `FaultPolicy::Morphology` — torsional spiral, bending butterfly, axial transverse, comminution, and greenstick as an *outcome* (`Fracture::bent`). Closes the limitation Sellán et al. name in `10.1145/3549540` §6 |
+| **Fragment count from the energy** | `grady_mott_target` — Grady's characteristic size, with the delivered energy as a hard ceiling. A pistol wedges; a rifle comminutes |
+| **Tissue class** | Cortical splits along its own grain and splinters; trabecular compacts and is clamped to three pieces at any energy |
+| **The framework surface** | `GoreTier` mapped to ESRB/PEGI descriptors, a WCAG 2.1 SC 2.3.1 flash gate that cannot be configured upward, an aim-exclusion cone, a decal budget, and hit-stop coalescing |
 | Cutting, capping, colliders | Stable. Every fragment audits as a closed convex solid, swept across seeds and shape dials |
-| Hierarchy, bond graph, region queries | Landed and tested; the API may still move before 0.2 |
-| Look dials (`plane_jitter`, `size_spread`, `weak_axis`, `cap_relief`, `soften`) | Newest surface here. Defaults are tuned by eye on a blockout, not measured against real assets |
+| Hierarchy, bond graph, region queries | Landed and tested |
+| Look dials (`plane_jitter`, `size_spread`, `weak_axis`, `cap_relief`, `soften`) | Defaults tuned by eye on a blockout, not measured against real assets |
 | Skinned meshes | Bind pose only — see above |
 | Cross-architecture reproducibility | Not claimed |
 
-The API is **not** stable before 0.2. Pin a rev.
+**Every frozen golden survived the move unchanged**, which is the evidence that it was a move: `hash_f32_is_frozen`, `the_spatter_model_is_frozen`, `the_stain_placement_is_frozen` and `the_pool_model_is_frozen` all pass in their new crate with the same bits, and `fracture_output_is_bit_identical_across_runs` passes here with `FaultPolicy::WeakAxis` still what `CutSettings::new` selects.
+
+The API is **not** stable before 1.0. Cargo's caret range on a `0.x` admits `0.2.z` only, so the next breaking change arrives as `0.3` and never by surprise.
+
+**Ten of this crate's examples also build for the browser.** They are published at
+[ladvien.github.io/foundation_vs_slop](https://ladvien.github.io/foundation_vs_slop/) from the monorepo, which is the only tree where all four gore crates are visible to one cargo workspace. Wasm builds never enable `vfx` — `bevy_hanabi`'s wasm support is WebGPU-compute-only — so every new visual in them is CPU-side.
 
 Known limitations are listed under "What it deliberately does not do" rather than hidden; `BACKLOG.md` carries the reasoning behind each decision, including the predictions that turned out wrong.
 
