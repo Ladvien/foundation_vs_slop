@@ -893,10 +893,14 @@ dependencies = [
 
 [[package]]
 name = "bevy_carnage"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bevy",
+ "bevy_cross_section",
+ "bevy_flaymap",
+ "bevy_fracture_modes",
  "bevy_hanabi",
+ "bevy_laceration",
  "bevy_viscera",
  "bevy_wetmap",
  "bloodstain",
@@ -963,6 +967,15 @@ dependencies = [
  "bitflags 2.13.0",
  "indexmap 2.14.0",
  "nonmax",
+]
+
+[[package]]
+name = "bevy_cross_section"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bloodstain",
+ "serde",
 ]
 
 [[package]]
@@ -1208,6 +1221,24 @@ dependencies = [
  "bevy_ui_widgets",
  "bevy_window",
  "smol_str",
+]
+
+[[package]]
+name = "bevy_flaymap"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy_cross_section",
+ "bloodstain",
+ "serde",
+]
+
+[[package]]
+name = "bevy_fracture_modes"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "serde",
 ]
 
 [[package]]
@@ -1480,6 +1511,16 @@ dependencies = [
  "bevy_window",
  "bevy_winit",
  "bevy_world_serialization",
+]
+
+[[package]]
+name = "bevy_laceration"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy_cross_section",
+ "bloodstain",
+ "serde",
 ]
 
 [[package]]
@@ -2266,7 +2307,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_wetmap"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bevy",
  "bloodstain",
@@ -2467,7 +2508,7 @@ dependencies = [
 
 [[package]]
 name = "bloodstain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libm",
  "serde",

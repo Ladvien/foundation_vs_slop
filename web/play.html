@@ -174,6 +174,45 @@
      the solver cannot oscillate.</p>
 </div>
 
+<div class="keys" id="notes-cross_section" hidden>
+  <p>Orbits on its own.</p>
+  <p>Three cut limbs — a thigh, a trunk, a skull — and every cap is anatomy: skin, subcutaneous fat,
+     muscle, cortical bone and marrow at the depths measured on living adults by ultrasound (Akkus
+     2012 <code>10.4172/2155-6156.1000216</code>, Derraik 2014 <code>10.1371/journal.pone.0086637</code>,
+     Abe 2015 <code>10.1177/1742271X14554678</code>, Dimitrova 2018 <code>10.5603/fm.a2017.0114</code>).
+     Depth below the skin is exact on a convex cell — the minimum over its skin planes — and lands in a
+     second UV channel; the strip it samples is baked once per region, at physical scale, so a 2 mm
+     fat lobule is 2 mm on a thigh and 2 mm on a finger.</p>
+  <p><strong>CPU-side and frozen</strong>: the strip is a pure function of the thickness table, a size
+     and a seed, and its digest is a golden.</p>
+</div>
+<div class="keys" id="notes-fracture_modes" hidden>
+  <p><kbd>Space</kbd> strike the bottom-left cell, harder each press · <kbd>R</kbd> rebuild</p>
+  <p>A wall of cells with one weak seam. Sellán et al.'s fracture modes
+     (<code>10.1145/3549540</code>): the sparse, mass-orthonormal modes of the cell graph are computed
+     once, an impact is projected onto them, and every face whose two cells still agree is glued back.
+     The seam gives first whichever corner is struck — the property Voronoi prefracture cannot have.</p>
+  <p><strong>Deterministic to the bit</strong>: fixed-sweep Jacobi initialisation, a fixed number of
+     ADMM steps, no convergence test anywhere.</p>
+</div>
+<div class="keys" id="notes-flaymap_peel" hidden>
+  <p>Hits land on their own, every twenty frames, at one spot.</p>
+  <p>Texture-space flaying: each hit peels a crater deeper — skin, then fat, then muscle, then the
+     cortex — shaded from the same cross-section palette at the same measured depths. Frostbite's
+     destruction masking applied to a body. <strong>The depth buffer is the authority</strong>; the
+     images are output, and the digest on screen is over the buffer.</p>
+  <p>The first time any texel reaches the cortex a handoff fires exactly once, which is what the
+     flagship uses to hand the next blow to fracture.</p>
+</div>
+<div class="keys" id="notes-laceration_open" hidden>
+  <p>Opens on its own over about three seconds.</p>
+  <p>A slash whose gape widens on a time curve scaled by the skin's tension, onto a wound bed banded by
+     depth. The tear is Kamarianakis et al.'s geometric model (<code>10.48550/arXiv.2209.08531</code>):
+     faces in the gap are removed, the lips part along the in-surface perpendicular; it stays open
+     because the deformation is plastic (O'Brien, Bargteil &amp; Hodgins, <code>10.1145/566570.566579</code>).
+     A cut across the Langer lines gapes more than one along them — Ní Annaidh et al. measured the
+     stiffness ratio (<code>10.1016/j.jmbbm.2011.08.016</code>) and it is the dial here.</p>
+</div>
 <div class="keys" id="notes-carnage_web" hidden>
   <p><kbd>click</kbd> shoot · <kbd>1</kbd>–<kbd>4</kbd> gore tier · <kbd>T</kbd> tissue ·
      <kbd>H</kbd> the numbers · <kbd>R</kbd> reset</p>
@@ -206,7 +245,11 @@
     gore_tier: "Reduction is substitution, never deletion",
     wetmap_paint: "A wetmap you can hash",
     viscera_spill: "Guts that spill, coil, tether and tear",
-    carnage_web: "One body, one shot, all four crates",
+    cross_section: "Every cut face is anatomy, at measured depths",
+    fracture_modes: "A body breaks where it is weak, not where a diagram says",
+    flaymap_peel: "Hits peel skin, fat and muscle down to bone",
+    laceration_open: "A slash that gapes on the skin's own tension",
+    carnage_web: "One body, one shot, eight crates",
   };
   // Every module here needs WebGPU. Cargo features are per-package, so `bevy`'s `webgpu` feature is on
   // for the whole wasm target, and `bevy_render-0.19.0/src/settings.rs` gives it precedence over

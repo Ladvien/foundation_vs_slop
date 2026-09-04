@@ -66,6 +66,10 @@ DEMOS=(
     bevy_carnage:gore_tier
     bevy_wetmap:wetmap_paint
     bevy_viscera:viscera_spill
+    bevy_cross_section:cross_section
+    bevy_fracture_modes:fracture_modes
+    bevy_flaymap:flaymap_peel
+    bevy_laceration:laceration_open
     bevy_carnage:carnage_web
 )
 

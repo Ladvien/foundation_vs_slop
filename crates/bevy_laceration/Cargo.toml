@@ -13,18 +13,29 @@ publish = true
 exclude = ["docs/*.gif"]
 
 [dependencies]
+# The umbrella with defaults off. Each feature is load-bearing:
+#
+# `bevy_pbr` is here for exactly one name — `MeshMaterial3d`, which the plugin puts on the wound-bed
+# child so `bevy_cross_section`'s baked strip material paints the bands. `bevy_log` is here because
+# every refusal in this crate is a `warn_once!` rather than a panic, which is the whole reason the
+# kernel returns `Option`. There is no `bevy_render` and no `bevy_image`: this crate builds meshes and
+# never touches a texture.
 bevy = { version = "0.19.0", default-features = false, features = [
-    "bevy_asset",
-    "bevy_image",
-    "bevy_mesh",
-    "bevy_pbr",
-    "bevy_render",
-    "bevy_log",
+    "bevy_asset", # Assets<Mesh>, Handle<T>, RenderAssetUsages
+    "bevy_mesh",  # Mesh, Mesh3d, Indices, VertexAttributeValues, ATTRIBUTE_UV_1
+    "bevy_pbr",   # MeshMaterial3d
+    "bevy_log",   # warn_once!
     "std",
 ] }
+# **The anatomy the wound bed is banded by**: `uv1_at` writes the depth every bed vertex reads as, and
+# `Layers`/`Region`/`Scale` appear in this crate's own signatures.
+#
 # Path *and* version, because `cargo publish` refuses a path-only dependency.
-bloodstain = { version = "0.2", path = "../bloodstain", default-features = false }
 bevy_cross_section = { version = "0.1", path = "../bevy_cross_section", default-features = false }
+# **The one frozen random source this family shares**, for `hash_f32` — the value noise that makes a
+# wound margin ragged instead of ruled. Hand-rolled and pinned upstream precisely so two machines tear
+# the same way; an RNG crate that reserved the right to change its stream could not promise that.
+bloodstain = { version = "0.2", path = "../bloodstain", default-features = false }
 serde = { version = "1.0", features = ["derive"], optional = true }
 
 [features]

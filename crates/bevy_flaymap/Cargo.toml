@@ -13,26 +13,55 @@ publish = true
 exclude = ["docs/*.gif"]
 
 [dependencies]
+# The umbrella with defaults off, matching `bevy_wetmap`'s precedent. Each feature is load-bearing:
+#
+# `bevy_render` is here for exactly three type names — `Extent3d`, `TextureDimension` and
+# `TextureFormat`. They are `wgpu_types` re-exports, and in 0.19 the ONLY public path to them inside
+# the umbrella is `bevy::render::render_resource` (`bevy_image-0.19.0/src/image.rs:24` imports them
+# privately and re-exports nothing). Every `Image` constructor takes an `Extent3d`, so there is no
+# way to build a canvas without naming it.
+#
+# **Not `bevy_pbr`, deliberately**, and it is the same call `bevy_wetmap` makes: this crate hands back
+# two `Handle<Image>` and never names a material, because which material they go on — and whether
+# `perceptual_roughness` is `1.0` so the map is authoritative — is the caller's decision. The
+# windowed example needs a material, and it gets one from the full umbrella in `[dev-dependencies]`.
 bevy = { version = "0.19.0", default-features = false, features = [
-    "bevy_asset",
-    "bevy_image",
-    "bevy_mesh",
-    "bevy_pbr",
-    "bevy_render",
-    "bevy_log",
+    "bevy_asset", # Assets<Image>, Handle<Image>, RenderAssetUsages
+    "bevy_image", # Image, Image::new_fill
+    "bevy_mesh",  # Mesh, Indices, VertexAttributeValues, PrimitiveTopology
+    "bevy_render", # render_resource::{Extent3d, TextureDimension, TextureFormat} — see above
+    "bevy_log",   # warn! — a mesh that cannot carry a flaymap has to say so once
     "std",
 ] }
+# **The tissue model.** `Layers` is the measured depth table this crate peels through and `texel_at`
+# is the per-texel colour and roughness of the tissue at a depth — the identical rule that bakes a cut
+# face's strip, so a flayed patch and the stump beside it cannot drift apart.
+#
 # Path *and* version, because `cargo publish` refuses a path-only dependency.
-bloodstain = { version = "0.2", path = "../bloodstain", default-features = false }
 bevy_cross_section = { version = "0.1", path = "../bevy_cross_section", default-features = false }
+# **The blood model**, re-exported whole rather than called directly: it is where `hash_f32` — the one
+# random source any of these crates has — and the spectral film that colours wet muscle live, both
+# reached through `bevy_cross_section::texel_at`. One dependency line for a consumer instead of two
+# that could drift in version.
+bloodstain = { version = "0.2", path = "../bloodstain", default-features = false }
 serde = { version = "1.0", features = ["derive"], optional = true }
 
 [features]
 default = []
+# Turns on `Serialize`/`Deserialize` for `FlaySettings` — which needs a remote-derive mirror for
+# `bevy_cross_section::Scale`, see `src/settings.rs` — and forwards to both dependencies so the
+# re-exported `Layers`, `Region` and `Layer` are serialisable through this crate too.
 serde = ["dep:serde", "bloodstain/serde", "bevy_cross_section/serde"]
 
+# **Examples only.** The crate's own `bevy` above is trimmed to what a canvas needs. `flaymap_peel`
+# additionally needs a window, an event loop, `StandardMaterial` and the 3D render pipeline, so it
+# takes the full umbrella here, where it cannot reach a consumer's dependency graph. `tests/leaf.rs`
+# reads `[dependencies]` only, deliberately.
 [dev-dependencies]
 bevy = { version = "0.19.0" }
 
+# **The wasm demos' extra features.** Target-gated, so a native build resolves none of it. `web` is
+# REQUIRED: without it `std::time::Instant::now()` compiles for `wasm32-unknown-unknown` and then
+# PANICS in the browser. `webgpu` takes precedence over the `webgl2` Bevy's defaults pull in.
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 bevy = { version = "0.19", default-features = false, features = ["web", "webgpu"] }
