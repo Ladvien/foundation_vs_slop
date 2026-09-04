@@ -893,7 +893,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_carnage"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "bevy",
  "bevy_cross_section",
@@ -905,6 +905,7 @@ dependencies = [
  "bevy_wetmap",
  "bloodstain",
  "isomesh",
+ "libm",
  "ron",
  "serde",
 ]
@@ -971,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_cross_section"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bevy",
  "bloodstain",
@@ -1225,7 +1226,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_flaymap"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bevy",
  "bevy_cross_section",
@@ -1515,7 +1516,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_laceration"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bevy",
  "bevy_cross_section",
@@ -2307,7 +2308,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_wetmap"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "bevy",
  "bloodstain",
@@ -2508,7 +2509,7 @@ dependencies = [
 
 [[package]]
 name = "bloodstain"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "libm",
  "serde",

@@ -2308,6 +2308,38 @@ Split out 2026-07-30.
 ### Push 11 — Render & Art Direction  ·  cross-cutting  ·  continuous
 
 
+- **FVS-Q-12 — The realism release: the flesh material, the preset, and three injury kernels** · L · ✅ **LANDED 2026-09-04**
+  Went in as a goal, like Q-11, and is recorded here so the id exists. **Pre-registered prediction:**
+  the family's weak half was the pixel, not the simulation — every cut face, stain and strand was a
+  flat `StandardMaterial`, and the flagship needed a thousand lines to include eight crates — so one
+  `ExtendedMaterial` reading the canvases the CPU already owns, plus one plugin composing the family,
+  would move the read from "painted plastic" to tissue without touching a golden. **Outcome:** every
+  pre-existing golden byte-identical (`hash_f32_is_frozen`, `the_spatter_model_is_frozen`,
+  `fracture_output_is_bit_identical_across_runs`, every wetmap/flaymap/cross-section digest); the
+  flagship is 150 lines on `bevy_carnage::preset`. What shipped, consolidated under `bevy_carnage`
+  0.4.0 as the human asked (no new crates): `flesh::FleshMaterial` — subsurface pre-integrated per
+  tissue from Jensen 2001's dipole after Penner 2011 (skin measured, fat and muscle flagged as own
+  or derived from Bosschaart's blood), a wet clear coat from the wetmap's new wetness byte, the
+  blood film composited on the GPU from `bloodstain::spectral` so cloth keeps its hue, a dermis map,
+  one sampler, WebGL2-verified in headless Chromium; `preset::{GorePlugin, Gore, GoreHit}` with
+  impact, slash, blunt and burn, spatter to floors and cloth, drips that pool, viscera on a torso
+  opened to muscle, and a bone handoff that parts a `FractureSubject` or a runtime `GoreBreakable`
+  along its fracture modes. `bloodstain 0.3.0`: `bruise` (Stam 2010, first-order 240 h clearance,
+  an HO-1 induction ramp flagged as own, a layered Kubelka–Munk colour), `burn` (Gowrishankar 2004's
+  Pennes lattice and Arrhenius constants; the Ω thresholds cited to Henriques by reference, not in
+  corpus), `wick` (Steinik 2024: the √t law holds only against an effective-viscosity time, raw
+  slope 0.46), and one correction — `kubelka_munk`'s non-absorbing limit returned the substrate, as
+  though a scattering layer were glass. Leaves: `bevy_wetmap 0.2.3` (R = amount, A = wetness,
+  `edge_samples`), `bevy_flaymap 0.1.2` (R = depth, A = peeled), `bevy_cross_section 0.1.2`
+  (`bone_mm`: 27 on a limb as a core, 0 on a trunk means muscle to the middle, ∞ on a skull),
+  `bevy_laceration 0.1.2`. **Two things the audit found that the papers settle and the demo body
+  did not:** a 120 mm blockout limb read as a 64 mm marrow core under depth-only banding (hence
+  `bone_mm`), and the wetmap's stains were single-texel binary stamps (hence `edge_samples`).
+  **Falsified along the way:** an ambient-light tint from the profile's total reflectance counted
+  the albedo twice and turned skin in shadow terracotta — removed, with the reason in `flesh.rs`.
+  Wired to the game only through the facade; no gene moved.
+  *Touches:* `crates/{bevy_carnage,bloodstain,bevy_wetmap,bevy_flaymap,bevy_cross_section,bevy_laceration}`, `scripts/build_web.sh`, `web/play.html`.
+
 - **FVS-Q-11 — Novel gore: four kernels and a spectral blood model, released** · L · ✅ **LANDED 2026-09-04**
   Went in as a goal rather than a ticket, and is recorded here so the id exists. Five corpus-grounded
   features shipped as one coordinated release: `bloodstain 0.2` gained `spectral` (Bosschaart 2014's

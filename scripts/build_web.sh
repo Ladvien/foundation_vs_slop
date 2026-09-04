@@ -40,8 +40,9 @@
 #
 # **Wasm demos never enable `vfx`.** `bevy_hanabi`'s wasm support is
 # WebGPU-compute-only, and every *new* visual in this plan is CPU-side anyway —
-# so `bevy_carnage` is built `--no-default-features --features serde` and GPU
-# particles stay a native extra. Decided here rather than discovered at build
+# so `bevy_carnage` is built `--no-default-features --features serde,flesh` and GPU
+# particles stay a native extra. `flesh` is not `vfx`: it is one forward-path
+# material over the CPU canvases, and the flagship needs it. Decided here rather than discovered at build
 # time.
 
 set -euo pipefail
@@ -70,6 +71,7 @@ DEMOS=(
     bevy_fracture_modes:fracture_modes
     bevy_flaymap:flaymap_peel
     bevy_laceration:laceration_open
+    bevy_carnage:flesh
     bevy_carnage:carnage_web
 )
 
@@ -133,7 +135,9 @@ for entry in "${DEMOS[@]}"; do
     # built the seven `bevy_carnage` demos and then died on the first crate with no features to pass.
     features=()
     if [ "$pkg" = "bevy_carnage" ]; then
-        features=(--no-default-features --features serde)
+        # `flesh` is the material and the preset — forward-path WGSL over CPU canvases, and it is
+        # what the flagship stands on since 0.4.0. `vfx` stays off: see the header.
+        features=(--no-default-features --features serde,flesh)
     fi
     cargo build -p "$pkg" --profile wasm-release --target wasm32-unknown-unknown \
         --example "$demo" ${features[@]+"${features[@]}"}

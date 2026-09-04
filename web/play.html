@@ -213,16 +213,28 @@
      A cut across the Langer lines gapes more than one along them — Ní Annaidh et al. measured the
      stiffness ratio (<code>10.1016/j.jmbbm.2011.08.016</code>) and it is the dial here.</p>
 </div>
+<div class="keys" id="notes-flesh" hidden>
+  <p>Runs on its own: the light walks round the subjects, a hit lands every second for ten seconds.</p>
+  <p><strong>The material every dressed surface wears.</strong> Subsurface scattering pre-integrated
+     from Jensen's dipole (<code>10.1145/383259.383319</code>) per tissue, after Penner's 2011 lookup —
+     watch the terminator on the sphere go soft and red and the fat band on the limb glow; a wet
+     clear coat where the wetmap says blood is fresh, fading as it dries; and on the sheet the film
+     composited over the weave from Bosschaart's whole-blood optics (<code>10.1007/s10103-013-1446-7</code>)
+     so the fabric keeps its hue under the stain. Forward path, WebGL2-safe, one sampler.</p>
+</div>
 <div class="keys" id="notes-carnage_web" hidden>
-  <p><kbd>click</kbd> shoot · <kbd>1</kbd>–<kbd>4</kbd> gore tier · <kbd>T</kbd> tissue ·
-     <kbd>H</kbd> the numbers · <kbd>R</kbd> reset</p>
-  <p><strong>The flagship: one body, one shot, everything at once.</strong> The bone breaks the way
-     that blow loaded it, the blood pattern that fits the wound is thrown, the wetmap it lands on
-     records it in UV space, the guts it opened spill and tether, and the drying it leaves walks the
-     colour and the gloss over the next half minute.</p>
-  <p>Four crates in one frame — <code>bevy_carnage</code>, <code>bloodstain</code>,
-     <code>bevy_wetmap</code>, <code>bevy_viscera</code> — which is also why this demo can only be
-     built from the monorepo: each crate's own mirror contains that crate alone.</p>
+  <p><kbd>click</kbd>/<kbd>1</kbd> shoot · <kbd>2</kbd> blow · <kbd>3</kbd> iron · <kbd>4</kbd> slash ·
+     <kbd>5</kbd> arterial · <kbd>H</kbd> the numbers · <kbd>R</kbd> reset</p>
+  <p><strong>The flagship: one body, every injury, one plugin.</strong> Three shots at one spot peel the
+     torso to cortex and the fracture modes part the body; a blow leaves a bruise that ages through
+     Stam's kinetics (<code>10.1007/s11517-010-0647-5</code>) in time-lapse; a hot iron leaves a burn
+     whose degree Henriques' damage integral decides (Gowrishankar et al.,
+     <code>10.1186/1475-925x-3-42</code>); a slash gapes and drips. Blood lands on the body, the sheet
+     and the slab, runs, pools and dries; on the sheet it wicks along a Lucas–Washburn front for
+     blood's own shear-thinning viscosity (Steinik et al., <code>10.1103/PhysRevFluids.9.023305</code>).</p>
+  <p>Every one of those is <code>GorePlugin</code>, a <code>Gore</code> per surface and a
+     <code>GoreHit</code> per key — the whole family behind one dependency line. Until 0.4.0 this demo
+     wired the same crates by hand in a thousand lines.</p>
 </div>
 
 </div>
@@ -249,7 +261,8 @@
     fracture_modes: "A body breaks where it is weak, not where a diagram says",
     flaymap_peel: "Hits peel skin, fat and muscle down to bone",
     laceration_open: "A slash that gapes on the skin's own tension",
-    carnage_web: "One body, one shot, eight crates",
+    flesh: "Tissue that scatters light, blood that is wet",
+    carnage_web: "One body, every injury, one plugin",
   };
   // Every module here needs WebGPU. Cargo features are per-package, so `bevy`'s `webgpu` feature is on
   // for the whole wasm target, and `bevy_render-0.19.0/src/settings.rs` gives it precedence over
