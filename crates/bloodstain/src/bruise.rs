@@ -534,9 +534,16 @@ impl Bruise {
                 if hb > 0.0 && vmax_ho > 0.0 {
                     let molar = hb * 1.0e9 / MW_HB_G_MOL;
                     let rate = vmax_ho * molar / (km + molar);
-                    let lost = rate * MW_HB_G_MOL * 1.0e-6 * 1.0e-3;
+                    // **Bounded by what is there.** Michaelis–Menten is zero-order once `molar ≫ km`,
+                    // so on the step that exhausts a compartment the rate would take more haemoglobin
+                    // than it holds. The store's `max(0.0)` used to truncate that loss while the
+                    // bilirubin was still minted at the full rate — four moles for every mole that
+                    // was never converted. The conversion is capped at the density present and the
+                    // bilirubin follows the capped amount, so the two stay 1 : 4 to the last step.
+                    let lost = (rate * MW_HB_G_MOL * 1.0e-6 * 1.0e-3).min(hb / STEP_H);
+                    let converted = lost / (MW_HB_G_MOL * 1.0e-6 * 1.0e-3);
                     add(d_hb, z, i, -lost * volume);
-                    add(d_bil, z, i, rate * BILIRUBIN_PER_HB * 1.0e-6 * volume);
+                    add(d_bil, z, i, converted * BILIRUBIN_PER_HB * 1.0e-6 * volume);
                 }
                 if tau > 0.0 {
                     add(d_bil, z, i, -at(&self.bil, z, i) / tau);
@@ -884,9 +891,14 @@ mod tests {
     ///
     /// A lock rather than a snapshot. Every constant in Stam's Table 1, the layer thicknesses, the
     /// flux scheme, the reaction order and the whole colour path are upstream of these bits; if one
-    /// moves, the model moved. Re-frozen once, before 0.3.0 shipped: `kubelka_munk`'s
+    /// moves, the model moved. Re-frozen twice. Before 0.3.0 shipped: `kubelka_munk`'s
     /// non-absorbing limit was corrected (a clear scattering layer whitened nothing), which moved
-    /// the four colour bytes at 96 h and 240 h where the top dermis holds no haemoglobin.
+    /// the four colour bytes at 96 h and 240 h where the top dermis holds no haemoglobin. After
+    /// 0.3.0, on review: `react` minted bilirubin at the full Michaelis–Menten rate on the step that
+    /// exhausted a compartment while the store clamped the haemoglobin loss, so the two drifted
+    /// past 1 : 4 at the end of a bruise; the conversion is now bounded by what is present. A
+    /// compartment that read exactly `0` after that overshoot now reads a residual of `1e-10` g/l,
+    /// and the late colour moved by a few bits where that compartment fed it.
     #[test]
     fn the_bruise_model_is_frozen() {
         let mut b = fresh();
@@ -904,10 +916,10 @@ mod tests {
         }
         std::println!("{got:?}");
         let want: Vec<u32> = std::vec![
-            0x3f673c96, 0x41b797d4, 0x30525422, 0x3cce3c53, 0x3f50a59f, 0x3f46c4c2, 0x3f2464ea,
-            0x40cdec14, 0x43a6ed21, 0x00000000, 0x40d015d7, 0x3f4d76f5, 0x3f08d4aa, 0x3e653970,
-            0x00000000, 0x452f1363, 0x00000000, 0x4362ca48, 0x3f6c5b38, 0x3f2c5091, 0x00000000,
-            0x00000000, 0x450a92c1, 0x00000000, 0x43e178c7, 0x3f6b2921, 0x3f2fae76, 0x00000000,
+            0x3f673c96, 0x41b797d4, 0x30525422, 0x3cce3c54, 0x3f50a59f, 0x3f46c4c2, 0x3f2464ea,
+            0x40cdec14, 0x43a6ed22, 0x2f84a806, 0x40cfe2f7, 0x3f4d76f5, 0x3f08d4aa, 0x3e65396c,
+            0x3c333930, 0x452d914f, 0x29ba9dca, 0x435f16ae, 0x3f6c4122, 0x3f2c4c28, 0x00000000,
+            0x00000000, 0x45082fce, 0x00000000, 0x43db8f7e, 0x3f6b118c, 0x3f2fed92, 0x00000000,
         ];
         assert_eq!(got, want);
     }
