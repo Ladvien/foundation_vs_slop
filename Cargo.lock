@@ -893,7 +893,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_carnage"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bevy",
  "bevy_cross_section",
@@ -2300,14 +2300,14 @@ dependencies = [
 
 [[package]]
 name = "bevy_viscera"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bevy",
 ]
 
 [[package]]
 name = "bevy_wetmap"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bevy",
  "bloodstain",
@@ -2508,7 +2508,7 @@ dependencies = [
 
 [[package]]
 name = "bloodstain"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libm",
  "serde",

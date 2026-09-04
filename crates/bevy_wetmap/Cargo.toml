@@ -1,12 +1,14 @@
 [package]
 name = "bevy_wetmap"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "CPU-authoritative texture-space blood accumulation for Bevy: paint a world-space hit into a mesh's UVs, then drip, spread, absorb and dry it on an integer tick — and hash the result."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Ladvien/bevy_wetmap"
 keywords = ["bevy", "gamedev", "blood", "gore", "texture"]
 categories = ["game-development", "graphics"]
+# The README gif is served from the mirror, not the registry package (crates.io caps a package at 10 MiB).
+exclude = ["docs/*.gif"]
 # **Published, unlike most of this workspace's mirrored crates, and it is not a preference.**
 #
 # `bevy_carnage` is on crates.io and depends on this crate; a released package may not depend on a

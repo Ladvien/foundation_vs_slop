@@ -1,12 +1,14 @@
 [package]
 name = "bevy_viscera"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Deterministic XPBD Cosserat-style viscera for Bevy: strands that spill, coil and tether, a mesenteric membrane that tears monotonically, and a CPU tube mesh handed back to the caller."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Ladvien/bevy_viscera"
 keywords = ["bevy", "gamedev", "physics", "xpbd", "gore"]
 categories = ["game-development", "simulation"]
+# The README gif is served from the mirror, not the registry package (crates.io caps a package at 10 MiB).
+exclude = ["docs/*.gif"]
 # **Published, unlike most of this workspace's mirrored crates, and it is not a preference.**
 #
 # `bevy_carnage` is on crates.io and depends on this crate; a released package may not depend on a

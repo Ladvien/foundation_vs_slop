@@ -117,14 +117,20 @@ pub fn appearance(age_ticks: u32, hz: u32, area_m2: f32, s: &BloodSettings) -> A
 
 /// **The appearance of a film of blood at `age_ticks`.** The fresh colour is computed from the
 /// film's thickness, oxygen saturation and substrate by [`crate::spectral`]; the age walk is the
-/// same one [`appearance`] takes.
+/// same one [`appearance`] takes, re-anchored on that fresh colour.
 ///
 /// The oxidation products' spectra are not tabulated here (see the `spectral` module docs for
-/// why), so ageing is applied as the **shift** between the published stops rather than as a
-/// second spectral chromophore: the colour at age `t` is the film's own fresh colour plus
-/// `stop(t) − SRGB_OXY`, clamped. At `t = 0` that is exactly the spectral colour; at full age the
-/// red has fallen and the green risen by exactly what the Bremmer walk says they do. Monotone by
-/// construction, because the shift is.
+/// why), so ageing is the published three-stop walk **scaled to the film**: the methaemoglobin and
+/// hemichrome stops are multiplied by `fresh.r / SRGB_OXY.r`, the ratio of this film's red to the
+/// authored fresh red, and the colour walks `fresh → MET·k → HEMI·k` on the same timing. Red is the
+/// oxidation signal and is what the scale is taken on, so it only ever falls; each segment is a
+/// straight lerp, so nothing oscillates. At `t = 0` the colour is exactly the spectral colour, and
+/// at `fresh = SRGB_OXY` the walk is exactly [`appearance`]'s.
+///
+/// This replaced an additive shift (`fresh + stop(t) − SRGB_OXY`) in 0.2.1. That shift was
+/// calibrated on the bright authored `SRGB_OXY`; applied to a thick venous pool, whose spectral
+/// colour is already near-black, its fixed +0.08 green and +0.05 blue crossed the red and the pool
+/// dried grey-teal. Dried blood is brown at every thickness; a scale keeps it so.
 pub fn appearance_of(age_ticks: u32, hz: u32, area_m2: f32, s: &BloodSettings, film: &Film) -> Appearance {
     appearance_with_fresh(age_ticks, hz, area_m2, s, crate::spectral::srgb(film))
 }
@@ -134,22 +140,22 @@ pub fn appearance_of(age_ticks: u32, hz: u32, area_m2: f32, s: &BloodSettings, f
 /// The seam the other two entry points share, public because a texture-space consumer computes
 /// its fresh colours once per thickness level and then ages thousands of texels against them —
 /// evaluating the spectral model per texel would be 81 exponentials each. Age is applied as the
-/// stop-to-stop shift described on [`appearance_of`].
+/// red-anchored walk described on [`appearance_of`].
 pub fn appearance_with_fresh(age_ticks: u32, hz: u32, area_m2: f32, s: &BloodSettings, fresh: [f32; 3]) -> Appearance {
     let span = dry_ticks(area_m2, hz);
     // Normalised age on the shared curve Laan's mass series collapse onto.
     let t = (age_ticks as f32 / span as f32).clamp(0.0, 1.0);
 
-    // Colour: two segments through three stops. The first is fast — oxidation to methaemoglobin is
-    // most of the visible colour change and it happens early (Bremmer 2012).
-    let stop = if t < 0.35 {
-        vec::lerp(SRGB_OXY, SRGB_MET, t / 0.35)
-    } else {
-        vec::lerp(SRGB_MET, SRGB_HEMI, (t - 0.35) / 0.65)
-    };
+    // Colour: two segments through three stops, the later two scaled to this film's red. The first
+    // segment is fast — oxidation to methaemoglobin is most of the visible colour change and it
+    // happens early (Bremmer 2012).
+    let k = if fresh[0].is_finite() && fresh[0] > 0.0 { fresh[0] / SRGB_OXY[0] } else { 1.0 };
+    let met = vec::scale(SRGB_MET, k);
+    let hemi = vec::scale(SRGB_HEMI, k);
+    let stop = if t < 0.35 { vec::lerp(fresh, met, t / 0.35) } else { vec::lerp(met, hemi, (t - 0.35) / 0.65) };
     let mut srgb = [0.0f32; 3];
     for c in 0..3 {
-        srgb[c] = (fresh[c] + (stop[c] - SRGB_OXY[c])).clamp(0.0, 1.0);
+        srgb[c] = stop[c].clamp(0.0, 1.0);
     }
 
     // Gloss collapses with the rim front rather than linearly with age: the surface stops being wet
@@ -229,6 +235,39 @@ mod tests {
         }
         // Green rises while red falls — a brown is not a dark red, and that is the whole point.
         assert!(old[1] > fresh[1], "hemichrome must be browner, not merely darker");
+    }
+
+    /// **A dark film dries brown, not grey.** The regression the additive shift failed: a thick
+    /// venous pool's spectral colour is near-black, and adding the authored green/blue rise to it
+    /// crossed the red. Dried blood at every thickness has red above green above blue, red never
+    /// rises, and the walk at `fresh = SRGB_OXY` is still exactly the authored one.
+    #[test]
+    fn a_dark_film_dries_brown_and_the_authored_walk_is_untouched() {
+        use crate::spectral::{Film, SO2_ARTERIAL, SO2_VENOUS};
+        let s = BloodSettings::default();
+        let span = dry_ticks(DRY_REF_AREA_M2, 60);
+        for so2 in [SO2_ARTERIAL, SO2_VENOUS] {
+            for thickness_mm in [0.05f32, 0.4, 4.0] {
+                let film = Film { thickness_mm, so2, substrate: 0.86 };
+                let mut last = appearance_of(0, 60, DRY_REF_AREA_M2, &s, &film).srgb;
+                for age in (0..=span).step_by(30) {
+                    let now = appearance_of(age, 60, DRY_REF_AREA_M2, &s, &film).srgb;
+                    assert!(now[0] <= last[0] + 1.0e-6, "red rose at age {age} for {thickness_mm} mm");
+                    last = now;
+                }
+                assert!(
+                    last[0] > last[1] && last[1] > last[2],
+                    "a {thickness_mm} mm film at SO2 {so2} dried to {last:?}, which is not a brown"
+                );
+            }
+        }
+        for age in [0, span / 5, span / 2, span] {
+            assert_eq!(
+                appearance_with_fresh(age, 60, DRY_REF_AREA_M2, &s, SRGB_OXY).srgb,
+                appearance(age, 60, DRY_REF_AREA_M2, &s).srgb,
+                "the authored walk must be the k = 1 case exactly"
+            );
+        }
     }
 
     /// Gloss is the channel that carries wetness, and it must actually span the authored range.
