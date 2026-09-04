@@ -180,6 +180,39 @@ fn the_bed_floor_sits_at_the_authored_depth() {
     assert_eq!(layer, bevy_laceration::bevy_cross_section::Layer::Fat, "6 mm into a limb is subcutaneous fat");
 }
 
+/// **Every face of the bed is wound the way its normal says.** A wound bed is looked at from
+/// inside the trough with back-face culling on, so a triangle wound against its authored normal is
+/// not a shading artefact — it is invisible. The end caps shipped that way in 0.1.0 and nothing here
+/// noticed, because the floor and rails were checked by position alone.
+#[test]
+fn every_bed_face_is_wound_to_its_normal() {
+    let patch = skin_patch(CELLS, SIZE);
+    let layers = Layers::for_region(Region::Limb);
+    let scale = Scale::default();
+    let torn = tear(&patch, &middle_row(), Vec3::Y, &shape(CELL * 1.2), Region::Limb, &layers, &scale)
+        .expect("the tear must produce a bed");
+    let pos = positions(&torn.bed);
+    let nrm: Vec<Vec3> = match torn.bed.try_attribute_option(Mesh::ATTRIBUTE_NORMAL) {
+        Ok(Some(VertexAttributeValues::Float32x3(n))) => n.iter().map(|n| Vec3::from_array(*n)).collect(),
+        _ => Vec::new(),
+    };
+    assert_eq!(pos.len(), nrm.len(), "every bed vertex needs a normal");
+    let tris = triples(&torn.bed);
+    assert!(!tris.is_empty(), "the bed has no faces");
+    for [a, b, c] in tris {
+        let (Some(pa), Some(pb), Some(pc), Some(na)) =
+            (pos.get(a as usize), pos.get(b as usize), pos.get(c as usize), nrm.get(a as usize))
+        else {
+            panic!("a bed index is out of range");
+        };
+        let geometric = (*pb - *pa).cross(*pc - *pa);
+        assert!(
+            geometric.dot(*na) > 0.0,
+            "face {a}-{b}-{c} is wound against its normal: geometric {geometric:?} vs authored {na:?}"
+        );
+    }
+}
+
 #[test]
 fn a_wider_gape_removes_at_least_as_many_faces() {
     let patch = skin_patch(CELLS, SIZE);
@@ -262,7 +295,9 @@ fn the_tear_is_frozen() {
     // Both halves of the output are frozen: `examples/laceration_curve.rs` prints exactly these two
     // lines, so a reader can check the crate against its own golden without running the suite.
     const FROZEN: u64 = 0xafb3_d3cb_bc85_b028;
-    const FROZEN_BED: u64 = 0x9b65_6070_df97_81d5;
+    // Re-blessed in 0.1.1: the two end caps were wound against their normals in 0.1.0 and are now
+    // wound to them (`every_bed_face_is_wound_to_its_normal`). Only the cap index order moved.
+    const FROZEN_BED: u64 = 0x18da_2f85_86e7_9831;
     let patch = skin_patch(CELLS, SIZE);
     let torn = tear(
         &patch,

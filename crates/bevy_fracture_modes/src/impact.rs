@@ -119,6 +119,7 @@ impl ModeSet {
         }
         let mut root_of: Vec<usize> = (0..n).map(|i| find(&mut parent, i)).collect();
         // Groups ordered by their smallest member: roots are the smallest member by construction.
+        // SORT-OK: cell indices from a Vec, deduplicated after — a total order, no ECS query near it.
         let mut roots: Vec<usize> = root_of.clone();
         roots.sort_unstable();
         roots.dedup();

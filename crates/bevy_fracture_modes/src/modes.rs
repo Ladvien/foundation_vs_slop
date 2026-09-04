@@ -237,6 +237,8 @@ impl ModeSet {
         }
 
         // Energy ascending, index as the tiebreak — a total order.
+        // SORT-OK: `(energy, index)` over a Vec the bake built in a fixed order; the index breaks
+        // every tie, so the order is total and no query is involved.
         let mut order: Vec<usize> = (0..modes.len()).collect();
         order.sort_by(|&a, &b| {
             modes[a].1.partial_cmp(&modes[b].1).unwrap_or(core::cmp::Ordering::Equal).then(a.cmp(&b))

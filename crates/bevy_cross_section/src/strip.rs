@@ -64,16 +64,24 @@ impl Strip {
     }
 }
 
-/// **Bake the strip** for `layers`, `width × height` texels, from `seed`.
+/// **Bake the strip** for `layers`, `width × height` texels, one `v` repeat spanning `tile_mm`
+/// of cut face, from `seed`.
 ///
-/// `height` is the tile: the along-axis noise is periodic in exactly `height` rows, so the image
-/// can be sampled with `Repeat` on `v` and no seam. `width` should give at least ten texels to the
-/// thinnest band you care about; `512` over a limb's 41 mm is 12 per millimetre.
-pub fn strip(layers: &Layers, width: u32, height: u32, seed: u32) -> Strip {
+/// `tile_mm` is the physical length one repeat of the image covers along the cut — the same
+/// number [`crate::annotate_cap`] maps `UV_1.y = 1` onto, so it must be `Scale::tile_units ×
+/// Scale::mm_per_unit` or every feature is stretched by the ratio. The along-axis noise is periodic
+/// in exactly `tile_mm`, so the image can be sampled with `Repeat` on `v` and no seam. `width`
+/// should give at least ten texels to the thinnest band you care about — `512` over a limb's
+/// 41 mm is 12 per millimetre — and square texels want `height ≈ width · tile_mm / span_mm`.
+///
+/// A non-finite or non-positive `tile_mm` falls back to the depth axis' own resolution, which is
+/// what 0.1.0 always did and what stretched a 2 mm lobule to 20 mm on a 50 mm tile.
+pub fn strip(layers: &Layers, width: u32, height: u32, tile_mm: f32, seed: u32) -> Strip {
     let width = width.max(1);
     let height = height.max(1);
     let span = layers.span_mm().max(1.0e-3);
     let px_per_mm = width as f32 / span;
+    let tile_mm = if tile_mm.is_finite() && tile_mm > 0.0 { tile_mm } else { height as f32 / px_per_mm };
 
     let bands = bands_of(layers, width);
     let muscle = muscle_albedo();
@@ -87,8 +95,7 @@ pub fn strip(layers: &Layers, width: u32, height: u32, seed: u32) -> Strip {
             let (layer, frac) = layers.at(depth_mm);
             // Texel coordinates in millimetres, with the along axis periodic in the tile.
             let u = depth_mm;
-            let v_mm = (y as f32 + 0.5) / px_per_mm;
-            let tile_mm = height as f32 / px_per_mm;
+            let v_mm = (y as f32 + 0.5) * tile_mm / height as f32;
             let ([r, g, b], ro) = texel(layer, frac, u, v_mm, tile_mm, seed, muscle);
             let i = ((y * width + x) * 4) as usize;
             albedo[i] = enc(r);
@@ -109,7 +116,8 @@ pub fn strip(layers: &Layers, width: u32, height: u32, seed: u32) -> Strip {
 ///
 /// The per-texel rule [`strip`] bakes, exposed so a texture-space consumer — a flayed patch, a
 /// wound bed — can paint the same tissue at the same physical scale without a strip lookup.
-/// Encoded sRGB and perceptual roughness, both in `[0, 1]`.
+/// Encoded sRGB and perceptual roughness, both in `[0, 1]`. Periodic in `v_mm` with period
+/// exactly `tile_mm`: `texel_at(.., v, ..) == texel_at(.., v + tile_mm, ..)` to the bit.
 pub fn texel_at(layers: &Layers, depth_mm: f32, u_mm: f32, v_mm: f32, tile_mm: f32, seed: u32) -> ([f32; 3], f32) {
     let (layer, frac) = layers.at(depth_mm);
     texel(layer, frac, u_mm, v_mm, tile_mm.max(1.0e-3), seed, muscle_albedo())
@@ -156,14 +164,16 @@ fn texel(layer: Layer, frac: f32, u: f32, v: f32, tile: f32, seed: u32, muscle: 
     match layer {
         Layer::Skin => {
             // A thin dark epidermis over a fibrous dermis.
-            let fibre = value_noise(u * 6.0, v * 6.0, tile * 6.0, seed ^ 0x51);
+            let (f, p) = snap(6.0, tile);
+            let fibre = value_noise(u * f, v * f, p, seed ^ 0x51);
             let dermis = shade(SKIN_DERMIS, 0.92 + 0.12 * fibre);
             if frac < 0.15 { (SKIN_EPIDERMIS, 0.55) } else { (dermis, 0.6 - 0.1 * fibre) }
         }
         Layer::Fat => {
             // Lobules ~2 mm across in a septal net: Worley F1 is the lobule interior, the ridge
             // between cells (F2 − F1 small) is the septum.
-            let (f1, f2) = worley(u / 2.0, v / 2.0, tile / 2.0, seed ^ 0xFA7);
+            let (f, p) = snap(0.5, tile);
+            let (f1, f2) = worley(u * f, v * f, p, seed ^ 0xFA7);
             let ridge = (f2 - f1).clamp(0.0, 1.0);
             let septum = smoothstep((0.12 - ridge) / 0.12);
             let glisten = 0.9 + 0.15 * (1.0 - f1).clamp(0.0, 1.0);
@@ -172,8 +182,10 @@ fn texel(layer: Layer, frac: f32, u: f32, v: f32, tile: f32, seed: u32, muscle: 
         }
         Layer::Muscle => {
             // Fascicles ~0.7 mm across wrapped in perimysium at ~3 mm.
-            let (f1, f2) = worley(u / 0.7, v / 0.7, tile / 0.7, seed ^ 0x3A5);
-            let (p1, p2) = worley(u / 3.0, v / 3.0, tile / 3.0, seed ^ 0x9C1);
+            let (ff, fp) = snap(1.0 / 0.7, tile);
+            let (f1, f2) = worley(u * ff, v * ff, fp, seed ^ 0x3A5);
+            let (pf, pp) = snap(1.0 / 3.0, tile);
+            let (p1, p2) = worley(u * pf, v * pf, pp, seed ^ 0x9C1);
             let fibre = 0.85 + 0.2 * (1.0 - f1).clamp(0.0, 1.0);
             let fine_ridge = smoothstep((0.08 - (f2 - f1)) / 0.08) * 0.35;
             let peri = smoothstep((0.06 - (p2 - p1)) / 0.06);
@@ -182,18 +194,22 @@ fn texel(layer: Layer, frac: f32, u: f32, v: f32, tile: f32, seed: u32, muscle: 
         }
         Layer::Cortex => {
             // Dense ivory with Haversian canals ~0.1 mm: a sparse dot field.
-            let (f1, _) = worley(u / 0.35, v / 0.35, tile / 0.35, seed ^ 0xB0E);
+            let (cf, cp) = snap(1.0 / 0.35, tile);
+            let (f1, _) = worley(u * cf, v * cf, cp, seed ^ 0xB0E);
             let canal = smoothstep((0.28 - f1) / 0.1);
-            let grain = value_noise(u * 3.0, v * 3.0, tile * 3.0, seed ^ 0x77);
+            let (gf, gp) = snap(3.0, tile);
+            let grain = value_noise(u * gf, v * gf, gp, seed ^ 0x77);
             let c = lerp3(shade(CORTEX, 0.94 + 0.08 * grain), CANAL, canal);
             (c, 0.65 + 0.2 * canal)
         }
         Layer::Marrow => {
             // Trabecular struts thin out over the first half of the band; the cavity is yellow
             // (fatty) marrow with red patches.
-            let n = value_noise(u * 1.5, v * 1.5, tile * 1.5, seed ^ 0x1D3);
+            let (sf, sp) = snap(1.5, tile);
+            let n = value_noise(u * sf, v * sf, sp, seed ^ 0x1D3);
             let strut = smoothstep((0.12 - (n - 0.5).abs()) / 0.12) * (1.0 - smoothstep(frac / 0.55));
-            let blotch = value_noise(u * 0.6, v * 0.6, tile * 0.6, seed ^ 0x4E2);
+            let (bf, bp) = snap(0.6, tile);
+            let blotch = value_noise(u * bf, v * bf, bp, seed ^ 0x4E2);
             let base = lerp3(MARROW_RED, MARROW_YELLOW, smoothstep(blotch * 1.4 - 0.2));
             (lerp3(base, TRABECULA, strut), 0.4 - 0.15 * strut.min(1.0) + 0.25 * strut)
         }
@@ -218,6 +234,18 @@ fn smoothstep(x: f32) -> f32 {
 fn enc(v: f32) -> u8 {
     let v = if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
     (v * 255.0).round() as u8
+}
+
+/// **A noise frequency snapped so the tile is a whole number of cells.** `cells_per_mm` is the
+/// feature scale the tissue wants — lobules at 2 mm are `0.5` — and the answer is the nearest
+/// frequency at which `tile_mm` holds an integer count of cells, with that count. A periodic lattice
+/// only closes on `v` when its period is integral, so every noise call goes through this rather
+/// than rounding the period after the fact: at the plugin's 50 mm tile the snap moves a frequency
+/// by under 1 %; at a 5 mm tile it would have moved the fat by 18 %, which is what the seam was.
+fn snap(cells_per_mm: f32, tile_mm: f32) -> (f32, f32) {
+    let tile = tile_mm.max(1.0e-3);
+    let cells = (tile * cells_per_mm).round().max(1.0);
+    (cells / tile, cells)
 }
 
 /// A lattice hash in `[0, 1)`, periodic in `y` with period `py` cells.
@@ -278,7 +306,7 @@ mod tests {
     fn band_widths_match_the_thickness_table() {
         for region in Region::ALL {
             let layers = Layers::for_region(region);
-            let s = strip(&layers, 512, 64, 1);
+            let s = strip(&layers, 512, 64, TILE_MM, 1);
             let ppm = s.px_per_mm(&layers);
             assert_eq!(s.bands.len(), 5, "{region:?} lost a band");
             for band in &s.bands {
@@ -294,24 +322,58 @@ mod tests {
         }
     }
 
-    /// The strip tiles: the last row and the row past it agree, so `Repeat` on `v` has no seam.
+    /// The plugin's default tile, in millimetres: `Scale::default()`.
+    const TILE_MM: f32 = 50.0;
+
+    /// **The along axis is periodic in exactly the tile.** Sampled through [`texel_at`] — the rule
+    /// the strip bakes and a texture-space consumer paints with — at every band, at a sweep of
+    /// positions, one tile apart in both directions: equal to within a float ulp's worth of noise
+    /// slope, or `Repeat` on `v` has a seam. 0.1.0 rounded each noise period *after* scaling, so
+    /// the period was integral in cells but the tile was not, and the fat band wrapped half a
+    /// lobule early — a difference of whole tenths, not the `1e-3` allowed here.
     #[test]
     fn the_along_axis_tiles_without_a_seam() {
-        let layers = Layers::for_region(Region::Limb);
-        let a = strip(&layers, 128, 32, 9);
-        let b = strip(&layers, 128, 64, 9);
-        // Row 32 of the taller strip is row 0 of the shorter one's period only if the noise is
-        // periodic in the tile; the two strips have different tiles, so compare a strip to itself
-        // through the lattice instead.
-        fn row(s: &Strip, y: u32) -> &[u8] {
-            &s.albedo[(y * s.width * 4) as usize..((y + 1) * s.width * 4) as usize]
+        for region in Region::ALL {
+            let layers = Layers::for_region(region);
+            let span = layers.span_mm();
+            for tile in [TILE_MM, 20.0, 5.1] {
+                for k in 0..40 {
+                    let depth = span * (k as f32 + 0.5) / 40.0;
+                    for j in 0..7 {
+                        let v = tile * (j as f32 * 0.137 + 0.01);
+                        let (a, ra) = texel_at(&layers, depth, depth, v, tile, 9);
+                        for (b, rb) in [texel_at(&layers, depth, depth, v + tile, tile, 9), texel_at(&layers, depth, depth, v - tile, tile, 9)] {
+                            for c in 0..3 {
+                                assert!(
+                                    (a[c] - b[c]).abs() < 1.0e-3,
+                                    "{region:?} seam at depth {depth:.2} v {v:.2} tile {tile}: {a:?} vs {b:?}"
+                                );
+                            }
+                            assert!((ra - rb).abs() < 1.0e-3, "{region:?} roughness seam at depth {depth:.2} v {v:.2} tile {tile}");
+                        }
+                    }
+                }
+            }
         }
-        // Periodicity: lattice(x, y) == lattice(x, y + py).
-        assert_eq!(lattice(3, 1, 8, 5), lattice(3, 9, 8, 5));
-        assert_eq!(lattice(3, -1, 8, 5), lattice(3, 7, 8, 5));
-        // And a strip is deterministic in its inputs.
-        assert_eq!(row(&a, 0), row(&strip(&layers, 128, 32, 9), 0));
-        assert_ne!(a.digest(), b.digest());
+        // And a strip is exactly reproducible in its inputs.
+        let layers = Layers::for_region(Region::Limb);
+        assert_eq!(strip(&layers, 128, 32, TILE_MM, 9).albedo, strip(&layers, 128, 32, TILE_MM, 9).albedo);
+    }
+
+    /// **Snapping keeps the tissue at its authored size.** Every frequency the bands use, at the
+    /// plugin's tile, lands on a whole number of cells within 2.5 % of what the anatomy asked for —
+    /// so a 2 mm lobule is 2 mm, and the coarsest, the 3 mm perimysium, is 2.94 — and at a tile too
+    /// small to hold one cell it still returns a period.
+    #[test]
+    fn snapping_barely_moves_the_authored_scale() {
+        for f in [6.0, 0.5, 1.0 / 0.7, 1.0 / 3.0, 1.0 / 0.35, 3.0, 1.5, 0.6] {
+            let (snapped, cells) = snap(f, TILE_MM);
+            assert_eq!(cells, cells.round(), "the period must be a whole number of cells");
+            assert!(cells >= 1.0);
+            assert!(((snapped - f) / f).abs() < 0.025, "{f} cells/mm snapped to {snapped} at {TILE_MM} mm");
+        }
+        let (_, cells) = snap(0.5, 0.5);
+        assert_eq!(cells, 1.0, "a tile smaller than a cell still has a period");
     }
 
     /// The muscle band is redder than the fat band and darker than the cortex — the three bands a
@@ -319,7 +381,7 @@ mod tests {
     #[test]
     fn the_bands_read_as_tissue() {
         let layers = Layers::for_region(Region::Limb);
-        let s = strip(&layers, 512, 64, 3);
+        let s = strip(&layers, 512, 64, TILE_MM, 3);
         let mean = |band: &Band| {
             let mut acc = [0u64; 3];
             let mut n = 0u64;
@@ -343,14 +405,19 @@ mod tests {
         assert!(lum(cortex) > lum(muscle), "cortex {cortex:?} is not lighter than muscle {muscle:?}");
     }
 
-    /// **Frozen.** Three strips, one per region, at the size the plugin bakes.
+    /// **Frozen.** Three strips, one per region, at the size and tile the plugin bakes.
+    ///
+    /// Re-blessed in 0.1.1: the along axis is now baked at the tile `annotate_cap` maps `v` onto
+    /// (50 mm, not the depth axis' 5.1 mm), each noise frequency is snapped so that tile is a whole
+    /// number of cells, and the plugin's default height went from 64 to 512 rows. 0.1.0's strips
+    /// were stretched ~10× along the cut and seamed; these are not.
     #[test]
     fn the_strips_are_frozen() {
         let got: Vec<u64> = Region::ALL
             .iter()
-            .map(|r| strip(&Layers::for_region(*r), 512, 64, 0xC0FF_EE00).digest())
+            .map(|r| strip(&Layers::for_region(*r), 512, 512, TILE_MM, 0xC0FF_EE00).digest())
             .collect();
         println!("{got:x?}");
-        assert_eq!(got, vec![0x136725b9641e209f, 0x909d3ebc3b17d129, 0x7ba7a7439ee27dbc]);
+        assert_eq!(got, vec![0xd55cec77866f8a74, 0xf6f9bd95d6256cca, 0xdfc4499c89d19840]);
     }
 }

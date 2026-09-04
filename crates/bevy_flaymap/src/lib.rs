@@ -129,6 +129,8 @@ fn upload_dirty_canvases(
     if order.is_empty() {
         return;
     }
+    // SORT-OK: `(dirty_since, Entity)` — the tick is total; the `Entity` tiebreak decides only which
+    // write-only image is flushed first, and `digest()` folds the depth buffer, never the images.
     order.sort_unstable();
 
     for &(_, entity) in order.iter().take(budget) {

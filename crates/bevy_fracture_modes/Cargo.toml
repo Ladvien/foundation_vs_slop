@@ -1,6 +1,6 @@
 [package]
 name = "bevy_fracture_modes"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Fracture modes on a convex decomposition for Bevy: precompute the sparse, mass-orthonormal fracture modes of a cell graph at bake time, then project an impact onto them at runtime so a body breaks across its real weaknesses — Sellán et al. 2022, deterministic."
 license = "MIT OR Apache-2.0"

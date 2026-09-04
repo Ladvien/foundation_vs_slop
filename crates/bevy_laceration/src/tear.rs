@@ -522,12 +522,14 @@ fn bed_mesh(segs: &[Seg], n: Vec3, shape: &TearShape, seed: u32, layers: &Layers
         b.quad([&l0, &f0, &f1, &l1], (n * shape.half_width - side * depth).normalize_or_zero(), n, layers, scale);
         // Right wall, the mirror: `h·n + depth·side`.
         b.quad([&r0, &r1, &f1, &f0], (n * shape.half_width + side * depth).normalize_or_zero(), n, layers, scale);
+        // The end caps: `side = n × dir`, so `(r − l) × (f − l)` is `+dir` at the near end and the
+        // far cap is its mirror. Wound to agree with the authored normal, because a back-face-culled
+        // cap is invisible from exactly where a wound is looked at — inside the trough.
         if i == 0 {
-            // Closing the near end, facing along the wound.
-            b.tri([&l0, &f0, &r0], seg.dir, n, layers, scale);
+            b.tri([&l0, &r0, &f0], seg.dir, n, layers, scale);
         }
         if i == last {
-            b.tri([&l1, &r1, &f1], -seg.dir, n, layers, scale);
+            b.tri([&l1, &f1, &r1], -seg.dir, n, layers, scale);
         }
     }
     b.finish()

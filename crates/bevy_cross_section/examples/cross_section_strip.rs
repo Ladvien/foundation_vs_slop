@@ -23,7 +23,7 @@ fn main() {
     let mut stacked_w = 0u32;
     for region in Region::ALL {
         let layers = Layers::for_region(region);
-        let s = strip(&layers, 512, 64, 0xC0FF_EE00);
+        let s = strip(&layers, 512, 512, 50.0, 0xC0FF_EE00);
         let ppm_per_mm = s.px_per_mm(&layers);
         println!("{region:?}: {}x{} texels, {ppm_per_mm:.1} px/mm, span {:.1} mm", s.width, s.height, layers.span_mm());
         for band in &s.bands {

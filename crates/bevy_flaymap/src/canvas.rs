@@ -454,28 +454,47 @@ impl FlayCanvas {
         let origin = inv.transform_point3(from);
         let local_dir = inv.transform_vector3(dir);
         match ray_uv(mesh, origin, local_dir) {
-            Pick::At { uv, point, normal } => {
+            Pick::At { uv, point, normal } if (0.0..=1.0).contains(&uv.x) && (0.0..=1.0).contains(&uv.y) => {
                 let mut handoff = self.paint_uv(uv, radius_uv, depth_mm, tick);
                 handoff.at = Some(point);
                 handoff.normal = Some(normal);
                 Some(handoff)
             }
+            // The mesh's own UV0 left the unit square at the hit. `paint_uv` would refuse it, but a
+            // refusal dressed as a shallow hit with a point and a normal is indistinguishable from a
+            // real one — so it is `None` here, and the mesh is named once, like any other mesh that
+            // cannot carry a flaymap.
+            Pick::At { uv, .. } => {
+                self.warn_once(mesh, &format!(
+                    "flaymap: this mesh's ATTRIBUTE_UV_0 leaves the unit square at the hit ({}, {}), so \
+                     nothing was peeled; a flaymap atlas must be in [0, 1]",
+                    uv.x, uv.y
+                ));
+                None
+            }
             Pick::Miss => None,
             Pick::Unusable => {
-                let key = mesh_key(mesh);
-                if !self.warned.contains(&key) {
-                    if self.warned.len() >= WARN_MEMO {
-                        self.warned.remove(0);
-                    }
-                    self.warned.push(key);
-                    warn!(
-                        "flaymap: this mesh has no Float32x2 ATTRIBUTE_UV_0 (or is not a triangle \
-                         list), so it cannot carry a flaymap; nothing was peeled"
-                    );
-                }
+                self.warn_once(
+                    mesh,
+                    "flaymap: this mesh has no Float32x2 ATTRIBUTE_UV_0 (or is not a triangle list), so it \
+                     cannot carry a flaymap; nothing was peeled",
+                );
                 None
             }
         }
+    }
+
+    /// Warn about `mesh` once per canvas, whatever the reason: the memo is per mesh, not per message.
+    fn warn_once(&mut self, mesh: &Mesh, message: &str) {
+        let key = mesh_key(mesh);
+        if self.warned.contains(&key) {
+            return;
+        }
+        if self.warned.len() >= WARN_MEMO {
+            self.warned.remove(0);
+        }
+        self.warned.push(key);
+        warn!("{message}");
     }
 
     /// **Recolour the wound from the cross-section palette.** The one pass that touches the pixels.

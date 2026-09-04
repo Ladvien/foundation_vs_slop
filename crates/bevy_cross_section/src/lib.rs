@@ -19,6 +19,7 @@ use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::{IntoScheduleConfigs, SystemSet};
 use bevy::ecs::system::{Res, ResMut};
 use bevy::image::{Image, ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+use bevy::log::warn;
 use bevy::mesh::UvChannel;
 use bevy::pbr::StandardMaterial;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -34,7 +35,9 @@ pub struct CrossSectionSettings {
     pub layers: [Layers; 3],
     /// Strip columns — the depth axis. `512`.
     pub width: u32,
-    /// Strip rows — the along axis, which tiles. `64`.
+    /// Strip rows — the along axis, which tiles over `scale.tile_units`. `512`, which over the
+    /// default 50 mm tile is 10 rows per millimetre against the depth axis' 12 columns: near enough
+    /// square that a 2 mm lobule is round. Square texels want `width · tile_mm / span_mm`.
     pub height: u32,
     /// Noise seed. Two apps with one seed bake one strip.
     pub seed: u32,
@@ -51,7 +54,7 @@ impl Default for CrossSectionSettings {
                 Layers::for_region(Region::Head),
             ],
             width: 512,
-            height: 64,
+            height: 512,
             seed: 0xC0FF_EE00,
             scale: Scale::default(),
         }
@@ -120,18 +123,27 @@ impl Plugin for CrossSectionPlugin {
     }
 }
 
-/// Build the strip images and materials. `Assets<StandardMaterial>` is optional so a headless app
-/// without a PBR plugin still gets the images and the digests.
+/// Build the strip images and materials. Both asset stores are optional: a headless app without a
+/// PBR plugin still gets the images and the digests, and one without `ImagePlugin` gets a warning
+/// and an empty atlas rather than a crash — a missing `Res<T>` panics a system in Bevy 0.19 rather
+/// than skipping it, so "optional" has to be spelled `Option`. The digests are one `strip` call
+/// away regardless.
 fn bake_strips(
     settings: Res<CrossSectionSettings>,
     mut atlas: ResMut<CrossSectionAtlas>,
-    mut images: ResMut<Assets<Image>>,
+    images: Option<ResMut<Assets<Image>>>,
     materials: Option<ResMut<Assets<StandardMaterial>>>,
 ) {
+    let mut images = images;
     let mut materials = materials;
+    let tile_mm = settings.scale.tile_units * settings.scale.mm_per_unit;
     atlas.strips.clear();
+    let Some(images) = images.as_mut() else {
+        warn!("cross_section: no `Assets<Image>` to bake strips into; add `ImagePlugin` or call `strip` directly");
+        return;
+    };
     for region in Region::ALL {
-        let s = strip(settings.layers(region), settings.width, settings.height, settings.seed);
+        let s = strip(settings.layers(region), settings.width, settings.height, tile_mm, settings.seed);
         let digest = s.digest();
         let albedo = images.add(image_of(s.width, s.height, s.albedo, TextureFormat::Rgba8UnormSrgb));
         let rough = images.add(image_of(s.width, s.height, s.rough, TextureFormat::Rgba8Unorm));

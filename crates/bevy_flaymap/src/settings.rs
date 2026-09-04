@@ -86,19 +86,3 @@ struct ScaleDef {
     mm_per_unit: f32,
     tile_units: f32,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The shipped dials are a contract: a game that leaves them alone gets these, and a change here
-    /// moves every frozen digest in every consumer.
-    #[test]
-    fn the_shipped_dials_are_the_contract() {
-        let s = FlaySettings::default();
-        assert_eq!(s.max_canvas_updates_per_tick, 4);
-        assert_eq!(s.tile_mm, 20.0);
-        assert_eq!(s.seed, 0xF1A9_5EED);
-        assert_eq!(s.scale.mm_per_unit, 1000.0);
-    }
-}

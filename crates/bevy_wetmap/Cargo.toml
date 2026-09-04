@@ -1,6 +1,6 @@
 [package]
 name = "bevy_wetmap"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "CPU-authoritative texture-space blood accumulation for Bevy: paint a world-space hit into a mesh's UVs, then drip, spread, absorb and dry it on an integer tick — and hash the result."
 license = "MIT OR Apache-2.0"

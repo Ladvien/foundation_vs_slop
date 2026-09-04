@@ -90,6 +90,12 @@ pub struct WetCanvas {
     dirty_since: Option<u32>,
     /// Meshes already refused, so a UV-less mesh warns exactly once instead of once per shot.
     warned: Vec<u64>,
+    /// The fresh-colour table `shade` reads, and the bit patterns of the three inputs it is a
+    /// function of. Sixteen `spectral::srgb` calls are ~1300 transcendentals; paying them once per
+    /// tick per canvas, on a dry canvas, was the difference between "a wetmap costs nothing when
+    /// nothing is wet" being true and false.
+    film_lut: [[f32; 3]; FILM_LEVELS],
+    film_key: Option<(u32, u32, u32)>,
 }
 
 impl WetCanvas {
@@ -163,6 +169,8 @@ impl WetCanvas {
             base_rough,
             dirty_since: None,
             warned: Vec::new(),
+            film_lut: [[0.0; 3]; FILM_LEVELS],
+            film_key: None,
         }
     }
 
@@ -557,10 +565,15 @@ impl WetCanvas {
         // pointless: sixteen depth levels are indistinguishable from 255 at blood's own contrast.
         // The substrate the film lies on is this canvas's base albedo, as a grey.
         let substrate = luminance(base);
-        let fresh: [[f32; 3]; FILM_LEVELS] = core::array::from_fn(|i| {
-            let thickness_mm = s.film_depth_mm.max(0.0) * (i as f32 + 0.5) / FILM_LEVELS as f32;
-            bloodstain::spectral::srgb(&Film { thickness_mm, so2: s.so2, substrate })
-        });
+        let key = (s.film_depth_mm.to_bits(), s.so2.to_bits(), substrate.to_bits());
+        if self.film_key != Some(key) {
+            self.film_lut = core::array::from_fn(|i| {
+                let thickness_mm = s.film_depth_mm.max(0.0) * (i as f32 + 0.5) / FILM_LEVELS as f32;
+                bloodstain::spectral::srgb(&Film { thickness_mm, so2: s.so2, substrate })
+            });
+            self.film_key = Some(key);
+        }
+        let fresh = self.film_lut;
 
         // One-slot memo on `(level, age)`. A stamp lands with one age across a contiguous blob and
         // its interior is one level, so a row-major walk hits this for almost every texel. Exact,

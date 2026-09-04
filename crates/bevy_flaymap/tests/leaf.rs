@@ -144,14 +144,27 @@ fn the_dependency_list_stays_closed() {
     let manifest = std::fs::read_to_string(crate_root().join("Cargo.toml"))
         .expect("bevy_flaymap must have a Cargo.toml");
 
-    // Only the `[dependencies]` table — a dev-dependency on the full `bevy` umbrella is what lets the
-    // windowed example exist without reaching a consumer's dependency graph, and that is a different
-    // (and much less alarming) conversation.
-    let deps = manifest
-        .split("[dependencies]")
-        .nth(1)
-        .expect("bevy_flaymap must declare a [dependencies] table");
-    let deps = deps.split("\n[").next().unwrap_or(deps);
+    // Every table whose header ends in `dependencies]` and is not a dev table — so a target-gated
+    // `[target.'cfg(..)'.dependencies]` is read too. Only the plain `[dependencies]` used to be, and
+    // a real dependency behind a `cfg` would have passed this ratchet green. Dev tables are skipped
+    // on purpose: a dev-dependency on the full `bevy` umbrella is what lets the windowed example
+    // exist without reaching a consumer's dependency graph, and that is a different (and much less
+    // alarming) conversation.
+    let mut deps = String::new();
+    let mut in_table = false;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_table = trimmed.ends_with("dependencies]") && !trimmed.ends_with("dev-dependencies]");
+            continue;
+        }
+        if in_table {
+            deps.push_str(line);
+            deps.push('\n');
+        }
+    }
+    assert!(!deps.trim().is_empty(), "bevy_flaymap must declare a [dependencies] table");
+    let deps = deps.as_str();
 
     for line in deps.lines() {
         let line = line.trim();

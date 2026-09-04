@@ -149,7 +149,9 @@ pub fn appearance_with_fresh(age_ticks: u32, hz: u32, area_m2: f32, s: &BloodSet
     // Colour: two segments through three stops, the later two scaled to this film's red. The first
     // segment is fast — oxidation to methaemoglobin is most of the visible colour change and it
     // happens early (Bremmer 2012).
-    let k = if fresh[0].is_finite() && fresh[0] > 0.0 { fresh[0] / SRGB_OXY[0] } else { 1.0 };
+    // A black fresh colour scales the walk to nothing — a film with no red has no red to lose — and
+    // only a non-finite one falls back to the authored walk. `k = 1` for zero would make red *rise*.
+    let k = if fresh[0].is_finite() { (fresh[0] / SRGB_OXY[0]).max(0.0) } else { 1.0 };
     let met = vec::scale(SRGB_MET, k);
     let hemi = vec::scale(SRGB_HEMI, k);
     let stop = if t < 0.35 { vec::lerp(fresh, met, t / 0.35) } else { vec::lerp(met, hemi, (t - 0.35) / 0.65) };
@@ -267,6 +269,8 @@ mod tests {
                 appearance(age, 60, DRY_REF_AREA_M2, &s).srgb,
                 "the authored walk must be the k = 1 case exactly"
             );
+            // A black film stays black: the one fresh colour whose red cannot fall.
+            assert_eq!(appearance_with_fresh(age, 60, DRY_REF_AREA_M2, &s, [0.0; 3]).srgb, [0.0; 3]);
         }
     }
 

@@ -96,7 +96,7 @@ fn on_hit(
 
 | `bevy` | `bevy_wetmap` |
 |---|---|
-| 0.19 | 0.1 |
+| 0.19 | 0.2 |
 
 ## What it exposes
 

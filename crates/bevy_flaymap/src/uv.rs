@@ -124,23 +124,26 @@ pub(crate) fn ray_uv(mesh: &Mesh, origin: Vec3, dir: Vec3) -> Pick {
         let e2 = p2 - p0;
         let h = dir.cross(e2);
         let det = e1.dot(h);
-        if det.abs() < PARALLEL_EPSILON {
+        // Every rejection below is written as a negated acceptance, so a NaN — from a non-finite
+        // vertex — fails it rather than slipping past a `<`. A `best_t` of NaN would otherwise make
+        // every later `t >= best_t` false and hand the hit to whichever triangle came next.
+        if !(det.abs() >= PARALLEL_EPSILON) {
             return;
         }
         let inv = 1.0 / det;
         let s = origin - p0;
         let u = s.dot(h) * inv;
-        if u < 0.0 || u > 1.0 {
+        if !(0.0..=1.0).contains(&u) {
             return;
         }
         let q = s.cross(e1);
         let v = dir.dot(q) * inv;
-        if v < 0.0 || u + v > 1.0 {
+        if !(v >= 0.0 && u + v <= 1.0) {
             return;
         }
         let t = e2.dot(q) * inv;
         // Strictly forward, and strictly nearer: a tie keeps the earlier triangle.
-        if t <= PARALLEL_EPSILON || t >= best_t {
+        if !(t > PARALLEL_EPSILON && t < best_t) {
             return;
         }
         let (Some(&ta), Some(&tb), Some(&tc)) = (uv.get(a), uv.get(b), uv.get(c)) else {

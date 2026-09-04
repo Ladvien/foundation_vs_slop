@@ -1,6 +1,6 @@
 [package]
 name = "bevy_laceration"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Progressive lacerations for Bevy: a cut along a mesh surface whose gape widens on a time curve scaled by an authored skin tension, opening onto a wound bed banded by anatomical depth — deterministic, no rig required."
 license = "MIT OR Apache-2.0"
@@ -18,8 +18,10 @@ exclude = ["docs/*.gif"]
 # `bevy_pbr` is here for exactly one name — `MeshMaterial3d`, which the plugin puts on the wound-bed
 # child so `bevy_cross_section`'s baked strip material paints the bands. `bevy_log` is here because
 # every refusal in this crate is a `warn_once!` rather than a panic, which is the whole reason the
-# kernel returns `Option`. There is no `bevy_render` and no `bevy_image`: this crate builds meshes and
-# never touches a texture.
+# kernel returns `Option`. Nothing here names `bevy_render` or `bevy_image` — this crate builds meshes
+# and never touches a texture — but `bevy_pbr` implies `bevy_core_pipeline` implies `bevy_render`, and
+# implies `bevy_material` implies `bevy_image` (bevy_internal-0.19.0/Cargo.toml), so both are in every
+# consumer's graph regardless; the list is lean in what it asks for, not in what it resolves.
 bevy = { version = "0.19.0", default-features = false, features = [
     "bevy_asset", # Assets<Mesh>, Handle<T>, RenderAssetUsages
     "bevy_mesh",  # Mesh, Mesh3d, Indices, VertexAttributeValues, ATTRIBUTE_UV_1
@@ -31,7 +33,7 @@ bevy = { version = "0.19.0", default-features = false, features = [
 # `Layers`/`Region`/`Scale` appear in this crate's own signatures.
 #
 # Path *and* version, because `cargo publish` refuses a path-only dependency.
-bevy_cross_section = { version = "0.1", path = "../bevy_cross_section", default-features = false }
+bevy_cross_section = { version = "0.1.1", path = "../bevy_cross_section", default-features = false }
 # **The one frozen random source this family shares**, for `hash_f32` — the value noise that makes a
 # wound margin ragged instead of ruled. Hand-rolled and pinned upstream precisely so two machines tear
 # the same way; an RNG crate that reserved the right to change its stream could not promise that.
