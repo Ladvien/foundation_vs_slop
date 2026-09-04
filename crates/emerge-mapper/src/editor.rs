@@ -112,9 +112,6 @@ const MARKER_LIFT: f32 = 0.02;
 /// "drag a box" are the same gesture told apart by distance rather than by a second modifier.
 const CLICK_EPS: f32 = 0.2;
 
-/// Edge of a palette row's preview box, logical px.
-const THUMB_SLOT: f32 = 30.0;
-
 /// Scene triangle counts worth colouring. Not limits — this machine draws far more than either — but
 /// the points at which an author should know what they have built.
 const BUSY_SCENE: usize = 1_000_000;
@@ -722,10 +719,12 @@ fn keep_palette_selection_on_screen(
         return;
     };
     for (list, list_tf, mut scroll) in &mut lists {
+        let (at, max) = crate::chrome::scroll_bounds(list);
         if let Some(want) = crate::chrome::scroll_to_reveal(
             (row_mid, row_half),
-            (list_tf.translation.y, list.size.y * 0.5),
-            scroll.0.y,
+            (list_tf.translation.y, list.size().y * 0.5),
+            at,
+            max,
             list.inverse_scale_factor,
         ) {
             scroll.0.y = want;
@@ -1645,8 +1644,8 @@ fn rebuild_palette(
                     palette_row.with_children(|row| {
                             let mut slot = row.spawn((
                                 Node {
-                                    width: Val::Px(THUMB_SLOT),
-                                    height: Val::Px(THUMB_SLOT),
+                                    width: Val::Px(crate::chrome::THUMB_SLOT),
+                                    height: Val::Px(crate::chrome::THUMB_SLOT),
                                     margin: UiRect::right(Val::Px(crate::chrome::GAP_ROW)),
                                     flex_shrink: 0.0,
                                     ..default()
@@ -1789,8 +1788,15 @@ fn categories(project: &Project) -> Vec<(String, Vec<usize>)> {
 fn on_category_click(
     activate: On<Activate>,
     headers: Query<&CategoryHeader>,
-    mut fold: ResMut<Folded>,
+    fold: Option<ResMut<Folded>>,
 ) {
+    // **`Option`, because this is a GLOBAL observer** — it fires for any `Activate` anywhere in
+    // the application, and in Bevy 0.19 a missing resource panics at param validation rather
+    // than skipping. See [`on_cell_verb`] for the whole argument; the ratchet is
+    // `every_resource_says_what_a_door_does_to_it.rs`.
+    let Some(mut fold) = fold else {
+        return;
+    };
     let Ok(header) = headers.get(activate.entity) else {
         return;
     };
@@ -1924,9 +1930,19 @@ fn on_row_click(
 fn on_size_field_click(
     activate: On<Activate>,
     fields: Query<&SizeField>,
-    mut edit: ResMut<SizeEdit>,
-    mut state: ResMut<EditorState>,
+    edit: Option<ResMut<SizeEdit>>,
+    state: Option<ResMut<EditorState>>,
 ) {
+    // **`Option`, because this is a GLOBAL observer** — it fires for any `Activate` anywhere in
+    // the application, and in Bevy 0.19 a missing resource panics at param validation rather
+    // than skipping. See [`on_cell_verb`] for the whole argument; the ratchet is
+    // `every_resource_says_what_a_door_does_to_it.rs`.
+    let Some(mut edit) = edit else {
+        return;
+    };
+    let Some(mut state) = state else {
+        return;
+    };
     let Ok(field) = fields.get(activate.entity) else {
         return;
     };

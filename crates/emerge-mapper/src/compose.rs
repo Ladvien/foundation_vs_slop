@@ -357,10 +357,12 @@ fn keep_compose_selection_on_screen(
     for (list, list_tf, mut scroll) in &mut lists {
         // Physical in, logical out — `ComputedNode` and `UiGlobalTransform` are physical pixels,
         // `ScrollPosition` is logical.
+        let (at, max) = crate::chrome::scroll_bounds(list);
         if let Some(want) = crate::chrome::scroll_to_reveal(
             (row_mid, row_half),
-            (list_tf.translation.y, list.size.y * 0.5),
-            scroll.0.y,
+            (list_tf.translation.y, list.size().y * 0.5),
+            at,
+            max,
             list.inverse_scale_factor,
         ) {
             scroll.0.y = want;
@@ -612,11 +614,20 @@ fn walk(
     project: Res<Project>,
     keys: Res<keys::Live>,
     input: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    mut repeat: ResMut<keys::Repeat>,
 ) {
     let step = if keys::shift_held(&input) { 5 } else { 1 };
-    let by = if keys::just_pressed(&input, *keys, Action::ComposeNext) {
+    // **Held arrows repeat**, at the shared cadence every other list in the editor walks at. This
+    // read `just_pressed`, so holding `↓` stepped exactly once on the tab whose job is reading
+    // down every composition (N9). One `repeating` call per direction: each key owns its own
+    // countdown in `keys::Repeat` and has to ramp on its own hold.
+    let dt = time.delta_secs();
+    let down = keys::repeating(&input, *keys, Action::ComposeNext, &mut repeat, dt);
+    let up = keys::repeating(&input, *keys, Action::ComposePrev, &mut repeat, dt);
+    let by = if down {
         step
-    } else if keys::just_pressed(&input, *keys, Action::ComposePrev) {
+    } else if up {
         -step
     } else {
         return;
@@ -1926,8 +1937,15 @@ fn rebuild(
 fn on_comp_row_click(
     activate: On<bevy::ui_widgets::Activate>,
     rows: Query<&CompRow>,
-    mut state: ResMut<ComposeState>,
+    state: Option<ResMut<ComposeState>>,
 ) {
+    // **`Option`, because this is a GLOBAL observer** — it fires for any `Activate` anywhere in
+    // the application, and in Bevy 0.19 a missing resource panics at param validation rather
+    // than skipping. See [`on_cell_verb`] for the whole argument; the ratchet is
+    // `every_resource_says_what_a_door_does_to_it.rs`.
+    let Some(mut state) = state else {
+        return;
+    };
     let Ok(row) = rows.get(activate.entity) else {
         return;
     };
@@ -1941,8 +1959,15 @@ fn on_comp_row_click(
 fn on_member_row_click(
     activate: On<bevy::ui_widgets::Activate>,
     rows: Query<&MemberRow>,
-    mut state: ResMut<ComposeState>,
+    state: Option<ResMut<ComposeState>>,
 ) {
+    // **`Option`, because this is a GLOBAL observer** — it fires for any `Activate` anywhere in
+    // the application, and in Bevy 0.19 a missing resource panics at param validation rather
+    // than skipping. See [`on_cell_verb`] for the whole argument; the ratchet is
+    // `every_resource_says_what_a_door_does_to_it.rs`.
+    let Some(mut state) = state else {
+        return;
+    };
     let Ok(row) = rows.get(activate.entity) else {
         return;
     };

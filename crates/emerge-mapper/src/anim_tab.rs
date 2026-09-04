@@ -198,10 +198,12 @@ fn keep_rig_selection_on_screen(
     for (list, list_tf, mut scroll) in &mut lists {
         // Physical in, logical out — `ComputedNode` and `UiGlobalTransform` are physical pixels,
         // `ScrollPosition` is logical.
+        let (at, max) = crate::chrome::scroll_bounds(list);
         if let Some(want) = crate::chrome::scroll_to_reveal(
             (row_mid, row_half),
-            (list_tf.translation.y, list.size.y * 0.5),
-            scroll.0.y,
+            (list_tf.translation.y, list.size().y * 0.5),
+            at,
+            max,
             list.inverse_scale_factor,
         ) {
             scroll.0.y = want;

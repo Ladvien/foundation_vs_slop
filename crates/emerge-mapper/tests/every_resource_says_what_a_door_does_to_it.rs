@@ -155,3 +155,58 @@ fn the_door_resets_what_it_says_it_owns() {
          reader consults, so a reset it does not mention is a reset nobody can find:\n{unclassified:#?}"
     );
 }
+
+/// **A global observer takes every resource as `Option`.**
+///
+/// `reset_door_state` removes and re-inits every `Ownership::Door` resource in one exclusive
+/// system, so the panic is closed today — but the crate's own rule, stated at `tiles::on_cell_verb`,
+/// is that a **global** observer fires for any `Activate` anywhere in the application and must
+/// therefore take `Option`: in Bevy 0.19 a missing resource panics at param validation rather than
+/// skipping. Sixteen observers took bare `ResMut` on 2026-09-04 (the review's T11). This is what
+/// keeps the count at zero.
+///
+/// Source text rather than the World, because what is being pinned is a signature shape.
+#[test]
+fn every_global_observer_takes_its_resources_as_option() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut offenders = Vec::new();
+    for file in ["tiles.rs", "compose.rs", "editor.rs", "chooser.rs"] {
+        let path = dir.join(file);
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+        let lines: Vec<&str> = text.lines().collect();
+        let mut i = 0;
+        while i < lines.len() {
+            let head = lines[i].trim_start();
+            let is_observer = (head.starts_with("fn on_")
+                || head.starts_with("pub fn on_")
+                || head.starts_with("pub(crate) fn on_"))
+                && head.ends_with('(');
+            if !is_observer {
+                i += 1;
+                continue;
+            }
+            let name = head
+                .trim_start_matches("pub(crate) ")
+                .trim_start_matches("pub ")
+                .trim_start_matches("fn ")
+                .trim_end_matches('(');
+            // The signature runs to the line that opens the body.
+            let mut j = i + 1;
+            while j < lines.len() && lines[j] != ") {" {
+                let l = lines[j].trim_start();
+                if l.contains("ResMut<") && !l.contains("Option<") && !l.starts_with("//") {
+                    offenders.push(format!("{file}:{}: {name} — `{}`", j + 1, l.trim()));
+                }
+                j += 1;
+            }
+            i = j + 1;
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "global observers taking a bare `ResMut` (a global observer fires for any `Activate` in the \
+         application, and in Bevy 0.19 a missing resource panics at param validation rather than \
+         skipping — take `Option<ResMut<..>>` and return on `None`):\n  {}",
+        offenders.join("\n  ")
+    );
+}

@@ -172,6 +172,8 @@ door_state![
     crate::tiles::ScaleEdit,
     crate::tiles::StagedLift,
     crate::tiles::LibraryCursor,
+    crate::tiles::AutoScanned,
+    crate::tiles::DrawnRows,
     crate::compose::ComposeState,
     crate::compose::Budget,
     crate::compose::StagedCarousel,
@@ -339,6 +341,11 @@ pub const OWNERSHIP: &[(&str, Ownership)] = &[
     // The library row you were last on. `Door`, because a different kit's ids mean nothing here —
     // a remembered `furniture/sofa` pointing into `site` would land the cursor on nothing.
     ("emerge_mapper::tiles::LibraryCursor", Ownership::Door),
+    // What the automatic scan has done and what the list is drawn from: both keyed by mesh path
+    // or row text, and two kits sharing either would have the second one's first frame silently
+    // skipped — the `badges::ShowingFor` hazard, one panel over.
+    ("emerge_mapper::tiles::AutoScanned", Ownership::Door),
+    ("emerge_mapper::tiles::DrawnRows", Ownership::Door),
     ("emerge_mapper::compose::ComposeState", Ownership::Door),
     ("emerge_mapper::compose::Budget", Ownership::Door),
     ("emerge_mapper::compose::StagedCarousel", Ownership::Door),

@@ -199,6 +199,10 @@ pub struct ImportState {
     /// Whether the directory has been walked yet. Separate from `candidates.is_empty()`, which is
     /// also true of a directory with nothing new in it — and those two states want different words.
     pub scanned: bool,
+    /// **The last scan could not read the directory.** Distinct from `scanned` with nothing found:
+    /// the list used to assert *"every mesh under assets/ is already in the library"* about a
+    /// folder it never opened. Set with the problem line, cleared by the next scan that succeeds.
+    pub scan_failed: bool,
     /// What the last scan found. **Persistent**, and separate from [`Self::status`] on purpose: the
     /// first version had one field, so "N mesh(es) not in the library" was replaced by "layer: on
     /// support" the moment anyone did anything, and the one number that says whether you have seen
@@ -246,6 +250,11 @@ pub struct ImportState {
     /// name for a folder of things somebody excluded. Closed by default: the group exists to get
     /// these out of the way.
     pub excluded_open: bool,
+    /// **Whether the cursor is standing on the `EXCLUDED` band itself.** Its own flag for the same
+    /// reason as [`Self::excluded_open`]: a sentinel in `folded_packs` is one real pack away from a
+    /// collision. `put_cursor` is the one writer, and it clears `focused_pack` on the way in and
+    /// this on the way out, which is what keeps "one cursor" true.
+    pub excluded_focused: bool,
     /// **This tab's history**, most recent last. See [`Snapshot`].
     pub undo: Vec<Snapshot>,
     /// What has been undone here and can be put back. Cleared by any new edit on this tab.
@@ -266,6 +275,19 @@ pub struct ImportState {
 pub struct Snapshot {
     pub measured: emerge_core::library::Library,
     pub candidates: Vec<Candidate>,
+    pub cursor: CursorMark,
+}
+
+/// **Where the cursor was, by identity.** An index is what `Snapshot` restoring `candidates`
+/// makes meaningless: an accept removes an entry and every index past it names a different
+/// mesh. `labels.rs` learned this for the same data
+/// (`suggestion_keys_are_ids_and_mesh_paths_never_indices`).
+#[derive(Clone, Default, PartialEq)]
+pub struct CursorMark {
+    pub mesh: Option<String>,
+    pub library_id: Option<String>,
+    pub pack: Option<String>,
+    pub excluded: bool,
 }
 
 /// How many steps this tab remembers.
@@ -281,6 +303,12 @@ impl ImportState {
         Snapshot {
             measured: project.measured.clone(),
             candidates: self.candidates.clone(),
+            cursor: CursorMark {
+                mesh: self.candidates.get(self.selected).map(|c| c.mesh.clone()),
+                library_id: self.selected_library_id.clone(),
+                pack: self.focused_pack.clone(),
+                excluded: self.excluded_focused,
+            },
         }
     }
 
@@ -683,9 +711,19 @@ fn on_note_click(
     activate: On<Activate>,
     fields: Query<&NoteField>,
     project: Option<Res<Project>>,
-    mut edit: ResMut<NoteEdit>,
-    mut state: ResMut<ImportState>,
+    edit: Option<ResMut<NoteEdit>>,
+    state: Option<ResMut<ImportState>>,
 ) {
+    // **`Option`, because this is a GLOBAL observer** — it fires for any `Activate` anywhere in
+    // the application, and in Bevy 0.19 a missing resource panics at param validation rather
+    // than skipping. See [`on_cell_verb`] for the whole argument; the ratchet is
+    // `every_resource_says_what_a_door_does_to_it.rs`.
+    let Some(mut edit) = edit else {
+        return;
+    };
+    let Some(mut state) = state else {
+        return;
+    };
     if fields.get(activate.entity).is_err() {
         return;
     }
@@ -875,12 +913,31 @@ fn bake_width(d: &mut Descriptor, want: f32) -> Result<f32, String> {
 fn on_scale_click(
     activate: On<Activate>,
     fields: Query<&ScaleField>,
-    mut edit: ResMut<ScaleEdit>,
-    mut state: ResMut<ImportState>,
-    mut height: ResMut<HeightEdit>,
-    mut note: ResMut<NoteEdit>,
-    mut cell: ResMut<CellEdit>,
+    edit: Option<ResMut<ScaleEdit>>,
+    state: Option<ResMut<ImportState>>,
+    height: Option<ResMut<HeightEdit>>,
+    note: Option<ResMut<NoteEdit>>,
+    cell: Option<ResMut<CellEdit>>,
 ) {
+    // **`Option`, because this is a GLOBAL observer** — it fires for any `Activate` anywhere in
+    // the application, and in Bevy 0.19 a missing resource panics at param validation rather
+    // than skipping. See [`on_cell_verb`] for the whole argument; the ratchet is
+    // `every_resource_says_what_a_door_does_to_it.rs`.
+    let Some(mut edit) = edit else {
+        return;
+    };
+    let Some(mut state) = state else {
+        return;
+    };
+    let Some(mut height) = height else {
+        return;
+    };
+    let Some(mut note) = note else {
+        return;
+    };
+    let Some(mut cell) = cell else {
+        return;
+    };
     if fields.get(activate.entity).is_err() {
         return;
     }
@@ -1029,12 +1086,31 @@ pub struct MountHeightReadout;
 fn on_mount_height_click(
     activate: On<Activate>,
     fields: Query<&MountHeightField>,
-    mut edit: ResMut<HeightEdit>,
-    mut state: ResMut<ImportState>,
-    mut width: ResMut<ScaleEdit>,
-    mut note: ResMut<NoteEdit>,
-    mut cell: ResMut<CellEdit>,
+    edit: Option<ResMut<HeightEdit>>,
+    state: Option<ResMut<ImportState>>,
+    width: Option<ResMut<ScaleEdit>>,
+    note: Option<ResMut<NoteEdit>>,
+    cell: Option<ResMut<CellEdit>>,
 ) {
+    // **`Option`, because this is a GLOBAL observer** — it fires for any `Activate` anywhere in
+    // the application, and in Bevy 0.19 a missing resource panics at param validation rather
+    // than skipping. See [`on_cell_verb`] for the whole argument; the ratchet is
+    // `every_resource_says_what_a_door_does_to_it.rs`.
+    let Some(mut edit) = edit else {
+        return;
+    };
+    let Some(mut state) = state else {
+        return;
+    };
+    let Some(mut width) = width else {
+        return;
+    };
+    let Some(mut note) = note else {
+        return;
+    };
+    let Some(mut cell) = cell else {
+        return;
+    };
     if fields.get(activate.entity).is_err() {
         return;
     }
@@ -1249,7 +1325,18 @@ fn tile_history_keys(
             // The in-memory half moves only once the disk write has succeeded — a failed commit
             // must leave both halves exactly as they were.
             state.candidates = want.candidates;
-            state.selected = state.selected.min(state.candidates.len().saturating_sub(1));
+            // **Resolved by mesh path, then clamped as a fallback.** Restoring the lists and leaving
+            // the cursor where it was is the audit's M11: the verb an author trusts most reported
+            // success while pointing at the wrong piece.
+            state.selected = want
+                .cursor
+                .mesh
+                .as_deref()
+                .and_then(|m| state.candidates.iter().position(|c| c.mesh == m))
+                .unwrap_or_else(|| state.selected.min(state.candidates.len().saturating_sub(1)));
+            state.selected_library_id = want.cursor.library_id;
+            state.focused_pack = want.cursor.pack;
+            state.excluded_focused = want.cursor.excluded;
             if back {
                 state.redo.push(now);
                 state.status.note("undid the last tile edit".to_owned());
@@ -1272,8 +1359,15 @@ fn tile_history_keys(
 fn on_cell_click(
     activate: On<Activate>,
     cells: Query<(&CellButton, &CellLayer)>,
-    mut edit: ResMut<CellEdit>,
+    edit: Option<ResMut<CellEdit>>,
 ) {
+    // **`Option`, because this is a GLOBAL observer** — it fires for any `Activate` anywhere in
+    // the application, and in Bevy 0.19 a missing resource panics at param validation rather
+    // than skipping. See [`on_cell_verb`] for the whole argument; the ratchet is
+    // `every_resource_says_what_a_door_does_to_it.rs`.
+    let Some(mut edit) = edit else {
+        return;
+    };
     let Ok((b, layer)) = cells.get(activate.entity) else {
         return;
     };
@@ -1375,10 +1469,20 @@ fn cell_glyph(c: Option<&emerge_core::descriptor::SubCell>) -> &'static str {
 fn on_cell_verb(
     activate: On<Activate>,
     verbs: Query<&CellVerb>,
-    mut edit: ResMut<CellEdit>,
+    edit: Option<ResMut<CellEdit>>,
     project: Option<ResMut<Project>>,
-    mut state: ResMut<ImportState>,
+    state: Option<ResMut<ImportState>>,
 ) {
+    // **`Option`, because this is a GLOBAL observer** — it fires for any `Activate` anywhere in
+    // the application, and in Bevy 0.19 a missing resource panics at param validation rather
+    // than skipping. See [`on_cell_verb`] for the whole argument; the ratchet is
+    // `every_resource_says_what_a_door_does_to_it.rs`.
+    let Some(mut edit) = edit else {
+        return;
+    };
+    let Some(mut state) = state else {
+        return;
+    };
     let Ok(verb) = verbs.get(activate.entity) else {
         return;
     };
@@ -1558,8 +1662,15 @@ fn on_rotate_click(
     axes: Query<&RotateAxis>,
     keyboard: Res<ButtonInput<KeyCode>>,
     project: Option<ResMut<Project>>,
-    mut state: ResMut<ImportState>,
+    state: Option<ResMut<ImportState>>,
 ) {
+    // **`Option`, because this is a GLOBAL observer** — it fires for any `Activate` anywhere in
+    // the application, and in Bevy 0.19 a missing resource panics at param validation rather
+    // than skipping. See [`on_cell_verb`] for the whole argument; the ratchet is
+    // `every_resource_says_what_a_door_does_to_it.rs`.
+    let Some(mut state) = state else {
+        return;
+    };
     let Ok(axis) = axes.get(activate.entity) else {
         return;
     };
@@ -1628,14 +1739,26 @@ impl Derived {
     }
 }
 
+/// **Whether a scan is an edit the history should remember.**
+///
+/// An asked-for scan is an edit. A scan that happened because the cursor arrived somewhere is
+/// not: it filled the 64-deep stack with list-walking, so `Cmd+Z` stepped back through arrow
+/// presses instead of the author's last real edit, and `record`'s redo clear meant merely
+/// pressing ↓ threw away anything waiting to be put back.
+#[derive(Clone, Copy, PartialEq)]
+enum ScanKind {
+    Asked,
+    Automatic,
+}
+
 /// Returns the derivation for the caller to stage, or `None` when there was nothing to read.
 ///
 /// **The caller decides whether to stage it, and that is load-bearing.** `autoscan_candidate` runs
-/// this on every selection change; staging there would put the tab into `keys::Stance::Proposed`
+/// this when the cursor comes to rest; staging there would put the tab into `keys::Stance::Proposed`
 /// without anybody asking, which silently changes what `Enter` means while an author is only walking
 /// the list. The automatic scan is deliberately unobtrusive — its own note says so — and a proposal
 /// that reassigns a key is not. Only the asked-for `B` stages.
-fn scan_mesh(project: &mut Project, state: &mut ImportState) -> Option<Derived> {
+fn scan_mesh(project: &mut Project, state: &mut ImportState, kind: ScanKind) -> Option<Derived> {
     let div = match focused_div(state, project) {
         Ok(div) => div,
         Err(why) => {
@@ -1679,8 +1802,10 @@ fn scan_mesh(project: &mut Project, state: &mut ImportState) -> Option<Derived> 
         }
     };
 
-    // Taken before the write — the only moment the old value still exists.
-    let history_before = state.snapshot(&project);
+    // Taken before the write — the only moment the old value still exists — and only when this is
+    // an edit: the snapshot is a whole library plus every candidate, which is not a thing to clone
+    // per arrow press.
+    let history_before = (kind == ScanKind::Asked).then(|| state.snapshot(project));
     let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
         return None;
     };
@@ -1701,7 +1826,9 @@ fn scan_mesh(project: &mut Project, state: &mut ImportState) -> Option<Derived> 
         .unwrap_or_default();
     let id = d.id.clone();
     let said = format!("scanned {mesh}: {} of {total} cells solid", cells.len());
-    state.record(history_before);
+    if let Some(before) = history_before {
+        state.record(before);
+    }
     state.status.say(persist(project, where_to, said));
 
     Some(Derived {
@@ -1833,7 +1960,19 @@ fn accept_derived_edges(
     state.status.say(persist(&mut project, where_to, said));
 }
 
-/// **Scan a candidate the moment it is selected**, so the common case needs no keypress at all.
+/// **What the automatic scan has done, and what it saw last frame.** A door resource rather than
+/// a `Local`, because a `Local` survives a door change: two kits that share a mesh path would
+/// have the second one's first candidate silently skipped.
+#[derive(Resource, Default)]
+pub(crate) struct AutoScanned {
+    /// The mesh path last scanned automatically.
+    done: Option<String>,
+    /// The mesh path the cursor was on last frame.
+    seen: Option<String>,
+}
+
+/// **Scan a candidate once the cursor has come to rest on it**, so the common case needs no
+/// keypress at all.
 ///
 /// Watches the selection rather than hooking the two places that change it (`on_candidate_click` and
 /// `move_selection`) — one rule in one place cannot drift from itself, and a third way to select a
@@ -1860,21 +1999,27 @@ fn autoscan_candidate(
     // `labels.rs` already learned this for the same data and wrote the test down:
     // `suggestion_keys_are_ids_and_mesh_paths_never_indices`. `focus_on` keys on the path too. This
     // was the last index-keyed cursor on the tab.
-    mut last: Local<Option<String>>,
+    mut marks: ResMut<AutoScanned>,
     mut project: ResMut<Project>,
     mut state: ResMut<ImportState>,
 ) {
     if state.selected_library_id.is_some() {
         // The library list has the focus. Forget where the candidate cursor was, so returning to it
         // is a fresh selection and scans again if it still has nothing.
-        *last = None;
+        marks.done = None;
+        marks.seen = None;
         return;
     }
     let here = state.candidates.get(state.selected).map(|c| c.mesh.clone());
-    if *last == here {
+    // **One frame of stillness before a GLB is opened.** A held arrow at the 30 ms repeat floor
+    // walks dozens of rows, and a scan is a disk read plus an occupancy rasterisation; scanning
+    // the rows the author passed through is work nobody asked for and it is on the main thread.
+    let steady = marks.seen == here;
+    marks.seen.clone_from(&here);
+    if !steady || marks.done == here {
         return;
     }
-    last.clone_from(&here);
+    marks.done.clone_from(&here);
     if here.is_none() {
         return;
     }
@@ -1887,8 +2032,9 @@ fn autoscan_candidate(
         return;
     }
     // Deliberately dropped: see `scan_mesh`'s note. An automatic scan marks solids and proposes
-    // nothing, so walking the candidate list never changes what a key does.
-    let _ = scan_mesh(&mut project, &mut state);
+    // nothing, so walking the candidate list never changes what a key does — and it records no
+    // history, so `Cmd+Z` never steps back through a walk.
+    let _ = scan_mesh(&mut project, &mut state, ScanKind::Automatic);
 }
 
 /// The chip.
@@ -1901,16 +2047,26 @@ fn on_scan_mesh(
     activate: On<Activate>,
     buttons: Query<&ScanMeshButton>,
     project: Option<ResMut<Project>>,
-    mut state: ResMut<ImportState>,
-    mut derived: ResMut<DerivedEdges>,
+    state: Option<ResMut<ImportState>>,
+    derived: Option<ResMut<DerivedEdges>>,
 ) {
+    // **`Option`, because this is a GLOBAL observer** — it fires for any `Activate` anywhere in
+    // the application, and in Bevy 0.19 a missing resource panics at param validation rather
+    // than skipping. See [`on_cell_verb`] for the whole argument; the ratchet is
+    // `every_resource_says_what_a_door_does_to_it.rs`.
+    let Some(mut state) = state else {
+        return;
+    };
+    let Some(mut derived) = derived else {
+        return;
+    };
     if buttons.get(activate.entity).is_err() {
         return;
     }
     let Some(mut project) = project else { return };
     // **Only the asked-for scan stages a proposal** — see `scan_mesh`'s note on why the automatic
     // one must not.
-    if let Some(proposal) = scan_mesh(&mut project, &mut state) {
+    if let Some(proposal) = scan_mesh(&mut project, &mut state, ScanKind::Asked) {
         let count = proposal.cells.len();
         let (changed, same) = proposal.delta(
             state
@@ -2240,7 +2396,7 @@ fn lattice_keys(
     if pressed(Action::ScanMesh) {
         // **Only the asked-for scan stages a proposal** — see `scan_mesh`'s note on why the automatic
         // one must not.
-        if let Some(proposal) = scan_mesh(&mut project, &mut state) {
+        if let Some(proposal) = scan_mesh(&mut project, &mut state, ScanKind::Asked) {
             let count = proposal.cells.len();
             let (changed, same) = proposal.delta(
                 state
@@ -2442,10 +2598,20 @@ fn cell_keys(
 fn on_fill_header(
     activate: On<Activate>,
     headers: Query<&FillHeader>,
-    mut edit: ResMut<CellEdit>,
+    edit: Option<ResMut<CellEdit>>,
     project: Option<ResMut<Project>>,
-    mut state: ResMut<ImportState>,
+    state: Option<ResMut<ImportState>>,
 ) {
+    // **`Option`, because this is a GLOBAL observer** — it fires for any `Activate` anywhere in
+    // the application, and in Bevy 0.19 a missing resource panics at param validation rather
+    // than skipping. See [`on_cell_verb`] for the whole argument; the ratchet is
+    // `every_resource_says_what_a_door_does_to_it.rs`.
+    let Some(mut edit) = edit else {
+        return;
+    };
+    let Some(mut state) = state else {
+        return;
+    };
     let Ok(header) = headers.get(activate.entity) else {
         return;
     };
@@ -3238,9 +3404,10 @@ impl Axis {
     }
 }
 
-/// One candidate row, carrying its index.
+/// One candidate row, carrying its index. `pub` so `tests/headless.rs` can pin that a keystroke
+/// repaints the row rather than respawning it.
 #[derive(Component, Clone, Copy)]
-struct CandidateRow(usize);
+pub struct CandidateRow(pub usize);
 
 /// A pack heading in the candidate list. Clicking it folds the pack away.
 #[derive(Component, Clone)]
@@ -3250,9 +3417,10 @@ struct PackHeader(String);
 #[derive(Component, Clone)]
 pub struct LibraryRow(pub String);
 
-/// The node the candidate list is rebuilt into.
+/// The node the candidate list is rebuilt into. `pub` so `tests/headless.rs` can read its scroll
+/// and count its children.
 #[derive(Component)]
-struct CandidateList;
+pub struct CandidateList;
 
 /// The node the selected candidate's detail is rebuilt into.
 #[derive(Component)]
@@ -3315,6 +3483,8 @@ impl Plugin for TilesPlugin {
             .init_resource::<HeightEdit>()
             .init_resource::<StagedLift>()
             .init_resource::<LibraryCursor>()
+            .init_resource::<AutoScanned>()
+            .init_resource::<DrawnRows>()
             // **The Tiles tab's state**, registered here rather than in its own plugin because both
             // tabs are this file's, and a `Res<T>` a system takes must exist before the first frame —
             // a missing one panics rather than skipping (`CLAUDE.md`).
@@ -3377,21 +3547,34 @@ impl Plugin for TilesPlugin {
                         draw_preview_footprint.run_if(in_meshes_mode),
                         draw_subgrid.run_if(in_meshes_mode),
                     ),
-                    // Nested as a pair, because a system tuple caps out at twenty and these two are
+                    // Nested as a trio, because a system tuple caps out at twenty and these are
                     // one rule: a selection the filter has hidden must not stay selected, in either
-                    // list. Accept and Remove both act on a selection.
+                    // list, and the list follows whatever cursor survives. Accept and Remove both
+                    // act on a selection.
                     (
                         // **Not `in_meshes_mode`.** The filter field and the library list are in
                         // the panel the Meshes and Tiles tabs share, so a filter typed while Tiles is
                         // live can hide the selected row there too — and on that tab the selection is
                         // what `Enter` drops. Gated on the panel, not on one of the two tabs in it.
-                        keep_library_selection_visible.run_if(in_tiles_panel),
+                        keep_library_selection_visible
+                            .run_if(in_tiles_panel)
+                            .after(move_selection),
+                        keep_candidate_selection_visible
+                            .run_if(in_meshes_mode)
+                            .after(move_selection),
                         // The same argument, and it was missed here: gated `in_meshes_mode`, the
                         // list followed the arrows on one of the two tabs sharing it — reported
                         // from the keyboard 2026-08-14: "the view doesn't follow my selection, it
                         // moves off screen."
-                        keep_selection_on_screen.run_if(in_tiles_panel),
-                        keep_candidate_selection_visible.run_if(in_meshes_mode),
+                        //
+                        // The follower reads LAST frame's geometry on purpose (see
+                        // `keep_selection_on_screen`), so it has to run before the rebuild that
+                        // would replace it — and after both correctors, or it arms on a cursor one
+                        // of them is about to move.
+                        keep_selection_on_screen
+                            .run_if(in_tiles_panel)
+                            .after(keep_candidate_selection_visible)
+                            .after(keep_library_selection_visible),
                     ),
                     cycle_mount.in_set(crate::keys::Phase::Act),
                     suggestion_keys.in_set(crate::keys::Phase::Act),
@@ -3409,13 +3592,31 @@ impl Plugin for TilesPlugin {
                         cell_keys.in_set(crate::keys::Phase::Text),
                         crate::build::naming_keys.in_set(crate::keys::Phase::Text),
                     ),
-                    (style_tabs, paint_label_progress, apply_what_arrives),
-                    rebuild_candidates.run_if(
-                        resource_changed::<ImportState>
-                            .or_else(resource_changed::<crate::filter::Filters>)
-                            // The list has two tabs now, and `Build::browsing` is which one is
-                            // showing -- so a tab flip has to rebuild it like any other change.
-                            .or_else(resource_changed::<crate::build::Build>),
+                    (
+                        style_tabs,
+                        paint_label_progress,
+                        apply_what_arrives,
+                        hide_filter_on_the_tiles_page.run_if(in_tiles_panel),
+                    ),
+                    (
+                        rebuild_candidates
+                            .run_if(
+                                resource_changed::<ImportState>
+                                    .or_else(resource_changed::<crate::filter::Filters>)
+                                    // The list has two tabs now, and `Build::browsing` is which
+                                    // one is showing -- so a tab flip has to rebuild it like any
+                                    // other change.
+                                    .or_else(resource_changed::<crate::build::Build>)
+                                    // `thumbs::bake` writes this as each portrait lands; without
+                                    // it the `portrait` flag flips in the ink with nothing to
+                                    // notice.
+                                    .or_else(resource_exists_and_changed::<
+                                        crate::thumbs::Thumbnails,
+                                    >),
+                            )
+                            .after(keep_selection_on_screen),
+                        // A row spawned this frame is armed this frame.
+                        arm_list_rows.after(rebuild_candidates),
                     ),
                     // **Structure only.** The selection and the carets are repainted in place by
                     // `refresh_cells`; rebuilding the pane for them is the bounce.
@@ -3427,6 +3628,9 @@ impl Plugin for TilesPlugin {
                             .or_else(resource_changed::<crate::labels::LabelGeneration>)
                             .or_else(resource_exists_and_changed::<Mode>)
                             .or_else(resource_changed::<crate::build::Build>)
+                            // `build_detail` reads `Project` — the members' descriptors, the
+                            // cell size — and the pane was not rebuilt for them (T10).
+                            .or_else(resource_changed::<Project>)
                             // **The tag filter, and only the tag filter.** Not
                             // `resource_changed::<Filters>`: one resource holds all four boxes, so
                             // that condition would despawn and respawn this whole pane on every
@@ -3714,6 +3918,27 @@ fn focus_filter(
     }
     if crate::keys::just_pressed(&keyboard, *live, crate::keys::Action::FocusTagFilter) {
         filters.take_focus(crate::filter::Pane::Tags);
+    }
+}
+
+/// **The filter box stands down on the Tiles page.** It narrows `library_rows` and the candidate
+/// packs; the page draws neither, so it sat above rows it did not narrow and swallowed the
+/// keyboard when typed into (N16). `FilterBox(pane)` is the whole box, one entity, so hiding it
+/// leaves no stray label. Compares before writing: `.display =` is a layout write.
+fn hide_filter_on_the_tiles_page(
+    mode: Res<Mode>,
+    build: Res<crate::build::Build>,
+    mut boxes: Query<(&crate::filter::FilterBox, &mut Node)>,
+) {
+    let away = *mode == Mode::Tiles && build.browsing.is_some();
+    for (b, mut node) in &mut boxes {
+        if b.0 != crate::filter::Pane::Candidates {
+            continue;
+        }
+        let want = if away { Display::None } else { Display::Flex };
+        if node.display != want {
+            node.display = want;
+        }
     }
 }
 
@@ -4574,7 +4799,7 @@ mod pack_fold_tests {
     /// **An excluded pack leaves the ordinary list and joins one group at the bottom.**
     ///
     /// The partition is the whole feature, so it is asserted on the data rather than on the drawn
-    /// rows: `draw_pack` is called for the offered packs in place, and for the excluded ones only
+    /// rows: `list_ink` emits the offered packs in place, and for the excluded ones only
     /// under the `EXCLUDED` heading and only when it is open. Chosen at the keyboard, 2026-08-16 —
     /// one group at the end rather than a muted row left in place per pack.
     ///
@@ -4711,10 +4936,18 @@ pub(crate) fn scan(project: &Project, state: &mut ImportState) {
                 }
             }
             state.scanned = true;
+            state.scan_failed = false;
         }
+        // **A failed scan is a problem, not a grey line.** It used to set `scanned` and nothing
+        // else, so the list asserted *"every mesh under assets/ is already in the library"* about
+        // a directory it could not read, over candidates left from the scan before (N13).
         Err(e) => {
+            state.status.problem(e.clone());
             state.summary = e;
+            state.candidates.clear();
+            state.selected = 0;
             state.scanned = true;
+            state.scan_failed = true;
         }
     }
 }
@@ -5056,7 +5289,7 @@ pub(crate) fn apply_suggestion(
                 // **Re-derived in the frame the piece is now in.** The turn cleared the lattice, and
                 // leaving it cleared would be a silent state change a moment after the scan that
                 // filled it — the same argument that makes turning and re-measuring one action.
-                let _ = scan_mesh(project, state);
+                let _ = scan_mesh(project, state, ScanKind::Asked);
             }
             suggestions.remove(&target);
             generation.0 = generation.0.wrapping_add(1);
@@ -5241,6 +5474,14 @@ fn commit_candidate(
     // it — the arrows can stand on a heading now, and a key that did nothing there would be the
     // reason to reach for the mouse. Same rule the chooser's settings panel follows: one key, one
     // meaning, down the whole list.
+    // **The band takes the same two keys a heading does.** It was the pointer's alone — the one
+    // path back from an accidental `Shift+R` — and `on_excluded_click` is the toggle this mirrors.
+    if state.excluded_focused {
+        state.excluded_open = !state.excluded_open;
+        let said = if state.excluded_open { "opened" } else { "closed" };
+        state.status.note(format!("`EXCLUDED` {said}"));
+        return;
+    }
     if let Some(pack) = state.focused_pack.clone() {
         // **The toggle already knows the answer**, so it is not asked again: `remove` reports
         // whether it was folded, which is exactly whether this press opened it. Re-reading
@@ -5733,8 +5974,15 @@ fn on_tag_chip(
     activate: On<Activate>,
     chips: Query<&TagChip>,
     project: Option<ResMut<Project>>,
-    mut state: ResMut<ImportState>,
+    state: Option<ResMut<ImportState>>,
 ) {
+    // **`Option`, because this is a GLOBAL observer** — it fires for any `Activate` anywhere in
+    // the application, and in Bevy 0.19 a missing resource panics at param validation rather
+    // than skipping. See [`on_cell_verb`] for the whole argument; the ratchet is
+    // `every_resource_says_what_a_door_does_to_it.rs`.
+    let Some(mut state) = state else {
+        return;
+    };
     let Ok(chip) = chips.get(activate.entity) else {
         return;
     };
@@ -5747,8 +5995,15 @@ fn on_tag_chip(
 fn on_new_token_chip(
     activate: On<Activate>,
     chips: Query<&NewTokenChip>,
-    mut prompt: ResMut<crate::token_prompt::TokenPrompt>,
+    prompt: Option<ResMut<crate::token_prompt::TokenPrompt>>,
 ) {
+    // **`Option`, because this is a GLOBAL observer** — it fires for any `Activate` anywhere in
+    // the application, and in Bevy 0.19 a missing resource panics at param validation rather
+    // than skipping. See [`on_cell_verb`] for the whole argument; the ratchet is
+    // `every_resource_says_what_a_door_does_to_it.rs`.
+    let Some(mut prompt) = prompt else {
+        return;
+    };
     let Ok(chip) = chips.get(activate.entity) else {
         return;
     };
@@ -5853,9 +6108,9 @@ fn move_selection(
     // Held arrows repeat at the shared [`crate::keys::REPEAT_SECS`] cadence, like the aim keys —
     // walking a 300-candidate scan one tap at a time is not a job.
     let dt = time.delta_secs();
-    // **Which pair of arrows, chosen by tab.** One `repeating` call per direction, not two OR'd
-    // together: `Repeat` carries a single countdown, so asking it about two actions in one frame
-    // would have the second reset the first's cadence.
+    // **Which pair of arrows, chosen by tab.** One `repeating` call per direction: `keys::Repeat`
+    // is a `Vec<Countdown>` keyed by action, so the two keys are separate countdowns and each has
+    // to ramp on its own hold — a single OR'd call would leave the second key's countdown untouched.
     //
     // **And on the Tiles tab only while nothing is in hand** — which this no longer has to check.
     // `TileListPrev`/`TileListNext` declare `Stance::Idle`, so taking a piece with `Space` stops them
@@ -5877,7 +6132,14 @@ fn move_selection(
     // discriminant the detail pane reads, so this sets it and everything else follows.
     if to_candidates {
         state.selected_library_id = None;
-        state.status.note("candidates".to_owned());
+        // **The same refusal `↑`/`↓` give**, because `←` onto an empty shelf is the same question.
+        // It always said `candidates`, however empty the shelf was — the audit's M16.
+        if candidate_list_rows(&state, &filters, &project.policy).is_empty() {
+            let say = nothing_to_walk(&state, &filters);
+            state.status.note(say);
+        } else {
+            state.status.note("candidates".to_owned());
+        }
     }
     if to_library {
         let ids = library_ids(
@@ -5986,11 +6248,18 @@ fn move_selection(
             // early their meshes were scanned.
             let rows = candidate_list_rows(&state, &filters, &project.policy);
             if rows.is_empty() {
+                // **Out loud, like the library branch.** The candidate walk used to return with
+                // nothing said while its sibling said `the library is empty` twice (N19).
+                let say = nothing_to_walk(&state, &filters);
+                state.status.note(say);
                 return;
             }
             let here = rows.iter().position(|r| match r {
                 ListRow::Header(p) => state.focused_pack.as_deref() == Some(p.as_str()),
-                ListRow::Mesh(i) => state.focused_pack.is_none() && *i == state.selected,
+                ListRow::Mesh(i) => {
+                    state.focused_pack.is_none() && !state.excluded_focused && *i == state.selected
+                }
+                ListRow::Excluded => state.excluded_focused,
             });
             let at = match here {
                 Some(at) => at,
@@ -6016,6 +6285,23 @@ fn move_selection(
     }
 }
 
+/// **What to say when the candidate shelf has no rows to walk.** Reachable from a filter that
+/// matches nothing, from every pack folded, and from a scan that found nothing — and it is the
+/// answer `←` owed as much as `↑`/`↓` did (the audit's M16 and the review's N19).
+fn nothing_to_walk(state: &ImportState, filters: &crate::filter::Filters) -> String {
+    let needle = filters.text(crate::filter::Pane::Candidates);
+    if !needle.is_empty() {
+        format!("nothing matches `{needle}`")
+    } else if state.candidates.is_empty() {
+        format!("nothing to import — {} scans", keys::chord(Action::Rescan))
+    } else {
+        format!(
+            "every pack is closed — {} opens the one under the cursor",
+            keys::chord(Action::FoldPack)
+        )
+    }
+}
+
 /// Put the cursor on a row, in whichever of its two states that row calls for.
 ///
 /// One function because the two fields are one cursor: leaving `focused_pack` set while moving to a
@@ -6023,10 +6309,19 @@ fn move_selection(
 /// which it believed.
 fn put_cursor(state: &mut ImportState, row: &ListRow) {
     match row {
-        ListRow::Header(pack) => state.focused_pack = Some(pack.clone()),
+        ListRow::Header(pack) => {
+            state.excluded_focused = false;
+            state.focused_pack = Some(pack.clone());
+        }
         ListRow::Mesh(ix) => {
+            state.excluded_focused = false;
             state.focused_pack = None;
             state.selected = *ix;
+        }
+        // The band is a heading over headings: it clears the pack the way a pack clears the mesh.
+        ListRow::Excluded => {
+            state.focused_pack = None;
+            state.excluded_focused = true;
         }
     }
 }
@@ -6043,6 +6338,10 @@ pub(crate) enum ListRow {
     Header(String),
     /// A mesh under an open heading, by index into `ImportState::candidates`.
     Mesh(usize),
+    /// **The `EXCLUDED` band itself.** It was mouse-only, so the one path back from an accidental
+    /// `Shift+R` needed the pointer — the §4.2 parity rule, broken on the row whose text explains
+    /// how to restore a pack from inside the group it is hiding (the audit's M8).
+    Excluded,
 }
 
 /// **Every row on screen, in the order it is drawn** — headings and meshes together.
@@ -6066,9 +6365,12 @@ pub(crate) fn candidate_list_rows(
     for (pack, members) in &offered {
         push(pack, members, &mut out);
     }
-    if !excluded.is_empty() && state.excluded_open {
-        for (pack, members) in &excluded {
-            push(pack, members, &mut out);
+    if !excluded.is_empty() {
+        out.push(ListRow::Excluded);
+        if state.excluded_open {
+            for (pack, members) in &excluded {
+                push(pack, members, &mut out);
+            }
         }
     }
     out
@@ -6136,7 +6438,7 @@ fn visible_packs(
             continue;
         }
         // **Members are kept whole, folded or not.** The heading says how many it is hiding
-        // (`draw_pack`), so clearing them here would make every folded pack report `0 hidden`. Who
+        // (`draw_pack_band`), so clearing them here would make every folded pack report `0 hidden`. Who
         // skips them is the reader's business: the list draws the heading and stops, the walk in
         // `candidate_rows` takes no rows from it at all.
         if policy.excludes(&pack) {
@@ -6200,6 +6502,7 @@ fn keep_selection_on_screen(
     library_rows: Query<(&LibraryRow, &ComputedNode, &UiGlobalTransform)>,
     kit_rows: Query<(&KitRow, &ComputedNode, &UiGlobalTransform)>,
     headers: Query<(&PackHeader, &ComputedNode, &UiGlobalTransform)>,
+    band: Query<(&ComputedNode, &UiGlobalTransform), With<ExcludedHeader>>,
     mut lists: Query<
         (&ComputedNode, &UiGlobalTransform, &mut ScrollPosition),
         (
@@ -6211,11 +6514,13 @@ fn keep_selection_on_screen(
     >,
     mut follow: Local<crate::chrome::Follow<Selected>>,
 ) {
-    // **One frame late, on purpose.** The rows are rebuilt when the selection moves —
-    // `rebuild_candidates` watches the same change — and their `ComputedNode`/`UiGlobalTransform`
+    // **One frame late, on purpose.** A row that moves the cursor onto a heading or a new tab is
+    // rebuilt by `rebuild_candidates` on the same frame, and its `ComputedNode`/`UiGlobalTransform`
     // only describe the new list after that rebuild's commands have applied and layout has run at
     // the end of the frame. Reacting on the change frame reads the PREVIOUS frame's geometry and
-    // scrolls to where the row used to be.
+    // scrolls to where the row used to be. (A cursor move within one drawn list no longer
+    // rebuilds it — see `RowInk` — so there the geometry is current on the change frame and one
+    // frame stale is merely one frame stale.)
     //
     // **Keyed on which row is selected, not on `is_changed`.** This watched `ImportState` and
     // `Build`, and both are written most frames — a status line, a preview watchdog — so the flag
@@ -6248,16 +6553,22 @@ fn keep_selection_on_screen(
             .iter()
             .find(|(r, _, _)| r.0 == ix)
             .map(|(_, n, t)| (t.translation.y, n.size.y * 0.5)),
+        Selected::Excluded => band
+            .iter()
+            .next()
+            .map(|(n, t)| (t.translation.y, n.size.y * 0.5)),
     };
     let Some((row_mid, row_half)) = selected else {
         return;
     };
 
     for (list, list_tf, mut scroll) in &mut lists {
+        let (at, max) = crate::chrome::scroll_bounds(list);
         if let Some(want) = crate::chrome::scroll_to_reveal(
             (row_mid, row_half),
-            (list_tf.translation.y, list.size.y * 0.5),
-            scroll.0.y,
+            (list_tf.translation.y, list.size().y * 0.5),
+            at,
+            max,
             list.inverse_scale_factor,
         ) {
             scroll.0.y = want;
@@ -6275,12 +6586,38 @@ fn keep_candidate_selection_visible(
     if !filters.is_changed() && !state.is_changed() {
         return;
     }
-    let visible = candidate_rows(&state, &filters, &project.policy);
-    if visible.iter().any(|&i| i == state.selected) {
+    let rows = candidate_list_rows(&state, &filters, &project.policy);
+    // **A heading the list no longer draws cannot hold the cursor.** Leaving it set painted no
+    // highlight anywhere — `draw_ink` suppresses the mesh row while a pack is focused — and left
+    // the follower unable to find a row to scroll to (N18).
+    if let Some(pack) = state.focused_pack.clone()
+        && !rows.iter().any(|r| matches!(r, ListRow::Header(p) if *p == pack))
+    {
+        state.focused_pack = None;
+    }
+    if state.excluded_focused && !rows.contains(&ListRow::Excluded) {
+        state.excluded_focused = false;
+    }
+    if rows.iter().any(|r| matches!(r, ListRow::Mesh(i) if *i == state.selected)) {
         return;
     }
-    if let Some(&first) = visible.first() {
-        state.selected = first;
+    // **The nearest surviving row, not the top of the list.** Closing the group you are standing
+    // in is an ordinary gesture, and answering it by staging a mesh from the other end of the scan
+    // is how an author loses their place — and, before the scan learned to wait for stillness,
+    // how they paid a GLB parse for a piece they never selected (N6).
+    //
+    // Written directly rather than through `put_cursor`, on purpose: the highlight stays on the
+    // heading the author folded from, and `put_cursor(Mesh)` would clear it. Only the staged
+    // index moves.
+    let nearest = rows
+        .iter()
+        .filter_map(|r| match r {
+            ListRow::Mesh(i) => Some(*i),
+            _ => None,
+        })
+        .min_by_key(|i| i.abs_diff(state.selected));
+    if let Some(ix) = nearest {
+        state.selected = ix;
     }
 }
 
@@ -6430,8 +6767,15 @@ fn keep_library_selection_visible(
 fn on_pack_click(
     activate: On<Activate>,
     headers: Query<&PackHeader>,
-    mut state: ResMut<ImportState>,
+    state: Option<ResMut<ImportState>>,
 ) {
+    // **`Option`, because this is a GLOBAL observer** — it fires for any `Activate` anywhere in
+    // the application, and in Bevy 0.19 a missing resource panics at param validation rather
+    // than skipping. See [`on_cell_verb`] for the whole argument; the ratchet is
+    // `every_resource_says_what_a_door_does_to_it.rs`.
+    let Some(mut state) = state else {
+        return;
+    };
     let Ok(header) = headers.get(activate.entity) else {
         return;
     };
@@ -6445,8 +6789,15 @@ fn on_pack_click(
 fn on_excluded_click(
     activate: On<Activate>,
     headers: Query<&ExcludedHeader>,
-    mut state: ResMut<ImportState>,
+    state: Option<ResMut<ImportState>>,
 ) {
+    // **`Option`, because this is a GLOBAL observer** — it fires for any `Activate` anywhere in
+    // the application, and in Bevy 0.19 a missing resource panics at param validation rather
+    // than skipping. See [`on_cell_verb`] for the whole argument; the ratchet is
+    // `every_resource_says_what_a_door_does_to_it.rs`.
+    let Some(mut state) = state else {
+        return;
+    };
     if headers.get(activate.entity).is_err() {
         return;
     }
@@ -6464,8 +6815,15 @@ fn on_excluded_click(
 fn on_library_click(
     activate: On<Activate>,
     rows: Query<&LibraryRow>,
-    mut state: ResMut<ImportState>,
+    state: Option<ResMut<ImportState>>,
 ) {
+    // **`Option`, because this is a GLOBAL observer** — it fires for any `Activate` anywhere in
+    // the application, and in Bevy 0.19 a missing resource panics at param validation rather
+    // than skipping. See [`on_cell_verb`] for the whole argument; the ratchet is
+    // `every_resource_says_what_a_door_does_to_it.rs`.
+    let Some(mut state) = state else {
+        return;
+    };
     if let Ok(row) = rows.get(activate.entity) {
         state.selected_library_id = Some(row.0.clone());
         // The heading cursor is part of the same cursor; leaving it set is two highlights.
@@ -6486,8 +6844,15 @@ fn on_library_click(
 fn on_candidate_click(
     activate: On<Activate>,
     rows: Query<&CandidateRow>,
-    mut state: ResMut<ImportState>,
+    state: Option<ResMut<ImportState>>,
 ) {
+    // **`Option`, because this is a GLOBAL observer** — it fires for any `Activate` anywhere in
+    // the application, and in Bevy 0.19 a missing resource panics at param validation rather
+    // than skipping. See [`on_cell_verb`] for the whole argument; the ratchet is
+    // `every_resource_says_what_a_door_does_to_it.rs`.
+    let Some(mut state) = state else {
+        return;
+    };
     if let Ok(row) = rows.get(activate.entity) {
         state.selected = row.0;
         // One selection at a time, or `Del` would have to guess which list it meant.
@@ -7200,40 +7565,26 @@ fn on_shelf_click(
                 None => state.status.note("the library is empty".to_owned()),
             }
         }
-        // The Tiles page, exactly as `Action::PageEnter`'s `browsing` does — **including its
-        // refusal**, which this arm used to drop. The guard means `browsing` is never set on an
-        // empty kit; without it a click on `TILES (0)` walked into `compositions.get(0)`'s `None`
-        // arm, the branch whose own comment calls itself "unreachable rather than unlikely".
+        // The Tiles page, landing where the arrival seed lands (`build::landing_row`): the first
+        // real tile, or `+ New Tile` when the kit is empty. The refusal that stood here guarded a
+        // `compositions.get(0)` that row zero no longer indexes — and it kept the pointer off the
+        // one page where `+ New Tile` is the only thing to do (N5). The note stays for the empty
+        // kit, because the page itself is nearly blank there.
         Shelf::Tiles => {
+            build.browsing = Some(crate::build::landing_row(&project, &build));
             if kit_len == 0 {
-                state
-                    .status
-                    .note("no tiles in the kit yet — build one and press Cmd+S".to_owned());
-            } else {
-                build.browsing = Some(0);
+                state.status.note(format!(
+                    "no tiles in the kit yet — {} on + New Tile names one",
+                    keys::chord(Action::TileOpen)
+                ));
             }
         }
     }
 }
 
-/// **The `New Tile +` row at the top of the Tiles page** — the chooser's `+ new (N)` shape, one
-/// panel over. Clicking it opens the same naming prompt `N` opens, through the same field, so the
-/// pointer and the keyboard cannot come to disagree about what a click on this row does.
-fn new_tile_row(p: &mut ChildSpawnerCommands, here: bool) {
-    crate::chrome::quiet_row(p, here, NewTileRow)
-        .with_children(|row| {
-            row.spawn((
-                Text::new("+ New Tile"),
-                TextColor(ACCENT),
-                crate::chrome::font(crate::chrome::text::BODY),
-            ));
-        })
-        .observe(on_new_tile_click);
-}
-
-/// The clickable `New Tile +` row.
+/// The clickable `New Tile +` row. `pub` so `tests/headless.rs` can pin that an empty kit draws it.
 #[derive(Component)]
-struct NewTileRow;
+pub struct NewTileRow;
 
 /// Clicking `+ New Tile` opens the naming prompt — the exact `NamePrompt` `BuildNew` builds, so
 /// the pointer and the `N` key ask the same question. A `quiet_row` carries its own click handling
@@ -7253,92 +7604,6 @@ fn on_new_tile_click(
     build.naming = Some(crate::build::NamePrompt {
         raw: String::new(),
         then: crate::build::NameThen::Open,
-    });
-}
-
-/// The authored tiles, with the cursor and which one is open for editing.
-///
-/// Until this existed the tab could author tiles and never show them: `open_blank` was the only
-/// opener, so a tile saved wrong stayed wrong and an author had no way to spot a duplicate.
-/// **The authored tiles, one row each** — the committed kit rows followed by the named-but-unsaved
-/// draft, when one is in hand. The draft is a real row on the page the author just named it from:
-/// it gets a name the moment `N`/`+ New Tile` is answered, and `Cmd+S` is what commits it. Until
-/// then it is drawn as a row so the author can see it, walk to it, and reopen it — a tile that
-/// exists only as `build.open` is invisible, which is exactly what the old flow made.
-fn tile_rows(p: &mut ChildSpawnerCommands, project: &Project, build: &crate::build::Build, cursor: usize) {
-    let mut rows = 0usize;
-    if project.compositions.compositions.is_empty() && crate::build::draft(build, project).is_none()
-    {
-        p.spawn((
-            Text::new("nothing authored yet — build a tile and press Cmd+S"),
-            TextColor(DIM),
-            crate::chrome::font(crate::chrome::text::LABEL),
-        ));
-        return;
-    }
-    // **`+ New Tile` is row zero, and the arrows reach it.** It used to sit above the walk with no
-    // way onto it: two down-presses on a two-row page moved nothing and said nothing (the audit's
-    // L4). It is the shape the chooser's `+ new kit` / `+ new map` rows already have — the first
-    // row of the list, selectable, and `Enter` on it starts a tile.
-    new_tile_row(p, cursor == 0);
-    for (i, c) in project.compositions.compositions.iter().enumerate() {
-        rows = i + 1;
-        // **An anchored composition is listed and marked, never silently opened.** Opening one put
-        // it in `build.open`, where the size guard then killed every verb including `Cmd+S`, with
-        // no verb that closes a tile — the tab was bricked until another tile was opened (the
-        // audit's T2). The row stays because the composition is real; `build::open_saved` refuses
-        // it by name, and this is the warning that arrives before the press rather than after.
-        kit_row(p, rows, rows == cursor, &c.id, c.members.len(), crate::build::has_a_box(c));
-    }
-    if let Some(d) = crate::build::draft(build, project) {
-        let i = rows + 1;
-        kit_row(p, i, i == cursor, &d.id, d.members.len(), crate::build::has_a_box(&d));
-    }
-}
-
-/// **One row of the Tiles page, in the shape every other list in this editor uses.**
-///
-/// It was a bare `Text` — no `Node`, no `Button`, no `Hovered` — and **no observer existed for it
-/// anywhere**, so the Tiles page of the right panel could not be clicked while the Meshes page of
-/// the same panel could. That is the mouse/keyboard parity rule this file quotes at itself two
-/// thousand lines up, broken in the one list the shared builder never reached (the 2026-09-03
-/// audit's F11). `chrome::list_row` puts it on the `Activate` bus, where [`on_kit_row`] answers.
-///
-/// Marked by row index so `keep_selection_on_screen` can follow the tile walk the way it follows
-/// the library's — the same defect class, one list over.
-///
-/// **The ASCII `>` marker and the `ACCENT` ink are gone with it.** Selection is the row's fill and
-/// its accent rail now ([`crate::chrome::SELECT_RAIL_W`]), so a cursor drawn into the text as well
-/// would be one fact said twice — and amber means a live edit and nothing else.
-fn kit_row(
-    p: &mut ChildSpawnerCommands,
-    i: usize,
-    here: bool,
-    id: &str,
-    members: usize,
-    openable: bool,
-) {
-    crate::chrome::list_row(p, here, KitRow(i)).with_children(|row| {
-        row.spawn((
-            Node {
-                flex_grow: 1.0,
-                // CHROME-OK: zero, not a spacing step — see [`count_cell`].
-                min_width: Val::Px(0.0),
-                ..default()
-            },
-            Text::new(id.to_owned()),
-            // `MUTED` for a composition this page cannot open — present on purpose and deliberately
-            // not participating, which is exactly what that ink is for.
-            TextColor(if openable { TEXT } else { MUTED }),
-            crate::chrome::font(crate::chrome::text::BODY),
-        ));
-        if openable {
-            count_cell(row, format!("{members} member(s)"), LABEL);
-        } else {
-            // The reason, in the count's column, because that is where the eye already is and
-            // because a row that refuses should say so before it is pressed.
-            count_cell(row, "no tile — see COMPOSE".to_owned(), MUTED);
-        }
     });
 }
 
@@ -7473,270 +7738,6 @@ struct KitRow(usize);
 #[derive(Component)]
 struct ListHeader;
 
-/// **The un-imported shelf: what has been measured and not brought in.**
-///
-/// Lifted out of `rebuild_candidates` when it stopped being the bottom half of the library's list
-/// and became a shelf of its own — see [`shelf_strip`]. The body is unchanged; what moved is that
-/// nothing is drawn above it, so a pack no longer starts wherever the library happened to end.
-fn draw_candidates(
-    p: &mut ChildSpawnerCommands,
-    state: &ImportState,
-    filters: &crate::filter::Filters,
-    project: &Project,
-) {
-    if state.candidates.is_empty() {
-        // `Tab` is Feathers' now — `keys::Action::NextTab` was retired with it, so the old
-        // "press Tab to scan" named a key that does nothing: the dead affordance this editor keeps
-        // finding. Read from the census, so renaming the chord renames the sentence.
-        let say = if state.scanned {
-            "every mesh under assets/ is already in the library".to_owned()
-        } else {
-            format!("press {} to scan", crate::keys::chord(Action::Rescan))
-        };
-        p.spawn((
-            Text::new(say),
-            TextColor(DIM),
-            crate::chrome::font(crate::chrome::text::BODY),
-        ));
-        return;
-    }
-    // **Grouped by pack.** A flat list this long is one you scroll past; grouped by where they came
-    // from it is a dozen headings, and an author importing a kit wants that kit rather than
-    // an alphabet.
-    //
-    // The directory, not `kind` — a candidate has no `kind` yet, that being the thing import
-    // is FOR. The folder an artist put it in is the only categorisation that exists before
-    // anyone has looked at it, and it is usually the right one.
-    // **Excluded packs fall to the bottom, under one collapsed group.**
-    //
-    // They used to sit in place, each folded and muted. That is honest but it is still one
-    // row per excluded pack scattered down a list an author is scrolling to find work in —
-    // and a kit that has excluded six packs pays six rows for a fact it already knows.
-    // Chosen at the keyboard, 2026-08-16: one `EXCLUDED` group at the end.
-    //
-    // Still *listed*, never hidden: a mesh that silently disappeared looks identical to one
-    // the scan never found, and there would be no way back except editing `project.ron` by
-    // hand. The group opens, its packs open, and `Shift+R` on a mesh inside restores it —
-    // which is why the group has to reach all the way down to a row.
-    // **The same partition the arrows walk** (`visible_packs`), so the rows on screen and
-    // the rows the keyboard steps through are one list built once. They were two, and the
-    // walk stepped index order while the list drew pack order — which is why the arrows
-    // stopped dead at a collapsed group.
-    let (offered, excluded_packs) = visible_packs(&state, &filters, &project.policy);
-    for (pack, members) in &offered {
-        draw_pack(p, pack, members, &state, false, !pack_is_open(&state, &project.policy, pack));
-    }
-
-    if !excluded_packs.is_empty() {
-        let meshes: usize = excluded_packs.iter().map(|(_, m)| m.len()).sum();
-        let packs_n = excluded_packs.len();
-        p.spawn((
-            // It keeps `HEADER_BG` because it is a signpost over rows rather than one of them, and
-            // carries `RowRest` so the five states still come from `chrome::style_list_rows`.
-            // CHROME-OK: a group band, not a list row.
-            UiButton,
-            Hovered::default(),
-            ExcludedHeader,
-            // The band's rest fill, carried so `chrome::style_list_rows` can give it the same five
-            // states every row and chip has. It sensed `Hovered` and nothing repainted it — the
-            // defect the audit found on `ShelfChip`, one row type over.
-            crate::chrome::RowRest(HEADER_BG),
-            Node {
-                width: Val::Percent(100.0),
-                padding: CHIP_PAD,
-                flex_direction: FlexDirection::Row,
-                column_gap: Val::Px(crate::chrome::GAP_ROW),
-                // `GAP_GROUP`, not a bare 8: this band starts a block, and the space above it is
-                // what says so.
-                margin: UiRect::top(Val::Px(crate::chrome::GAP_GROUP)),
-                ..default()
-            },
-            BackgroundColor(HEADER_BG),
-        ))
-        .with_children(|row| {
-            row.spawn((
-                Node {
-                    width: Val::Px(crate::chrome::COL_TIGHT),
-                    flex_shrink: 0.0,
-                    ..default()
-                },
-                Text::new(if state.excluded_open { "v" } else { ">" }),
-                TextColor(MUTED),
-                crate::chrome::font(crate::chrome::text::LABEL),
-            ));
-            // **The name column wraps within itself; the tally does not.** The state and the way
-            // out of it both stay on the band (`docs/ui.md` §1.4) — what changed is that they now
-            // share the *growing* column, so the count can hold a column of its own rather than
-            // being the last words of a sentence that wraps around it (F6).
-            row.spawn((
-                Node {
-                    flex_grow: 1.0,
-                    // CHROME-OK: zero, not a spacing step — see [`count_cell`].
-                    min_width: Val::Px(0.0),
-                    ..default()
-                },
-                Text::new(format!(
-                    "EXCLUDED  -  {} restores one",
-                    keys::chord(Action::ExcludePack)
-                )),
-                TextColor(MUTED),
-                crate::chrome::font(crate::chrome::text::LABEL),
-            ));
-            count_cell(
-                row,
-                format!("{packs_n} pack(s), {meshes} mesh(es)"),
-                MUTED,
-            );
-        });
-        if state.excluded_open {
-            for (pack, members) in &excluded_packs {
-                draw_pack(p, pack, members, &state, true, !pack_is_open(&state, &project.policy, pack));
-            }
-        }
-    }
-}
-
-/// Wholesale rather than diffed: it changes on a rescan and on nothing else, and a diffing rebuild of
-/// a list this long would be more code than the thing it saves.
-fn rebuild_candidates(
-    mut commands: Commands,
-    state: Res<ImportState>,
-    project: Res<Project>,
-    filters: Res<crate::filter::Filters>,
-    build: Res<crate::build::Build>,
-    lists: Query<Entity, With<CandidateList>>,
-    headers: Query<Entity, With<ListHeader>>,
-    // The panel serves two tabs and they ask different questions of the same list.
-    mode: Res<Mode>,
-    // A proposal waiting on a human keeps its mesh out of the composing palette — see `composable`.
-    suggestions: Res<crate::labels::Suggestions>,
-) {
-    // **The counts are of what is SHOWN.** A heading reading 318 above a filtered list of four is a
-    // heading lying about the thing directly under it — and the count is the one number that says
-    // whether you have seen the end of the list, which is why it is here at all.
-    //
-    // **Counted by asking the builder that draws the rows**, since 2026-09-03. The library count
-    // used to re-filter `descriptors` by the text filter alone, while `library_rows` additionally
-    // narrows to what this kit measured (Meshes) or what is judged (Tiles) — so a brand-new kit
-    // with nothing in it read `MESHES (90)`, which is the audit's M5 and is visible in the capture
-    // of the kit-reset fix. Two predicates for one list is how a readout comes to lie; there is one
-    // now, and the count is `.len()` of it.
-    //
-    // The unfiltered pass is what lets the chip say `12 of 90`. `Filters::default()` keeps
-    // everything, so the same builder answers both questions and they cannot disagree.
-    let unfiltered = crate::filter::Filters::default();
-    let on_tiles = *mode == Mode::Tiles;
-    let pending = Some(&*suggestions);
-    let in_library = (
-        library_rows(&project, &filters, on_tiles, pending).len(),
-        library_rows(&project, &unfiltered, on_tiles, pending).len(),
-    );
-    let members_of = |f: &crate::filter::Filters| {
-        // `.0` is the offered partition; `.1` is the excluded band, which the page counts
-        // separately on its own heading.
-        visible_packs(&state, f, &project.policy)
-            .0
-            .iter()
-            .map(|(_, members)| members.len())
-            .sum::<usize>()
-    };
-    let not_imported = (members_of(&filters), members_of(&unfiltered));
-
-    // **Two tabs on the one list, not two lists.** The crate started as a section stacked above the
-    // mesh palette in the LEFT controls column, which the author called weird and was: two lists
-    // competing for one panel, and the wrong panel. One list owns one page at a time.
-    let browsing = build.browsing;
-    // The census counts, not this panel -- `census_is_the_one_counter` forbids a panel
-    // rendering `compositions.compositions.len()` itself. The TILES chip count includes the
-    // named-but-unsaved draft, because the Tiles page draws it as a row — the same
-    // `build::page_len` the page's own walk clamps to, so the strip and the list agree.
-    let tiles_n = emerge_core::census::of_catalog(&project.library, &project.compositions.compositions)
-        .compositions
-        + usize::from(crate::build::draft(&build, &project).is_some());
-    // The tile list is not text-filtered, so shown and total are the same number and the chip
-    // prints the bare count.
-    let kit = (tiles_n, tiles_n);
-
-    // **Which page the Tiles tab is showing.** `browsing` is the cursor: `Some` is the Tiles
-    // page — the authored tiles, `New Tile +` at the top — and `None` is the Meshes page, where
-    // the library and the un-imported candidates are picked from. The Tiles tab opens on the
-    // Tiles page; `right` drills into the Meshes page, `left` ascends back. The Meshes tab keeps
-    // its own shelf pair (`NOT IMPORTED` / `MESHES`), because its job is defining meshes.
-    let at = if on_tiles {
-        if browsing.is_some() {
-            Shelf::Tiles
-        } else {
-            Shelf::Library
-        }
-    } else if state.selected_library_id.is_some() {
-        // **No `Shelf::Tiles` arm here, and its absence is the fix for the audit's T3.**
-        //
-        // There was one, and it contradicted the paragraph directly above it. `enter_tab` never
-        // cleared `browsing`, and the Tiles tab *arrives* with it set — so `TILES` then `1` left
-        // the Meshes tab drawing the kit's tile rows under a strip that draws only
-        // `[Candidates, Library]`, with **neither chip active**, the arrows walking a list that was
-        // not on screen and the scroll follower chasing a third. `enter_tab` clears it now, so this
-        // arm was unreachable as well as wrong; both halves went, because leaving the arm would
-        // leave the contradiction for the next reader to re-derive.
-        Shelf::Library
-    } else {
-        Shelf::Candidates
-    };
-
-    // The strip rides the header node, not the list — frozen above the scroll. See [`ListHeader`].
-    for header in &headers {
-        commands.entity(header).despawn_related::<Children>();
-        commands.entity(header).with_children(|p| {
-            shelf_strip(p, at, on_tiles, in_library, not_imported, kit);
-        });
-    }
-    for list in &lists {
-        commands.entity(list).despawn_related::<Children>();
-        commands.entity(list).with_children(|p| {
-            // **The Tiles page: the authored tiles, `New Tile +` at the top.**
-            //
-            // `right` at idle (`PageEnter`) drills to the Meshes page — the tile under the cursor
-            // stays selected and the next `Enter` drops the picked mesh into it. `left` on the
-            // Meshes page (`PageLeave`) comes back. A tile is opened by `Enter` (`TileOpen`),
-            // which also lands on the Meshes page so the first drop follows the open.
-            if at == Shelf::Tiles {
-                // `+ New Tile` is drawn by `tile_rows` as row zero now, so the walk can reach it.
-                tile_rows(p, &project, &build, browsing.unwrap_or(crate::build::NEW_TILE_ROW));
-                return;
-            }
-            // **One shelf, because the strip above says which.** The Meshes page carries the
-            // library's rows, and the un-imported candidates below them — the chip counts what is
-            // on each, and saying it twice is what `chrome.rs` exists to stop.
-            if at == Shelf::Candidates {
-                draw_candidates(p, &state, &filters, &project);
-                return;
-            }
-            // **Through `library_rows`, which is also what the arrows walk.** This used to repeat
-            // the filter inline with a comment promising the two agreed — and they did, until the
-            // order moved: newest-first in one place and file order in the other is the keys
-            // stepping onto rows the eye cannot see, which is the exact failure that comment named.
-            // One function answers "what is on this shelf, in what order" for both.
-            for d in library_rows(&project, &filters, on_tiles, Some(&suggestions)) {
-                let selected = state.selected_library_id.as_deref() == Some(d.id.as_str());
-                // **Green when it has been judged, plain when it still owes an answer.** The one
-                // glance that says whether a mesh can build anything yet; on the Tiles tab every
-                // row is green by construction, which is the point of the split.
-                let judged = composable(d, Some(&suggestions));
-                crate::chrome::list_row(p, selected, LibraryRow(d.id.clone())).with_children(
-                    |row| {
-                        row.spawn((
-                            Text::new(d.id.clone()),
-                            TextColor(if judged { crate::chrome::LABELED } else { TEXT }),
-                            crate::chrome::font(crate::chrome::text::LABEL),
-                        ));
-                    },
-                );
-            }
-        });
-    }
-}
-
-
 /// **Which row this panel's lists have highlighted**, as one comparable value.
 ///
 /// Three lists share one scroll area — candidates, the kit's tiles, and the library — and which of
@@ -7753,6 +7754,8 @@ pub(crate) enum Selected {
     Library(String),
     /// A candidate from the scan, by index.
     Candidate(usize),
+    /// Standing on the `EXCLUDED` band, which the arrows reach since 2026-09-04 (M8).
+    Excluded,
 }
 
 impl Selected {
@@ -7762,42 +7765,441 @@ impl Selected {
             (None, Some(id), _) => Selected::Library(id.clone()),
             // A heading outranks the mesh cursor underneath it — it is what is highlighted.
             (None, None, Some(pack)) => Selected::Header(pack.clone()),
+            (None, None, None) if state.excluded_focused => Selected::Excluded,
             (None, None, None) => Selected::Candidate(state.selected),
         }
     }
 }
 
-/// **One pack heading and, unless it is folded, the meshes under it.**
+/// **One row of the shared list as INK** — exactly what a row renders, and deliberately nothing
+/// about the cursor.
 ///
-/// Extracted so the ordinary list and the collapsed `EXCLUDED` group below it draw a pack exactly
-/// the same way — two copies of this would be two ideas of what a pack row looks like, and the
-/// excluded one is the copy nobody would look at.
+/// The list was rebuilt wholesale on every write to `ImportState`, which is every keystroke: the
+/// cursor lives in that resource, so walking 318 candidates tore down and respawned ~1000
+/// entities per press. Selection is repainted in place by [`arm_list_rows`] instead, and this
+/// exists so "have the rows themselves changed" is a comparison rather than a guess. **A value a
+/// row draws and this does not carry is a row that goes stale** — add to both together.
+#[derive(Clone, PartialEq)]
+enum RowInk {
+    /// A pack heading: name, how many it holds, folded, excluded.
+    Pack {
+        name: String,
+        members: usize,
+        folded: bool,
+        excluded: bool,
+    },
+    /// The `EXCLUDED` band.
+    Band {
+        packs: usize,
+        meshes: usize,
+        open: bool,
+    },
+    /// A candidate, by index into `ImportState::candidates`.
+    Mesh {
+        ix: usize,
+        leaf: String,
+        mark: Option<Severity>,
+    },
+    /// A library entry: id, judged, and whether a portrait exists for it yet.
+    Library {
+        id: String,
+        judged: bool,
+        portrait: bool,
+    },
+    /// A Tiles-page row: page index, id, members, openable, open for editing.
+    Tile {
+        row: usize,
+        id: String,
+        members: usize,
+        openable: bool,
+        open: bool,
+    },
+    /// `+ New Tile`, page row zero.
+    NewTile,
+    /// A sentence where rows would be.
+    Say(String),
+}
+
+/// **The ink the list is currently drawn from.** A resource rather than a `Local` because a
+/// `Local` survives a door change, and two kits whose lists happen to match would leave the
+/// second one drawing the first one's rows — the `badges::ShowingFor` hazard, one panel over.
+#[derive(Resource, Default)]
+pub(crate) struct DrawnRows(Vec<RowInk>);
+
+/// **Everything the shared list is about to draw**, built once from one `visible_packs` and one
+/// `library_rows`. The five callers that each re-derived the partition are why this is one
+/// function.
 #[allow(clippy::too_many_arguments)]
-fn draw_pack(
+fn list_ink(
+    at: Shelf,
+    state: &ImportState,
+    filters: &crate::filter::Filters,
+    project: &Project,
+    build: &crate::build::Build,
+    on_tiles: bool,
+    suggestions: &crate::labels::Suggestions,
+    thumbs: Option<&crate::thumbs::Thumbnails>,
+) -> Vec<RowInk> {
+    let mut ink: Vec<RowInk> = Vec::new();
+    match at {
+        // **The Tiles page: the authored tiles, `+ New Tile` at the top.**
+        //
+        // `right` at idle (`PageEnter`) drills to the Meshes page — the tile under the cursor
+        // stays selected and the next `Enter` drops the picked mesh into it. `left` on the
+        // Meshes page (`PageLeave`) comes back. A tile is opened by `Enter` (`TileOpen`),
+        // which also lands on the Meshes page so the first drop follows the open.
+        //
+        // **`+ New Tile` is row zero, unconditionally.** It used to be skipped on an empty kit —
+        // the one kit where it is the only thing to do, where `landing_row` parks the cursor on
+        // it and the arrival note names it (N5). The committed rows follow, then the
+        // named-but-unsaved draft when one is in hand: a real row on the page the author just
+        // named it from, so a tile that exists only as `build.open` is not invisible.
+        Shelf::Tiles => {
+            ink.push(RowInk::NewTile);
+            let open_id = build.open.as_ref().map(|o| o.id.as_str());
+            let mut rows = 0usize;
+            for (i, c) in project.compositions.compositions.iter().enumerate() {
+                rows = i + 1;
+                // **An anchored composition is listed and marked, never silently opened.**
+                // `build::open_saved` refuses it by name, and the row's `openable` is the
+                // warning that arrives before the press rather than after (T2).
+                ink.push(RowInk::Tile {
+                    row: rows,
+                    id: c.id.clone(),
+                    members: c.members.len(),
+                    openable: crate::build::has_a_box(c),
+                    open: open_id == Some(c.id.as_str()),
+                });
+            }
+            if let Some(d) = crate::build::draft(build, project) {
+                ink.push(RowInk::Tile {
+                    row: rows + 1,
+                    id: d.id.clone(),
+                    members: d.members.len(),
+                    openable: crate::build::has_a_box(&d),
+                    open: true,
+                });
+            }
+            if ink.len() == 1 {
+                ink.push(RowInk::Say(
+                    "nothing authored yet — build a tile and press Cmd+S".to_owned(),
+                ));
+            }
+        }
+        // **The un-imported shelf: what has been measured and not brought in.**
+        Shelf::Candidates => {
+            if state.candidates.is_empty() {
+                // `Tab` is Feathers' now — `keys::Action::NextTab` was retired with it, so the old
+                // "press Tab to scan" named a key that does nothing: the dead affordance this
+                // editor keeps finding. Read from the census, so renaming the chord renames the
+                // sentence.
+                let say = if state.scan_failed {
+                    "the scan could not read assets/ — see the problem line".to_owned()
+                } else if state.scanned {
+                    "every mesh under assets/ is already in the library".to_owned()
+                } else {
+                    format!("press {} to scan", crate::keys::chord(Action::Rescan))
+                };
+                ink.push(RowInk::Say(say));
+                return ink;
+            }
+            // **Grouped by pack.** A flat list this long is one you scroll past; grouped by where
+            // they came from it is a dozen headings, and an author importing a kit wants that kit
+            // rather than an alphabet. The directory, not `kind` — a candidate has no `kind` yet,
+            // that being the thing import is FOR.
+            //
+            // **Excluded packs fall to the bottom, under one collapsed group.** Still *listed*,
+            // never hidden: a mesh that silently disappeared looks identical to one the scan
+            // never found. Chosen at the keyboard, 2026-08-16.
+            //
+            // **The same partition the arrows walk** (`visible_packs`), so the rows on screen and
+            // the rows the keyboard steps through are one list built once.
+            let (offered, excluded) = visible_packs(state, filters, &project.policy);
+            let push_pack = |ink: &mut Vec<RowInk>, pack: &str, members: &[usize], excluded: bool| {
+                let folded = !pack_is_open(state, &project.policy, pack);
+                ink.push(RowInk::Pack {
+                    name: pack.to_owned(),
+                    members: members.len(),
+                    folded,
+                    excluded,
+                });
+                if folded {
+                    return;
+                }
+                for &ix in members {
+                    let Some(c) = state.candidates.get(ix) else {
+                        continue;
+                    };
+                    ink.push(RowInk::Mesh {
+                        ix,
+                        leaf: leaf(&c.mesh),
+                        mark: c.worst(),
+                    });
+                }
+            };
+            for (pack, members) in &offered {
+                push_pack(&mut ink, pack, members, false);
+            }
+            if !excluded.is_empty() {
+                ink.push(RowInk::Band {
+                    packs: excluded.len(),
+                    meshes: excluded.iter().map(|(_, m)| m.len()).sum(),
+                    open: state.excluded_open,
+                });
+                if state.excluded_open {
+                    for (pack, members) in &excluded {
+                        push_pack(&mut ink, pack, members, true);
+                    }
+                }
+            }
+            // **A filter that empties the shelf says so** — the guard above asks about the scan,
+            // not about what is visible, so a non-matching needle drew zero rows and zero words
+            // (N12). One wording for the refusal and the empty list.
+            if ink.is_empty() {
+                ink.push(RowInk::Say(nothing_to_walk(state, filters)));
+            }
+        }
+        // **Through `library_rows`, which is also what the arrows walk.** One function answers
+        // "what is on this shelf, in what order" for both, so the keys cannot step onto rows the
+        // eye cannot see.
+        Shelf::Library => {
+            for d in library_rows(project, filters, on_tiles, Some(suggestions)) {
+                ink.push(RowInk::Library {
+                    id: d.id.clone(),
+                    // **Green when it has been judged, plain when it still owes an answer.** On
+                    // the Tiles tab every row is green by construction, which is the point of
+                    // the split.
+                    judged: composable(d, Some(suggestions)),
+                    portrait: thumbs.and_then(|t| t.image(&d.id)).is_some(),
+                });
+            }
+            // **Three reachable empty states, three sentences** (N11). The shelf had no empty
+            // branch at all while its sibling spawned one; the chord is read through the census,
+            // so renaming a key renames the sentence.
+            if ink.is_empty() {
+                let needle = filters.text(crate::filter::Pane::Candidates);
+                let say = if !needle.is_empty() {
+                    format!("nothing matches `{needle}`")
+                } else if on_tiles {
+                    format!(
+                        "no mesh is judged yet — label one on MESHES, {} does the batch",
+                        keys::chord(Action::SuggestAll)
+                    )
+                } else {
+                    format!(
+                        "nothing imported yet — {} adds the selected mesh",
+                        keys::chord(Action::Accept)
+                    )
+                };
+                ink.push(RowInk::Say(say));
+            }
+        }
+    }
+    ink
+}
+
+/// **Render the ink**, one arm per variant. Every row is spawned UNSELECTED: the cursor is a
+/// paint pass ([`arm_list_rows`]) on the same frame, not a value baked in here, because baking it
+/// in is what made every keystroke a respawn.
+fn draw_ink(
+    p: &mut ChildSpawnerCommands,
+    ink: &[RowInk],
+    thumbs: Option<&crate::thumbs::Thumbnails>,
+) {
+    for row in ink {
+        match row {
+            RowInk::Pack {
+                name,
+                members,
+                folded,
+                excluded,
+            } => draw_pack_band(p, name, *members, *folded, *excluded),
+            RowInk::Band {
+                packs,
+                meshes,
+                open,
+            } => draw_excluded_band(p, *packs, *meshes, *open),
+            RowInk::Mesh { ix, leaf, mark } => {
+                crate::chrome::list_row(p, false, CandidateRow(*ix)).with_children(|row| {
+                    // The severity mark first, so a list of 300 can be skimmed for the ones that
+                    // need attention rather than read. The tint comes from the one severity map,
+                    // so the mark here and the rail in the detail pane cannot disagree.
+                    row.spawn((
+                        Node {
+                            width: Val::Px(crate::chrome::COL_TIGHT),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                        Text::new(match mark {
+                            Some(Severity::Blocking) => "x",
+                            Some(Severity::Warn) => "!",
+                            _ => "",
+                        }),
+                        TextColor(match mark {
+                            Some(s) => crate::chrome::severity_style(*s).0,
+                            None => LABEL,
+                        }),
+                        crate::chrome::font(crate::chrome::text::BODY),
+                    ));
+                    row.spawn((
+                        Node {
+                            flex_grow: 1.0,
+                            // See [`count_cell`]: a long mesh name wraps inside its own column
+                            // rather than widening the row.
+                            // CHROME-OK: zero is not a spacing step.
+                            min_width: Val::Px(0.0),
+                            ..default()
+                        },
+                        // The file's own name, not the full path — the pack heading already said
+                        // where it came from, and repeating it on 145 rows is the same word 145
+                        // times.
+                        Text::new(leaf.clone()),
+                        TextColor(TEXT),
+                        crate::chrome::font(crate::chrome::text::LABEL),
+                    ));
+                });
+            }
+            RowInk::Library {
+                id,
+                judged,
+                portrait,
+            } => {
+                // **The palette's own row shape**, portrait first. The kit door bakes a thumbnail
+                // for every merged-library GLB and, until 2026-09-04, displayed none of them —
+                // the only reader was `editor::rebuild_palette`, gated to the map door (N10).
+                //
+                // `align_items` is set through `entry` rather than a second `Node`, because a
+                // bundle carrying two of the same component panics at spawn in Bevy 0.19.
+                let mut library_row = crate::chrome::list_row(p, false, LibraryRow(id.clone()));
+                library_row
+                    .entry::<Node>()
+                    .and_modify(|mut n| n.align_items = AlignItems::Center);
+                library_row.with_children(|row| {
+                    let mut slot = row.spawn((
+                        Node {
+                            width: Val::Px(crate::chrome::THUMB_SLOT),
+                            height: Val::Px(crate::chrome::THUMB_SLOT),
+                            margin: UiRect::right(Val::Px(crate::chrome::GAP_ROW)),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                        BackgroundColor(crate::chrome::SLOT_BG),
+                    ));
+                    // The ink carries only `portrait: bool` — a `Handle<Image>` in a compared
+                    // value would make the comparison about handle identity — so the handle is
+                    // looked up here, by id, never by index.
+                    if *portrait && let Some(image) = thumbs.and_then(|t| t.image(id)) {
+                        slot.insert(ImageNode::new(image));
+                    }
+                    row.spawn((
+                        Node {
+                            flex_grow: 1.0,
+                            // CHROME-OK: zero, not a spacing step — see [`count_cell`].
+                            min_width: Val::Px(0.0),
+                            ..default()
+                        },
+                        Text::new(id.clone()),
+                        TextColor(if *judged { crate::chrome::LABELED } else { TEXT }),
+                        crate::chrome::font(crate::chrome::text::LABEL),
+                    ));
+                });
+            }
+            // **One row of the Tiles page, in the shape every other list in this editor uses.**
+            //
+            // It was a bare `Text` — no `Node`, no `Button`, no `Hovered` — and no observer existed
+            // for it anywhere, so the Tiles page of the right panel could not be clicked while the
+            // Meshes page of the same panel could (the 2026-09-03 audit's F11). `chrome::list_row`
+            // puts it on the `Activate` bus, where [`on_kit_row`] answers. Marked by row index so
+            // `keep_selection_on_screen` can follow the tile walk the way it follows the library's.
+            //
+            // **Amber means a live edit and nothing else** — so the open tile's id is the one row
+            // drawn in `ACCENT` (N20). Selection is the row's fill and its accent rail, never the
+            // text.
+            RowInk::Tile {
+                row: i,
+                id,
+                members,
+                openable,
+                open,
+            } => {
+                crate::chrome::list_row(p, false, KitRow(*i)).with_children(|row| {
+                    row.spawn((
+                        Node {
+                            flex_grow: 1.0,
+                            // CHROME-OK: zero, not a spacing step — see [`count_cell`].
+                            min_width: Val::Px(0.0),
+                            ..default()
+                        },
+                        Text::new(id.clone()),
+                        // `MUTED` for a composition this page cannot open — present on purpose
+                        // and deliberately not participating, which is exactly what that ink is
+                        // for.
+                        TextColor(if *open {
+                            ACCENT
+                        } else if *openable {
+                            TEXT
+                        } else {
+                            MUTED
+                        }),
+                        crate::chrome::font(crate::chrome::text::BODY),
+                    ));
+                    if *openable {
+                        count_cell(row, format!("{members} member(s)"), LABEL);
+                    } else {
+                        // The reason, in the count's column, because that is where the eye
+                        // already is and because a row that refuses should say so before it is
+                        // pressed.
+                        count_cell(row, "no tile — see COMPOSE".to_owned(), MUTED);
+                    }
+                });
+            }
+            // **The `New Tile +` row at the top of the Tiles page** — the chooser's `+ new (N)`
+            // shape, one panel over. Clicking it opens the same naming prompt `N` opens, through
+            // the same field, so the pointer and the keyboard cannot come to disagree about what a
+            // click on this row does.
+            RowInk::NewTile => {
+                crate::chrome::quiet_row(p, false, NewTileRow)
+                    .with_children(|row| {
+                        row.spawn((
+                            Text::new("+ New Tile"),
+                            TextColor(ACCENT),
+                            crate::chrome::font(crate::chrome::text::BODY),
+                        ));
+                    })
+                    .observe(on_new_tile_click);
+            }
+            RowInk::Say(say) => {
+                p.spawn((
+                    Text::new(say.clone()),
+                    TextColor(DIM),
+                    crate::chrome::font(crate::chrome::text::BODY),
+                ));
+            }
+        }
+    }
+}
+
+/// **One pack heading.** The ordinary list and the collapsed `EXCLUDED` group below it draw a pack
+/// exactly the same way — two copies of this would be two ideas of what a pack row looks like, and
+/// the excluded one is the copy nobody would look at.
+fn draw_pack_band(
     p: &mut ChildSpawnerCommands,
     pack: &str,
-    members: &[usize],
-    state: &ImportState,
-    excluded: bool,
+    members: usize,
     folded: bool,
+    excluded: bool,
 ) {
-    let pack = pack.to_owned();
-    let members: Vec<usize> = members.to_vec();
     p.spawn((
-        // See the `EXCLUDED` header above. It carries `RowRest`, so the five states come from
+        // See the `EXCLUDED` band. It carries `RowRest`, so the five states come from
         // `chrome::style_list_rows`.
         // CHROME-OK: a group band, not a list row.
         UiButton,
         Hovered::default(),
-        PackHeader(pack.clone()),
+        PackHeader(pack.to_owned()),
         // The band's rest fill, so the shared repainter gives it hover and press. `ROW_SELECTED`
-        // is how `style_list_rows` recognises "the one being acted on", so the cursor standing on
-        // a heading is carried by the same component as the cursor standing on a row.
-        crate::chrome::RowRest(if state.focused_pack.as_deref() == Some(pack.as_str()) {
-            ROW_SELECTED
-        } else {
-            HEADER_BG
-        }),
+        // is how `style_list_rows` recognises "the one being acted on", and `arm_list_rows`
+        // writes it there when the cursor stands on this heading.
+        crate::chrome::RowRest(HEADER_BG),
         Node {
             width: Val::Percent(100.0),
             // `CHIP_PAD`, not the hand copy of its two numbers that stood here — the audit found
@@ -7808,12 +8210,7 @@ fn draw_pack(
             margin: UiRect::top(Val::Px(crate::chrome::GAP_ROW)),
             ..default()
         },
-        // **The heading shows the cursor**, because the arrows can stand on it now.
-        BackgroundColor(if state.focused_pack.as_deref() == Some(pack.as_str()) {
-            ROW_SELECTED
-        } else {
-            HEADER_BG
-        }),
+        BackgroundColor(HEADER_BG),
     ))
     .with_children(|row| {
         row.spawn((
@@ -7841,74 +8238,280 @@ fn draw_pack(
             Text::new(if excluded {
                 format!("{pack}  -  {} restores", keys::chord(Action::ExcludePack))
             } else {
-                pack.clone()
+                pack.to_owned()
             }),
             TextColor(if excluded { MUTED } else { LABEL }),
             crate::chrome::font(crate::chrome::text::LABEL),
         ));
         // **The count, and nothing else.** A folded pack used to say "{n} hidden — click to
-        // open", on the argument that a bare count reads as absence when 145 rows have just left
-        // the screen. Removed at the keyboard, 2026-08-18: that is a whole sentence on every
-        // folded row of a list an author is scrolling, and the chevron to the left of the name
-        // (`>` folded, `v` open) already carries both the state and the affordance.
+        // open"; removed at the keyboard, 2026-08-18: that is a whole sentence on every folded
+        // row of a list an author is scrolling, and the chevron to the left of the name (`>`
+        // folded, `v` open) already carries both the state and the affordance.
         count_cell(
             row,
-            format!("{}", members.len()),
+            format!("{members}"),
             if excluded { MUTED } else { LABEL },
         );
     });
-    if folded {
+}
+
+/// **The `EXCLUDED` band.** It keeps `HEADER_BG` because it is a signpost over rows rather than one
+/// of them, and carries `RowRest` so the five states still come from `chrome::style_list_rows` —
+/// and so `arm_list_rows` can put the cursor on it, now that the arrows reach it (M8).
+fn draw_excluded_band(p: &mut ChildSpawnerCommands, packs: usize, meshes: usize, open: bool) {
+    p.spawn((
+        // CHROME-OK: a group band, not a list row.
+        UiButton,
+        Hovered::default(),
+        ExcludedHeader,
+        crate::chrome::RowRest(HEADER_BG),
+        Node {
+            width: Val::Percent(100.0),
+            padding: CHIP_PAD,
+            flex_direction: FlexDirection::Row,
+            column_gap: Val::Px(crate::chrome::GAP_ROW),
+            // `GAP_GROUP`, not a bare 8: this band starts a block, and the space above it is
+            // what says so.
+            margin: UiRect::top(Val::Px(crate::chrome::GAP_GROUP)),
+            ..default()
+        },
+        BackgroundColor(HEADER_BG),
+    ))
+    .with_children(|row| {
+        row.spawn((
+            Node {
+                width: Val::Px(crate::chrome::COL_TIGHT),
+                flex_shrink: 0.0,
+                ..default()
+            },
+            Text::new(if open { "v" } else { ">" }),
+            TextColor(MUTED),
+            crate::chrome::font(crate::chrome::text::LABEL),
+        ));
+        // **The name column wraps within itself; the tally does not.** The state and the way
+        // out of it both stay on the band (`docs/ui.md` §1.4) — what changed is that they now
+        // share the *growing* column, so the count can hold a column of its own rather than
+        // being the last words of a sentence that wraps around it (F6).
+        row.spawn((
+            Node {
+                flex_grow: 1.0,
+                // CHROME-OK: zero, not a spacing step — see [`count_cell`].
+                min_width: Val::Px(0.0),
+                ..default()
+            },
+            Text::new(format!(
+                "EXCLUDED  -  {} restores one",
+                keys::chord(Action::ExcludePack)
+            )),
+            TextColor(MUTED),
+            crate::chrome::font(crate::chrome::text::LABEL),
+        ));
+        count_cell(row, format!("{packs} pack(s), {meshes} mesh(es)"), MUTED);
+    });
+}
+
+/// **The shared list, rebuilt only when its ink changes.**
+///
+/// Wholesale rather than diffed when it does: a rescan, a fold, a filter, a tab flip or a portrait
+/// landing each change what the rows *say*, and a diffing rebuild of a list this long would be
+/// more code than the thing it saves. What is NOT a rebuild is a cursor move — see [`RowInk`] —
+/// which is why this compares before it despawns.
+#[allow(clippy::too_many_arguments)]
+fn rebuild_candidates(
+    mut commands: Commands,
+    state: Res<ImportState>,
+    project: Res<Project>,
+    filters: Res<crate::filter::Filters>,
+    build: Res<crate::build::Build>,
+    lists: Query<Entity, With<CandidateList>>,
+    headers: Query<Entity, With<ListHeader>>,
+    // The panel serves two tabs and they ask different questions of the same list.
+    mode: Res<Mode>,
+    // A proposal waiting on a human keeps its mesh out of the composing palette — see `composable`.
+    suggestions: Res<crate::labels::Suggestions>,
+    // `Option`: the map door has no thumbnails and this system is not gated on the door.
+    thumbs: Option<Res<crate::thumbs::Thumbnails>>,
+    mut drawn: ResMut<DrawnRows>,
+) {
+    let on_tiles = *mode == Mode::Tiles;
+    let pending = Some(&*suggestions);
+
+    // **Two tabs on the one list, not two lists.** The crate started as a section stacked above the
+    // mesh palette in the LEFT controls column, which the author called weird and was: two lists
+    // competing for one panel, and the wrong panel. One list owns one page at a time.
+    //
+    // **Which page the Tiles tab is showing.** `browsing` is the cursor: `Some` is the Tiles
+    // page — the authored tiles, `New Tile +` at the top — and `None` is the Meshes page, where
+    // the library and the un-imported candidates are picked from. The Tiles tab opens on the
+    // Tiles page; `right` drills into the Meshes page, `left` ascends back. The Meshes tab keeps
+    // its own shelf pair (`NOT IMPORTED` / `MESHES`), because its job is defining meshes.
+    let at = if on_tiles {
+        if build.browsing.is_some() {
+            Shelf::Tiles
+        } else {
+            Shelf::Library
+        }
+    } else if state.selected_library_id.is_some() {
+        // **No `Shelf::Tiles` arm here, and its absence is the fix for the audit's T3.**
+        //
+        // There was one, and it contradicted the paragraph directly above it. `enter_tab` never
+        // cleared `browsing`, and the Tiles tab *arrives* with it set — so `TILES` then `1` left
+        // the Meshes tab drawing the kit's tile rows under a strip that draws only
+        // `[Candidates, Library]`, with **neither chip active**. `enter_tab` clears it now, so this
+        // arm was unreachable as well as wrong.
+        Shelf::Library
+    } else {
+        Shelf::Candidates
+    };
+
+    let ink = list_ink(
+        at,
+        &state,
+        &filters,
+        &project,
+        &build,
+        on_tiles,
+        &suggestions,
+        thumbs.as_deref(),
+    );
+    // **The strip is rebuilt with the rows, and only with them.** Its counts come out of the same
+    // two builders the ink does, so a strip that says `12 of 90` cannot disagree with the rows
+    // under it — and a keystroke that changes nothing the rows say changes nothing on screen.
+    if drawn.0 == ink {
         return;
     }
-    for ix in members {
-        let Some(c) = state.candidates.get(ix) else {
-            continue;
-        };
-        // **`focused_pack.is_none()` is the whole fix for the audit's M4**, and it belongs here
-        // rather than in the cursor. `put_cursor` is careful to write both fields as one cursor and
-        // says why — *"leaving `focused_pack` set while moving to a mesh would highlight a heading
-        // and a row at once, and every reader would then have to decide which it believed"* — but
-        // this row never asked the second field, so crossing onto a heading left the mesh you came
-        // from wearing the fill *and* the accent rail. Two selection rails on screen, on the tab's
-        // most-used gesture. The test that claimed to hold this line only checked the field.
-        let is_here = ix == state.selected && state.focused_pack.is_none();
-        crate::chrome::list_row(p, is_here, CandidateRow(ix)).with_children(|row| {
-            // The severity mark first, so a list of 300 can be skimmed for the ones that need
-            // attention rather than read. The tint comes from the one severity map, so the mark
-            // here and the rail in the detail pane cannot disagree.
-            row.spawn((
-                Node {
-                    width: Val::Px(crate::chrome::COL_TIGHT),
-                    flex_shrink: 0.0,
-                    ..default()
-                },
-                Text::new(match c.worst() {
-                    Some(Severity::Blocking) => "x",
-                    Some(Severity::Warn) => "!",
-                    _ => "",
-                }),
-                TextColor(match c.worst() {
-                    Some(s) => crate::chrome::severity_style(s).0,
-                    None => LABEL,
-                }),
-                crate::chrome::font(crate::chrome::text::BODY),
-            ));
-            row.spawn((
-                Node {
-                    flex_grow: 1.0,
-                    // See [`count_cell`]: a long mesh name wraps inside its own column rather
-                    // than widening the row.
-                    // CHROME-OK: zero is not a spacing step.
-                    min_width: Val::Px(0.0),
-                    ..default()
-                },
-                // The file's own name, not the full path — the pack heading already said where it
-                // came from, and repeating it on 145 rows is the same word 145 times.
-                Text::new(leaf(&c.mesh)),
-                TextColor(TEXT),
-                crate::chrome::font(crate::chrome::text::LABEL),
-            ));
+
+    // **The counts are of what is SHOWN.** A heading reading 318 above a filtered list of four is a
+    // heading lying about the thing directly under it — and the count is the one number that says
+    // whether you have seen the end of the list, which is why it is here at all.
+    //
+    // The shown half is counted off the ink; the unfiltered pass is what lets the chip say
+    // `12 of 90`. `Filters::default()` keeps everything, so the same builder answers both questions
+    // and they cannot disagree (the audit's M5).
+    let unfiltered = crate::filter::Filters::default();
+    let in_library = (
+        if at == Shelf::Library {
+            ink.iter()
+                .filter(|r| matches!(r, RowInk::Library { .. }))
+                .count()
+        } else {
+            library_rows(&project, &filters, on_tiles, pending).len()
+        },
+        library_rows(&project, &unfiltered, on_tiles, pending).len(),
+    );
+    let members_of = |f: &crate::filter::Filters| {
+        // `.0` is the offered partition; `.1` is the excluded band, which the page counts
+        // separately on its own heading.
+        visible_packs(&state, f, &project.policy)
+            .0
+            .iter()
+            .map(|(_, members)| members.len())
+            .sum::<usize>()
+    };
+    let not_imported = (members_of(&filters), members_of(&unfiltered));
+    // The census counts, not this panel -- `census_is_the_one_counter` forbids a panel
+    // rendering `compositions.compositions.len()` itself. The TILES chip count includes the
+    // named-but-unsaved draft, because the Tiles page draws it as a row — the same
+    // `build::page_len` the page's own walk clamps to, so the strip and the list agree.
+    let tiles_n = emerge_core::census::of_catalog(&project.library, &project.compositions.compositions)
+        .compositions
+        + usize::from(crate::build::draft(&build, &project).is_some());
+    // The tile list is not text-filtered, so shown and total are the same number and the chip
+    // prints the bare count.
+    let kit = (tiles_n, tiles_n);
+
+    // The strip rides the header node, not the list — frozen above the scroll. See [`ListHeader`].
+    for header in &headers {
+        commands.entity(header).despawn_related::<Children>();
+        commands.entity(header).with_children(|p| {
+            shelf_strip(p, at, on_tiles, in_library, not_imported, kit);
         });
+    }
+    for list in &lists {
+        commands.entity(list).despawn_related::<Children>();
+        commands.entity(list).with_children(|p| {
+            draw_ink(p, &ink, thumbs.as_deref());
+        });
+    }
+    drawn.0 = ink;
+}
+
+/// **Which row is highlighted, repainted in place.**
+///
+/// `rebuild_candidates` no longer runs on a cursor move (see [`RowInk`]), so the selection is a
+/// paint pass rather than a respawn — the same split `editor::arm_palette_rows` makes for the
+/// map palette, and for the same measured reason.
+///
+/// **Exactly one row is ever highlighted**, which is the audit's M4 held at the layer that
+/// draws: `Selected::now` ranks the headings above the mesh cursor, so crossing onto a heading
+/// cannot leave the row you came from wearing a rail. Compares before writing: all three carriers
+/// are change-detected and this runs every frame over every row in the list.
+#[allow(clippy::type_complexity)]
+fn arm_list_rows(
+    state: Res<ImportState>,
+    build: Res<crate::build::Build>,
+    // **This panel's rows only.** `RowRest` + `RowSelected` is every list row in the editor; a
+    // query without the marker filter would un-arm the map palette and the chooser every frame.
+    mut rows: Query<
+        (
+            &mut crate::chrome::RowRest,
+            &mut crate::chrome::RowSelected,
+            &mut BorderColor,
+            Option<&CandidateRow>,
+            Option<&LibraryRow>,
+            Option<&KitRow>,
+            Has<NewTileRow>,
+        ),
+        Or<(
+            With<CandidateRow>,
+            With<LibraryRow>,
+            With<KitRow>,
+            With<NewTileRow>,
+        )>,
+    >,
+    mut bands: Query<
+        (&mut crate::chrome::RowRest, Option<&PackHeader>, Has<ExcludedHeader>),
+        (
+            Without<crate::chrome::RowSelected>,
+            Or<(With<PackHeader>, With<ExcludedHeader>)>,
+        ),
+    >,
+) {
+    let now = Selected::now(&state, &build);
+    for (mut rest, mut selected, mut border, candidate, library, kit, new_tile) in &mut rows {
+        let armed = match &now {
+            Selected::Candidate(ix) => candidate.is_some_and(|r| r.0 == *ix),
+            Selected::Library(id) => library.is_some_and(|r| r.0 == *id),
+            Selected::Kit(row) => {
+                kit.is_some_and(|r| r.0 == *row)
+                    || (new_tile && *row == crate::build::NEW_TILE_ROW)
+            }
+            Selected::Header(_) | Selected::Excluded => false,
+        };
+        if selected.0 != armed {
+            selected.0 = armed;
+        }
+        let fill = if armed { ROW_SELECTED } else { ROW_BG };
+        if rest.0 != fill {
+            rest.0 = fill;
+        }
+        let edge = if armed { ACCENT } else { Color::NONE };
+        if border.left != edge {
+            *border = BorderColor::all(edge);
+        }
+    }
+    // Bands carry `RowRest` only: `chrome::style_list_rows` writes their `BackgroundColor` from it
+    // each frame, compared.
+    for (mut rest, pack, excluded) in &mut bands {
+        let armed = match &now {
+            Selected::Header(p) => pack.is_some_and(|h| h.0 == *p),
+            Selected::Excluded => excluded,
+            _ => false,
+        };
+        let fill = if armed { ROW_SELECTED } else { HEADER_BG };
+        if rest.0 != fill {
+            rest.0 = fill;
+        }
     }
 }
 
@@ -8058,7 +8661,7 @@ fn build_detail(p: &mut ChildSpawnerCommands, build: &crate::build::Build, proje
         // not. It was a bare `Text` with `>` written into the string and `ACCENT` for the focused
         // row: no `Node`, no `Button`, no `Hovered`, no observer, so the one list `Del`, `R` and
         // `,`/`.` all act on was the one list the pointer could not touch (the 2026-09-03 review's
-        // T6). `kit_row` had exactly this defect fixed seven hundred lines up, and said so.
+        // T6). The Tiles-page row had exactly this defect fixed seven hundred lines up, and said so.
         //
         // Selection is the row's fill and its accent rail now, so the ASCII marker goes with the
         // amber — a cursor drawn into the text as well would be one fact said twice.
@@ -8164,9 +8767,19 @@ fn rebuild_detail(
             // One guard for the pair. They are `Some` together or `None` together — the layered
             // library is derived from the measurements and `Policy::apply` patches entries without
             // renaming them — so a second `else` arm here would be a branch nothing can reach.
+            //
+            // **The empty case reads.** The pane used to bail to nothing on a new kit, where its
+            // Tiles sibling keeps its heading and says what would fill it (N14). The populated pane
+            // is headed by the id itself, so the section heading is the empty arm's alone.
             let (Some(d), Some(placed)) =
                 (state.editing(&project.measured), state.placed(&project))
             else {
+                crate::chrome::section(p, "MESH");
+                p.spawn((
+                    Text::new("no mesh selected — walk NOT IMPORTED and press Enter to bring one in"),
+                    TextColor(DIM),
+                    crate::chrome::font(crate::chrome::text::BODY),
+                ));
                 return;
             };
             // The candidate behind the focus, when the focus IS a candidate. The findings and the

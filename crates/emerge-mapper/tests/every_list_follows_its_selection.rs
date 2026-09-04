@@ -211,6 +211,37 @@ fn no_follower_arms_itself_on_a_resource_change() {
     }
 }
 
+/// **Every follower measures the scroll off the node, not off the component.**
+///
+/// `ScrollPosition` is what a follower writes; `ComputedNode::scroll_position` is where the list
+/// actually is. Bevy clamps the second and leaves the first alone, so at the end of a list the
+/// component holds `max + margin` while the rows are drawn at `max` — and every reveal computed
+/// from the component lands over max too, so nothing moves while the highlight walks off the
+/// list. That is the 2026-09-03 seed, reintroduced by its own fix, and `chrome::scroll_bounds` is
+/// the one reader that answers with the effective position and the ceiling together.
+#[test]
+fn every_follower_reads_the_scroll_it_is_actually_at() {
+    for (file, text) in sources() {
+        let lines: Vec<&str> = text.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if !line.contains("crate::chrome::scroll_to_reveal(") {
+                continue;
+            }
+            let start = i.saturating_sub(12);
+            let above = lines[start..i].join("\n");
+            assert!(
+                above.contains("scroll_bounds"),
+                "the follower in {file}:{} feeds `scroll_to_reveal` without `chrome::scroll_bounds`. \
+                 A follower that feeds back the raw `ScrollPosition` component re-creates the frozen \
+                 list: Bevy clamps only `ComputedNode::scroll_position`, so the component keeps a \
+                 surplus past the end and every later reveal is computed from a place the list never \
+                 went.",
+                i + 1
+            );
+        }
+    }
+}
+
 /// **Folding is decided once, by `pack_is_open`.**
 ///
 /// It was decided twice — inline where the rows are drawn, and not at all where the arrows walk them

@@ -5521,10 +5521,12 @@ fn keep_the_chooser_selection_on_screen(
         return;
     };
     let reveal = |list: &ComputedNode, tf: &UiGlobalTransform, scroll: &mut ScrollPosition| {
+        let (at, max) = crate::chrome::scroll_bounds(list);
         if let Some(y) = crate::chrome::scroll_to_reveal(
             (row_mid, row_half),
             (tf.translation.y, list.size().y * 0.5),
-            scroll.0.y,
+            at,
+            max,
             list.inverse_scale_factor,
         ) {
             scroll.0.y = y;
@@ -5557,8 +5559,15 @@ fn on_row_click(
     mut chooser: Option<ResMut<Chooser>>,
     // For the double-click, which runs the same `open_the_selection` `Enter` does.
     mut commands: Commands,
-    mut next: ResMut<NextState<crate::screen::Screen>>,
+    next: Option<ResMut<NextState<crate::screen::Screen>>>,
 ) {
+    // **`Option`, because this is a GLOBAL observer** — it fires for any `Activate` anywhere in
+    // the application, and in Bevy 0.19 a missing resource panics at param validation rather
+    // than skipping. See [`on_cell_verb`] for the whole argument; the ratchet is
+    // `every_resource_says_what_a_door_does_to_it.rs`.
+    let Some(mut next) = next else {
+        return;
+    };
     let (Ok(row), Some(chooser)) = (rows.get(click.entity), chooser.as_mut()) else {
         return;
     };
