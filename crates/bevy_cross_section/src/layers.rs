@@ -117,7 +117,19 @@ pub struct Layers {
     /// this table cannot name, so a boneless row draws the muscle to the deepest point and never a
     /// cortex or a marrow. A skull is a shell with everything inside it: bone without end keeps the
     /// depth-only model, so the cortex begins at its measured depth and the interior follows.
+    ///
+    /// **Absent from an authored table, it reads as `∞`** — the depth-only model every table written
+    /// before this field existed was written against — so a 0.1.1 RON file deserialises in 0.1.2 and
+    /// bands exactly as it did. `0` would have been the wrong default: it is a statement about the
+    /// trunk, not a fallback.
+    #[cfg_attr(feature = "serde", serde(default = "unbounded"))]
     pub bone_mm: f32,
+}
+
+/// The pre-`bone_mm` behaviour, for a table authored before the field existed.
+#[cfg(feature = "serde")]
+fn unbounded() -> f32 {
+    f32::INFINITY
 }
 
 impl Layers {
