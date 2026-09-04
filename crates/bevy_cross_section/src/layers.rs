@@ -38,6 +38,14 @@
 //! (`doi:10.1073/pnas.1321605111`, `doi:10.1002/ar.20778`, `doi:10.1016/j.jchb.2009.07.001`,
 //! `doi:10.1016/j.media.2010.01.003`) had no open-access copy. The `cortex_mm` values are stated
 //! plainly as this crate's own and are a caller's to override.
+//!
+//! **Nor is the bone's outer diameter.** `bone_mm` is the same kind of number as `cortex_mm` and is
+//! flagged the same way: **this crate's own**, 27 mm on a limb and 0 on the torso and the head.
+//! Nothing in the corpus this crate was written from tabulates long-bone outer diameter, and the
+//! value is a caller's to override. It is not a thickness — it does not enter `starts_mm`,
+//! `span_mm`, `thickness_mm` or `at`, so no strip and no band moves because of it. It is read in
+//! exactly one place, [`crate::uv1_at_core`], where it makes a limb's bone a **core at the deepest
+//! point of a cut face** rather than everything past the cortex start.
 
 /// Where on the body a cut is, which decides which thickness row applies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -94,15 +102,52 @@ pub struct Layers {
     pub cortex_mm: f32,
     /// The marrow band a strip draws. Marrow itself is unbounded.
     pub marrow_mm: f32,
+    /// **Outer diameter of the long bone in this region, millimetres — `0` where the region has no
+    /// core.** *This crate's own number*, like [`cortex_mm`](Self::cortex_mm), and for the same
+    /// reason: no paper tabulating long-bone outer diameter was in the corpus this crate was written
+    /// from.
+    ///
+    /// It is what turns the depth table from a stack of slabs into a body: a limb's bone is a **core
+    /// at the deepest point of a cut**, not everything past 27.8 mm, so a cut through a thigh should
+    /// show muscle right up to the bone and then bone at the middle. `annotate_cap` uses it exactly
+    /// that way — see [`crate::uv1_at_core`].
+    ///
+    /// **`0` on the torso and `∞` on the head**, and both are statements rather than gaps. The
+    /// trunk's contents are not a cylinder of cortical bone: past the muscle wall there is a cavity
+    /// this table cannot name, so a boneless row draws the muscle to the deepest point and never a
+    /// cortex or a marrow. A skull is a shell with everything inside it: bone without end keeps the
+    /// depth-only model, so the cortex begins at its measured depth and the interior follows.
+    pub bone_mm: f32,
 }
 
 impl Layers {
     /// The measured row for a region. See the module docs for every number's source.
     pub const fn for_region(region: Region) -> Self {
         match region {
-            Region::Limb => Self { skin_mm: 1.9, fat_mm: 7.2, muscle_mm: 18.7, cortex_mm: 5.0, marrow_mm: 8.0 },
-            Region::Torso => Self { skin_mm: 2.2, fat_mm: 16.0, muscle_mm: 7.3, cortex_mm: 2.0, marrow_mm: 4.0 },
-            Region::Head => Self { skin_mm: 2.0, fat_mm: 2.6, muscle_mm: 2.2, cortex_mm: 6.0, marrow_mm: 4.0 },
+            Region::Limb => Self {
+                skin_mm: 1.9,
+                fat_mm: 7.2,
+                muscle_mm: 18.7,
+                cortex_mm: 5.0,
+                marrow_mm: 8.0,
+                bone_mm: 27.0,
+            },
+            Region::Torso => Self {
+                skin_mm: 2.2,
+                fat_mm: 16.0,
+                muscle_mm: 7.3,
+                cortex_mm: 2.0,
+                marrow_mm: 4.0,
+                bone_mm: 0.0,
+            },
+            Region::Head => Self {
+                skin_mm: 2.0,
+                fat_mm: 2.6,
+                muscle_mm: 2.2,
+                cortex_mm: 6.0,
+                marrow_mm: 4.0,
+                bone_mm: f32::INFINITY,
+            },
         }
     }
 
@@ -195,5 +240,22 @@ mod tests {
         assert_eq!(seen, 4, "four boundaries, five layers");
         assert_eq!(l.at(-3.0).0, Layer::Skin);
         assert_eq!(l.at(f32::NAN).0, Layer::Skin);
+    }
+
+    /// **The bone diameter is this crate's own, and it is not a thickness.** It must not enter the
+    /// depth stack: a strip, a band and every digest over one are functions of `starts_mm` and
+    /// `span_mm`, so a number that leaked into either would move goldens in three crates.
+    #[test]
+    fn the_bone_diameter_is_authored_and_outside_the_depth_stack() {
+        assert_eq!(Layers::for_region(Region::Limb).bone_mm, 27.0);
+        assert_eq!(Layers::for_region(Region::Torso).bone_mm, 0.0, "the trunk has no long bone");
+        assert!(Layers::for_region(Region::Head).bone_mm.is_infinite(), "a skull is a shell, not a core");
+        for region in Region::ALL {
+            let table = Layers::for_region(region);
+            let widened = Layers { bone_mm: table.bone_mm + 40.0, ..table };
+            assert_eq!(widened.starts_mm(), table.starts_mm(), "{region:?}: bone_mm moved a band");
+            assert_eq!(widened.span_mm(), table.span_mm(), "{region:?}: bone_mm moved the span");
+            assert_eq!(widened.at(12.0), table.at(12.0), "{region:?}: bone_mm moved a lookup");
+        }
     }
 }

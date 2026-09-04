@@ -193,8 +193,11 @@ impl FlayCanvas {
         };
         let base_rgba = [enc(base_srgb[0]), enc(base_srgb[1]), enc(base_srgb[2]), 255];
         let base_rough = enc(base_roughness);
-        // G carries roughness, B carries metallic, and tissue is a dielectric so B stays 0.
-        let base_rough_rgba = [0, base_rough, 0, 255];
+        // **The four channels of the metallic-roughness image, and only two of them are Bevy's.**
+        // G carries roughness and B carries metallic — tissue is a dielectric, so B stays 0 — and R
+        // and A are free for the depth buffer's own two numbers: R is how deep this texel is peeled
+        // as a fraction of the layer table's span, A marks a peeled texel. Intact skin is 0 in both.
+        let base_rough_rgba = [0, base_rough, 0, 0];
 
         let extent = Extent3d { width: size, height: size, depth_or_array_layers: 1 };
         // `MAIN_WORLD | RENDER_WORLD` because `flush` rewrites the pixels every time they change: with
@@ -253,7 +256,22 @@ impl FlayCanvas {
     ///
     /// **Roughness is the green channel and metallic is the blue one** — stated in that file at
     /// `:153-154`: *"The blue channel contains metallic values, and the green channel contains the
-    /// roughness values."* This crate writes G and leaves B at 0, so tissue stays a dielectric.
+    /// roughness values."* B stays 0, so tissue stays a dielectric.
+    ///
+    /// **R and A are the flaymap's own data channels**, because Bevy reads only G and B from this
+    /// image and a second texture per actor would be a second upload. Per texel:
+    ///
+    /// | channel | what | range |
+    /// |---|---|---|
+    /// | R | `round(255 · min(depth_mm / Layers::span_mm(), 1))` — how deep the wound is here | `0..=255` |
+    /// | G | perceptual roughness of the exposed tissue, from `bevy_cross_section::texel_at` | `0..=255` |
+    /// | B | metallic — always `0` | `0` |
+    /// | A | `255` where anything has been removed, `0` on intact surface | `0` or `255` |
+    ///
+    /// So `R · span_mm / 255` is the millimetres of tissue gone and `A` is the wound's own mask — the
+    /// two things a caller's shader would otherwise have to infer from the colour, which cannot be
+    /// done because muscle and a red shirt are the same red. They are still *output*: nothing in this
+    /// crate reads a pixel back.
     ///
     /// **The material must set `perceptual_roughness: 1.0`**, because Bevy *multiplies* the scalar by
     /// the texture (`:157-163`) and the shipped scalar would scale the map away. That channel is
@@ -518,6 +536,9 @@ impl FlayCanvas {
         let per_texel = UV_SPAN_M * s.scale.mm_per_unit / self.size as f32;
         let mm = if per_texel.is_finite() { per_texel } else { 0.0 };
         let size = self.size as usize;
+        // The depth fraction's denominator: the whole span the layer table describes, which is also
+        // what the buffer saturates at. `max` so a degenerate table cannot divide by zero.
+        let span = self.layers.span_mm().max(1.0e-3);
         // Field-level borrows: the two pixel buffers are written while the depth buffer and the layer
         // table are read, and they are disjoint fields of `self`.
         let (layers, depth) = (&self.layers, &self.depth);
@@ -533,11 +554,16 @@ impl FlayCanvas {
                 continue;
             };
             let (want_a, want_r) = if d == 0 {
-                (base_rgba, [0, base_rough, 0, 255])
+                (base_rgba, [0, base_rough, 0, 0])
             } else {
                 let (u, v) = ((i % size) as f32 * mm, (i / size) as f32 * mm);
-                let (c, rough) = texel_at(layers, d as f32 / HMM_PER_MM, u, v, s.tile_mm, s.seed);
-                ([enc(c[0]), enc(c[1]), enc(c[2]), 255], [0, enc(rough), 0, 255])
+                let depth_mm = d as f32 / HMM_PER_MM;
+                let (c, rough) = texel_at(layers, depth_mm, u, v, s.tile_mm, s.seed);
+                // R and A are the depth buffer written where a shader can read it, per
+                // [`roughness`](Self::roughness): the depth as a fraction of the table's whole span,
+                // and the wound's own mask. `span` is the same `Layers::span_mm()` the buffer
+                // saturates at, so R = 255 is exactly a texel dug as deep as this crate models.
+                ([enc(c[0]), enc(c[1]), enc(c[2]), 255], [enc(depth_mm / span), enc(rough), 0, 255])
             };
             // Compare before writing: a canvas whose depths did not move must not ask for an upload,
             // because a still scene should cost no bandwidth.
@@ -859,16 +885,50 @@ mod tests {
         let got = canvas.albedo_px.get(i..i + 4).unwrap_or(&[]);
         assert_eq!(got, [enc(want[0]), enc(want[1]), enc(want[2]), 255], "wrong tissue at the centre");
         let got_rough = canvas.rough_px.get(i..i + 4).unwrap_or(&[]);
-        assert_eq!(got_rough, [0, enc(want_rough), 0, 255], "roughness must be the green channel");
+        assert_eq!(
+            got_rough,
+            [enc(depth / limb().span_mm()), enc(want_rough), 0, 255],
+            "the rough pixel is not (depth fraction, roughness, dielectric, peeled)"
+        );
 
-        // A texel the stamp never reached keeps the intact surface exactly.
+        // A texel the stamp never reached keeps the intact surface exactly — and reports no wound.
         let far = 0usize * 4;
         assert_eq!(canvas.depth_at(0, 0), Some(0.0));
         assert_eq!(canvas.albedo_px.get(far..far + 4), Some(&canvas.base_rgba[..]));
-        assert_eq!(
-            canvas.rough_px.get(far..far + 4),
-            Some(&[0, canvas.base_rough, 0, 255][..])
+        assert_eq!(canvas.rough_px.get(far..far + 4), Some(&[0, canvas.base_rough, 0, 0][..]));
+    }
+
+    /// **The two data channels are the depth buffer, not a look.** A shader reading R gets
+    /// millimetres back; a shader reading A gets the wound's own mask, which is the thing it cannot
+    /// infer from the albedo — flayed muscle and a red shirt are the same red.
+    #[test]
+    fn the_rough_channels_report_the_depth_and_the_wound() {
+        let (_images, mut canvas) = scratch(32);
+        let s = FlaySettings::default();
+        let layers = limb();
+        // Into the fat: past the 1.9 mm skin, short of the 9.1 mm muscle start.
+        canvas.paint_uv(Vec2::new(0.5, 0.5), 0.2, 5.0, 0);
+        canvas.shade(&s);
+
+        let (cx, cy) = centre(&canvas);
+        let depth = canvas.depth_at(cx, cy).unwrap_or(0.0);
+        assert_eq!(layers.at(depth).0, Layer::Fat, "the fixture is not in the fat at {depth} mm");
+
+        let i = (cy as usize * canvas.size() as usize + cx as usize) * 4;
+        let px = canvas.rough_px.get(i..i + 4).unwrap_or(&[]);
+        let want_r = (255.0 * (depth / layers.span_mm()).min(1.0)).round() as u8;
+        assert_eq!(px.first().copied(), Some(want_r), "R is not the depth fraction");
+        assert_eq!(px.get(3).copied(), Some(255), "a peeled texel is not marked peeled");
+        // The claim R actually makes: the byte reads back as the millimetres that were removed.
+        let read_back = px.first().copied().unwrap_or(0) as f32 / 255.0 * layers.span_mm();
+        assert!(
+            (read_back - depth).abs() < layers.span_mm() / 255.0,
+            "R read back as {read_back} mm, not {depth} mm"
         );
+
+        let untouched = canvas.rough_px.get(0..4).unwrap_or(&[]);
+        assert_eq!(untouched.first().copied(), Some(0), "intact skin reports a depth");
+        assert_eq!(untouched.get(3).copied(), Some(0), "intact skin reports a wound");
     }
 
     /// The crater is what the smooth falloff is for: deepest at the centre, shallower outward, and

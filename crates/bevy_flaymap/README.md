@@ -71,6 +71,19 @@ The colour and roughness of a peeled texel are `bevy_cross_section::texel_at` at
 
 Bone is exposed **once**. A flag that stayed true would make every later shot re-announce it, and a consumer that spawns a fracture proxy or a bone-scrape sound on the announcement would spawn one per shot for the rest of the fight. `BoneExposed::from_handoff` is the whole gate, so no caller has to remember which field guards which.
 
+## The metallic-roughness image carries the depth, not just gloss
+
+Bevy reads exactly two channels out of a metallic-roughness texture — **green** is roughness and **blue** is metallic (`bevy_pbr-0.19.0/src/pbr_material.rs:153-154`) — so red and alpha are free, and a flaymap that left them at a constant would be uploading two wasted channels per texel. It writes the depth buffer there instead:
+
+| channel | what | range |
+|---|---|---|
+| R | `round(255 · min(depth_mm / Layers::span_mm(), 1))` — how deep the wound is here | `0..=255` |
+| G | perceptual roughness of the exposed tissue, from `bevy_cross_section::texel_at` | `0..=255` |
+| B | metallic — always `0`, because tissue is a dielectric | `0` |
+| A | `255` where anything has been removed, `0` on intact surface | `0` or `255` |
+
+So `R · span_mm / 255` is the millimetres of tissue gone and `A` is the wound's own mask — the two things a caller's shader would otherwise have to infer from the colour, which cannot be done, because flayed muscle and a red shirt are the same red. A subsurface term, a wetness boost or a rim darkening can be driven off the image the `StandardMaterial` is already sampling, with no second texture and no second upload. Both are **output**: the depth buffer stays the authority and nothing here reads a pixel back.
+
 ## The digest
 
 `digest()` folds the depth buffer and **nothing else** — not the pixels. `shade` is a pure function of that buffer, the layer table and the settings, so folding the pixels as well would hash the same information twice and would make a palette tweak read as a simulation divergence. The frozen golden is `the_scripted_wound_is_frozen`, and moving that number is a deliberate act.

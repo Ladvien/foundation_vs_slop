@@ -1,6 +1,6 @@
 [package]
 name = "bevy_wetmap"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 description = "CPU-authoritative texture-space blood accumulation for Bevy: paint a world-space hit into a mesh's UVs, then drip, spread, absorb and dry it on an integer tick — and hash the result."
 license = "MIT OR Apache-2.0"
@@ -49,7 +49,7 @@ bevy = { version = "0.19.0", default-features = false, features = [
 # graph that no type in this crate reads.
 #
 # Path *and* version, because `cargo publish` refuses a path-only dependency.
-bloodstain = { version = "0.2", path = "../bloodstain", default-features = false }
+bloodstain = { version = "0.3", path = "../bloodstain", default-features = false }
 
 # **Examples only.** The crate's own `bevy` above is trimmed to what a canvas needs. `wetmap_paint`
 # additionally needs a window, an event loop and the 3D render pipeline, so it takes the full umbrella

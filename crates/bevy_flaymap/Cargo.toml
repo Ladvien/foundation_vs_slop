@@ -1,6 +1,6 @@
 [package]
 name = "bevy_flaymap"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "CPU-authoritative texture-space flaying for Bevy: repeated hits peel skin, fat and muscle down to bone at their measured depths, shade the wound from a cross-section palette, and hand the exposed bone to fracture — hashable to the byte."
 license = "MIT OR Apache-2.0"
@@ -43,7 +43,7 @@ bevy_cross_section = { version = "0.1.1", path = "../bevy_cross_section", defaul
 # random source any of these crates has — and the spectral film that colours wet muscle live, both
 # reached through `bevy_cross_section::texel_at`. One dependency line for a consumer instead of two
 # that could drift in version.
-bloodstain = { version = "0.2", path = "../bloodstain", default-features = false }
+bloodstain = { version = "0.3", path = "../bloodstain", default-features = false }
 serde = { version = "1.0", features = ["derive"], optional = true }
 
 [features]

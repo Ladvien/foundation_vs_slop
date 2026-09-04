@@ -84,6 +84,23 @@ pub struct WetSettings {
     /// What an ordinary wound bleeds. A caller painting an arterial spurt sets
     /// [`bloodstain::SO2_ARTERIAL`] and gets a visibly brighter red from the same model.
     pub so2: f32,
+    /// **Subsamples per texel axis when a stain is stamped.** `1` — one sample per texel, the
+    /// shipped rasterisation to the byte.
+    ///
+    /// `bloodstain::stain::rasterise` answers "how covered is this texel" once per texel, at the
+    /// texel's own centre, so at the default 128-texel canvas a stain's rim is a staircase: a texel
+    /// the silhouette crosses is either in or out. At `n` the mask is rasterised at `n` times the
+    /// resolution and each texel takes the **mean of its `n × n` subsamples**, so a texel the edge
+    /// only clips gets a proportional share of the coverage.
+    ///
+    /// One path, not two: the reduction is a box filter over `n²` samples, and at `n = 1` it is the
+    /// identity — the same bytes the crate has always written, which is why the digests are
+    /// untouched by this dial existing. `2` is the smallest useful value and `4` is what the shipped
+    /// examples use; the scratch mask costs `(major · size · n)²` bytes, so `n` past 4 buys nothing a
+    /// player can see for four times the rasterisation.
+    ///
+    /// Clamped into `1..=8` internally.
+    pub edge_samples: u32,
 }
 
 impl Default for WetSettings {
@@ -97,6 +114,7 @@ impl Default for WetSettings {
             humidity: 0.4,
             film_depth_mm: 2.0,
             so2: bloodstain::SO2_VENOUS,
+            edge_samples: 1,
         }
     }
 }
@@ -108,6 +126,14 @@ impl WetSettings {
     /// where dry is.
     pub(crate) fn dry_span(&self) -> u32 {
         self.dry_ticks.clamp(1, u16::MAX as u32)
+    }
+
+    /// [`edge_samples`](Self::edge_samples) clamped into `1..=8`.
+    ///
+    /// One place, so the scratch buffer's size and the box filter's divisor cannot disagree about how
+    /// many samples a texel got.
+    pub(crate) fn edge_span(&self) -> u32 {
+        self.edge_samples.clamp(1, 8)
     }
 
     /// Coverage byte above which a texel runs.
@@ -153,6 +179,10 @@ mod tests {
         assert_eq!(s.absorbency, 0.15);
         assert_eq!(s.max_canvas_updates_per_tick, 4);
         assert_eq!(s.humidity, 0.4);
+        // One sample per texel: the shipped rasterisation, so every digest in the crate is the one
+        // it was frozen at. An example that wants a smoother rim opts in.
+        assert_eq!(s.edge_samples, 1);
+        assert_eq!(s.edge_span(), 1);
     }
 
     #[test]

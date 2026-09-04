@@ -74,7 +74,13 @@ pub struct WetCanvas {
     /// anything at all. (The same argument `bevy_stigmergy` makes for its diffusion stencil.)
     prev: Vec<(u8, u16)>,
     /// Scratch for `bloodstain::stain::rasterise`, kept so a stamp does not allocate.
+    ///
+    /// Two buffers because the rasterisation happens at `edge_samples` times the canvas resolution
+    /// and is then box-filtered down: `fine` is what `rasterise` writes, `mask` is the per-texel
+    /// coverage the stamp adds. At one sample per texel the filter is the identity and the two hold
+    /// the same bytes, which is why the dial cannot move a digest.
     mask: Vec<u8>,
+    fine: Vec<u8>,
     albedo_handle: Handle<Image>,
     rough_handle: Handle<Image>,
     /// RGBA8 sRGB bytes, base colour composited with blood by coverage.
@@ -128,8 +134,11 @@ impl WetCanvas {
         };
         let base_rgba = [enc(base_srgb[0]), enc(base_srgb[1]), enc(base_srgb[2]), 255];
         let base_rough = enc(base_roughness);
-        // G carries roughness, B carries metallic, and blood is a dielectric so B stays 0.
-        let base_rough_rgba = [0, base_rough, 0, 255];
+        // **The four channels of the metallic-roughness image, and only two of them are Bevy's.**
+        // G carries roughness and B carries metallic — blood is a dielectric, so B stays 0 — and R
+        // and A are free for data a caller's own shader may want: R is the coverage byte (the film
+        // depth) and A is wetness. An untouched texel has no blood on it, so both are 0.
+        let base_rough_rgba = [0, base_rough, 0, 0];
 
         let extent = Extent3d { width: size, height: size, depth_or_array_layers: 1 };
         // `MAIN_WORLD | RENDER_WORLD` because `flush` rewrites the pixels every time they change: with
@@ -161,6 +170,7 @@ impl WetCanvas {
             wet: vec![(0, 0); texels],
             prev: vec![(0, 0); texels],
             mask: Vec::new(),
+            fine: Vec::new(),
             albedo_handle: images.add(albedo),
             rough_handle: images.add(rough),
             albedo_px: base_rgba.iter().copied().cycle().take(texels * 4).collect(),
@@ -185,7 +195,21 @@ impl WetCanvas {
     ///
     /// **Roughness is the green channel and metallic is the blue one** — stated in that file at
     /// `:153-154`: *"The blue channel contains metallic values, and the green channel contains the
-    /// roughness values."* This crate writes G and leaves B at 0, so blood stays a dielectric.
+    /// roughness values."* B stays 0, so blood stays a dielectric.
+    ///
+    /// **R and A are the wetmap's own data channels**, because Bevy reads only G and B from this
+    /// image and a second texture per actor would be a second upload. Per texel:
+    ///
+    /// | channel | what | range |
+    /// |---|---|---|
+    /// | R | coverage — the film depth byte the buffer holds, `amount` | `0..=255` |
+    /// | G | perceptual roughness, wet blood over the dry surface | `0..=255` |
+    /// | B | metallic — always `0` | `0` |
+    /// | A | wetness: `round(255 · (1 − age / dry_ticks))`, `0` where there is no blood | `0..=255` |
+    ///
+    /// So `R · film_depth_mm / 255` is the millimetres of blood a texel holds and `A` is how far it
+    /// is from set — the two quantities a caller's own shader would otherwise have to guess from the
+    /// colour. Nothing in this crate reads them back: they are output, like every other byte here.
     ///
     /// **The material must set `perceptual_roughness: 1.0` and `metallic: 1.0`**, because Bevy
     /// *multiplies* the scalars by the texture (`:157-163`), and the shipped scalars would scale the
@@ -232,8 +256,9 @@ impl WetCanvas {
         self.wet.get((y as usize) * (self.size as usize) + x as usize).copied()
     }
 
-    /// **Stamp a stain at a UV.** The coverage mask comes from `bloodstain::stain::rasterise`, so a
-    /// stain's silhouette is derived from its own impact rather than picked from a texture set.
+    /// **Stamp a stain at a UV, at one sample per texel.** The coverage mask comes from
+    /// `bloodstain::stain::rasterise`, so a stain's silhouette is derived from its own impact rather
+    /// than picked from a texture set.
     ///
     /// The mask's edge length in texels is `shape.major` scaled by [`UV_SPAN_M`] — at least one texel,
     /// at most the whole canvas. Coverage **accumulates** (saturating at full), because accumulation
@@ -245,17 +270,70 @@ impl WetCanvas {
     ///
     /// UVs outside `[0, 1]` are clamped to the edge, matching Bevy's default `ClampToEdge` sampler: a
     /// tiling atlas would otherwise paint an arbitrary texel and look like a bug somewhere else.
+    ///
+    /// A caller holding [`WetSettings`] should use [`paint_uv_with`](Self::paint_uv_with), which is
+    /// the same stamp at the dialled [`WetSettings::edge_samples`]; this entry point is that stamp at
+    /// one sample, which is the shipped value.
     pub fn paint_uv(&mut self, uv: Vec2, shape: &StainShape, tick: u32) {
+        self.stamp(uv, shape, tick, 1);
+    }
+
+    /// **[`paint_uv`](Self::paint_uv) at the caller's [`WetSettings::edge_samples`].**
+    ///
+    /// The only dial a stamp reads, and it reads it here rather than from a copy on the canvas, for
+    /// the same reason [`tick`](Self::tick) takes the settings: one authority, held by the caller.
+    pub fn paint_uv_with(&mut self, uv: Vec2, shape: &StainShape, tick: u32, s: &WetSettings) {
+        self.stamp(uv, shape, tick, s.edge_span());
+    }
+
+    /// The one stamp. `span` subsamples per texel axis; `1` is the shipped rasterisation to the byte.
+    ///
+    /// The mask is rasterised at `span` times the canvas resolution and box-filtered down, so a texel
+    /// the silhouette only clips receives the share of it that is actually inside. At `span = 1` the
+    /// filter is the identity — one sample, divisor one, rounding term zero — which is what keeps
+    /// every frozen digest in this crate exactly where it was.
+    ///
+    /// `span` is capped so the scratch cannot exceed a 2048-texel edge: at the shipped 128-texel
+    /// canvas that is never reached, and on a canvas large enough to reach it a subtexel edge is not
+    /// what is limiting the look.
+    fn stamp(&mut self, uv: Vec2, shape: &StainShape, tick: u32, span: u32) {
         if !uv.is_finite() {
             return;
         }
         let px = self.mask_px(shape);
+        let span = span.clamp(1, 8).min((2048 / px.max(1)).max(1));
+        let fine_px = px.saturating_mul(span);
+        let fine_need = (fine_px as usize) * (fine_px as usize);
+        if self.fine.len() != fine_need {
+            self.fine.resize(fine_need, 0);
+        }
+        if !rasterise(shape, fine_px, &mut self.fine) {
+            return;
+        }
         let need = (px as usize) * (px as usize);
         if self.mask.len() != need {
             self.mask.resize(need, 0);
         }
-        if !rasterise(shape, px, &mut self.mask) {
-            return;
+        let taps = (span * span).max(1);
+        let round = taps / 2;
+        let (px_u, span_u, fine_u) = (px as usize, span as usize, fine_px as usize);
+        for my in 0..px_u {
+            for mx in 0..px_u {
+                let mut sum = 0u32;
+                for sy in 0..span_u {
+                    for sx in 0..span_u {
+                        let i = (my * span_u + sy) * fine_u + mx * span_u + sx;
+                        // In bounds by construction; `get` rather than `[]` so the crate holds no
+                        // panicking index at all.
+                        if let Some(&v) = self.fine.get(i) {
+                            sum += v as u32;
+                        }
+                    }
+                }
+                if let Some(slot) = self.mask.get_mut(my * px_u + mx) {
+                    *slot = ((sum + round) / taps).min(255) as u8;
+                }
+            }
         }
 
         let n = self.size as i64;
@@ -314,12 +392,45 @@ impl WetCanvas {
         shape: &StainShape,
         tick: u32,
     ) -> bool {
+        self.cast(mesh, xf, from, dir, shape, tick, 1)
+    }
+
+    /// **[`paint_world`](Self::paint_world) at the caller's [`WetSettings::edge_samples`].**
+    ///
+    /// Same ray, same stamp; the dial is the caller's, for the reason
+    /// [`paint_uv_with`](Self::paint_uv_with) gives.
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_world_with(
+        &mut self,
+        mesh: &Mesh,
+        xf: &GlobalTransform,
+        from: Vec3,
+        dir: Vec3,
+        shape: &StainShape,
+        tick: u32,
+        s: &WetSettings,
+    ) -> bool {
+        self.cast(mesh, xf, from, dir, shape, tick, s.edge_span())
+    }
+
+    /// The one ray. See [`paint_world`](Self::paint_world) for the contract.
+    #[allow(clippy::too_many_arguments)]
+    fn cast(
+        &mut self,
+        mesh: &Mesh,
+        xf: &GlobalTransform,
+        from: Vec3,
+        dir: Vec3,
+        shape: &StainShape,
+        tick: u32,
+        span: u32,
+    ) -> bool {
         let inv = xf.affine().inverse();
         let origin = inv.transform_point3(from);
         let local_dir = inv.transform_vector3(dir);
         match ray_uv(mesh, origin, local_dir) {
             Pick::At(uv) => {
-                self.paint_uv(uv, shape, tick);
+                self.stamp(uv, shape, tick, span);
                 true
             }
             Pick::Miss => false,
@@ -620,11 +731,17 @@ impl WetCanvas {
                 *b = rgb[2];
                 changed = true;
             }
-            if let [_, g, _, _] = r_px
-                && *g != rough_byte
-            {
-                *g = rough_byte;
-                changed = true;
+            // **All four channels of the metallic-roughness image**, per
+            // [`roughness`](Self::roughness): R the coverage byte, G the roughness, B the metallic
+            // zero, A the wetness. R and A are the buffer's own two numbers written where a shader
+            // can read them, so nothing has to be inferred from the albedo — and they are still
+            // *output*: no pass in this file reads a pixel back.
+            let want = [amount, rough_byte, 0, wetness(amount, age, span)];
+            for (slot, want) in r_px.iter_mut().zip(want) {
+                if *slot != want {
+                    *slot = want;
+                    changed = true;
+                }
             }
         }
 
@@ -639,6 +756,21 @@ impl WetCanvas {
 #[inline]
 fn is_wet(age: u16, span: u32) -> bool {
     (age as u32) < span
+}
+
+/// **The wetness byte a texel reports**: `round(255 · (1 − age / span))`, and `0` where there is no
+/// blood to be wet.
+///
+/// Integer, and over the *same* `dry_span` the wet/dry gate and the appearance rescale use, so a
+/// texel that reads 0 here is exactly a texel [`is_wet`] calls dry. A shader multiplying a specular
+/// boost by this gets the drying timeline for free.
+#[inline]
+fn wetness(amount: u8, age: u16, span: u32) -> u8 {
+    if amount == 0 {
+        return 0;
+    }
+    let left = span.saturating_sub(age as u32) as u64;
+    (((left * 255 + (span as u64) / 2) / span.max(1) as u64).min(255)) as u8
 }
 
 /// The single-texel step gravity implies.

@@ -1,6 +1,6 @@
 [package]
 name = "bevy_laceration"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Progressive lacerations for Bevy: a cut along a mesh surface whose gape widens on a time curve scaled by an authored skin tension, opening onto a wound bed banded by anatomical depth — deterministic, no rig required."
 license = "MIT OR Apache-2.0"
@@ -37,7 +37,7 @@ bevy_cross_section = { version = "0.1.1", path = "../bevy_cross_section", defaul
 # **The one frozen random source this family shares**, for `hash_f32` — the value noise that makes a
 # wound margin ragged instead of ruled. Hand-rolled and pinned upstream precisely so two machines tear
 # the same way; an RNG crate that reserved the right to change its stream could not promise that.
-bloodstain = { version = "0.2", path = "../bloodstain", default-features = false }
+bloodstain = { version = "0.3", path = "../bloodstain", default-features = false }
 serde = { version = "1.0", features = ["derive"], optional = true }
 
 [features]

@@ -45,6 +45,16 @@ The whole thing is CPU-side and deterministic: a strip is a pure function of the
 
 \* Cortical bone thickness is **not corpus-sourced** — no open-access long-bone cortex table was reachable when this was written — and is stated as this crate's own. Override it through `CrossSectionSettings::layers`.
 
+**The bone is a core, not a floor.** Depth alone puts cortical bone at every point past 27.8 mm on a limb, which is right for a shallow wound and wrong for a severed thigh: the whole middle of the cut face goes to bone however wide the limb is, and the muscle ends up a rim. So `Layers` carries `bone_mm` — the long bone's **outer diameter**, 27 mm on a limb, `0` on the torso and `∞` on the head, and **this crate's own number** like the cortex row — and `annotate_cap` measures the cap's own deepest point `d_core` (the maximum over its vertices *and* its centroid, because the deepest point of a convex cross-section is in its interior) and lays the bands out from it:
+
+| depth | reads as |
+|---|---|
+| `0 .. fat_end` | skin then fat, at their measured depths — they are measured from the surface |
+| `fat_end .. d_core − bone_mm/2` | the **muscle** band, stretched to fill whatever is between the fat and the bone |
+| `d_core − bone_mm/2 .. d_core` | **cortex then marrow**, so the bone is exactly `bone_mm` across the deepest point |
+
+The core rule engages only where `bone_mm` is finite and positive **and** the cap reaches the cortex, so a head and a shallow limb cut are `uv1_at` to the bit. A `bone_mm` of `0` — the torso — means *no bone*: past the muscle wall there is a cavity this table cannot name, so the muscle band is drawn to the deepest point and no cortex or marrow ever appears on a trunk. `∞` — the skull — is bone without end: the cortex begins at its measured depth and the interior follows, which is the depth-only model. It is a remapping on the way *in*: what lands in `UV_1.x` is still `depth_equivalent / span`, so the strip texture, its frozen digest and every material sampling it are untouched. `uv1_at_core` is the same rule for a caller building its own geometry, and `uv1_at` stays the depth-only one a wound bed wants.
+
 **The strip is anatomy at physical scale.** Fat is lobules ~2 mm across in a septal net (Worley cells); muscle in cross-section is fascicles ~0.7 mm wrapped in perimysium at ~3 mm; cortex is ivory pierced by ~0.1 mm Haversian canals; the marrow cavity opens through a thinning trabecular lattice into yellow marrow with red patches. Because the strip is parameterised in millimetres, a lobule is 2 mm on a thigh and 2 mm on a finger. The muscle band's colour is not authored: it is a 0.3 mm venous film from `bloodstain::spectral` over a mid-grey substrate, the same optics that colour a pool.
 
 ## Compatibility
@@ -58,7 +68,7 @@ The whole thing is CPU-side and deterministic: a strip is a pure function of the
 - `CrossSectionPlugin` — bakes one strip per `Region` on `Startup` into `CrossSectionAtlas`, as two images and a `StandardMaterial` that samples them through `UvChannel::Uv1`. System set: `CrossSectionSystems`.
 - `CrossSectionSettings` — the per-region `Layers`, strip size, seed and `Scale`. Insert it before the plugin to override.
 - `Layers`, `Layer`, `Region` — the table and the query `Layers::at(depth_mm)`.
-- `SkinPlane`, `depth_below_skin`, `annotate_cap`, `uv1_at` — the geometry side.
+- `SkinPlane`, `depth_below_skin`, `annotate_cap`, `uv1_at`, `uv1_at_core` — the geometry side.
 - `strip`, `Strip`, `Band` — the bake, engine-free apart from `bevy::math`.
 
 No components. The caller decides which region a subject's cells belong to, hands `annotate_cap` the cell's supplied-face planes, and puts `CrossSectionAtlas::material(region)` on the cap.

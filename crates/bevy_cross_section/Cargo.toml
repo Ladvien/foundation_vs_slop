@@ -1,6 +1,6 @@
 [package]
 name = "bevy_cross_section"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Anatomical cross-sections for cut faces in Bevy: skin, fat, muscle, cortex and marrow bands at their measured per-region depths, baked once into a procedural strip and painted through a second UV channel — CPU-side, deterministic, hashable."
 license = "MIT OR Apache-2.0"
@@ -34,7 +34,7 @@ bevy = { version = "0.19.0", default-features = false, features = [
 # shares, and `spectral`, which colours the muscle band as the wet venous film it optically is.
 #
 # Path *and* version, because `cargo publish` refuses a path-only dependency.
-bloodstain = { version = "0.2", path = "../bloodstain", default-features = false }
+bloodstain = { version = "0.3", path = "../bloodstain", default-features = false }
 serde = { version = "1.0", features = ["derive"], optional = true }
 
 [features]

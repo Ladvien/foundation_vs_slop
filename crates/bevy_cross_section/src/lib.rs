@@ -5,7 +5,7 @@ mod depth;
 mod layers;
 mod strip;
 
-pub use depth::{Scale, SkinPlane, annotate_cap, depth_below_skin, uv1_at};
+pub use depth::{Scale, SkinPlane, annotate_cap, depth_below_skin, uv1_at, uv1_at_core};
 pub use layers::{Layer, Layers, Region};
 pub use strip::{Band, Strip, strip, texel_at};
 

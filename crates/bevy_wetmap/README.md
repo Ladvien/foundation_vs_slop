@@ -105,11 +105,30 @@ fn on_hit(
 | Plugin | `WetmapPlugin` | Adds `WetSettings` and the upload budget on `Update`. Registers nothing else. |
 | `SystemSet` | `WetmapSystems` | The one system above, so you can order against it. |
 | Component | `WetCanvas` | One actor's canvas. Holds the buffer and the two image handles. |
-| Resource | `WetSettings` | Six dials: `drip_rate`, `spread_rate`, `dry_ticks`, `absorbency`, `max_canvas_updates_per_tick`, `humidity`. |
+| Resource | `WetSettings` | Nine dials: `drip_rate`, `spread_rate`, `dry_ticks`, `absorbency`, `max_canvas_updates_per_tick`, `humidity`, `film_depth_mm`, `so2`, `edge_samples`. |
 | Constant | `UV_SPAN_M` | How much world one UV unit is taken to be — see below. |
 | Re-export | `StainShape`, `bloodstain` | The silhouette `paint_*` takes, and the blood model it comes from. |
 
-`WetCanvas`: `new`, `albedo`, `roughness`, `paint_uv`, `paint_world`, `tick`, `flush`, `digest`, `wetted_area`, plus the read-only `size`, `amount_at`, `age_at`, `is_dirty`, `dirty_since`.
+`WetCanvas`: `new`, `albedo`, `roughness`, `paint_uv`, `paint_uv_with`, `paint_world`, `paint_world_with`, `tick`, `flush`, `digest`, `wetted_area`, plus the read-only `size`, `amount_at`, `age_at`, `is_dirty`, `dirty_since`.
+
+## The metallic-roughness image carries data, not just gloss
+
+Bevy reads exactly two channels out of a metallic-roughness texture — **green** is roughness and **blue** is metallic (`bevy_pbr-0.19.0/src/pbr_material.rs:153-154`) — so red and alpha are free, and a wetmap that left them at a constant would be uploading two wasted channels per texel. It writes the buffer's own two numbers there instead:
+
+| channel | what | range |
+|---|---|---|
+| R | coverage — the film depth byte, `amount` | `0..=255` |
+| G | perceptual roughness, wet blood composited over the dry surface | `0..=255` |
+| B | metallic — always `0`, because blood is a dielectric | `0` |
+| A | wetness, `round(255 · (1 − age / dry_ticks))`, and `0` where there is no blood | `0..=255` |
+
+So `R · film_depth_mm / 255` is the millimetres of blood on a texel and `A` is how far it is from set: a caller's own shader can drive a specular boost, a normal-map ripple or a subsurface term off the same image the `StandardMaterial` is already sampling, without a second texture and without inferring either quantity from the colour. Nothing in the crate reads them back — they are output, like every other byte here.
+
+## Anti-aliased stain edges: `edge_samples`
+
+`bloodstain::stain::rasterise` answers *how covered is this texel* once per texel, at the texel's own centre, so at the shipped 128-texel canvas a stain's rim is a staircase. `WetSettings::edge_samples = n` rasterises the mask at `n` times the resolution and box-filters each `n × n` block down, so a texel the silhouette only clips receives the share of it that is actually inside.
+
+It ships at **`1`** and that is not a fallback: the box filter over one tap is the identity — divisor one, rounding term zero — so the default writes the bytes the crate has always written and **every frozen digest is untouched by the dial existing**. `4` is what the examples use; the scratch mask costs `(major · size · n)²` bytes, so past 4 it buys nothing a player can see for four times the rasterisation. Reach it through `paint_uv_with` / `paint_world_with`, which take the settings the way `tick` does — `paint_uv` and `paint_world` are the same stamp at one sample.
 
 ## Two things the caller owns, and one convention
 

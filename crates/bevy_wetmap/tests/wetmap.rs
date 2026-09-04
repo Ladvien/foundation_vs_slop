@@ -78,6 +78,68 @@ fn one_hit_moved_by_a_single_texel_changes_the_digest() {
     );
 }
 
+/// **The edge dial, and the reason it is a dial.**
+///
+/// One painter, three settings, so the only thing that differs between the three runs is
+/// `edge_samples`. At `1` the stamp must be the rasterisation the crate has always written — pinned
+/// to the byte through the digest, because that is what keeps every frozen wetmap golden frozen. At
+/// `4` the rim gains partial coverage and the total converges: point-sampling one coverage value per
+/// texel is a quadrature of the silhouette with one tap, and the error it makes is the staircase.
+#[test]
+fn the_edge_dial_smooths_the_rim_and_one_sample_is_the_frozen_rasterisation() {
+    let size = 128u32;
+    let shape = blob(0.25);
+    let paint = |samples: u32| -> (u64, u32, usize, usize) {
+        let (_images, mut canvas) = scratch(size);
+        let s = WetSettings { edge_samples: samples, ..Default::default() };
+        canvas.paint_uv_with(Vec2::new(0.5, 0.5), &shape, 0, &s);
+        let mut partial = 0;
+        let mut wetted = 0;
+        for y in 0..size {
+            for x in 0..size {
+                let a = canvas.amount_at(x, y);
+                if a > 0 {
+                    wetted += 1;
+                }
+                if a > 0 && a < 255 {
+                    partial += 1;
+                }
+            }
+        }
+        (canvas.digest(), coverage(&canvas), partial, wetted)
+    };
+
+    let (digest_1, sum_1, partial_1, wetted_1) = paint(1);
+    let (_, sum_4, partial_4, wetted_4) = paint(4);
+
+    // The frozen rasterisation. `edge_samples = 1` is one tap, divisor one, rounding term zero — the
+    // identity — so this digest is the one this canvas has always produced for this stamp.
+    assert_eq!(
+        digest_1, 0xa3bc_55f8_b50f_7c3d,
+        "one sample per texel moved the shipped rasterisation"
+    );
+
+    // The disc's footprint is its area. `rasterise` puts the rim at `0.5 / 1.04` of the mask's
+    // half-width for a spineless shape, so a `major = 0.25` stain on a 128-texel canvas is a disc of
+    // radius `0.25 · 128 · 0.5 / 1.04 = 15.4` texels.
+    let r = 0.25 * size as f32 * 0.5 / 1.04;
+    let area = std::f32::consts::PI * r * r;
+    for (samples, wetted) in [(1u32, wetted_1), (4, wetted_4)] {
+        let err = (wetted as f32 - area).abs() / area;
+        assert!(err < 0.05, "at {samples} samples the footprint was {wetted} texels, not ~{area:.0}");
+    }
+
+    // Anti-aliasing is more texels carrying a *share* of the edge, not more blood.
+    assert!(
+        partial_4 > partial_1,
+        "four samples produced no more partial texels than one ({partial_4} vs {partial_1})"
+    );
+    // …and it is exactly that: a redistribution. The dial must not make a stain wetter, because the
+    // coverage byte is a film depth and a smoother rim is not more blood.
+    let drift = (sum_4 as f32 - sum_1 as f32).abs() / sum_1 as f32;
+    assert!(drift < 0.01, "the edge dial moved {:.1} % of the coverage", 100.0 * drift);
+}
+
 #[test]
 fn a_tick_conserves_every_byte_of_coverage() {
     // `absorbency = 0` isolates movement from the substrate's cut: the drip and spread passes are
@@ -244,6 +306,13 @@ fn flush_uploads_only_when_dirty() {
     assert!(!canvas.flush(&mut images), "a freshly flushed canvas uploaded twice");
 }
 
+/// **What a renderer samples, all four channels of it.**
+///
+/// The metallic-roughness image is no longer two channels and two constants: **R is the coverage
+/// byte and A is wetness**, `round(255 · (1 − age / dry_ticks))` and `0` where there is no blood —
+/// which is why an untouched texel here is `[0, 140, 0, 0]` rather than the `[0, 140, 0, 255]` this
+/// test pinned before the data channels existed. G is still roughness and B is still the dielectric
+/// zero. No digest moved with it: `digest()` folds the buffer, never the pixels.
 #[test]
 fn what_reaches_the_gpu_is_blood_over_the_base_surface() {
     // **A test may read `Assets<Image>`; the library may not.** This is the only place in the crate
@@ -267,8 +336,9 @@ fn what_reaches_the_gpu_is_blood_over_the_base_surface() {
     let base_rough = at(images.get(&roughness), size / 2, size / 2);
     assert_eq!(base_albedo, [199, 168, 153, 255], "the base surface is not the sRGB it was given");
     // G is roughness, B is metallic (`bevy_pbr-0.19.0/src/pbr_material.rs:153-154`), and blood is a
-    // dielectric, so B stays 0.
-    assert_eq!(base_rough, [0, 140, 0, 255], "the base roughness is not in the green channel");
+    // dielectric, so B stays 0. R is the coverage byte and A is wetness — this crate's own two data
+    // channels, both zero on a texel with no blood on it.
+    assert_eq!(base_rough, [0, 140, 0, 0], "the base roughness is not in the green channel");
 
     canvas.paint_uv(Vec2::new(0.5, 0.5), &blob(0.25), 0);
     canvas.tick(0, Vec2::new(0.0, 1.0), &s);
@@ -287,6 +357,20 @@ fn what_reaches_the_gpu_is_blood_over_the_base_surface() {
         "fresh blood must be glossier than the dry surface: {base_rough:?} -> {wet_rough:?}"
     );
     assert_eq!(wet_rough[2], 0, "blood stopped being a dielectric");
+    // **The data channels carry the buffer, not an inference from the colour.** A freshly stamped
+    // texel at full coverage reports its amount in R and full wetness in A; one tick of age has not
+    // moved it off 255 at the shipped 1800-tick drying span.
+    assert_eq!(wet_rough[0], canvas.amount_at(size / 2, size / 2), "R is not the coverage byte");
+    assert_eq!(wet_rough[3], 255, "fresh blood is not reported as wet");
+
+    // Dry it, and the wetness channel is what changed.
+    for tick in 0..s.dry_ticks {
+        canvas.tick(tick, Vec2::ZERO, &s);
+    }
+    assert!(canvas.flush(&mut images));
+    let dry_rough = at(images.get(&roughness), size / 2, size / 2);
+    assert_eq!(dry_rough[3], 0, "a set texel still reports as wet: {dry_rough:?}");
+    assert!(dry_rough[1] > wet_rough[1], "dry blood is not rougher than fresh: {dry_rough:?}");
 }
 
 /// Which canvas is which, for the budget test.
