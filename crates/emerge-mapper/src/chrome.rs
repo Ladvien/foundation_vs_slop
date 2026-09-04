@@ -217,6 +217,10 @@ pub const LABELED: Color = Color::srgb(0.550, 0.830, 0.500);
 /// Empty preview tile, so an un-baked row reads as "not yet" rather than as a hole in the panel.
 /// `thumbs.rs` carries a third copy of this value as `BACKDROP`, for the booth's own background.
 pub const SLOT_BG: Color = Color::srgb(0.185, 0.172, 0.150);
+/// Edge of a row's preview box, logical px. One home since 2026-09-04: the map palette and the
+/// kit door's MESHES shelf both draw a portrait in this slot, and two copies of the size would
+/// be two row heights for one picture.
+pub const THUMB_SLOT: f32 = 30.0;
 /// **A modal card's ground** — the one thing lit while the [`SCRIM`] holds everything else back.
 /// Above [`PANEL_BG`] by ΔL\* 9.2, because a card that reads at the same elevation as the panel
 /// behind it is a panel with a shadow on it rather than a question being asked.
@@ -1652,6 +1656,7 @@ pub fn scroll_to_reveal(
     row: (f32, f32),
     list: (f32, f32),
     scroll_y: f32,
+    max_scroll_y: f32,
     inverse_scale: f32,
 ) -> Option<f32> {
     let (row_top, row_bottom) = (row.0 - row.1, row.0 + row.1);
@@ -1671,8 +1676,32 @@ pub fn scroll_to_reveal(
     };
     // Further than a viewport is a jump, not a step: put the row in the middle.
     let delta = if delta.abs() > list_h { row.0 - list.0 } else { delta };
-    let want = (scroll_y + delta * inverse_scale).max(0.0);
+    // **Clamped at BOTH ends.** The floor was always here; the ceiling is what the two-row margin
+    // made necessary — a reveal at the end of a list asks for `max + margin`, Bevy clamps only
+    // `ComputedNode::scroll_position` (`bevy_ui-0.19.0/src/layout/mod.rs:364-369`, through
+    // `bypass_change_detection`), and the component every caller reads back keeps the surplus. The
+    // list then stands still while the highlight walks off it — the 2026-09-03 seed, reintroduced
+    // by its own fix.
+    let want = (scroll_y + delta * inverse_scale).clamp(0.0, max_scroll_y.max(0.0));
     ((scroll_y - want).abs() > 0.5).then_some(want)
+}
+
+/// **Where a scroll viewport actually is, and how far it can go** — both in LOGICAL pixels, both
+/// read off the node's own `ComputedNode`.
+///
+/// The position is the **effective** one: Bevy writes the clamped, floored value into
+/// `ComputedNode::scroll_position` and leaves the `ScrollPosition` component alone, so the
+/// component can hold a position the list is not at. Row geometry is laid out at the effective
+/// one, so that is the only honest basis for a delta measured off the screen.
+///
+/// The maximum is upstream's own: `content - layout + scrollbar`, floored at zero
+/// (`bevy_ui-0.19.0/src/layout/mod.rs:364-367`). `scroll_list` overlays its bar rather than
+/// reserving a gutter, so `scrollbar_size` is zero here today; it is in the expression because
+/// the day it is not, a reveal that ignored it would be short by exactly the bar.
+pub fn scroll_bounds(list: &ComputedNode) -> (f32, f32) {
+    let inv = list.inverse_scale_factor;
+    let max = (list.content_size.y - list.size().y + list.scrollbar_size.y).max(0.0);
+    (list.scroll_position.y * inv, max * inv)
 }
 
 /// **How much list stays visible past the selection.** Two rows: one is enough to prove the list
@@ -2606,6 +2635,10 @@ impl Plugin for ChromePlugin {
 mod scroll_tests {
     use super::{scroll_to_reveal, Follow};
 
+    /// The ceiling every pre-existing case runs under: none. The arithmetic those cases pin is
+    /// unchanged by the clamp; the two tests at the end of this module are the clamp's own.
+    const NO_LIMIT: f32 = f32::INFINITY;
+
     /// **The arming rule, which is the half that was broken for two days — and then for longer.**
     ///
     /// `scroll_to_reveal`'s arithmetic was always right and always tested; nothing ever called it,
@@ -2676,10 +2709,10 @@ mod scroll_tests {
     fn a_row_with_context_around_it_asks_for_no_scroll() {
         // List centred at 200, half 100 → fold [100, 300]. Row half 10 → margin is 2 rows = 40.
         // Comfortable band is therefore [140, 260]; a row at 200 sits in the middle of it.
-        assert_eq!(scroll_to_reveal((200.0, 10.0), (200.0, 100.0), 0.0, 1.0), None);
+        assert_eq!(scroll_to_reveal((200.0, 10.0), (200.0, 100.0), 0.0, NO_LIMIT, 1.0), None);
         // Exactly two rows clear of each edge is still comfortable.
-        assert_eq!(scroll_to_reveal((150.0, 10.0), (200.0, 100.0), 0.0, 1.0), None);
-        assert_eq!(scroll_to_reveal((250.0, 10.0), (200.0, 100.0), 0.0, 1.0), None);
+        assert_eq!(scroll_to_reveal((150.0, 10.0), (200.0, 100.0), 0.0, NO_LIMIT, 1.0), None);
+        assert_eq!(scroll_to_reveal((250.0, 10.0), (200.0, 100.0), 0.0, NO_LIMIT, 1.0), None);
     }
 
     /// **Flush is not comfortable, and that reverses a decision.**
@@ -2693,12 +2726,12 @@ mod scroll_tests {
     fn a_flush_row_scrolls_to_earn_its_margin() {
         // Row flush against the bottom edge of fold [100, 300]: it wants 2 rows (40 px) of daylight.
         assert_eq!(
-            scroll_to_reveal((290.0, 10.0), (200.0, 100.0), 0.0, 1.0),
+            scroll_to_reveal((290.0, 10.0), (200.0, 100.0), 0.0, NO_LIMIT, 1.0),
             Some(40.0)
         );
         // And flush against the top edge, the same the other way.
         assert_eq!(
-            scroll_to_reveal((110.0, 10.0), (200.0, 100.0), 100.0, 1.0),
+            scroll_to_reveal((110.0, 10.0), (200.0, 100.0), 100.0, NO_LIMIT, 1.0),
             Some(60.0)
         );
     }
@@ -2710,7 +2743,7 @@ mod scroll_tests {
         // Fold [180, 220] is 40 tall; a 20-tall row leaves 10 either side, not 40.
         // Row at 215 (spans [205, 225]) overhangs the bottom by 5, and wants 10 more.
         assert_eq!(
-            scroll_to_reveal((215.0, 10.0), (200.0, 20.0), 0.0, 1.0),
+            scroll_to_reveal((215.0, 10.0), (200.0, 20.0), 0.0, NO_LIMIT, 1.0),
             Some(15.0)
         );
     }
@@ -2725,7 +2758,7 @@ mod scroll_tests {
         // Fold [100, 300], 200 tall. A row centred at 900 is far past a viewport away, so the
         // correction is "put it in the middle": 900 - 200 = 700.
         assert_eq!(
-            scroll_to_reveal((900.0, 10.0), (200.0, 100.0), 0.0, 1.0),
+            scroll_to_reveal((900.0, 10.0), (200.0, 100.0), 0.0, NO_LIMIT, 1.0),
             Some(700.0)
         );
     }
@@ -2735,12 +2768,12 @@ mod scroll_tests {
     fn an_off_screen_row_scrolls_by_its_overshoot() {
         // Row bottom at 320 against a fold ending at 300: 20 px of overshoot, plus a 40 px margin.
         assert_eq!(
-            scroll_to_reveal((310.0, 10.0), (200.0, 100.0), 40.0, 1.0),
+            scroll_to_reveal((310.0, 10.0), (200.0, 100.0), 40.0, NO_LIMIT, 1.0),
             Some(100.0)
         );
         // Row top at 80 against a fold starting at 100: 20 px back up, plus the same margin.
         assert_eq!(
-            scroll_to_reveal((90.0, 10.0), (200.0, 100.0), 100.0, 1.0),
+            scroll_to_reveal((90.0, 10.0), (200.0, 100.0), 100.0, NO_LIMIT, 1.0),
             Some(40.0)
         );
     }
@@ -2751,7 +2784,7 @@ mod scroll_tests {
     fn the_correction_converts_physical_to_logical() {
         // 20 px of overshoot plus a 40 px margin is 60 physical, which is 30 logical on top of 40.
         assert_eq!(
-            scroll_to_reveal((310.0, 10.0), (200.0, 100.0), 40.0, 0.5),
+            scroll_to_reveal((310.0, 10.0), (200.0, 100.0), 40.0, NO_LIMIT, 0.5),
             Some(70.0)
         );
     }
@@ -2760,7 +2793,7 @@ mod scroll_tests {
     #[test]
     fn the_scroll_clamps_at_zero() {
         assert_eq!(
-            scroll_to_reveal((50.0, 10.0), (200.0, 100.0), 10.0, 1.0),
+            scroll_to_reveal((50.0, 10.0), (200.0, 100.0), 10.0, NO_LIMIT, 1.0),
             Some(0.0)
         );
     }
@@ -2774,7 +2807,7 @@ mod scroll_tests {
     #[test]
     fn a_sub_pixel_correction_is_swallowed() {
         assert_eq!(
-            scroll_to_reveal((250.3, 10.0), (200.0, 100.0), 0.0, 1.0),
+            scroll_to_reveal((250.3, 10.0), (200.0, 100.0), 0.0, NO_LIMIT, 1.0),
             None
         );
     }
@@ -2785,8 +2818,31 @@ mod scroll_tests {
     fn an_over_tall_row_aligns_its_top() {
         // Row spans [40, 560] against fold [100, 300]: top wins, scroll up by 60.
         assert_eq!(
-            scroll_to_reveal((300.0, 260.0), (200.0, 100.0), 100.0, 1.0),
+            scroll_to_reveal((300.0, 260.0), (200.0, 100.0), 100.0, NO_LIMIT, 1.0),
             Some(40.0)
+        );
+    }
+
+    /// **A reveal never asks past the end of the content.** The flush-bottom case above wants 40;
+    /// with 25 of scroll left, it gets 25. Bevy clamps only `ComputedNode::scroll_position`, so
+    /// an unclamped answer here would leave the `ScrollPosition` component carrying a surplus the
+    /// list is not at — and every later delta computed from a place the list never went.
+    #[test]
+    fn a_reveal_never_asks_past_the_end_of_the_content() {
+        assert_eq!(
+            scroll_to_reveal((290.0, 10.0), (200.0, 100.0), 0.0, 25.0, 1.0),
+            Some(25.0)
+        );
+    }
+
+    /// **A scroll already at the end asks for nothing.** No write, so no re-layout, which is what
+    /// the dead-band exists for — and the frame-after-frame write at the end of a list is exactly
+    /// how the seed presented.
+    #[test]
+    fn a_scroll_already_at_the_end_asks_for_nothing() {
+        assert_eq!(
+            scroll_to_reveal((290.0, 10.0), (200.0, 100.0), 25.0, 25.0, 1.0),
+            None
         );
     }
 }

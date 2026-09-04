@@ -87,6 +87,19 @@ pub enum Context {
 }
 
 impl Context {
+    /// **Every context a binding could be judged against**, in one place for the same reason
+    /// [`Stance::ALL`] is: the badge tests sweep it, and a seventh context therefore costs one
+    /// edit here rather than a hand-written list in each test that silently stops reaching it.
+    pub const ALL: [Context; 7] = [
+        Context::Global,
+        Context::Map,
+        Context::Meshes,
+        Context::Anim,
+        Context::Compose,
+        Context::Tiles,
+        Context::Typing,
+    ];
+
     /// Can these two be live at the same moment?
     pub fn overlaps(self, other: Context) -> bool {
         use Context::*;
@@ -1596,15 +1609,19 @@ pub const BINDINGS: &[Binding] = &[
     // and reaching for `Enter` mid-scroll is the reach for the mouse that `commit_candidate`'s own
     // note is about. Deliberately inert off a heading: Space must never commit a tile, which is why
     // this is its own action rather than a second key on `Accept`.
-    bp(
+    // **Every stance but `Holding`**, since 2026-09-04. It was `Stance::Idle`, so it died at
+    // `Stance::Proposed` while the mouse kept folding — a staged derivation stopped `Space` on a
+    // heading it had nothing to do with (the audit's M12). Off a held piece it stays: a piece in
+    // hand is the one state where the list under the cursor is not what the author is acting on.
+    b(
         Action::FoldPack,
         KeyCode::Space,
         false,
-        Stance::Idle,
         Context::Meshes,
         "Space",
         "open / close the pack",
     )
+    .unless(Stance::Holding)
     .at(Home::Control(ControlId::Pieces)),
     bp(
         Action::AcceptEdges,
@@ -1837,7 +1854,7 @@ pub const BINDINGS: &[Binding] = &[
         Stance::Browsing,
         Context::Tiles,
         "up",
-        "walk the tiles",
+        "walk the tiles / Shift: x5",
     )
     .also_filtered()
     .at(Home::Control(ControlId::Pieces)),
@@ -1848,7 +1865,7 @@ pub const BINDINGS: &[Binding] = &[
         Stance::Browsing,
         Context::Tiles,
         "down",
-        "walk the tiles",
+        "walk the tiles / Shift: x5",
     )
     .also_filtered()
     .at(Home::Control(ControlId::Pieces)),
@@ -1892,6 +1909,11 @@ pub const BINDINGS: &[Binding] = &[
     // in this context (`Fill` is the Map's and the lattice cursor's `F` is the Meshes tab's, and the
     // two are never live together, which is the case `Context` exists to model). Asked for at the
     // keyboard, 2026-08-15. `Enter` and `Esc` both leave the box, which `filter::keys` already owned.
+    //
+    // **Not on the Tiles page** (`Stance::Browsing`): the box narrows `library_rows` and the
+    // candidate packs, and that page draws neither — so `F` narrowed a list nobody could see and
+    // swallowed the keyboard when typed into (N16). `tiles::hide_filter_on_the_tiles_page` hides
+    // the box itself for the same reason.
     b(
         Action::FocusFilter,
         KeyCode::KeyF,
@@ -1900,6 +1922,7 @@ pub const BINDINGS: &[Binding] = &[
         "F",
         "filter the list",
     )
+    .unless(Stance::Browsing)
     .at(Home::Control(ControlId::Filter)),
     bp(
         Action::TileListPrev,
@@ -2436,15 +2459,11 @@ pub const BINDINGS: &[Binding] = &[
     // seats. They keep the whole surface under one hand (`T F G H` seat, `Y U` turn, `[ ]` raise), and
     // the Map's own row for `Y`/`U` is "turn left / turn right / tip x / tip z", so the family is the same one.
     //
-    // **Not `,` and `.`, and the test is why.** `rows()` joins a collapsed row's chords with `", "`,
-    // so a chord that *is* a comma comes out as `, , .` and cannot be read back —
-    // `collapsing_rows_loses_nothing` failed on exactly that, naming the vanished chord.
-    // **Not `,` and `.`, for the second time, and the test caught it both times.**
-    //
-    // `rows()` joins a collapsed row's chords with `", "`, so a comma chord is unreadable the moment
-    // it shares a row with anything — including its own pair. `,`/`.` were tried for turn and printed
-    // `, , .`; tried again here and did it again. A comma cannot be a chord in this editor while the
-    // separator is a comma, and that is a property of the census, not of this row.
+    // **`,` and `.` are legal chords since 2026-09-04.** `chord_column` used to join a collapsed
+    // row's chords with `", "`, so a chord that *is* a comma came out as `, , .` and could not be
+    // read back — `collapsing_rows_loses_nothing` failed on exactly that, twice, and `,`/`.` were
+    // kept off turn here because of it. The separator is a mid-dot now (` · `), so the constraint
+    // that decided this row is gone; `Y`/`U` stay because they are already learned.
     // **The two verbs this tab was missing.** It could refine a group and not make one, so every
     // group had to be captured on the Map first — which is a fine way to work and a bad only way.
     // **The carousel, and this tab's TWELFTH row — the last one it has.** The focal composition stands
@@ -2844,12 +2863,16 @@ pub fn badges(context: Context, stance: Stance) -> Vec<Badge> {
 }
 
 /// **How a badge's chords read**, and the only place that decides.
+///
+/// Joined with a mid-dot rather than a comma, since 2026-09-04: the member walk is `,` and `.`,
+/// and a comma separator rendered that badge as `",, ."` (N15). The codepoint is one this UI
+/// already draws — the status line's bullets in `chrome.rs`.
 fn chord_column(actions: &[Action]) -> String {
     actions
         .iter()
         .map(|a| chord(*a))
         .collect::<Vec<_>>()
-        .join(", ")
+        .join(" · ")
 }
 
 /// **Sense who owns the keyboard, let the fields have it, then dispatch** — in that order, once a
@@ -3503,7 +3526,7 @@ mod tests {
             .find(|r| r.does == "move the piece")
             .unwrap_or_else(|| panic!("no row for moving the piece: {holding:?}"));
         assert_eq!(
-            moving.chord.split(", ").count(),
+            moving.chord.split(" · ").count(),
             4,
             "all four arrows move the piece, and it reads `{}`",
             moving.chord
@@ -3513,7 +3536,7 @@ mod tests {
             .find(|r| r.does.contains("member"))
             .unwrap_or_else(|| panic!("no row walks the members: {holding:?}"));
         assert_eq!(
-            walking.chord.split(", ").count(),
+            walking.chord.split(" · ").count(),
             2,
             "a prev/next pair walks the members, and it reads `{}`",
             walking.chord
@@ -3567,14 +3590,14 @@ mod tests {
             .unwrap_or_else(|| panic!("the Map census no longer offers a composition verb at all"));
         let chord = chord_text(binding(Action::GroupFromSet));
         assert!(
-            row.chord.split(", ").any(|c| c == chord),
+            row.chord.split(" · ").any(|c| c == chord),
             "the row's chord column must list `{chord}`, and it reads `{}`",
             row.chord
         );
         assert!(
             row.does.contains(&format!("{chord}:")),
             "`{chord}` is one of {} chords on this row, so the phrase has to name it — it reads `{}`",
-            row.chord.split(", ").count(),
+            row.chord.split(" · ").count(),
             row.does
         );
     }
@@ -3669,7 +3692,7 @@ mod tests {
             .flat_map(|c| [(c, Stance::Idle), (c, Stance::Holding)])
         {
             for row in badges(context, stance) {
-                let chords = row.chord.split(", ").count();
+                let chords = row.chord.split(" · ").count();
                 let phrases: Vec<&str> = row.does.split(" / ").collect();
                 // The annotation form names its own chord; see the note above.
                 if phrases.iter().skip(1).any(|p| p.contains(':')) {
@@ -3994,14 +4017,14 @@ mod tests {
             .iter()
             .find(|r| r.does == "pan")
             .unwrap_or_else(|| panic!("no pan row"));
-        assert_eq!(pan.chord, "W, A, S, D");
+        assert_eq!(pan.chord, "W · A · S · D");
         assert_eq!(global.iter().filter(|r| r.does == "pan").count(), 1);
 
         let turn = badges(Context::Global, Stance::Idle)
             .into_iter()
             .find(|r| r.does == "turn view")
             .unwrap_or_else(|| panic!("no turn row"));
-        assert_eq!(turn.chord, "Q, E");
+        assert_eq!(turn.chord, "Q · E");
 
         // **The whole rotate cluster on one row.** It was two rows and two subjects — `Z, C, V`
         // aimed the brush while `R, T, Y, U` turned what was under the cursor — until the split was
@@ -4012,7 +4035,7 @@ mod tests {
             .iter()
             .find(|r| r.does == "turn L / turn R / tip x / tip z / straight")
             .unwrap_or_else(|| panic!("no turn row"));
-        assert_eq!(turn_piece.chord, "R, T, Y, U, V");
+        assert_eq!(turn_piece.chord, "R · T · Y · U · V");
         assert!(
             !map.iter().any(|r| r.does.starts_with("aim ")),
             "the aim row retired into the turn cluster; two rows would be two subjects again"
@@ -4062,7 +4085,7 @@ mod tests {
             .into_iter()
             .find(|r| r.does == "suggest / all / abandon")
             .unwrap_or_else(|| panic!("no labels row"));
-        assert_eq!(labels.chord, "L, Shift+L, Shift+Y");
+        assert_eq!(labels.chord, "L · Shift+L · Shift+Y");
     }
 
     /// **The overlay key is held, not tapped.** `pressed` must answer for it while it is down —
@@ -4088,33 +4111,34 @@ mod tests {
     }
 
     /// Collapsing must not lose a binding — every one still appears in exactly one row.
+    ///
+    /// **Every context × every stance.** It swept five contexts at `Stance::Idle`, which is how
+    /// the `Only(Holding)` member walk in `Context::Tiles` rendered as `",, ."` for weeks with a
+    /// test named for exactly that defect passing (N15).
     #[test]
     fn collapsing_rows_loses_nothing() {
-        for context in [
-            Context::Global,
-            Context::Map,
-            Context::Meshes,
-            Context::Anim,
-            // **Compose was missing from both of these lists**, so the fourth tab's rows were
-            // neither counted against the ceiling nor checked for surviving the collapse. A tab
-            // absent from the test that polices the tabs is a tab the policing does not reach.
-            Context::Compose,
-        ] {
-            let chords: String = badges(context, Stance::Idle)
-                .iter()
-                .map(|r| r.chord.clone())
-                .collect::<Vec<_>>()
-                .join(" ");
-            for b in in_context(context, Stance::Idle) {
-                // Against the RENDERED chord, not the bare field: a modified binding reads as one
-                // token (`Cmd+S`), and splitting it back apart would be this test inventing a second
-                // rendering rule to disagree with `chord_text`.
-                let want = chord_text(b);
-                assert!(
-                    chords.split(&[' ', ','][..]).any(|c| c == want),
-                    "{:?}'s chord `{want}` vanished when rows collapsed",
-                    b.action
-                );
+        for context in Context::ALL {
+            for stance in Stance::ALL {
+                let chords: String = badges(context, stance)
+                    .iter()
+                    .map(|r| r.chord.clone())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                for b in in_context(context, stance) {
+                    // Against the RENDERED chord, not the bare field: a modified binding reads as
+                    // one token (`Cmd+S`), and splitting it back apart would be this test inventing
+                    // a second rendering rule to disagree with `chord_text`.
+                    //
+                    // Split on whitespace only: with ` · ` as the separator, splitting on `','`
+                    // would tear a chord that IS a comma back apart — the bug this exists to catch.
+                    let want = chord_text(b);
+                    assert!(
+                        chords.split_whitespace().any(|c| c == want),
+                        "{:?}'s chord `{want}` vanished when rows collapsed in {context:?} at \
+                         {stance:?}",
+                        b.action
+                    );
+                }
             }
         }
     }
@@ -4470,10 +4494,10 @@ mod tests {
         let rows = badges(Context::Map, Stance::Idle);
         let fills: Vec<&Badge> = rows
             .iter()
-            .filter(|r| r.chord.split(", ").any(|c| c.ends_with('G')))
+            .filter(|r| r.chord.split(" · ").any(|c| c.ends_with('G')))
             .collect();
         assert_eq!(fills.len(), 1, "four bindings, one row: {fills:?}");
-        let chords: Vec<&str> = fills[0].chord.split(", ").collect();
+        let chords: Vec<&str> = fills[0].chord.split(" · ").collect();
         assert_eq!(chords.len(), 4, "all four chords are on it: {:?}", fills[0]);
         assert!(chords.iter().any(|c| *c == "F"), "{chords:?}");
         assert!(chords.iter().any(|c| *c == "G"), "{chords:?}");

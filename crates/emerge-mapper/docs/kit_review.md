@@ -282,22 +282,77 @@ fell through to an "unreachable" arm posting `no tile at row 0`, and `has_proble
 the refusal under test. They passed for months without ever reaching the drop. Both now open a tile
 and stand on the Meshes page, which is the state the refusal is actually about.
 
-### Not built, named rather than dropped
+### Not built on 2026-09-03 — every one closed on 2026-09-04
 
-Triaged in and **not** delivered. None is blocked; each is simply past the turn budget.
+Triaged in and not delivered in that commit. Part 4 below closes all of them.
 
-| # | What is left |
+| # | What was left | Closed by |
+|---|---|---|
+| **M8** | The `EXCLUDED` band could not be opened from the keyboard. | `ListRow::Excluded`, `Selected::Excluded`, `ImportState::excluded_focused`; `Space`/`Enter` toggle it from `commit_candidate`. |
+| **M11** | Undo restored the lists and not the cursor. | `Snapshot::cursor: CursorMark`, resolved by mesh path on restore. |
+| **M12** | `Space` stopped folding packs while a derivation was staged. | `FoldPack` is `b(..).unless(Stance::Holding)`. |
+| **M16** | `←` on an empty candidate shelf had no refusal. | `nothing_to_walk`, shared with `↑`/`↓`. |
+| **M9** | The follower was unordered against the rebuild. | Explicit `.after` chain: correctors → follower → rebuild → `arm_list_rows`. |
+| **M15** | The false `Repeat` comment. | Corrected: `Repeat` is a `Vec<Countdown>` keyed by action. |
+| **T7** | `[INFERENCE]` — verified unreachable, no change. | — |
+| **T10, T11** | The detail pane's rebuild gate; observers taking bare `ResMut`. | `resource_changed::<Project>` rung; every `on_*` observer takes `Option<ResMut>`, ratcheted by `every_global_observer_takes_its_resources_as_option`. |
+
+---
+## Part 4 — 2026-09-04: the seed, re-reported, and twenty new findings
+
+The author re-reported the seed after Part 3: *"I don't see a list of meshes as I press up and down
+arrows, but I see the mesh change."* Two read-only reviews found **N1–N20**, plus the leftovers above.
+
+**Baseline was 155 / 1 on `--test headless`; it is now 166 / 1** — eleven behavioural tests added,
+the one red still `no_two_leaders_cross`. Unit tests 330 / 0; every ratchet binary green.
+
+### N1 — the seed, reintroduced by its own fix
+
+Part 3's two-row margin asks for `max + margin` at the end of a list, and a page-jump asks for up to
+half a viewport past it. Bevy 0.19 clamps only `ComputedNode::scroll_position`
+(`bevy_ui-0.19.0/src/layout/mod.rs:364-369`, through `bypass_change_detection`); the `ScrollPosition`
+**component** every follower read back kept the surplus. So the rows were drawn at the clamp while
+the arithmetic worked from the surplus, and walking back up produced `want` values still over max:
+nothing moved while the highlight walked off the list.
+
+`chrome::scroll_to_reveal` now takes the ceiling and clamps at both ends; `chrome::scroll_bounds`
+is the one reader of a viewport's effective position and maximum, and all five followers go through
+it. `the_list_scrolls_back_up_from_the_end_of_the_scan` reproduces the seed — jump to the last row,
+walk up twenty-five, assert the effective scroll moved — and **fails under the old arithmetic at
+`972 -> 972`**. A ratchet (`every_follower_reads_the_scroll_it_is_actually_at`) forbids a follower
+that feeds the raw component back in.
+
+### What changed
+
+| # | What changed |
 |---|---|
-| **M8** | The `EXCLUDED` band still cannot be opened from the keyboard. It needs a third `ListRow` variant, which ripples through the walk, `put_cursor`, the draw and `commit_candidate`'s fold branch — the same class of index-model change that `+ New Tile` turned out to be, and there was not room for a second one. |
-| **M11** | Undo restores the lists and not the cursor. |
-| **M12** | `Space` still stops folding packs while a derivation is staged, and the mouse still folds. |
-| **M16** | `←` on an empty candidate shelf still has no refusal where `→` has one. |
-| **M9** | The follower's "one frame late" contract is still unordered against the rebuild — latent, and now less likely to bite because the margin absorbs a stale frame. |
-| **M15** | The false `Repeat` comment. |
-| **T7** | A clicked row keeps keyboard focus, so the next `Enter` may fire its `Activate` too. `[INFERENCE]` — never reproduced. |
-| **T10, T11** | The detail pane's rebuild gate, and thirteen observers taking non-optional `ResMut` of door resources. Both latent; T11 becomes a crash the day the teardown is completed — **and this commit completed part of that teardown**, so T11 is now the most urgent of the leftovers. |
+| **N2** | `scan_mesh` takes a `ScanKind`; the automatic scan records no history and clones no snapshot. `autoscan_candidate` waits one frame of stillness (`AutoScanned`, a door resource) before opening a GLB, so a held arrow scans only where it stops. |
+| **N7, M9, M15** | The list is a value: `RowInk` / `list_ink` / `draw_ink`. `rebuild_candidates` compares the ink against `DrawnRows` and returns when nothing a row says has changed; `arm_list_rows` repaints the selection in place. A keystroke on a 318-row scan is now ~0 spawns instead of ~1000 despawns + ~1000 spawns. `draw_candidates`, `draw_pack`, `tile_rows`, `kit_row`, `new_tile_row` are gone. |
+| **N10** | MESHES rows carry a portrait — the thumbnails the kit door was already baking and displaying nowhere. `THUMB_SLOT` moved to `chrome`. |
+| **N3** | `build_keys` records the mode on the way past, so the arrival seed fires on every arrival. |
+| **N4** | `Enter` on the tile already in hand — committed or draft — does not reopen it. |
+| **N17** | `right` on `+ New Tile` drills and says what is true, instead of claiming the kit is empty. |
+| **N20** | The open tile's id is drawn in `ACCENT` on the page. |
+| **N5** | `+ New Tile` is drawn on an empty kit, and the `TILES` chip lands on the page there too. |
+| **N8, N9** | The Tiles page walk and Compose's list walk repeat and stride through `keys::repeating`. |
+| **N6, N18** | `keep_candidate_selection_visible` clears a heading the list no longer draws and moves the staged mesh to the **nearest** surviving row, not the top. |
+| **N19** | The candidate walk refuses out loud on an empty shelf. |
+| **N11, N12, N13, N14** | Every empty shelf says why; a failed scan raises a problem, clears stale rows and says so; the inspector's empty case reads. |
+| **N15** | Badge chords join with ` · `, so `,`/`.` render; `collapsing_rows_loses_nothing` sweeps `Context::ALL × Stance::ALL`. |
+| **N16** | `F` is unbound on the Tiles page and the box is hidden there. |
 
-### Captures
+### Captures — 2026-09-04
+
+| Surface | After |
+|---|---|
+| The seed, forty down then eighteen up — the list follows both ways | `kit_review/after2_seed_down40.png`, `kit_review/after2_seed_up18.png` |
+| MESHES shelf with portraits | `kit_review/after2_meshes_portraits.png` |
+| Tiles page, open tile in amber, no filter box | `kit_review/after2_tiles_open_amber.png` |
+| Badges while holding — `, · .` | `kit_review/after2_badges_holding.png` |
+
+A six-second held `↓` walked the whole 270-mesh scan to its last row without a stall.
+
+### Captures — 2026-09-03
 
 | Surface | Before | After |
 |---|---|---|

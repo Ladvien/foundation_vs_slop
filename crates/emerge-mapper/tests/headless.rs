@@ -9736,6 +9736,13 @@ fn f_focuses_the_filter_and_enter_hands_the_keyboard_back() {
     }
     assert_eq!(focus(&app), None, "the tab does not open typing");
 
+    // **Off the Tiles page first.** The tab arrives on the page, and since 2026-09-04 `F` is not
+    // bound there (N16): the box narrows the library and the candidate packs, and the page draws
+    // neither. `right` drills to the Meshes page, which is where the box is.
+    press(&mut app, key(Action::PageEnter));
+    for _ in 0..2 {
+        app.update();
+    }
     press(&mut app, key(Action::FocusFilter));
     for _ in 0..2 {
         app.update();
@@ -14874,4 +14881,618 @@ fn the_token_prompt_swallows_the_keys_that_would_rotate_the_mesh() {
         Some("n".to_owned()),
         "and the letter lands in the draft's name field"
     );
+}
+
+
+// ── The kit door's list, after the 2026-09-04 defect list ────────────────────────────────────────
+//
+// The plan these pin is `crates/emerge-mapper/docs/kit_review.md` Part 4. Each test names the
+// finding it closes.
+
+/// **A press, then a release, then some frames.** `press_once` latches the key down, and a held
+/// key auto-repeats through `keys::repeating` — so a walk of forty presses has to release between
+/// them or the count is not the count.
+fn step(app: &mut App, key: KeyCode, frames: usize) {
+    press_once(app, key);
+    app.world_mut()
+        .resource_mut::<bevy::input::ButtonInput<KeyCode>>()
+        .release_all();
+    for _ in 0..frames {
+        app.update();
+    }
+}
+
+/// A chord — modifier plus key — pressed once and released.
+fn step_chord(app: &mut App, keys: Vec<KeyCode>, frames: usize) {
+    app.add_systems(
+        Update,
+        IntoScheduleConfigs::before(
+            move |mut input: ResMut<bevy::input::ButtonInput<KeyCode>>, mut done: Local<bool>| {
+                if !*done {
+                    input.release_all();
+                    for k in &keys {
+                        input.press(*k);
+                    }
+                    *done = true;
+                }
+            },
+            emerge_mapper::keys::Phase::Act,
+        ),
+    );
+    app.update();
+    app.world_mut()
+        .resource_mut::<bevy::input::ButtonInput<KeyCode>>()
+        .release_all();
+    for _ in 0..frames {
+        app.update();
+    }
+}
+
+fn import_state(app: &App) -> &emerge_mapper::tiles::ImportState {
+    app.world().resource::<emerge_mapper::tiles::ImportState>()
+}
+
+/// **Where the candidate list actually is** — `ComputedNode::scroll_position`, the clamped value
+/// the rows are laid out at, in physical pixels. NOT the `ScrollPosition` component: Bevy never
+/// clamps that, so under the seed defect it kept decreasing while the list stood still, and a
+/// test reading it would have called the frozen list "scrolling".
+fn candidate_scroll_y(app: &mut App) -> f32 {
+    let mut q = app
+        .world_mut()
+        .query_filtered::<&bevy::ui::ComputedNode, With<emerge_mapper::tiles::CandidateList>>();
+    let mut it = q.iter(app.world());
+    let at = it
+        .next()
+        .unwrap_or_else(|| panic!("the kit door has one candidate list"))
+        .scroll_position
+        .y;
+    assert!(it.next().is_none(), "and only one");
+    at
+}
+
+/// The `Text` strings that are direct children of the candidate list.
+fn list_texts(app: &mut App) -> Vec<String> {
+    let list = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<Entity, With<emerge_mapper::tiles::CandidateList>>();
+        q.single(app.world())
+            .unwrap_or_else(|e| panic!("one candidate list: {e}"))
+    };
+    let children: Vec<Entity> = app
+        .world()
+        .get::<Children>(list)
+        .map(|c| c.iter().collect())
+        .unwrap_or_default();
+    children
+        .into_iter()
+        .filter_map(|e| app.world().get::<Text>(e).map(|t| t.0.clone()))
+        .collect()
+}
+
+/// Sixty meshes, so the list is taller than the surface and the walk has somewhere to go.
+fn long_pack() -> Vec<String> {
+    (0..60).map(|i| format!("mesh_{i:02}")).collect()
+}
+
+/// **N1, the seed in both directions.** Walk to the end of the scan, then walk back: the list
+/// must scroll UP. Under the pre-fix code it did not move at all — the follower fed back the raw
+/// `ScrollPosition` component, which Bevy never clamps, so every reveal computed from the end of
+/// the list landed past its end.
+#[test]
+fn the_list_scrolls_back_up_from_the_end_of_the_scan() {
+    use emerge_mapper::keys::{Action, binding};
+    let names = long_pack();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let root = Fixture::new("scroll-back")
+        .descriptor("wall", "alpha")
+        .pack("beta", &refs)
+        .build("m");
+    let mut app =
+        harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Meshes)
+            .unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..5 {
+        app.update();
+    }
+    let n = import_state(&app).candidates.len();
+    assert_eq!(n, 60, "the scan found the pack");
+
+    let up = binding(Action::PrevCandidate).key;
+    // **Straight to the last row**, the way a click lands there. A jump of more than a viewport
+    // takes `scroll_to_reveal`'s re-centre branch, which asks for the row in the MIDDLE of the
+    // viewport — half a viewport past the end of the content. Bevy clamps what it draws and leaves
+    // the `ScrollPosition` component carrying the surplus; that surplus is what the seed was.
+    app.world_mut()
+        .resource_mut::<emerge_mapper::tiles::ImportState>()
+        .selected = n - 1;
+    for _ in 0..4 {
+        app.update();
+    }
+    let at_end = candidate_scroll_y(&mut app);
+    assert!(at_end > 0.0, "sixty rows do not fit the surface, so the list scrolled: {at_end}");
+
+    // Back up, twenty-five rows — past the top of a viewport that shows roughly that many, so a
+    // correct follower has to scroll by then. Under the seed the component had half a viewport
+    // of surplus to burn through first, and the highlight walked off the top of the list while
+    // the rows stood still: *"I don't see a list of meshes as I press up and down arrows, but I
+    // see the mesh change."*
+    for _ in 0..25 {
+        step(&mut app, up, 3);
+    }
+    let after = candidate_scroll_y(&mut app);
+    assert!(
+        after < at_end,
+        "walking back up from the end must scroll the list up: {at_end} -> {after}"
+    );
+    while import_state(&app).selected > 0 {
+        step(&mut app, up, 3);
+    }
+    assert_eq!(
+        candidate_scroll_y(&mut app),
+        0.0,
+        "and the top row puts the list back at the top"
+    );
+}
+
+/// **N2.** Walking the list records nothing; an asked-for scan records one step.
+#[test]
+fn walking_the_candidate_list_records_no_history() {
+    use emerge_mapper::keys::{Action, binding};
+    let root = Fixture::new("walk-no-history")
+        .descriptor("wall", "alpha")
+        .pack("beta", &["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"])
+        .build("m");
+    let mut app =
+        harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Meshes)
+            .unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..5 {
+        app.update();
+    }
+    let down = binding(Action::NextCandidate).key;
+    for _ in 0..10 {
+        // Four frames: one for the move, one of stillness the automatic scan waits for, one for
+        // the scan itself, one to settle.
+        step(&mut app, down, 4);
+    }
+    let state = import_state(&app);
+    assert_eq!(state.selected, 10, "ten presses walked ten rows");
+    assert!(
+        state.undo.is_empty(),
+        "an automatic scan is not an edit: {} entries after a walk",
+        state.undo.len()
+    );
+    assert!(state.redo.is_empty());
+
+    step(&mut app, binding(Action::ScanMesh).key, 3);
+    assert_eq!(
+        import_state(&app).undo.len(),
+        1,
+        "the asked-for scan is an edit, and exactly one"
+    );
+}
+
+/// **N7, M9, M15 in one assertion.** The row survives the keystroke and the highlight moves.
+#[test]
+fn a_keystroke_does_not_respawn_the_list() {
+    use emerge_mapper::chrome::RowSelected;
+    use emerge_mapper::keys::{Action, binding};
+    use emerge_mapper::tiles::CandidateRow;
+    let root = Fixture::new("no-respawn")
+        .descriptor("wall", "alpha")
+        .pack("beta", &["a", "b", "c", "d"])
+        .build("m");
+    let mut app =
+        harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Meshes)
+            .unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..5 {
+        app.update();
+    }
+    let selected = import_state(&app).selected;
+    let row_of = |app: &mut App, ix: usize| -> (Entity, bool) {
+        let mut q = app.world_mut().query::<(Entity, &CandidateRow, &RowSelected)>();
+        q.iter(app.world())
+            .find(|(_, r, _)| r.0 == ix)
+            .map(|(e, _, s)| (e, s.0))
+            .unwrap_or_else(|| panic!("no row for candidate {ix}"))
+    };
+    let (first, armed) = row_of(&mut app, selected);
+    assert!(armed, "the selected row is the highlighted one");
+
+    step(&mut app, binding(Action::NextCandidate).key, 2);
+    let now = import_state(&app).selected;
+    assert_eq!(now, selected + 1, "one press, one row");
+    assert!(
+        app.world().get_entity(first).is_ok(),
+        "the row the cursor left must still exist — a keystroke repaints, it does not respawn"
+    );
+    let (same, still_armed) = row_of(&mut app, selected);
+    assert_eq!(same, first, "and it is the same entity");
+    assert!(!still_armed, "the row the cursor left is no longer highlighted");
+    let (_, next_armed) = row_of(&mut app, now);
+    assert!(next_armed, "the row the cursor moved to is");
+}
+
+/// **N3.** The arrival seed fires on every arrival, not once per process.
+#[test]
+fn arriving_on_the_tiles_tab_twice_lands_on_the_page_both_times() {
+    use emerge_mapper::tiles::Mode;
+    let root = Fixture::new("arrive-twice")
+        .descriptor("floor", "alpha")
+        .bounded_composition("furniture/t1", (1.0, 1.0, 1.0), &[("floor", "floor", (0.0, 0.0))])
+        .build("m");
+    let mut app = harness::build_headless_at(&root, "m", None, Mode::Tiles)
+        .unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..5 {
+        app.update();
+    }
+    let landing = |app: &App| {
+        let project = app.world().resource::<emerge_mapper::project::Project>();
+        let build = app.world().resource::<emerge_mapper::build::Build>();
+        emerge_mapper::build::landing_row(project, build)
+    };
+    let browsing = |app: &App| app.world().resource::<emerge_mapper::build::Build>().browsing;
+    assert_eq!(browsing(&app), Some(landing(&app)), "the first arrival lands on the page");
+
+    // Through the strip's own keys, which is what clears `browsing` on the way out (`enter_tab`).
+    let slot = |mode: Mode| {
+        let i = emerge_mapper::tiles::Door::showing(Mode::Tiles)
+            .tabs()
+            .iter()
+            .position(|m| *m == mode)
+            .unwrap_or_else(|| panic!("the mode is on the kit door"));
+        emerge_mapper::keys::binding(
+            emerge_mapper::keys::Action::tab_slot(i)
+                .unwrap_or_else(|| panic!("slot {i} has a key")),
+        )
+        .key
+    };
+    step(&mut app, slot(Mode::Meshes), 5);
+    assert!(
+        *app.world().resource::<Mode>() == Mode::Meshes,
+        "the strip key moved the door to MESHES"
+    );
+    assert_eq!(browsing(&app), None, "leaving the tab clears the page cursor");
+
+    step(&mut app, slot(Mode::Tiles), 5);
+    assert!(*app.world().resource::<Mode>() == Mode::Tiles);
+    assert_eq!(
+        browsing(&app),
+        Some(landing(&app)),
+        "the second arrival lands on the page too — the seed used to fire once per process"
+    );
+}
+
+/// **N4.** `Enter` on the tile already in hand keeps its unsaved edits and its history.
+#[test]
+fn reopening_the_open_tile_keeps_its_edits() {
+    use emerge_mapper::keys::{Action, MOD_KEYS, binding};
+    let root = Fixture::new("reopen-keeps")
+        .sized_descriptor("panel", "alpha", 0.2, 0.2)
+        .build("m");
+    let mut app =
+        harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Tiles)
+            .unwrap_or_else(|e| panic!("{e}"));
+    app.update();
+    open_tile(&mut app, "tile");
+    step(&mut app, binding(Action::BuildDrop).key, 2);
+    step_chord(&mut app, vec![MOD_KEYS[0], binding(Action::Save).key], 3);
+    let kit_len = app
+        .world()
+        .resource::<emerge_mapper::project::Project>()
+        .compositions
+        .compositions
+        .len();
+    assert_eq!(kit_len, 1, "the tile is committed");
+
+    // Nudge the member, so there is an unsaved edit to lose.
+    step(&mut app, binding(Action::BuildRung).key, 2);
+    step(&mut app, binding(Action::BuildBack).key, 2);
+    let member_at = |app: &App| -> (f32, f32) {
+        app.world()
+            .resource::<emerge_mapper::build::Build>()
+            .open
+            .as_ref()
+            .and_then(|c| c.members.first())
+            .map(|m| m.at)
+            .unwrap_or_else(|| panic!("a member is in the tile"))
+    };
+    let nudged = member_at(&app);
+    assert_ne!(nudged, (0.0, 0.0), "the nudge moved the member");
+
+    // Put the piece down first: `left` is the nudge while holding, and the page walk at idle.
+    step(&mut app, binding(Action::Cancel).key, 2);
+    // Back to the page, onto the tile's row, and `Enter` on it.
+    step(&mut app, binding(Action::PageLeave).key, 3);
+    let build = app.world().resource::<emerge_mapper::build::Build>();
+    assert_eq!(build.browsing, Some(1), "the page lands on the first tile row");
+    step(&mut app, binding(Action::TileOpen).key, 3);
+    assert_eq!(
+        member_at(&app),
+        nudged,
+        "`Enter` on the open tile must not reload the committed copy over the edit"
+    );
+    // `TileHistory`'s fields are private, so the stack is asserted through what it does: an undo
+    // that still takes the nudge back is a stack the reopen did not clear.
+    step_chord(&mut app, vec![MOD_KEYS[0], binding(Action::UndoBuild).key], 3);
+    assert_eq!(
+        member_at(&app),
+        (0.0, 0.0),
+        "and must not clear the undo stack under it — one undo takes the nudge back"
+    );
+}
+
+/// **N5.** An empty kit still draws `+ New Tile`, so the pointer has something to click.
+#[test]
+fn an_empty_kit_can_start_a_tile_with_the_pointer() {
+    let root = Fixture::new("empty-kit-new-tile")
+        .descriptor("floor", "alpha")
+        .build("m");
+    let mut app =
+        harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Tiles)
+            .unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..5 {
+        app.update();
+    }
+    let mut q = app
+        .world_mut()
+        .query_filtered::<Entity, With<emerge_mapper::tiles::NewTileRow>>();
+    assert_eq!(
+        q.iter(app.world()).count(),
+        1,
+        "`+ New Tile` is drawn on an empty kit — it used to be skipped on exactly that kit"
+    );
+    let texts = list_texts(&mut app);
+    assert!(
+        texts.iter().any(|t| t.starts_with("nothing authored yet")),
+        "and the empty-kit sentence follows it rather than replacing it: {texts:?}"
+    );
+}
+
+/// **N6.** Folding the pack the cursor is in keeps the staged mesh near it, never at the top.
+#[test]
+fn folding_the_pack_you_are_in_keeps_you_near_it() {
+    use emerge_mapper::keys::{Action, binding};
+    let root = Fixture::new("fold-near")
+        .descriptor("wall", "alpha")
+        .pack("aaa", &["a1", "a2", "a3", "a4", "a5"])
+        .pack("bbb", &["b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8", "b9", "b10"])
+        .build("m");
+    let mut app =
+        harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Meshes)
+            .unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..5 {
+        app.update();
+    }
+    let ix_of = |app: &App, leaf: &str| {
+        import_state(app)
+            .candidates
+            .iter()
+            .position(|c| c.mesh.ends_with(&format!("/{leaf}.glb")))
+            .unwrap_or_else(|| panic!("no candidate {leaf}"))
+    };
+    // Stand on `bbb/b5`, with `bbb` open and the cursor on its heading — the state a fold is
+    // made from. Written directly: the walk is pinned elsewhere, and this is about the corrector.
+    let b5 = ix_of(&app, "b5");
+    {
+        let mut state = app
+            .world_mut()
+            .resource_mut::<emerge_mapper::tiles::ImportState>();
+        state.folded_packs.remove("bbb");
+        state.selected = b5;
+        state.focused_pack = Some("bbb".to_owned());
+    }
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(import_state(&app).selected, b5, "standing on bbb's heading, b5 staged");
+
+    step(&mut app, binding(Action::FoldPack).key, 3);
+    let state = import_state(&app);
+    assert!(state.folded_packs.contains("bbb"), "Space on the heading folded it");
+    assert_eq!(
+        state.focused_pack.as_deref(),
+        Some("bbb"),
+        "the highlight stays on the heading the author folded from"
+    );
+    let a5 = ix_of(&app, "a5");
+    assert_eq!(
+        state.selected, a5,
+        "the staged mesh is the NEAREST surviving row (aaa's last), not the top of the list"
+    );
+}
+
+/// **M8.** The `EXCLUDED` band is a row the arrows reach and `Space` opens.
+#[test]
+fn the_excluded_band_opens_from_the_keyboard() {
+    use emerge_mapper::keys::{Action, binding};
+    let root = Fixture::new("excluded-band")
+        .descriptor("wall", "alpha")
+        .pack("aaa", &["a1", "a2"])
+        .pack("bbb", &["b1", "b2"])
+        .build("m");
+    let mut app =
+        harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Meshes)
+            .unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..5 {
+        app.update();
+    }
+    // Exclude `bbb` from its heading: down past aaa's two rows onto bbb's heading, Shift+R.
+    let down = binding(Action::NextCandidate).key;
+    let mut guard = 0;
+    while import_state(&app).focused_pack.as_deref() != Some("bbb") {
+        step(&mut app, down, 2);
+        guard += 1;
+        assert!(guard < 20, "the walk never reached bbb's heading");
+    }
+    step_chord(
+        &mut app,
+        vec![KeyCode::ShiftLeft, binding(Action::ExcludePack).key],
+        3,
+    );
+    let project = app.world().resource::<emerge_mapper::project::Project>();
+    assert!(project.policy.excludes("bbb"), "Shift+R excluded the pack under the cursor");
+    assert!(!import_state(&app).excluded_open, "the band starts closed");
+
+    // The band is the last row now. Walk down until the cursor stands on it.
+    guard = 0;
+    while !import_state(&app).excluded_focused {
+        step(&mut app, down, 2);
+        guard += 1;
+        assert!(guard < 20, "the arrows never reached the EXCLUDED band");
+    }
+    step(&mut app, binding(Action::FoldPack).key, 3);
+    assert!(
+        import_state(&app).excluded_open,
+        "Space on the band opens the group — it used to be the pointer's alone"
+    );
+}
+
+/// **M11.** Undo restores the lists AND the cursor, by mesh path rather than by index.
+#[test]
+fn undo_puts_the_cursor_back_on_the_mesh_it_was_on() {
+    use emerge_mapper::keys::{Action, MOD_KEYS, binding};
+    let root = Fixture::new("undo-cursor")
+        .descriptor("wall", "alpha")
+        .pack("aaa", &["a1", "a2", "a3", "a4"])
+        .build("m");
+    let mut app =
+        harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Meshes)
+            .unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..5 {
+        app.update();
+    }
+    let down = binding(Action::NextCandidate).key;
+    step(&mut app, down, 3);
+    step(&mut app, down, 3);
+    let (before_len, mesh) = {
+        let s = import_state(&app);
+        (s.candidates.len(), s.candidates[s.selected].mesh.clone())
+    };
+    step(&mut app, binding(Action::Accept).key, 3);
+    assert_eq!(
+        import_state(&app).candidates.len(),
+        before_len - 1,
+        "Accept removed the candidate and shifted every later index"
+    );
+    step_chord(&mut app, vec![MOD_KEYS[0], binding(Action::UndoTile).key], 3);
+    let s = import_state(&app);
+    assert_eq!(s.candidates.len(), before_len, "undo put the candidate back");
+    assert_eq!(
+        s.candidates.get(s.selected).map(|c| c.mesh.as_str()),
+        Some(mesh.as_str()),
+        "and the cursor is on the mesh it was on, not on whatever now sits at that index"
+    );
+}
+
+/// **N11, N12, N13, and the no-candidates case.** Every empty shelf says why, in one `Text`.
+#[test]
+fn every_empty_shelf_says_why() {
+    use emerge_mapper::filter::{Filters, Pane};
+    use emerge_mapper::keys::{Action, binding};
+    use emerge_mapper::tiles::ImportState;
+
+    // No candidates: a kit whose one mesh is already in the library.
+    let root = Fixture::new("empty-says-why")
+        .unjudged_descriptor("wall", "alpha")
+        .build("m");
+    let mut app =
+        harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Meshes)
+            .unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..5 {
+        app.update();
+    }
+    let one_sentence = |app: &mut App, what: &str| {
+        let texts = list_texts(app);
+        assert_eq!(texts.len(), 1, "{what}: exactly one sentence where rows would be: {texts:?}");
+        assert!(!texts[0].trim().is_empty(), "{what}: and it says something");
+        texts[0].clone()
+    };
+    assert!(import_state(&app).candidates.is_empty(), "the one mesh is in the library");
+    let said = one_sentence(&mut app, "no candidates");
+    assert!(said.contains("already in the library"), "{said}");
+
+    // A failed scan, as `scan`'s error arm leaves the state.
+    {
+        let mut state = app.world_mut().resource_mut::<ImportState>();
+        state.scan_failed = true;
+        state.candidates.clear();
+        state.selected = 0;
+    }
+    for _ in 0..3 {
+        app.update();
+    }
+    let said = one_sentence(&mut app, "failed scan");
+    assert!(said.contains("could not read"), "{said}");
+    app.world_mut().resource_mut::<ImportState>().scan_failed = false;
+
+    // The library shelf on the Tiles tab, with nothing judged.
+    *app.world_mut().resource_mut::<emerge_mapper::tiles::Mode>() =
+        emerge_mapper::tiles::Mode::Tiles;
+    for _ in 0..5 {
+        app.update();
+    }
+    step(&mut app, binding(Action::PageEnter).key, 3);
+    let said = one_sentence(&mut app, "empty judged library");
+    assert!(said.contains("no mesh is judged yet"), "{said}");
+
+    // A filter that matches nothing — on the same shelf, since `F` is the Tiles tab's key and the
+    // page has been left (`F` is not bound on the Tiles page, N16).
+    step(&mut app, binding(Action::FocusFilter).key, 3);
+    assert_eq!(
+        app.world().resource::<Filters>().focus_pane(),
+        Some(Pane::Candidates),
+        "`F` puts the cursor in the box"
+    );
+    // The drain frame — the keystroke that opens a field must not become its first character.
+    app.update();
+    for c in ['z', 'z', 'z'] {
+        tap_key(
+            &mut app,
+            bevy::input::keyboard::Key::Character(c.to_string().into()),
+            letter_key(c),
+        );
+    }
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(app.world().resource::<Filters>().text(Pane::Candidates), "zzz");
+    let said = one_sentence(&mut app, "filter matches nothing");
+    assert!(said.contains("nothing matches `zzz`"), "{said}");
+}
+
+/// **N10.** Every MESHES row carries a portrait slot.
+#[test]
+fn a_library_row_carries_a_portrait_slot() {
+    use emerge_mapper::keys::{Action, binding};
+    let root = Fixture::new("portrait-slot")
+        .descriptor("wall", "alpha")
+        .descriptor("floor", "alpha")
+        .build("m");
+    let mut app =
+        harness::build_headless_at(&root, "m", None, emerge_mapper::tiles::Mode::Meshes)
+            .unwrap_or_else(|e| panic!("{e}"));
+    for _ in 0..5 {
+        app.update();
+    }
+    step(&mut app, binding(Action::FocusLibrary).key, 3);
+    let rows: Vec<Entity> = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<Entity, With<emerge_mapper::tiles::LibraryRow>>();
+        q.iter(app.world()).collect()
+    };
+    assert_eq!(rows.len(), 2, "both library entries are rows");
+    for row in rows {
+        let children: Vec<Entity> = app
+            .world()
+            .get::<Children>(row)
+            .map(|c| c.iter().collect())
+            .unwrap_or_default();
+        let slot = children.iter().any(|e| {
+            app.world()
+                .get::<Node>(*e)
+                .is_some_and(|n| n.width == Val::Px(emerge_mapper::chrome::THUMB_SLOT))
+        });
+        assert!(slot, "a MESHES row without a portrait slot");
+    }
 }

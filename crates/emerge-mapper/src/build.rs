@@ -187,7 +187,7 @@ pub fn blank(id: &str, height: f32) -> Composition {
 /// not a tile it can edit at all.
 ///
 /// Named rather than matched inline because three places ask: both open paths in `build_keys`, and
-/// `tiles::tile_rows`, which marks the row so the refusal is not the first an author hears of it.
+/// `tiles::list_ink`, which marks the row so the refusal is not the first an author hears of it.
 pub fn has_a_box(comp: &Composition) -> bool {
     matches!(comp.envelope, Envelope::Bounded { .. })
 }
@@ -1270,6 +1270,9 @@ pub fn build_keys(
     // is on the record (2026-08-11 inspection, D3: eighteen rebuilds of an identical picture in
     // one session).
     mut project: ResMut<crate::project::Project>,
+    // The page walk repeats at the shared cadence like every other list in the editor.
+    time: Res<Time>,
+    mut repeat: ResMut<crate::keys::Repeat>,
     // **Which mode this system last saw.** The arrival seed below must fire exactly once per tab
     // entry, and `Mode::is_changed()` cannot answer that deterministically: the flag is consumed
     // by whichever system reads it first in a frame, so a `sense`-phase reader can eat the edge
@@ -1279,6 +1282,11 @@ pub fn build_keys(
 ) {
     use crate::keys::{Action, just_pressed};
     if *mode != crate::tiles::Mode::Tiles {
+        // **Recorded on the way past, or the seed below can only ever fire once per process.** The
+        // early return used to skip it, so `*seen` never held anything but `Some(Tiles)`: leaving
+        // the tab and coming back landed on the Meshes page, which is the opposite of what the
+        // seed's own note claims (N3).
+        *seen = Some(*mode);
         return;
     }
     let pressed = |a: Action| just_pressed(&keyboard, *live, a);
@@ -1352,11 +1360,16 @@ pub fn build_keys(
             // should stop there rather than wrap to the other end of it.
             (row as i32 + by).clamp(0, page.saturating_sub(1) as i32) as usize
         };
-        if pressed(Action::TilePrev) {
-            build.browsing = Some(step(row, -1));
+        let dt = time.delta_secs();
+        let stride = if crate::keys::shift_held(&keyboard) { 5 } else { 1 };
+        // One `repeating` call per direction: each key owns its own countdown and has to ramp on
+        // its own hold (`keys::Repeat` is a `Vec<Countdown>` keyed by id). It was `just_pressed`
+        // and `±1` while every other list in the editor repeats and strides (N8).
+        if crate::keys::repeating(&keyboard, *live, Action::TileNext, &mut repeat, dt) {
+            build.browsing = Some(step(row, stride));
         }
-        if pressed(Action::TileNext) {
-            build.browsing = Some(step(row, 1));
+        if crate::keys::repeating(&keyboard, *live, Action::TilePrev, &mut repeat, dt) {
+            build.browsing = Some(step(row, -stride));
         }
         // **`right` opens the tile under the cursor and drills into the Meshes page.** The
         // author's shape for the tab: *"push right arrow with a tile selected to add/move to the
@@ -1366,13 +1379,26 @@ pub fn build_keys(
         // return to the Meshes page without reopening it, so an undo stack is not a collateral
         // casualty.
         if pressed(Action::PageEnter) {
-            // **The draft row is the one case the kit has no tile for** — a named, unsaved tile
-            // in hand is a row the author walked to, and it opens by re-arming the page: the
-            // draft is already open, so this is the `already` branch below doing the drill alone.
-            // A kit with nothing in it has the same shape: nothing to open, and the drill is
-            // still the drill — the author came to pick meshes, and the Meshes page is where the
-            // picking happens. Both refuse by flipping the page instead of panicking or
-            // dead-ending, because the author's request (drill to Meshes) needs no tile.
+            // **Row zero drills and says so.** `row_composition(NEW_TILE_ROW)` is `None`, so this
+            // used to fall through to *"nothing to open yet"* for ANY kit without a draft in hand —
+            // two keystrokes from the landing row, claiming a kit of forty tiles was empty (N17).
+            // The drill is still the drill (`right` means the Meshes page and needs no tile), and
+            // the note names what is true.
+            if row == NEW_TILE_ROW {
+                build.browsing = None;
+                state.status.note(if page > 1 {
+                    format!(
+                        "meshes — nothing in hand; {} on a tile row opens one",
+                        crate::keys::chord(Action::TileOpen)
+                    )
+                } else {
+                    format!(
+                        "no tiles in the kit yet — {} on + New Tile names one",
+                        crate::keys::chord(Action::TileOpen)
+                    )
+                });
+                return;
+            }
             // **Row zero is NOT a name prompt here, and that distinction cost a test cluster.**
             //
             // `right` means *drill to the Meshes page* — the drill's own note above is right that it
@@ -1382,17 +1408,19 @@ pub fn build_keys(
             // drill into. `Enter` (`TileOpen`) is the key that acts on the row, and that is where
             // `+ New Tile` answers.
             //
-            // So row zero falls through to the empty-kit arm below, which flips to the Meshes page —
-            // exactly what it did before the row existed.
+            // The draft row is the one case the kit has no tile for — a named, unsaved tile in
+            // hand is a row the author walked to, and it opens by re-arming the page: the draft is
+            // already open, so this is the `already` branch below doing the drill alone.
             let Some(comp) = row_composition(row)
                 .and_then(|i| project.compositions.compositions.get(i))
                 .cloned()
                 .or_else(|| draft(&build, &project).cloned())
             else {
-                build.browsing = None;
+                // The row is drawn from the same source this indexes, so this is unreachable
+                // rather than unlikely — `TileOpen`'s own precedent below.
                 state
                     .status
-                    .note("nothing to open yet — New Tile +, then right again".to_owned());
+                    .problem(format!("no tile at row {row}; the page has {page}"));
                 return;
             };
             // **A composition with no box is refused by name, and the row stays where it is.**
@@ -1405,7 +1433,7 @@ pub fn build_keys(
             // The refusal comes from [`open_saved`], the one writer of `build.open`, rather than
             // from a check here — the alternatives to refusing are both worse: hiding the row lies
             // about what is in the kit, and converting it silently rewrites what the author
-            // captured. `tiles::tile_rows` marks the row, so the refusal is not the first they hear
+            // captured. `tiles::list_ink` marks the row, so the refusal is not the first they hear
             // of it.
             //
             // **And the page does not flip.** The drill's own note above is right that the drill
@@ -1434,6 +1462,26 @@ pub fn build_keys(
             // **Row zero makes one**, the same door `right` and the row's click use.
             if row == NEW_TILE_ROW {
                 build.naming = Some(NamePrompt { raw: String::new(), then: NameThen::Open });
+                return;
+            }
+            // **The tile in hand is not reopened.** `open_saved` takes the COMMITTED copy, so
+            // reopening the tile you are editing throws away every unsaved member edit and both
+            // undo stacks — and nothing on the page said which tile was open (N20). `right` has
+            // asked this since T2; `Enter` did not (N4). The draft row is the same case: it IS
+            // `build.open`, and reopening it kept the members but bumped `opened`, which cleared
+            // the history under it.
+            let at_row = row_composition(row)
+                .and_then(|i| project.compositions.compositions.get(i))
+                .map(|c| c.id.as_str())
+                .or_else(|| draft(&build, &project).map(|d| d.id.as_str()));
+            if let (Some(open), Some(id)) = (build.open.as_ref(), at_row)
+                && open.id == id
+            {
+                let (id, n) = (open.id.clone(), open.members.len());
+                build.browsing = None;
+                state
+                    .status
+                    .note(format!("`{id}` is already open — {n} member(s)"));
                 return;
             }
             // The draft is the last row of the page, and it is in hand by construction — the
