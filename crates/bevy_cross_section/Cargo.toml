@@ -1,0 +1,53 @@
+[package]
+name = "bevy_cross_section"
+version = "0.1.0"
+edition = "2024"
+description = "Anatomical cross-sections for cut faces in Bevy: skin, fat, muscle, cortex and marrow bands at their measured per-region depths, baked once into a procedural strip and painted through a second UV channel — CPU-side, deterministic, hashable."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Ladvien/bevy_cross_section"
+keywords = ["bevy", "gamedev", "gore", "anatomy", "texture"]
+categories = ["game-development", "graphics"]
+# **Published**, because `bevy_carnage` is on crates.io and depends on this crate, and a released
+# package may not depend on a path-only dependency. Same rule as `bevy_wetmap`.
+publish = true
+# The README gif is served from the mirror, not the registry package (crates.io caps a package at 10 MiB).
+exclude = ["docs/*.gif"]
+
+[dependencies]
+# The umbrella with defaults off. Each feature is load-bearing:
+#
+# `bevy_pbr` is here because this crate's product is a `StandardMaterial` that samples its strip
+# through `UvChannel::Uv1` — the material IS the API, unlike `bevy_wetmap`, which hands back images
+# and lets the caller own the material. `bevy_render` is here for the three `wgpu_types` names every
+# `Image` constructor takes (`Extent3d`, `TextureDimension`, `TextureFormat`); in 0.19 the only
+# public path to them inside the umbrella is `bevy::render::render_resource`.
+bevy = { version = "0.19.0", default-features = false, features = [
+    "bevy_asset",  # Assets<Image>, Handle<T>, RenderAssetUsages
+    "bevy_image",  # Image, ImageSampler
+    "bevy_mesh",   # Mesh, VertexAttributeValues, ATTRIBUTE_UV_1
+    "bevy_pbr",    # StandardMaterial, UvChannel
+    "bevy_render", # render_resource::{Extent3d, TextureDimension, TextureFormat}
+    "std",
+] }
+# **The blood model**, for two things: `hash_f32`, the one frozen random source every gore crate
+# shares, and `spectral`, which colours the muscle band as the wet venous film it optically is.
+#
+# Path *and* version, because `cargo publish` refuses a path-only dependency.
+bloodstain = { version = "0.2", path = "../bloodstain", default-features = false }
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+[features]
+default = []
+serde = ["dep:serde", "bloodstain/serde"]
+
+# **Examples only.** The windowed example needs winit and the 3D render pipeline, so it takes the
+# full umbrella here, where it cannot reach a consumer's dependency graph. `tests/leaf.rs` reads
+# `[dependencies]` only, deliberately.
+[dev-dependencies]
+bevy = { version = "0.19.0" }
+
+# **The wasm demos' extra features.** Target-gated, so a native build resolves none of it. `web` is
+# REQUIRED: without it `std::time::Instant::now()` panics in the browser. `webgpu` takes precedence
+# over the `webgl2` Bevy's defaults pull in, so these modules are WebGPU-only.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+bevy = { version = "0.19", default-features = false, features = ["web", "webgpu"] }

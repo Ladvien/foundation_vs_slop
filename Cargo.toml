@@ -38,6 +38,15 @@ members = [
     # XPBD Cosserat-style strands with a tearing mesenteric membrane: guts that spill, coil, tether
     # and tear. Fixed substep and iteration count with a fixed constraint order, so it is a golden.
     "crates/bevy_viscera",
+    # **The 2026-09-04 four**, each a kernel `bevy_carnage` composes and none depending on it back.
+    # Anatomical cross-section banding on cut caps, from a measured per-region thickness table;
+    # texture-space flaying that peels skin→fat→muscle→bone and hands the bone to fracture; a
+    # laceration whose gape widens with time and an authored tension; and Sellán et al.'s fracture
+    # modes on the convex proxy, so an impact breaks a body across its real weaknesses.
+    "crates/bevy_cross_section",
+    "crates/bevy_flaymap",
+    "crates/bevy_laceration",
+    "crates/bevy_fracture_modes",
     # The agent debugger, vendored whole so it can be USED and EVOLVED here rather than pinned to a
     # rev of someone else's history. Two members because the repo has two independent halves: the MCP
     # server binary (a separate process, speaks MCP to an agent and BRP to the game) and the companion

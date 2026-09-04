@@ -11,8 +11,14 @@ use bevy::mesh::Mesh;
 use bevy::prelude::Component;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::transform::components::GlobalTransform;
-use bloodstain::dry::{DRY_REF_AREA_M2, DRY_REF_TICKS, appearance};
+use bloodstain::dry::{DRY_REF_AREA_M2, DRY_REF_TICKS, appearance_with_fresh};
+use bloodstain::spectral::Film;
 use bloodstain::stain::{StainShape, rasterise};
+
+/// Thickness levels the fresh-colour table holds per tick. Sixteen: blood's colour moves fastest
+/// in the first quarter-millimetre and is flat past a couple, so the levels are spent where the
+/// substrate still shows through.
+const FILM_LEVELS: usize = 16;
 
 use crate::digest::Fnv1a;
 use crate::settings::WetSettings;
@@ -544,11 +550,22 @@ impl WetCanvas {
         let span = s.dry_span();
         let base = self.base_rgba;
         let base_rough = self.base_rough;
-        // One-slot memo on the raw age. `bloodstain::dry::appearance`'s only per-texel input is the
-        // age, and a stamp lands with one age across a contiguous blob, so a row-major walk hits this
-        // for almost every texel. Exact, not quantised: the memo either matches the age or is
-        // recomputed.
-        let mut memo_age = u32::MAX;
+
+        // **The fresh colour is a function of thickness, tabulated once per tick.** The coverage byte
+        // is a film depth (see `WetSettings::film_depth_mm`), and `bloodstain::spectral` turns a depth
+        // into a colour through 81 wavelengths of Kubelka–Munk — far too much per texel, and
+        // pointless: sixteen depth levels are indistinguishable from 255 at blood's own contrast.
+        // The substrate the film lies on is this canvas's base albedo, as a grey.
+        let substrate = luminance(base);
+        let fresh: [[f32; 3]; FILM_LEVELS] = core::array::from_fn(|i| {
+            let thickness_mm = s.film_depth_mm.max(0.0) * (i as f32 + 0.5) / FILM_LEVELS as f32;
+            bloodstain::spectral::srgb(&Film { thickness_mm, so2: s.so2, substrate })
+        });
+
+        // One-slot memo on `(level, age)`. A stamp lands with one age across a contiguous blob and
+        // its interior is one level, so a row-major walk hits this for almost every texel. Exact,
+        // not quantised: the memo either matches or is recomputed.
+        let mut memo = (usize::MAX, u32::MAX);
         let mut memo_srgb = [0u8; 3];
         let mut memo_rough = 0u8;
         let mut changed = false;
@@ -560,30 +577,26 @@ impl WetCanvas {
             let (rgb, rough_byte) = if amount == 0 {
                 ([base[0], base[1], base[2]], base_rough)
             } else {
-                if age as u32 != memo_age {
-                    memo_age = age as u32;
+                let level = (amount as usize * FILM_LEVELS) / 256;
+                if (level, age as u32) != memo {
+                    memo = (level, age as u32);
                     // **`s.dry_ticks` is the single authority for the timeline.** `appearance`
                     // normalises the age it is given against `dry_ticks(area, hz)`, so the texel's age
                     // is rescaled onto `bloodstain`'s own reference span and the reference inputs are
                     // passed. Feeding the raw age with an unrelated area would leave two dials
                     // deciding one curve.
                     let scaled = ((age as u64 * DRY_REF_TICKS as u64) / span as u64) as u32;
-                    let ap = appearance(scaled, 60, DRY_REF_AREA_M2, &blood);
+                    let ap = appearance_with_fresh(scaled, 60, DRY_REF_AREA_M2, &blood, fresh[level]);
                     memo_srgb = [enc(ap.srgb[0]), enc(ap.srgb[1]), enc(ap.srgb[2])];
                     memo_rough = enc(ap.roughness);
                 }
-                // Composited in the encoded space rather than in linear light. Deliberate: the honest
-                // version is a `powf` each way per channel per texel per tick, and at blood's own
-                // chroma the difference is under a code value. `rim`, `halo` and `craquelure` are
-                // deliberately unread — they need a shader, and this crate ships none.
-                (
-                    [
-                        over(base[0], memo_srgb[0], amount),
-                        over(base[1], memo_srgb[1], amount),
-                        over(base[2], memo_srgb[2], amount),
-                    ],
-                    over(base_rough, memo_rough, amount),
-                )
+                // The albedo is the film's own colour: the substrate is already inside it, because
+                // a thin film transmits what it lies on — compositing it over the base a second time
+                // would count the surface twice. Roughness still blends, in the encoded space: the
+                // honest version is a `powf` each way per texel per tick and at these values the
+                // difference is under a code value. `rim`, `halo` and `craquelure` are deliberately
+                // unread — they need a shader, and this crate ships none.
+                (memo_srgb, over(base_rough, memo_rough, amount))
             };
 
             if let [r, g, b, _] = a_px
@@ -632,6 +645,15 @@ fn dominant_step(g: Vec2) -> Option<(i64, i64)> {
     } else {
         Some((0, if g.y > 0.0 { 1 } else { -1 }))
     }
+}
+
+/// Relative luminance of an encoded-sRGB base colour, `[0, 1]` — the grey substrate the film lies on.
+fn luminance(base: [u8; 4]) -> f32 {
+    let lin = |b: u8| {
+        let c = b as f32 / 255.0;
+        if c <= 0.040_45 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * lin(base[0]) + 0.7152 * lin(base[1]) + 0.0722 * lin(base[2])
 }
 
 /// `base` with `blood` composited over it at `cov/255` coverage, rounded.
@@ -699,6 +721,35 @@ mod tests {
         }
         // One memo entry, so one warning was emitted for five refusals.
         assert_eq!(c.warned.len(), 1);
+    }
+
+    /// **A thin film is lighter than a pool, and arterial is redder than venous** — the two claims
+    /// `bloodstain::spectral` makes, checked where a renderer would read them: the uploaded bytes.
+    #[test]
+    fn the_albedo_darkens_with_thickness_and_brightens_with_oxygen() {
+        let mut s = WetSettings::default();
+        let (_images, mut c) = canvas(4);
+        // Fresh, so the age shift is zero and only the film decides the colour. Column 0 is a thin
+        // smear, column 3 a full-depth pool; the drip pass cannot move either because the gravity
+        // handed to `tick` is zero.
+        c.wet[0] = (1, 0);
+        c.wet[3] = (255, 0);
+        c.shade(0, &s);
+        let lum = |px: &[u8]| 0.2126 * px[0] as f32 + 0.7152 * px[1] as f32 + 0.0722 * px[2] as f32;
+        let thin = c.albedo_px[0..3].to_vec();
+        let pool = c.albedo_px[12..15].to_vec();
+        assert!(lum(&thin) > lum(&pool), "a smear {thin:?} was not lighter than a pool {pool:?}");
+        assert!(pool[0] > pool[1] && pool[0] > pool[2], "a pool is not red: {pool:?}");
+
+        let venous_red_share = pool[0] as f32 / (pool[0] as u32 + pool[1] as u32 + pool[2] as u32) as f32;
+        s.so2 = bloodstain::SO2_ARTERIAL;
+        c.shade(0, &s);
+        let art = c.albedo_px[12..15].to_vec();
+        let arterial_red_share = art[0] as f32 / (art[0] as u32 + art[1] as u32 + art[2] as u32) as f32;
+        assert!(
+            arterial_red_share > venous_red_share,
+            "arterial {art:?} was not redder than venous {pool:?}"
+        );
     }
 
     #[test]

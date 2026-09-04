@@ -16,6 +16,7 @@ pub mod patterns;
 pub mod pool;
 pub mod rheo;
 pub mod settings;
+pub mod spectral;
 pub mod stain;
 
 pub use bag::pick;
@@ -24,7 +25,7 @@ pub use droplet::{
     BACK_SPATTER_SPEED, BLOOD_DENSITY, BLOOD_SURFACE_TENSION, Droplet, FORWARD_SPATTER_SPEED,
     droplet, droplet_count, droplets, landing, wound_seed,
 };
-pub use dry::{Appearance, appearance};
+pub use dry::{Appearance, appearance, appearance_of, appearance_with_fresh};
 pub use origin::area_of_origin;
 pub use patterns::{
     PatternClass, arterial_arc, cast_off, drip_trail, expirated, impact_spatter, transfer,
@@ -32,6 +33,7 @@ pub use patterns::{
 pub use pool::{POOL_CAP_SLACK, Pool, absorb, spread_pools};
 pub use rheo::{flows, viscosity, yield_stress};
 pub use settings::BloodSettings;
+pub use spectral::{Film, SO2_ARTERIAL, SO2_VENOUS};
 pub use stain::{Impact, Stain, StainShape, rasterise, reynolds, stain_shape, stains, weber};
 
 /// **The whole public vector type.** Three floats, no math library.

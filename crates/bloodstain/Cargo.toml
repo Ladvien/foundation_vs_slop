@@ -1,6 +1,6 @@
 [package]
 name = "bloodstain"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Blood as a material: Carreau-Yasuda rheology with a Casson yield stress, percolation spatter, procedural stain morphology, the forensic pattern taxonomy, and the drying timeline. Engine-free, no_std, deterministic."
 license = "MIT OR Apache-2.0"

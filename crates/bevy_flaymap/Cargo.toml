@@ -1,0 +1,38 @@
+[package]
+name = "bevy_flaymap"
+version = "0.1.0"
+edition = "2024"
+description = "CPU-authoritative texture-space flaying for Bevy: repeated hits peel skin, fat and muscle down to bone at their measured depths, shade the wound from a cross-section palette, and hand the exposed bone to fracture — hashable to the byte."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Ladvien/bevy_flaymap"
+keywords = ["bevy", "gamedev", "gore", "texture", "damage"]
+categories = ["game-development", "graphics"]
+# **Published**, because `bevy_carnage` is on crates.io and depends on this crate, and a released
+# package may not depend on a path-only dependency. Same rule as `bevy_wetmap`.
+publish = true
+exclude = ["docs/*.gif"]
+
+[dependencies]
+bevy = { version = "0.19.0", default-features = false, features = [
+    "bevy_asset",
+    "bevy_image",
+    "bevy_mesh",
+    "bevy_pbr",
+    "bevy_render",
+    "bevy_log",
+    "std",
+] }
+# Path *and* version, because `cargo publish` refuses a path-only dependency.
+bloodstain = { version = "0.2", path = "../bloodstain", default-features = false }
+bevy_cross_section = { version = "0.1", path = "../bevy_cross_section", default-features = false }
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+[features]
+default = []
+serde = ["dep:serde", "bloodstain/serde", "bevy_cross_section/serde"]
+
+[dev-dependencies]
+bevy = { version = "0.19.0" }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+bevy = { version = "0.19", default-features = false, features = ["web", "webgpu"] }

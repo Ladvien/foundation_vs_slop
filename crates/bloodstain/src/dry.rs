@@ -26,6 +26,7 @@
 //! metallic-roughness map rather than tinting an albedo darker.
 
 use crate::settings::BloodSettings;
+use crate::spectral::Film;
 use crate::{m, vec};
 
 /// Ticks a pool of [`DRY_REF_AREA_M2`] takes to dry, at 60 Hz.
@@ -107,18 +108,49 @@ pub fn dry_ticks(area_m2: f32, hz: u32) -> u32 {
 /// Every channel is monotone in age, and that is a contract rather than an accident: blood does not
 /// re-wet, un-oxidise or un-crack, so a channel that could fall would be indistinguishable from a
 /// bug at exactly the moment a player is looking at it.
+///
+/// The colour starts at [`SRGB_OXY`], an authored triple. A caller who knows how thick the film is
+/// and what it is lying on gets the physical starting colour from [`appearance_of`] instead.
 pub fn appearance(age_ticks: u32, hz: u32, area_m2: f32, s: &BloodSettings) -> Appearance {
+    appearance_with_fresh(age_ticks, hz, area_m2, s, SRGB_OXY)
+}
+
+/// **The appearance of a film of blood at `age_ticks`.** The fresh colour is computed from the
+/// film's thickness, oxygen saturation and substrate by [`crate::spectral`]; the age walk is the
+/// same one [`appearance`] takes.
+///
+/// The oxidation products' spectra are not tabulated here (see the `spectral` module docs for
+/// why), so ageing is applied as the **shift** between the published stops rather than as a
+/// second spectral chromophore: the colour at age `t` is the film's own fresh colour plus
+/// `stop(t) − SRGB_OXY`, clamped. At `t = 0` that is exactly the spectral colour; at full age the
+/// red has fallen and the green risen by exactly what the Bremmer walk says they do. Monotone by
+/// construction, because the shift is.
+pub fn appearance_of(age_ticks: u32, hz: u32, area_m2: f32, s: &BloodSettings, film: &Film) -> Appearance {
+    appearance_with_fresh(age_ticks, hz, area_m2, s, crate::spectral::srgb(film))
+}
+
+/// **The appearance at `age_ticks` of blood whose fresh colour is `fresh`** (encoded sRGB).
+///
+/// The seam the other two entry points share, public because a texture-space consumer computes
+/// its fresh colours once per thickness level and then ages thousands of texels against them —
+/// evaluating the spectral model per texel would be 81 exponentials each. Age is applied as the
+/// stop-to-stop shift described on [`appearance_of`].
+pub fn appearance_with_fresh(age_ticks: u32, hz: u32, area_m2: f32, s: &BloodSettings, fresh: [f32; 3]) -> Appearance {
     let span = dry_ticks(area_m2, hz);
     // Normalised age on the shared curve Laan's mass series collapse onto.
     let t = (age_ticks as f32 / span as f32).clamp(0.0, 1.0);
 
     // Colour: two segments through three stops. The first is fast — oxidation to methaemoglobin is
     // most of the visible colour change and it happens early (Bremmer 2012).
-    let srgb = if t < 0.35 {
+    let stop = if t < 0.35 {
         vec::lerp(SRGB_OXY, SRGB_MET, t / 0.35)
     } else {
         vec::lerp(SRGB_MET, SRGB_HEMI, (t - 0.35) / 0.65)
     };
+    let mut srgb = [0.0f32; 3];
+    for c in 0..3 {
+        srgb[c] = (fresh[c] + (stop[c] - SRGB_OXY[c])).clamp(0.0, 1.0);
+    }
 
     // Gloss collapses with the rim front rather than linearly with age: the surface stops being wet
     // when the film breaks, not gradually over the whole timeline.

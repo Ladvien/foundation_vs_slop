@@ -71,6 +71,19 @@ pub struct WetSettings {
     /// serum halo only at or above `0.5` (Laan et al. 2016, `doi:10.1016/j.forsciint.2016.08.005`). The
     /// shipped value sits below that threshold, so no halo by default.
     pub humidity: f32,
+    /// Film thickness a texel at full coverage stands for, mm. `2.0`.
+    ///
+    /// **The coverage byte is a depth, and the colour is computed from it.** A texel's amount, scaled
+    /// by this, is the thickness `bloodstain::spectral` puts under the Kubelka–Munk two-flux model:
+    /// a faint edge is a thin film that lets the substrate through and reads pink-scarlet, a full
+    /// texel is a pool that converges on blood's own semi-infinite reflectance and reads near-black
+    /// crimson. No blood colour is authored anywhere in this crate.
+    pub film_depth_mm: f32,
+    /// Oxygen saturation of the blood that lands, `[0, 1]`. [`bloodstain::SO2_VENOUS`].
+    ///
+    /// What an ordinary wound bleeds. A caller painting an arterial spurt sets
+    /// [`bloodstain::SO2_ARTERIAL`] and gets a visibly brighter red from the same model.
+    pub so2: f32,
 }
 
 impl Default for WetSettings {
@@ -82,6 +95,8 @@ impl Default for WetSettings {
             absorbency: 0.15,
             max_canvas_updates_per_tick: 4,
             humidity: 0.4,
+            film_depth_mm: 2.0,
+            so2: bloodstain::SO2_VENOUS,
         }
     }
 }
