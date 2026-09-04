@@ -52,9 +52,11 @@
 //!
 //! # What is this crate's own
 //!
-//! Stam's Table 1 is the source for every kinetic constant and for the two dermal thicknesses. Four
-//! numbers are **not** in it and say so here rather than hiding in a literal:
+//! Stam's Table 1 is the source for every kinetic constant but one and for the two dermal
+//! thicknesses. Six numbers are **not** in it and say so here rather than hiding in a literal:
 //!
+//! - [`Params::clearance_h`] — 240 h is Randeberg's figure as Stam quote it in their discussion;
+//!   their own Table 1 column is 150 h. Inside the paper's range, but not the paper's column.
 //! - [`Params::subcutis_mm`] — their Table 1 gives dermal thicknesses only.
 //! - [`DERMIS_MUSP_MM`] — Bosschaart's tables are *blood*, not dermis, so the scattering of the
 //!   layer the blood sits in has no source in this crate's corpus.
@@ -719,9 +721,15 @@ mod tests {
         Bruise::new(Params::default())
     }
 
-    /// **The deeper layers can only darken.** The through-skin reflectance is a stack whose every
-    /// added layer absorbs, so its L\* is never above the top-dermis-only L\* at any hour, and a
-    /// pool six hours into its leak already shows through the skin as a visible darkening.
+    /// **Under the blow, the deeper layers can only darken.** At the centre, where the pool sits, the
+    /// through-skin reflectance is a stack whose every added layer absorbs, so its L\* is never
+    /// above the top-dermis-only L\* at any hour of the first day, and a pool six hours into its
+    /// leak already shows through the skin as a visible darkening. **Away from the pool the
+    /// opposite holds, and it is not a defect**: tissue with no chromophore in it is a pure
+    /// scattering stack over the neutral substrate, and a scattering layer whitens what is under it
+    /// (the two-flux limit `kubelka_munk` takes at `k = 0`), so a chromophore-free shell reads
+    /// *lighter* through three layers than through one. The claim below is therefore the centre's,
+    /// and the far shell's lightening is pinned beside it so nobody widens the claim by accident.
     #[test]
     fn the_layers_beneath_only_darken_and_show_early() {
         let mut b = fresh();
@@ -736,6 +744,11 @@ mod tests {
         early.advance(60);
         let six = early.lab_through_at(0.0)[0];
         assert!(six < blank - 2.0, "a six-hour pool shows through the skin: L* {six} against {blank}");
+        // The far shell holds nothing at six hours, and there the scattering stack is lighter than
+        // the single layer — the property the doc comment bounds the claim against.
+        let far_top = early.lab_at(RADIUS_MM)[0];
+        let far_through = early.lab_through_at(RADIUS_MM)[0];
+        assert!(far_through > far_top, "a chromophore-free stack whitens: through {far_through} vs top {far_top}");
     }
 
     /// Hue angle in the `a*`/`b*` plane, degrees. `0°` is red, `90°` is yellow.

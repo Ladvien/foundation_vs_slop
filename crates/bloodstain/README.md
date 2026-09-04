@@ -77,7 +77,7 @@ rasterise(&shape, 64, &mut mask);            // one byte of coverage per texel
 ## Determinism
 
 - One generator (`hash_f32`), hand-rolled and **frozen by a test**. No RNG crate, because a crate that may change its stream between minor versions cannot promise reproducibility.
-- Integer ticks everywhere time appears. Nothing reads a clock.
+- Integer ticks everywhere time appears, and nothing reads a clock. The three injury kernels are the one exception, and it is a unit rather than a clock: `bruise` steps in 0.1 h, `burn` in 20 ms substeps and `wick` answers for a time in seconds — each an integer count of fixed steps or a pure function of its argument, never an accumulated float.
 - Seeds are hashes of **where** something is, quantised onto a weld lattice, never of history, an entity id or an accumulator.
 - `libm` unconditionally rather than `std`'s math behind a feature, because a second math path is a second set of bits.
 - Seven goldens are locks rather than snapshots: `hash_f32_is_frozen`, `the_spatter_model_is_frozen`, `the_stain_placement_is_frozen`, `the_pool_model_is_frozen`, and the three added with the injury kernels — `the_bruise_model_is_frozen`, `the_burn_model_is_frozen`, `the_wick_model_is_frozen`. If one moves while the build profile is held fixed, the model moved.

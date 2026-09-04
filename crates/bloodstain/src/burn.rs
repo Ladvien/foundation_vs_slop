@@ -269,6 +269,12 @@ impl Burn {
     /// skin back against room-temperature air, and the damage that accrues during it — because the
     /// dermis is still above 42 °C — is the reason a burn is worse than it looked at the moment
     /// contact ended.
+    ///
+    /// **A contact shorter than half a substep does nothing, and says so here rather than in a
+    /// log.** `seconds` is rounded to a whole count of [`DT_S`] steps; below `DT_S / 2` that count
+    /// is zero and the model is unchanged — an exposure the scheme cannot represent is refused, not
+    /// rounded up to a whole step it never had, which would be a fabricated injury in the other
+    /// direction. A caller with a 5 ms flash accumulates it into a longer exposure itself.
     pub fn expose(&mut self, temp_c: f32, seconds: f32) {
         if !temp_c.is_finite() || !seconds.is_finite() || seconds <= 0.0 {
             return;
