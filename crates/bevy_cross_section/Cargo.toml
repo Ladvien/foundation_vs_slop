@@ -24,6 +24,7 @@ exclude = ["docs/*.gif"]
 bevy = { version = "0.19.0", default-features = false, features = [
     "bevy_asset",  # Assets<Image>, Handle<T>, RenderAssetUsages
     "bevy_image",  # Image, ImageSampler
+    "bevy_log",    # warn! — an app with no image store is told so once, not crashed
     "bevy_mesh",   # Mesh, VertexAttributeValues, ATTRIBUTE_UV_1
     "bevy_pbr",    # StandardMaterial, UvChannel
     "bevy_render", # render_resource::{Extent3d, TextureDimension, TextureFormat}
