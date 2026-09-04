@@ -64,6 +64,11 @@ CRATES=(
     bloodstain
     bevy_wetmap
     bevy_viscera
+    # The 2026-09-04 four: kernels `bevy_carnage` composes and none depends on it back.
+    bevy_cross_section
+    bevy_flaymap
+    bevy_laceration
+    bevy_fracture_modes
 )
 
 # Mirrors that are created PUBLIC. Everything absent from this list is created private — see the
@@ -104,6 +109,10 @@ PUBLIC_CRATES=(
     bloodstain
     bevy_wetmap
     bevy_viscera
+    bevy_cross_section
+    bevy_flaymap
+    bevy_laceration
+    bevy_fracture_modes
 )
 
 cd "$(git rev-parse --show-toplevel)"

@@ -6,6 +6,8 @@ Progressive lacerations: a cut along a mesh surface whose gape widens on a time 
 
 > **This repo is a read-only mirror.** It is split out of [`Ladvien/foundation_vs_slop`](https://github.com/Ladvien/foundation_vs_slop) with `git subtree split`, history intact. Issues and PRs belong upstream.
 
+![A slash across a thigh opening onto a banded wound bed](https://raw.githubusercontent.com/Ladvien/bevy_laceration/main/docs/laceration.gif)
+
 ## Why this exists
 
 A knife wound in a game is a decal. A decal cannot gape, so it reads as paint on a surface, and the moment the camera gets close the illusion is that the character has been drawn on rather than opened. What is actually missing is not resolution — it is that a real laceration is a *hole with sides*, it takes about a second to reach its width, and the width depends on which way the blade ran relative to the collagen underneath.

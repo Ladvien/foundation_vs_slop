@@ -6,6 +6,8 @@ Texture-space flaying for Bevy: hit the same place twice and the skin comes off,
 
 > **This repo is a read-only mirror.** It is split out of [`Ladvien/foundation_vs_slop`](https://github.com/Ladvien/foundation_vs_slop) with `git subtree split`, history intact. Issues and PRs belong upstream.
 
+![A torso cratered deeper with every hit until the cortex shows](https://raw.githubusercontent.com/Ladvien/bevy_flaymap/main/docs/flaymap.gif)
+
 ## Why CPU-authoritative is the whole point
 
 Texture-space damage masking is old, shipped technology: Frostbite 2 wrote destruction masks into textures to reveal a layered material underneath, and every engine that has done it since has done it the same way — as a **GPU render target** written by a fragment shader (Kihl, *Destruction Masking in Frostbite 2 using Volume Distance Fields*, SIGGRAPH 2010 Advances in Real-Time Rendering course). That is why nobody can hash one. A render target's contents are a function of driver rounding, of raster order, and of when an asynchronous readback landed. It is a picture, not a state.

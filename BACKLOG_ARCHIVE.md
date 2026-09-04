@@ -2308,6 +2308,23 @@ Split out 2026-07-30.
 ### Push 11 — Render & Art Direction  ·  cross-cutting  ·  continuous
 
 
+- **FVS-Q-11 — Novel gore: four kernels and a spectral blood model, released** · L · ✅ **LANDED 2026-09-04**
+  Went in as a goal rather than a ticket, and is recorded here so the id exists. Five corpus-grounded
+  features shipped as one coordinated release: `bloodstain 0.2` gained `spectral` (Bosschaart 2014's
+  whole-blood tables under Kubelka–Munk and the CIE observer — a film's colour is a function of
+  thickness and oxygen saturation, and `bevy_wetmap`'s coverage byte is now a depth); four new public
+  crates — `bevy_cross_section` (sourced per-region skin/fat/muscle/cortex/marrow bands on cut caps
+  through `UV_1`), `bevy_flaymap` (CPU-authoritative texture-space flaying with a once-per-canvas bone
+  handoff), `bevy_laceration` (a cut that gapes on a time curve, Ní Annaidh's Langer-line stiffness ratio
+  as the anisotropy) and `bevy_fracture_modes` (Sellán 2022 on the convex proxy's cell graph, fixed
+  schedule throughout); and `bevy_carnage 0.3.0` composing them (`FractureRegion`, `annotate_cap`,
+  `modal.rs`, `FractureCache::modes`). Every deterministic half is frozen; every physical claim has a
+  numeric test; the per-feature predictions and the two falsifications are in
+  `crates/bevy_carnage/BACKLOG.md` §Phase 5. Wired to the game only through `bevy_carnage`'s facade —
+  the game's own `carnage.rs` is untouched this round, so the RL/QD genome sees no new gene, by design:
+  cap banding, flaying and laceration are cosmetic layers over state the genome already scores.
+  *Touches:* `crates/{bloodstain,bevy_wetmap,bevy_carnage,bevy_cross_section,bevy_flaymap,bevy_laceration,bevy_fracture_modes}`, `scripts/{build_web,mirror_crates}.sh`, `web/play.html`.
+
 - **FVS-Q-9 — `solid` refining clearance: answered NO** · M · ✅ **CLOSED 2026-08-05, not built**
   `SubCell::solid` was to refine `emerge_core::stack::covers` — the single "is this point inside this
   piece" test that stacking and the editor's `pick_at` both funnel through — so clearance would respect
