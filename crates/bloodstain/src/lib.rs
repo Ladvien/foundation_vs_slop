@@ -9,6 +9,8 @@ extern crate std;
 
 pub mod bag;
 pub mod bleed;
+pub mod bruise;
+pub mod burn;
 pub mod droplet;
 pub mod dry;
 pub mod origin;
@@ -18,9 +20,12 @@ pub mod rheo;
 pub mod settings;
 pub mod spectral;
 pub mod stain;
+pub mod wick;
 
 pub use bag::pick;
 pub use bleed::{Bleed, flow, pulse_period, pulse_phase, pulse_wound, pulses_on};
+pub use bruise::Bruise;
+pub use burn::{Burn, Degree};
 pub use droplet::{
     BACK_SPATTER_SPEED, BLOOD_DENSITY, BLOOD_SURFACE_TENSION, Droplet, FORWARD_SPATTER_SPEED,
     droplet, droplet_count, droplets, landing, wound_seed,
@@ -35,6 +40,7 @@ pub use rheo::{flows, viscosity, yield_stress};
 pub use settings::BloodSettings;
 pub use spectral::{Film, SO2_ARTERIAL, SO2_VENOUS};
 pub use stain::{Impact, Stain, StainShape, rasterise, reynolds, stain_shape, stains, weber};
+pub use wick::Sheet;
 
 /// **The whole public vector type.** Three floats, no math library.
 ///

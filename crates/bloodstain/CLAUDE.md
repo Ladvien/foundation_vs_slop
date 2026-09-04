@@ -24,22 +24,34 @@ inputs, `libm::{sinf, cosf, sqrtf}` are bit-identical to the platform libm the m
 against. `powf`/`expf` differ by one ULP at some inputs and are read only by code written here, never
 by a moved golden. Every transcendental goes through `crate::m`.
 
-## Four goldens are locks, not snapshots
+## Seven goldens are locks, not snapshots
 
 `hash_f32_is_frozen`, `the_spatter_model_is_frozen`, `the_stain_placement_is_frozen`,
-`the_pool_model_is_frozen`. If one goes red while the build profile is held fixed, **the model
-moved** — that is the finding, not a table to update. Re-bless only for a profile change, and say
-which profile in the doc comment (both spatter tables record the one re-blessing they have had).
+`the_pool_model_is_frozen`, and the three the injury kernels brought with them —
+`the_bruise_model_is_frozen`, `the_burn_model_is_frozen`, `the_wick_model_is_frozen`. If one goes red
+while the build profile is held fixed, **the model moved** — that is the finding, not a table to
+update. Re-bless only for a profile change, and say which profile in the doc comment (both spatter
+tables record the one re-blessing they have had).
 
 `the_spatter_model_is_frozen` and `the_stain_placement_is_frozen` came out of `bevy_carnage::spatter`
 **with their bits unchanged**. That is the evidence the extraction was a move rather than a rewrite,
 and it is why a future refactor must not touch them.
 
-## Ticks, not seconds. No clocks.
+## Ticks, not seconds. No clocks. And the one exception, which is a unit rather than a clock.
 
-Every function that involves time takes `tick: u32` and `hz: u32`. Nothing reads a clock, virtual or
-real. A float accumulator large enough stops advancing at all, which is a recorded failure in this
-family of crates. Tick counts are quoted for 60 Hz; a caller on another rate re-derives them in data.
+Every function that involves *game* time takes `tick: u32` and `hz: u32`. Nothing reads a clock,
+virtual or real. A float accumulator large enough stops advancing at all, which is a recorded failure
+in this family of crates. Tick counts are quoted for 60 Hz; a caller on another rate re-derives them
+in data.
+
+**`bruise`, `burn` and `wick` are in physical time, and that is not a loosening of the rule.** Each
+is a reduction of a published numerical model whose step size *is* one of its constants — Stam's
+0.1 h, the CFL-bounded 0.02 s of an explicit heat solver — so a tick count would be a second,
+hidden, rate-dependent discretisation on top of the paper's own. The rule the exception keeps is the
+one that mattered: **the state is advanced by an integer count of fixed steps and never by an
+accumulated float.** `Bruise::steps` and `Burn::steps` are `u32`, the elapsed time is *derived* by
+multiplying, and a `seconds` argument is rounded to a step count once at the door. `wick` holds no
+state at all — its front is a closed form of `t`.
 
 ## Seeds are places, never histories
 

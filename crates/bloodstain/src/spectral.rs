@@ -203,7 +203,11 @@ impl Film {
 ///
 /// `k` and `s` are the two-flux constants, `d` the thickness, `rg` the substrate reflectance. A
 /// zero-thickness film returns `rg` exactly; a film thick enough that `coth` saturates returns the
-/// semi-infinite `a − b`.
+/// semi-infinite `a − b`; a film that scatters but does not absorb (`k = 0`, so `b = 0` and the
+/// general form is `0/0`) takes the two-flux limit `R = (Rg + S·d·(1 − Rg)) / (1 + S·d·(1 − Rg))`
+/// — a non-absorbing layer still *whitens* what is under it, which is what a millimetre of dermis
+/// does to a pool of blood beneath it. Until 0.3.0 this branch returned `Rg`, as though a clear
+/// scattering layer were glass; nothing that had blood in it ever reached the branch.
 pub fn kubelka_munk(k: f32, s: f32, d: f32, rg: f32) -> f32 {
     let d = if d.is_finite() && d > 0.0 { d } else { return rg };
     let s = s.max(1.0e-6);
@@ -215,7 +219,8 @@ pub fn kubelka_munk(k: f32, s: f32, d: f32, rg: f32) -> f32 {
     let coth = if x >= 20.0 {
         1.0
     } else if x <= 1.0e-6 {
-        return rg;
+        let g = s * d * (1.0 - rg);
+        return ((rg + g) / (1.0 + g)).clamp(0.0, 1.0);
     } else {
         let e = m::exp(2.0 * x);
         (e + 1.0) / (e - 1.0)
@@ -289,6 +294,27 @@ pub fn lightness(film: &Film) -> f32 {
     let y = xyz(&reflectance(film))[1];
     let f = if y > 0.008_856 { m::powf(y, 1.0 / 3.0) } else { 7.787 * y + 16.0 / 116.0 };
     116.0 * f - 16.0
+}
+
+/// **CIE L\*a\*b\* of a reflectance spectrum**, against the same D65 white [`xyz`] normalises to.
+///
+/// `[L*, a*, b*]`: lightness `0`–`100`, then the two opponent axes — `+a*` red, `−a*` green, `+b*`
+/// yellow, `−b*` blue. [`lightness`] answers the first of those from a film and is left alone; this
+/// exists because **a hue claim needs two axes**. "This bruise went from red to yellow" is a
+/// statement about the sign of `a*` giving way to the sign of `b*`, and no RGB triple and no
+/// lightness says it — which is exactly the claim [`crate::bruise`]'s trajectory test has to make.
+///
+/// The same `f` companding and the same `0.008856` break the CIE puts on `Y/Yn`, applied to all
+/// three ratios rather than to `Y` alone.
+pub fn lab(refl: &[f32; SAMPLES]) -> [f32; 3] {
+    let white = xyz(&[1.0f32; SAMPLES]);
+    let c = xyz(refl);
+    let ratio = |v: f32, n: f32| if n > 0.0 { v / n } else { 0.0 };
+    let f = |t: f32| if t > 0.008_856 { m::powf(t, 1.0 / 3.0) } else { 7.787 * t + 16.0 / 116.0 };
+    let fx = f(ratio(c[0], white[0]));
+    let fy = f(ratio(c[1], white[1]));
+    let fz = f(ratio(c[2], white[2]));
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
 }
 
 #[cfg(test)]

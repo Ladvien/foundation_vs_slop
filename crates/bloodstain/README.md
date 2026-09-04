@@ -2,7 +2,7 @@
 
 > ⚠️ **Vibe Coded** — written by an AI agent working from a human's direction. It is used in a shipping game and covered by tests, but it has had no line-by-line human audit. Read it before you trust it.
 
-Blood as a **material**, not a texture: shear-thinning viscosity with a yield stress that grows into a clot, percolation spatter, stain silhouettes derived from impact conditions, the six forensic pattern classes as generators, a drying timeline, and an inverse solver that reads the wound back out of the stains.
+Blood as a **material**, not a texture: shear-thinning viscosity with a yield stress that grows into a clot, percolation spatter, stain silhouettes derived from impact conditions, the six forensic pattern classes as generators, a drying timeline, an inverse solver that reads the wound back out of the stains — and the three injury kernels around it: a bruise's haemoglobin/bilirubin chemistry, a burn's bioheat and Arrhenius damage, and blood wicking into cloth.
 
 > **This repo is a read-only mirror.** It is split out of [`Ladvien/foundation_vs_slop`](https://github.com/Ladvien/foundation_vs_slop) with `git subtree split`, history intact. Issues and PRs belong upstream.
 
@@ -70,6 +70,9 @@ rasterise(&shape, 64, &mut mask);            // one byte of coverage per texel
 | `bleed` | The integer-tick pulse train and the perfusion envelope |
 | `bag` | Variety selection with a guaranteed minimum gap, and no mutable cursor |
 | `origin` | The inverse solver: stains in, wound out |
+| `bruise` | Stam's compartment model as a radial 1-D: Darcy convection out of the pool, Fick diffusion, Michaelis–Menten conversion to bilirubin, and a colour computed from the two concentrations. Frozen by a golden |
+| `burn` | Layered Pennes conduction with an Arrhenius damage integral per node: `Ω`, the necrosis depth, and a degree. Frozen by a golden |
+| `wick` | Lucas–Washburn imbibition into a porous sheet at the shear-thinning viscosity of blood. Frozen by a golden |
 
 ## Determinism
 
@@ -77,7 +80,15 @@ rasterise(&shape, 64, &mut mask);            // one byte of coverage per texel
 - Integer ticks everywhere time appears. Nothing reads a clock.
 - Seeds are hashes of **where** something is, quantised onto a weld lattice, never of history, an entity id or an accumulator.
 - `libm` unconditionally rather than `std`'s math behind a feature, because a second math path is a second set of bits.
-- Three goldens are locks rather than snapshots: `hash_f32_is_frozen`, `the_spatter_model_is_frozen`, `the_stain_placement_is_frozen`, `the_pool_model_is_frozen`. If one moves while the build profile is held fixed, the model moved.
+- Seven goldens are locks rather than snapshots: `hash_f32_is_frozen`, `the_spatter_model_is_frozen`, `the_stain_placement_is_frozen`, `the_pool_model_is_frozen`, and the three added with the injury kernels — `the_bruise_model_is_frozen`, `the_burn_model_is_frozen`, `the_wick_model_is_frozen`. If one moves while the build profile is held fixed, the model moved.
+
+## The three injury kernels
+
+**A bruise ages by a chemistry, not by a colour ramp.** `bruise` is Stam et al.'s compartment model (`10.1007/s11517-010-0647-5`) reduced to one radial dimension over three layers — dermis top, dermis bottom, subcutis — stepped at their own 0.1 h. Blood leaks out of the subcutaneous pool by Darcy convection until the vessels close at 12 h, both chromophores diffuse, heme oxygenase-1 converts haemoglobin to bilirubin under Michaelis–Menten kinetics at 4 mol per mol, and the lymph drains the bilirubin on a 240 h constant. The colour is then *computed*: the top 400 µm of dermis as a Kubelka–Munk layer whose absorption is Bosschaart's whole-blood spectrum scaled by how much haemoglobin is actually there, plus a bilirubin band, over an authored substrate. So the yellow halo is wider than the red core because bilirubin diffuses four times faster, and the red peaks before the yellow because one is the substrate of the other — neither is authored anywhere.
+
+**A burn is the heat that made it.** `burn` is one-dimensional layered Pennes conduction on Gowrishankar et al.'s three-layer skin (`10.1186/1475-925x-3-42`) at 100 µm nodes and a 0.02 s substep, with their Arrhenius damage integral — `A = 2.9e37 s⁻¹`, `ΔE = 2.4e5 J/mol` — accumulated per node wherever the tissue is above 42 °C. `Ω` gives the necrosis depth and a degree, so 200 ms against 200 °C and a minute against 55 °C are different injuries, and **the damage keeps accruing after contact ends** because the tissue is still hot. The two outer burn-degree thresholds are not in this crate's corpus and the module says so.
+
+**Blood soaks into cloth as √t.** `wick` is Lucas–Washburn imbibition, with the twist Steinik et al. (`10.1103/physrevfluids.9.023305`) establish for shear-thinning fluids: the ½ exponent survives only after the effective viscosity is scaled out, so the raw front rises measurably *slower* than √t while the rescaled one is √t to within 2 %. `μ_eff` comes from this crate's own Carreau–Yasuda at the front's wall shear rate — which is why blood wicks faster than its resting viscosity predicts — and the front carries a smooth saturation profile a renderer can read.
 
 ## The literature this is a reduction of
 
@@ -94,6 +105,11 @@ rasterise(&shape, 64, &mut mask);            // one byte of coverage per texel
 | Drying pools collapse onto one curve; rim-first front | Laan et al., `10.1016/j.forsciint.2016.08.005`; Smith, Nicloux & Brutin, `10.1038/s41598-020-65465-4` |
 | Colour walk oxyHb → metHb → hemichrome | Bremmer et al., `10.1016/j.forsciint.2011.07.027` |
 | Wetness, not colour, is the disgust cue | Oum, Lieberman & Aylward, `10.1080/02699931.2010.496997` |
+| Whole-blood absorption and scattering, 380–780 nm | Bosschaart et al., `10.1007/s10103-013-1446-7` |
+| Bruise kinetics: convection, diffusion, Michaelis–Menten, 4:1 bilirubin | Stam, van Gemert, van Leeuwen & Aalders, `10.1007/s11517-010-0647-5` |
+| Layered skin bioheat and the Arrhenius damage integral | Gowrishankar, Stewart, Martin & Weaver, `10.1186/1475-925x-3-42` |
+| Burn-degree `Ω` thresholds — **not in the local corpus**, cited by reference | Moritz & Henriques, Am J Pathol 26 (1947) 695–720 |
+| Lucas–Washburn survives shear thinning only when rescaled | Steinik, Picchi, Lavalle & Poesio, `10.1103/physrevfluids.9.023305` |
 
 Constants that are **tuned rather than measured** say so in their own doc comments, and `docs/citations.md` lists every citation with whether it resolved in the local corpus. A tuned constant that says so is honest; one dressed as a measurement is not.
 
