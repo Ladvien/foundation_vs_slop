@@ -53,22 +53,12 @@ CRATES=(
     # can be: the add recorded a `git-subtree-split` trailer, so a split rejoins the mirror's own history
     # and the non-forced push below fast-forwards. It is also the one mirrored crate that publishes to
     # crates.io; the registry release is cut from this tree, never from the mirror.
+    # **The seven gore leaves that were listed here — `bloodstain`, `bevy_wetmap`, `bevy_viscera`,
+    # `bevy_cross_section`, `bevy_flaymap`, `bevy_laceration`, `bevy_fracture_modes` — are modules
+    # of `bevy_carnage` since 0.5.0 (2026-09-04).** Their repositories are archived and their
+    # registry versions yanked; this script must not touch them again, which is what removing them
+    # from this list guarantees.
     bevy_carnage
-    # **The three carved out of `bevy_carnage` on 2026-09-02.** Extracted from this tree rather than
-    # vendored into it, so the flow is the ordinary one: monorepo → mirror, split from
-    # `crates/<name>/`, nothing ever edited on the far side.
-    #
-    # `bloodstain` is engine-free with no math library in its public API — the property that lets it
-    # be depended on by anything, which is exactly why it came out. The other two are ecosystem Bevy
-    # libraries with no game in them.
-    bloodstain
-    bevy_wetmap
-    bevy_viscera
-    # The 2026-09-04 four: kernels `bevy_carnage` composes and none depends on it back.
-    bevy_cross_section
-    bevy_flaymap
-    bevy_laceration
-    bevy_fracture_modes
 )
 
 # Mirrors that are created PUBLIC. Everything absent from this list is created private — see the
@@ -98,21 +88,6 @@ PUBLIC_CRATES=(
     bevy_stigmergy
     det_rng
     map_elites
-    # The three carved out of `bevy_carnage`. Public for the same reason as the rest of this list:
-    # each answers a question the engine does not. `bloodstain` is blood as a *material* and needs no
-    # engine at all; `bevy_wetmap` is the first texture-space blood accumulation that is
-    # CPU-authoritative and therefore hashable; `bevy_viscera` is an XPBD rope solver with a tearing
-    # membrane. None needs any of the game, and all three are MIT-or-Apache.
-    #
-    # **Listed here BEFORE their first mirror**, which is what makes the new repositories public
-    # without a hand edit afterwards — this list only drives creation.
-    bloodstain
-    bevy_wetmap
-    bevy_viscera
-    bevy_cross_section
-    bevy_flaymap
-    bevy_laceration
-    bevy_fracture_modes
 )
 
 cd "$(git rev-parse --show-toplevel)"

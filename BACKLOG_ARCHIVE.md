@@ -2308,6 +2308,23 @@ Split out 2026-07-30.
 ### Push 11 — Render & Art Direction  ·  cross-cutting  ·  continuous
 
 
+- **FVS-Q-13 — One crate: the seven gore leaves fold into `bevy_carnage`** · M · ✅ **LANDED 2026-09-04**
+  The review after 0.4.0 shipped came back with fifteen findings and a decision from the human: the
+  family is one crate, and only one crate is public. **Pre-registered prediction:** because every
+  leaf was already reached through `bevy_carnage::<name>` re-exports, moving each crate's `src/`
+  under `crates/bevy_carnage/src/<name>/` and rewriting `crate::` paths would change zero call
+  sites in the game and zero re-export paths, leave every golden and digest byte-identical, and
+  drop seven dependency lines and seven version pins. **Outcome:** exactly that — 287 lib tests and
+  every moved integration test green under `-p bevy_carnage`, the workspace gate green (bar the
+  pre-existing editor red), the flesh and preset digests unchanged, the wasm site rebuilt with all
+  fifteen demos under one package. What the boundaries bought is kept as convention: `tests/leaf.rs`
+  gained `bloodstain_is_still_engine_free` (no `bevy`, `glam` or `std` in `src/bloodstain/`), and each
+  leaf's `CLAUDE.md` is carried verbatim in the crate's. The seven repositories are archived, their
+  registry versions yanked, and `bevy_carnage` 0.5.0 is the release with no path dependency left in
+  it. Also in the same batch, as the review's other thirteen fixes: the flagship's three-shot
+  handoff is real (the jitter kept it at 12.4 of 25.5 mm), viscera wear the muscle profile, a
+  same-tick despawn+insert panic path is `try_insert`, the recorder digests fold in sorted order, and
+  the bruise golden was re-blessed once for a bounded conversion.
 - **FVS-Q-12 — The realism release: the flesh material, the preset, and three injury kernels** · L · ✅ **LANDED 2026-09-04**
   Went in as a goal, like Q-11, and is recorded here so the id exists. **Pre-registered prediction:**
   the family's weak half was the pixel, not the simulation — every cut face, stain and strand was a

@@ -319,10 +319,9 @@ jobs:
   # ---------------------------------------------------------------------------
   # The demo site: ten WebAssembly modules and three hand-written pages.
   #
-  # Built from this repository because it is the only tree where all four gore
-  # crates — `bevy_carnage`, `bloodstain`, `bevy_wetmap`, `bevy_viscera` — are
-  # visible to one cargo workspace, so it is the only place the flagship
-  # cross-crate demo can be compiled at all.
+  # Built from this repository because the wasm toolchain, the pinned `bevy`
+  # and the pages that host the modules live here; `bevy_carnage` is the one
+  # gore crate since 0.5.0 and every module on the site is one of its examples.
   # ---------------------------------------------------------------------------
   site:
     name: demo site (ten wasm modules)

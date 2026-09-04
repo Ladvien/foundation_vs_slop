@@ -893,17 +893,10 @@ dependencies = [
 
 [[package]]
 name = "bevy_carnage"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bevy",
- "bevy_cross_section",
- "bevy_flaymap",
- "bevy_fracture_modes",
  "bevy_hanabi",
- "bevy_laceration",
- "bevy_viscera",
- "bevy_wetmap",
- "bloodstain",
  "isomesh",
  "libm",
  "ron",
@@ -968,15 +961,6 @@ dependencies = [
  "bitflags 2.13.0",
  "indexmap 2.14.0",
  "nonmax",
-]
-
-[[package]]
-name = "bevy_cross_section"
-version = "0.1.2"
-dependencies = [
- "bevy",
- "bloodstain",
- "serde",
 ]
 
 [[package]]
@@ -1222,24 +1206,6 @@ dependencies = [
  "bevy_ui_widgets",
  "bevy_window",
  "smol_str",
-]
-
-[[package]]
-name = "bevy_flaymap"
-version = "0.1.2"
-dependencies = [
- "bevy",
- "bevy_cross_section",
- "bloodstain",
- "serde",
-]
-
-[[package]]
-name = "bevy_fracture_modes"
-version = "0.1.1"
-dependencies = [
- "bevy",
- "serde",
 ]
 
 [[package]]
@@ -1512,16 +1478,6 @@ dependencies = [
  "bevy_window",
  "bevy_winit",
  "bevy_world_serialization",
-]
-
-[[package]]
-name = "bevy_laceration"
-version = "0.1.2"
-dependencies = [
- "bevy",
- "bevy_cross_section",
- "bloodstain",
- "serde",
 ]
 
 [[package]]
@@ -2300,21 +2256,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bevy_viscera"
-version = "0.1.1"
-dependencies = [
- "bevy",
-]
-
-[[package]]
-name = "bevy_wetmap"
-version = "0.2.3"
-dependencies = [
- "bevy",
- "bloodstain",
-]
-
-[[package]]
 name = "bevy_window"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2505,14 +2446,6 @@ dependencies = [
  "futures-io",
  "futures-lite",
  "piper",
-]
-
-[[package]]
-name = "bloodstain"
-version = "0.3.0"
-dependencies = [
- "libm",
- "serde",
 ]
 
 [[package]]

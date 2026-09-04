@@ -43,25 +43,25 @@
     <h3><a href="play.html?demo=stain_morphology">stain_morphology</a></h3>
     <p>Aspect ratio is <code>sin θ</code>, spines follow the blood-specific law, satellites need a
       splash threshold. Press <kbd>B</kbd> for the four-texture wall this replaced.</p>
-    <span class="who">bevy_carnage + bloodstain</span>
+    <span class="who">bevy_carnage::bloodstain</span>
   </li>
   <li class="card">
     <h3><a href="play.html?demo=pattern_classes">pattern_classes</a></h3>
     <p>Six forensic classes as six mechanisms. One arterial arc per systole, cast-off released
       tangentially, and a transfer smear that runs out of blood.</p>
-    <span class="who">bevy_carnage + bloodstain</span>
+    <span class="who">bevy_carnage::bloodstain</span>
   </li>
   <li class="card">
     <h3><a href="play.html?demo=rheology">rheology</a></h3>
     <p>Rivulets thin and race, then thicken, bead, and <strong>arrest mid-wall</strong> when the yield
       stress overtakes the drive. Clotting is visibly the same mechanism.</p>
-    <span class="who">bloodstain</span>
+    <span class="who">bevy_carnage::bloodstain</span>
   </li>
   <li class="card">
     <h3><a href="play.html?demo=drying">drying</a></h3>
     <p>Scrub the age: oxyHb → metHb → hemichrome, gloss collapsing, the rim drying first, a serum halo
       above 50 % humidity, and a late craquelure.</p>
-    <span class="who">bloodstain</span>
+    <span class="who">bevy_carnage::bloodstain</span>
   </li>
   <li class="card">
     <h3><a href="play.html?demo=gore_tier">gore_tier</a></h3>
@@ -73,19 +73,19 @@
     <h3><a href="play.html?demo=wetmap_paint">wetmap_paint</a></h3>
     <p>Blood lands in UV space, runs down the real geometry, and dries in place — with a digest on
       screen, because this wetmap is CPU-authoritative.</p>
-    <span class="who">bevy_wetmap</span>
+    <span class="who">bevy_carnage::wetmap</span>
   </li>
   <li class="card">
     <h3><a href="play.html?demo=viscera_spill">viscera_spill</a></h3>
     <p>XPBD strands: guts spill with weight, coil on the floor, stay tethered by the mesentery, then
       tear. A tear is monotone, so it cannot heal.</p>
-    <span class="who">bevy_viscera</span>
+    <span class="who">bevy_carnage::viscera</span>
   </li>
   <li class="card">
     <h3><a href="play.html?demo=carnage_web">carnage_web</a></h3>
     <p><strong>The flagship.</strong> One body, one shot: the bone morphology, the blood pattern that
       fits it, the wetmap it lands on, the guts it opens, the drying it leaves.</p>
-    <span class="who">all four crates</span>
+    <span class="who">bevy_carnage, every module</span>
   </li>
 </ul>
 
@@ -139,31 +139,14 @@
   </tr>
 </table>
 
-<h2>The crates</h2>
+<h2>The crate</h2>
 
 <table>
   <tr><th>Crate</th><th>What it is</th><th>Licence</th></tr>
   <tr>
     <td><a href="https://github.com/Ladvien/bevy_carnage"><code>bevy_carnage</code></a></td>
-    <td>Deterministic runtime gore: prefracture with loading-mode morphology, bullet bores, wounds,
-      bond-graph severance, hit feel, and the tone/accessibility policy surface.</td>
-    <td>MIT OR Apache-2.0</td>
-  </tr>
-  <tr>
-    <td><a href="https://github.com/Ladvien/bloodstain"><code>bloodstain</code></a></td>
-    <td>Blood as a material — engine-free, <code>no_std</code>, no math library in its public API.
-      Rheology, percolation spatter, stain morphology, the forensic pattern taxonomy, drying, and an
-      inverse solver that reads the wound back out of the stains.</td>
-    <td>MIT OR Apache-2.0</td>
-  </tr>
-  <tr>
-    <td><a href="https://github.com/Ladvien/bevy_wetmap"><code>bevy_wetmap</code></a></td>
-    <td>Texture-space blood accumulation, CPU-authoritative and therefore hashable.</td>
-    <td>MIT OR Apache-2.0</td>
-  </tr>
-  <tr>
-    <td><a href="https://github.com/Ladvien/bevy_viscera"><code>bevy_viscera</code></a></td>
-    <td>XPBD Cosserat-style strands with a tearing mesenteric membrane.</td>
+    <td>Deterministic runtime gore, one crate: prefracture with loading-mode morphology, bullet bores, wounds,
+      bond-graph severance, hit feel, the policy surface — and, as modules, blood as a material, the wetmap, viscera, cross-sections, flaying, lacerations and fracture modes.</td>
     <td>MIT OR Apache-2.0</td>
   </tr>
 </table>

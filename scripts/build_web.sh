@@ -7,10 +7,10 @@
 #
 # # Why this is built from the monorepo
 #
-# It is the only tree where all four crates — `bevy_carnage`, `bloodstain`,
-# `bevy_wetmap`, `bevy_viscera` — are visible to one cargo workspace, so it is
-# the only place the flagship cross-crate demo can be compiled at all. Each
-# crate's own public mirror contains that crate alone.
+# The gore stack is one crate, `bevy_carnage`, since 0.5.0, but the game's
+# workspace is where its wasm toolchain, its pinned `bevy` and the pages that
+# host the modules all live together; the crate's own mirror carries the
+# examples and nothing that serves them.
 #
 # # Four things this script learned from `~/isomesh/scripts/build_web.sh`, which
 # # is its model, and each one cost a real failure there
@@ -65,12 +65,12 @@ DEMOS=(
     bevy_carnage:drying
     bevy_carnage:fragment_energy
     bevy_carnage:gore_tier
-    bevy_wetmap:wetmap_paint
-    bevy_viscera:viscera_spill
-    bevy_cross_section:cross_section
-    bevy_fracture_modes:fracture_modes
-    bevy_flaymap:flaymap_peel
-    bevy_laceration:laceration_open
+    bevy_carnage:wetmap_paint
+    bevy_carnage:viscera_spill
+    bevy_carnage:cross_section
+    bevy_carnage:fracture_modes
+    bevy_carnage:flaymap_peel
+    bevy_carnage:laceration_open
     bevy_carnage:flesh
     bevy_carnage:carnage_web
 )
