@@ -113,3 +113,6 @@ assets/ozea_kit/*.glb
 # artifact. Committing it would put a third of a gigabyte of binary into the pack forever, which is
 # the same mistake `assets/scp610/scp-610.glb` is in this history three times for.
 web/dist/
+
+# Inter-agent scratch channel — never committed.
+agents_chat.md
