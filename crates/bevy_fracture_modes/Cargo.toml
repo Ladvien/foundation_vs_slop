@@ -13,24 +13,20 @@ publish = true
 exclude = ["docs/*.gif"]
 
 [dependencies]
-bevy = { version = "0.19.0", default-features = false, features = [
-    "bevy_asset",
-    "bevy_image",
-    "bevy_mesh",
-    "bevy_pbr",
-    "bevy_render",
-    "bevy_log",
-    "std",
-] }
-# Path *and* version, because `cargo publish` refuses a path-only dependency.
-bloodstain = { version = "0.2", path = "../bloodstain", default-features = false }
-bevy_cross_section = { version = "0.1", path = "../bevy_cross_section", default-features = false }
+# **The umbrella with everything off but `std`.** This crate is a graph, a dense solver and two
+# resources: `bevy::app`, `bevy::ecs` and `bevy::math` are all it names, and all three are in the
+# umbrella's core. No asset, no image, no mesh, no material — a fracture mode is a number per cell,
+# and the crate that owns the cells draws them.
+bevy = { version = "0.19.0", default-features = false, features = ["std"] }
 serde = { version = "1.0", features = ["derive"], optional = true }
 
 [features]
 default = []
-serde = ["dep:serde", "bloodstain/serde", "bevy_cross_section/serde"]
+serde = ["dep:serde"]
 
+# **Examples only.** The windowed example needs winit and the 3D render pipeline, so it takes the
+# full umbrella here, where it cannot reach a consumer's dependency graph. `tests/leaf.rs` reads
+# `[dependencies]` only, deliberately.
 [dev-dependencies]
 bevy = { version = "0.19.0" }
 
