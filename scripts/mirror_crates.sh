@@ -55,9 +55,10 @@ CRATES=(
     # crates.io; the registry release is cut from this tree, never from the mirror.
     # **The seven gore leaves that were listed here — `bloodstain`, `bevy_wetmap`, `bevy_viscera`,
     # `bevy_cross_section`, `bevy_flaymap`, `bevy_laceration`, `bevy_fracture_modes` — are modules
-    # of `bevy_carnage` since 0.5.0 (2026-09-04).** Their repositories are archived and their
-    # registry versions yanked; this script must not touch them again, which is what removing them
-    # from this list guarantees.
+    # of `bevy_carnage` since 0.5.0 (2026-09-04).** Their repositories are archived, each with a
+    # "moved" banner. On crates.io the six `bevy_*` leaves are yanked and `bloodstain` stays live by
+    # decision; this line once said all seven were yanked, which was never true (FVS-Q-14). This
+    # script must not touch them again, which is what removing them from this list guarantees.
     bevy_carnage
 )
 

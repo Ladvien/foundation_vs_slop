@@ -2325,6 +2325,11 @@ Split out 2026-07-30.
   handoff is real (the jitter kept it at 12.4 of 25.5 mm), viscera wear the muscle profile, a
   same-tick despawn+insert panic path is `try_insert`, the recorder digests fold in sorted order, and
   the bruise golden was re-blessed once for a bounded conversion.
+  **Falsified 2026-10-02: "their registry versions yanked".** It was written about 2 h 45 min before
+  any yank ran. That run (2026-09-04T23:55Z) yanked the six `bevy_*` leaves, was refused for
+  `bloodstain`, and left `bevy_carnage` 0.3.0–0.4.0 listed as live but unresolvable. Decided
+  2026-10-02: `bloodstain` stays live (engine-free `no_std`, with no Bevy-free replacement) and
+  `bevy_carnage` 0.3.0–0.4.0 are yanked — FVS-Q-14.
 - **FVS-Q-12 — The realism release: the flesh material, the preset, and three injury kernels** · L · ✅ **LANDED 2026-09-04**
   Went in as a goal, like Q-11, and is recorded here so the id exists. **Pre-registered prediction:**
   the family's weak half was the pixel, not the simulation — every cut face, stain and strand was a
