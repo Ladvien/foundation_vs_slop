@@ -134,7 +134,7 @@ pub(crate) const WELD: f32 = crate::bloodstain::WELD;
 pub(crate) const MIN_CROSS2: f32 = 1.0e-12;
 /// How far behind its own surface a triangle is tested for cell membership.
 ///
-/// Must exceed [`EPS`], or [`ProxyCell::contains`](crate::proxy::ProxyCell)'s "on a face counts as
+/// Must exceed [`EPS`], or [`Halfspaces::contains`](crate::proxy::Halfspaces::contains)'s "on a face counts as
 /// inside" tolerance swallows it and the test is unchanged; must stay well under the thinnest cell
 /// any caller supplies, or a triangle is nudged clean through its own solid and comes back homeless.
 /// Positions are subject-local — roughly a metre for a character — so a tenth of a millimetre sits

@@ -365,23 +365,14 @@ impl ProxyCell {
         if n == Vec3::ZERO { None } else { Some((self.verts[f[0] as usize], n)) }
     }
 
-    /// Is `p` inside this cell? **The Tier B assignment test** — a render triangle belongs to the
-    /// fragment whose cell contains its centroid.
+    /// The cell as the half-spaces it is the intersection of: **the Tier B assignment test** — a
+    /// render triangle belongs to the fragment whose cell contains its centroid.
     ///
-    /// Convexity makes this a half-space test per face and nothing more: no ray casting, no winding
-    /// number, no tolerance beyond the shared [`EPS`]. A point exactly on a shared face counts as
-    /// inside both neighbours, which is deliberate — a triangle must never fall through the gap
-    /// between two cells and vanish.
-    pub(crate) fn contains(&self, p: Vec3) -> bool {
-        (0..self.faces.len()).all(|fi| inside_face(self.face_plane(fi), p))
-    }
-
-    /// Every face's plane, computed once, for a caller about to ask [`Self::contains`] many times.
-    ///
-    /// `contains` runs Newell's method over every face on every call, and the render-triangle
-    /// assignment asks it once per triangle per candidate cell. On `bench_carnage` that recomputation
-    /// was the bake's largest single cost. The planes are a function of the cell alone, so computing
-    /// them once and testing with the same expression gives the same answer for every point.
+    /// Every face's plane is computed once, here, by Newell's method, and [`Halfspaces::contains`]
+    /// tests against them. The test used to live on the cell and rerun Newell's method over every
+    /// face for every point. The render-triangle assignment asks once per triangle per candidate
+    /// cell, which made that recomputation the bake's largest single cost on `bench_carnage`. The
+    /// planes are a function of the cell alone, so building them once changes no answer.
     pub(crate) fn halfspaces(&self) -> Halfspaces {
         Halfspaces((0..self.faces.len()).map(|fi| self.face_plane(fi)).collect())
     }
@@ -605,20 +596,18 @@ impl ProxyCell {
 pub(crate) struct Halfspaces(Vec<Option<(Vec3, Vec3)>>);
 
 impl Halfspaces {
-    /// [`ProxyCell::contains`], against the planes computed up front.
+    /// Is `p` inside the cell?
+    ///
+    /// Convexity makes this a half-space test per face and nothing more: no ray casting, no winding
+    /// number, no tolerance beyond the shared [`EPS`]. A point exactly on a shared face counts as
+    /// inside both neighbours, which is deliberate — a triangle must never fall through the gap
+    /// between two cells and vanish.
     pub(crate) fn contains(&self, p: Vec3) -> bool {
-        self.0.iter().all(|&plane| inside_face(plane, p))
-    }
-}
-
-/// One face's half of the containment test, shared by both spellings of `contains`, so the cached
-/// test cannot drift from the uncached one.
-#[inline]
-fn inside_face(plane: Option<(Vec3, Vec3)>, p: Vec3) -> bool {
-    match plane {
-        Some((o, n)) => (p - o).dot(n) <= EPS,
-        // A degenerate face cannot exclude anything; refusing here would drop the triangle.
-        None => true,
+        self.0.iter().all(|&plane| match plane {
+            Some((o, n)) => (p - o).dot(n) <= EPS,
+            // A degenerate face cannot exclude anything; refusing here would drop the triangle.
+            None => true,
+        })
     }
 }
 
@@ -934,7 +923,7 @@ mod tests {
 
     #[test]
     fn contains_agrees_with_the_box_it_was_built_from() {
-        let c = unit_box();
+        let c = unit_box().halfspaces();
         assert!(c.contains(Vec3::ZERO));
         assert!(c.contains(Vec3::new(0.49, 0.49, 0.49)));
         assert!(!c.contains(Vec3::new(0.51, 0.0, 0.0)));
