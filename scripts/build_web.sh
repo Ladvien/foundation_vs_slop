@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Build the carnage demo site into web/dist: ten WebAssembly demos and three
+# Build the carnage demo site into web/dist: fifteen WebAssembly demos and three
 # hand-written pages.
 #
 #   ./scripts/build_web.sh

@@ -266,7 +266,7 @@
   };
   // Every module here needs WebGPU. Cargo features are per-package, so `bevy`'s `webgpu` feature is on
   // for the whole wasm target, and `bevy_render-0.19.0/src/settings.rs` gives it precedence over
-  // `webgl2` on wasm — so there is no WebGL2 build of these ten and nothing to fall back to. Derived
+  // `webgl2` on wasm — so there is no WebGL2 build of these fifteen and nothing to fall back to. Derived
   // from `DEMOS` rather than written out again, so the two cannot drift.
   const NEEDS_WEBGPU = new Set(Object.keys(DEMOS));
   const name = new URLSearchParams(location.search).get("demo");
