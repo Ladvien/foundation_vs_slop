@@ -373,11 +373,17 @@ impl ProxyCell {
     /// inside both neighbours, which is deliberate — a triangle must never fall through the gap
     /// between two cells and vanish.
     pub(crate) fn contains(&self, p: Vec3) -> bool {
-        (0..self.faces.len()).all(|fi| match self.face_plane(fi) {
-            Some((o, n)) => (p - o).dot(n) <= EPS,
-            // A degenerate face cannot exclude anything; refusing here would drop the triangle.
-            None => true,
-        })
+        (0..self.faces.len()).all(|fi| inside_face(self.face_plane(fi), p))
+    }
+
+    /// Every face's plane, computed once, for a caller about to ask [`Self::contains`] many times.
+    ///
+    /// `contains` runs Newell's method over every face on every call, and the render-triangle
+    /// assignment asks it once per triangle per candidate cell. On `bench_carnage` that recomputation
+    /// was the bake's largest single cost. The planes are a function of the cell alone, so computing
+    /// them once and testing with the same expression gives the same answer for every point.
+    pub(crate) fn halfspaces(&self) -> Halfspaces {
+        Halfspaces((0..self.faces.len()).map(|fi| self.face_plane(fi)).collect())
     }
 
     /// Split by a plane into `(above, below)`, either of which is `None` when the cell lies wholly on
@@ -590,6 +596,29 @@ impl ProxyCell {
                 out.push_tri(vtx(a), vtx(b), vtx(c), self.face_kind[fi] != FaceKind::Supplied);
             }
         }
+    }
+}
+
+/// A cell's face planes, in face order, as [`ProxyCell::halfspaces`] computed them. Holds no
+/// reference to the cell, so it answers for the cell as it was when built; every caller builds it
+/// after its cells stop changing and uses it only before any of them is clipped.
+pub(crate) struct Halfspaces(Vec<Option<(Vec3, Vec3)>>);
+
+impl Halfspaces {
+    /// [`ProxyCell::contains`], against the planes computed up front.
+    pub(crate) fn contains(&self, p: Vec3) -> bool {
+        self.0.iter().all(|&plane| inside_face(plane, p))
+    }
+}
+
+/// One face's half of the containment test, shared by both spellings of `contains`, so the cached
+/// test cannot drift from the uncached one.
+#[inline]
+fn inside_face(plane: Option<(Vec3, Vec3)>, p: Vec3) -> bool {
+    match plane {
+        Some((o, n)) => (p - o).dot(n) <= EPS,
+        // A degenerate face cannot exclude anything; refusing here would drop the triangle.
+        None => true,
     }
 }
 

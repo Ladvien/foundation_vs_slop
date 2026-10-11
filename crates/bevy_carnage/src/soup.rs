@@ -558,6 +558,9 @@ pub(crate) fn fracture(
     let mut carried = 0usize;
     let mut considered = 0usize;
 
+    // The cells are fixed from here until the cut loop below, so each one's planes are computed
+    // once rather than once per triangle tested against it. See `ProxyCell::halfspaces`.
+    let halfspaces: Vec<crate::proxy::Halfspaces> = pieces.iter().map(|p| p.cell.halfspaces()).collect();
     for shell in shells(&render) {
         if shell.open {
             let mut whole = Soup::default();
@@ -570,7 +573,7 @@ pub(crate) fn fracture(
                     render.tri_interior[t],
                 );
             }
-            match pieces.iter().position(|p| p.cell.contains(shell.centroid)) {
+            match halfspaces.iter().position(|h| h.contains(shell.centroid)) {
                 Some(i) => {
                     pieces[i].sheets.push(whole);
                     carried += 1;
@@ -611,7 +614,7 @@ pub(crate) fn fracture(
             // own area; each arm by 0.1040, the shoulder's; each leg by 0.0528, the hip's; and the
             // torso holding all 0.3812 of it. Which is to say the hole was exactly joint-shaped.
             let mid = mid - face_normal(a.pos, b.pos, c.pos) * INWARD_NUDGE;
-            match pieces.iter().position(|p| p.cell.contains(mid)) {
+            match halfspaces.iter().position(|h| h.contains(mid)) {
                 Some(i) => pieces[i].render.push_tri(a, b, c, solid.tri_interior[t]),
                 None => homeless += 1,
             }
@@ -765,11 +768,12 @@ pub(crate) fn fracture(
         .flat_map(|(n, plug)| {
             let mut render = Soup::default();
             if let Some(skin) = torn.get(plug.prism) {
+                let inside = plug.cell.halfspaces();
                 for (t, tri) in skin.idx.iter().enumerate() {
                     let (a, b, c) = (skin.vtx(tri[0]), skin.vtx(tri[1]), skin.vtx(tri[2]));
                     let mid = (a.pos + b.pos + c.pos) / 3.0
                         - face_normal(a.pos, b.pos, c.pos) * INWARD_NUDGE;
-                    if plug.cell.contains(mid) {
+                    if inside.contains(mid) {
                         render.push_tri(a, b, c, skin.tri_interior[t]);
                     }
                 }
