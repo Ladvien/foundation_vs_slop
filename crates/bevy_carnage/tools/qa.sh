@@ -73,34 +73,37 @@ rec_args() {
 }
 
 # **The one place the key lists live.** Space-separated `KeyCode` variant names; `Name*n` holds the
-# key for `n` frames. An empty list means an auto-play demo that needs no input. Confirm a binding
-# against the example's own `just_pressed` / `pressed` calls — the source wins over this table.
+# key for `n` frames. An empty list means an auto-play demo that needs no input. Each list was
+# checked against the example's own `just_pressed` / `pressed` calls; a polled `pressed()` key
+# (arrows, `[`/`]` on rheology, `G` on viscera_spill, `F` on gore_tier) needs a hold, and a hold must
+# stay under the 130-frame spacing so it ends before the next press. Blows are cumulative until `R`,
+# so the strike demos reset between blows or the later ones report "nothing left to break here".
 keys_for() {
   case "$1" in
     bullet_holes) echo "Space KeyK Space BracketRight Space KeyJ Space KeyF Space KeyR" ;;
-    carnage) echo "Digit6 Digit1 Digit2 Digit3 Digit4 Digit5 KeyR" ;;
-    carnage_web) echo "Digit1 Digit2 Digit3 Digit4 Digit5 Digit1 Digit1 KeyH KeyR" ;;
+    carnage) echo "Digit6 KeyR Digit1 KeyR Digit2 KeyR Digit3 KeyR Digit4 KeyR Digit5 KeyR" ;;
+    carnage_web) echo "Digit1 Digit2 Digit3 Digit4 Digit5 KeyH KeyR" ;;
     cross_section) echo ;;
-    drying) echo "ArrowRight*120 KeyH Space ArrowRight*240 KeyH" ;;
-    entrails) echo "Digit1 Digit2 Digit3 Digit4 Digit5 KeyR" ;;
+    drying) echo "ArrowRight*120 KeyH Space ArrowRight*110 KeyH" ;;
+    entrails) echo "Digit1 KeyR Digit2 KeyR Digit3 KeyR Digit4 KeyR Digit5 KeyR" ;;
     explode) echo "Space Space" ;;
     fault_modes) echo "Digit1 Digit2 Digit3 Digit4 KeyT BracketRight KeyR" ;;
     flaymap_peel) echo ;;
     flesh) echo ;;
     fracture_modes) echo "Space Space Space KeyR" ;;
-    fragment_energy) echo "BracketRight BracketRight Period KeyT KeyH" ;;
-    gore_tier) echo "Space Digit1 Space Digit2 Space Digit3 Space Digit4 KeyA" ;;
+    fragment_energy) echo "BracketRight BracketRight Period KeyT KeyT KeyH" ;;
+    gore_tier) echo "Space Digit1 Space Digit2 Space Digit3 Space Digit4 Space KeyA KeyF*90" ;;
     laceration_open) echo "Space" ;;
-    pattern_classes) echo "Digit1 Digit2 Digit3 Digit4 Digit5 Digit6 KeyC" ;;
+    pattern_classes) echo "Digit1 Digit2 Digit3 Digit4 Digit5 Digit5 Digit6 KeyC" ;;
     pooling) echo "Space Space Space Space KeyR" ;;
     preset) echo "Digit1 Digit2 Digit3 Digit4 Digit1 Digit1 KeyR" ;;
-    rheology) echo "ArrowRight*60 ArrowUp*60 BracketRight Space" ;;
-    ribbons) echo "Digit1 Digit2 Digit3 Digit4 Digit5 KeyR" ;;
-    sever) echo "Digit1 Digit2 Digit3 Digit4 Digit5 KeyG KeyT KeyR" ;;
+    rheology) echo "Space ArrowRight*60 Space BracketRight*100 Space BracketRight*50 Space" ;;
+    ribbons) echo "Digit1 KeyR Digit4 KeyR Digit2 KeyR Digit3 KeyR Digit5 KeyR" ;;
+    sever) echo "Digit1 KeyR Digit2 KeyR Digit3 KeyR Digit4 KeyR Digit5 KeyR KeyG KeyT KeyR" ;;
     spill) echo "Space Space KeyR" ;;
-    stain_morphology) echo "ArrowRight ArrowUp KeyR KeyB" ;;
+    stain_morphology) echo "ArrowRight ArrowUp KeyR KeyR KeyB" ;;
     viscera_spill) echo "Space KeyG*90 KeyT KeyR" ;;
-    wetmap_paint) echo "Space Space KeyG Space KeyD" ;;
+    wetmap_paint) echo "Space KeyG Space KeyD" ;;
     *) die "no key list for windowed example '$1'" ;;
   esac
 }
