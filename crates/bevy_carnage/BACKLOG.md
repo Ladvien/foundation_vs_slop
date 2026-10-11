@@ -5,7 +5,7 @@
 `docs/research-brief.md` (the open problems), `docs/isomesh-upstream-asks.md` (what we need from the
 validator).
 
-**15 tickets archived, 10 landed in phase 3 (AG-015 … AG-024), 7 landed in phase 4 (AG-025 … AG-031), 1 landed in phase 6 (AG-032), 1 open (AG-033, blocked).**
+**15 tickets archived, 10 landed in phase 3 (AG-015 … AG-024), 7 landed in phase 4 (AG-025 … AG-031), 2 landed in phase 6 (AG-032, AG-034), 1 open (AG-033, blocked).**
 The architectural change this backlog opened with has landed: the crate no longer cuts the triangle
 soup. It cuts a caller-supplied convex proxy and carries the render triangles along as a payload.
 
@@ -805,8 +805,13 @@ defect a ticket and each ticket a commit. The registry release is cut once, afte
 |---|---|---|
 | [x] | **AG-032 — dependencies to the newest the ecosystem allows.** bevy 0.19.0 → 0.19.1 and serde 1.0.228 → 1.0.229 in both lockfiles (the workspace's, and the standalone one the mirror CI builds from); every other dependency was already the newest. Manifests untouched: every requirement already admits the newest version, and raising a library's minimum only restricts its consumers. `CLAUDE.md`'s vendored-source path follows to `bevy-0.19.1`. | S |
 | [ ] | **AG-033 — Bevy 0.20.** Out on 2026-10-08, and the crate stays on the 0.19 line until its two neighbours move. | L |
+| [x] | **AG-034 — nine example headers told you to run crates that no longer exist.** `cargo run -p bevy_wetmap`, `-p bevy_flaymap` and `-p bevy_viscera` in seven headers, `-p bloodstain` in two more, all folded into `bevy_carnage` at 0.5.0. Each is now `cargo run -p bevy_carnage --release --example <name>`. | S |
 
 > BLOCKED: bevy_hanabi has no bevy-0.20 release (crates.io 0.19.0; its main still declares bevy 0.19), and the game's avian3d 0.7 is on bevy 0.19 with no 0.20 release; the game consumes this crate by path, so the crate cannot move alone.
+
+### Seed tickets, as landed
+
+- **AG-034.** The grep the ticket named, `cargo run -p bevy_(wetmap|flaymap|viscera|cross_section|laceration|fracture_modes)|-p bloodstain`, found nine files, not the seven the plan counted: `stain_sweep` and `dry_timeline` still said `-p bloodstain`. None of the nine needs `--features`. The same grep over `docs/`, `README.md`, `tools/`, `web/` and `scripts/` is empty.
 
 ---
 
