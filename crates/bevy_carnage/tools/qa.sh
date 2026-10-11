@@ -21,6 +21,14 @@
 # **Windowed examples never run in parallel.** A covered window stops presenting and its screenshots
 # come back black, so each one runs alone and the machine must be left alone while they do.
 #
+# **Two hosts.** The build is the heavy part and a window needs a live display (a window on a Mac
+# with no active display presents black, so its screenshots are black). So the phases can be split:
+# `QA_PHASES` picks from `build recorders terminal windowed sheets` (default: all of them), `QA_BIN`
+# points at a directory of prebuilt example binaries, and `QA_KEEP_MISSING=1` appends to an existing
+# `missing.txt` instead of truncating it. Build and record on the fast host, `rsync` the out-dir and
+# the binaries to a machine with a screen, then run `QA_PHASES="windowed sheets" QA_BIN=<dir>
+# QA_KEEP_MISSING=1 tools/qa.sh <out-dir>` there. The binaries are portable between Macs of one OS.
+#
 # `QA_DRY=1` prints every command instead of running it, which is how this script is tested.
 #
 # macOS ships bash 3.2: no associative arrays, no `mapfile`, no `${var,,}`. Hence the `case`
@@ -44,6 +52,18 @@ cd "$(dirname "$0")/.."
 
 DRY=0
 [ "${QA_DRY:-}" = 1 ] && DRY=1
+
+PHASES=${QA_PHASES:-"build recorders terminal windowed sheets"}
+for p in $PHASES; do
+  case "$p" in
+    build | recorders | terminal | windowed | sheets) ;;
+    *) echo "qa.sh: unknown QA_PHASES entry '$p' (build recorders terminal windowed sheets)" >&2; exit 1 ;;
+  esac
+done
+phase() {
+  case " $PHASES " in *" $1 "*) return 0 ;; esac
+  return 1
+}
 
 say() { printf '%s\n' "$*"; }
 die() { echo "qa.sh: $*" >&2; exit 1; }
@@ -159,13 +179,17 @@ selected() {
 # Run the built binaries directly rather than through `cargo run`: killing `cargo` on a timeout would
 # leave the example it spawned running. `cargo run` also sets `CARGO_MANIFEST_DIR`, which Bevy's
 # asset root reads at runtime, so set it here to the crate dir (this script's cwd).
-TARGET=${CARGO_TARGET_DIR:-}
-if [ -z "$TARGET" ]; then
-  TARGET=$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
-    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p') || true
+if [ -n "${QA_BIN:-}" ]; then
+  BIN=$QA_BIN
+else
+  TARGET=${CARGO_TARGET_DIR:-}
+  if [ -z "$TARGET" ]; then
+    TARGET=$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
+      | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p') || true
+  fi
+  [ -n "$TARGET" ] || die "cannot find the cargo target directory; set CARGO_TARGET_DIR or QA_BIN"
+  BIN=$TARGET/release/examples
 fi
-[ -n "$TARGET" ] || die "cannot find the cargo target directory; set CARGO_TARGET_DIR"
-BIN=$TARGET/release/examples
 export CARGO_MANIFEST_DIR=$PWD
 
 # The `required-features` examples (`vfx`: carnage/pooling/ribbons and their recorders; `flesh`:
@@ -238,6 +262,7 @@ run_logged() {
 # Recorders: every 10th frame, 12 frames per sheet.
 sheets_recorder() {
   local name=$1 dir=$OUT/$1 frames i n=0 page=1 sheet
+  phase sheets || return 0
   local picked=()
   if [ "$DRY" -eq 1 ]; then
     say "+ magick montage -font \"$FONT\" -label '%t' <every 10th of $dir/frame*.png, 12 per sheet> -tile 4x3 -geometry 320x240+4+4 $OUT/sheets/${name}_NN.png"
@@ -268,6 +293,7 @@ sheets_recorder() {
 sheets_windowed() {
   local name=$1 dir=$OUT/$1 frames i n=0 page=1 sheet total pages
   local picked=()
+  phase sheets || return 0
   if [ "$DRY" -eq 1 ]; then
     say "+ magick montage -font \"$FONT\" -label '%t' $dir/f*.png -tile 3x2 -geometry 480x+4+4 $OUT/sheets/$name.png   # ${name}_NN.png past 6 shots"
     return 0
@@ -296,15 +322,17 @@ sheets_windowed() {
 # --- go -------------------------------------------------------------------------------------------
 
 if [ "$DRY" -eq 1 ]; then
-  say "# QA_DRY=1: printing commands, running none. out=$OUT cwd=$PWD"
+  say "# QA_DRY=1: printing commands, running none. out=$OUT cwd=$PWD phases=$PHASES"
   say "+ mkdir -p $OUT $OUT/sheets"
-  say "+ : > $MISSING"
-  say "+ $BUILD"
+  if [ -z "${QA_KEEP_MISSING:-}" ]; then say "+ : > $MISSING"; fi
+  if phase build; then say "+ $BUILD"; fi
 else
-  command -v magick >/dev/null || die "ImageMagick (magick) is required"
   mkdir -p "$OUT" "$OUT/sheets"
-  : >"$MISSING"
-  $BUILD
+  if [ -z "${QA_KEEP_MISSING:-}" ]; then : >"$MISSING"; fi
+  if phase sheets; then
+    command -v magick >/dev/null || die "ImageMagick (magick) is required for the sheets phase"
+  fi
+  if phase build; then $BUILD; fi
 fi
 
 # 2. Recorders.
@@ -313,15 +341,17 @@ for name in $RECORDERS; do
   ex=$(rec_example "$name")
   args=$(rec_args "$name")
   if [ "$DRY" -eq 1 ]; then
-    say "+ $BIN/$ex --out $OUT/$name $args 2>&1 | tee $OUT/$name.log"
+    if phase recorders; then say "+ $BIN/$ex --out $OUT/$name $args 2>&1 | tee $OUT/$name.log"; fi
     sheets_recorder "$name"
     continue
   fi
-  need_bin "$ex"
-  rm -f "$OUT/$name"/frame*.png
-  # Unquoted on purpose: `$args` is a flag list with no glob characters.
-  # shellcheck disable=SC2086
-  run_logged "$name" 0 "$BIN/$ex" --out "$OUT/$name" $args
+  if phase recorders; then
+    need_bin "$ex"
+    rm -f "$OUT/$name"/frame*.png
+    # Unquoted on purpose: `$args` is a flag list with no glob characters.
+    # shellcheck disable=SC2086
+    run_logged "$name" 0 "$BIN/$ex" --out "$OUT/$name" $args
+  fi
   sheets_recorder "$name"
 done
 
@@ -330,25 +360,31 @@ for name in $TERMINAL; do
   selected "$name" || continue
   if [ "$name" = cross_section_strip ]; then
     if [ "$DRY" -eq 1 ]; then
-      say "+ $BIN/$name --ppm $OUT/$name.ppm 2>&1 | tee $OUT/$name.log"
-      say "+ magick $OUT/$name.ppm $OUT/$name.png"
+      if phase terminal; then say "+ $BIN/$name --ppm $OUT/$name.ppm 2>&1 | tee $OUT/$name.log"; fi
+      if phase sheets; then say "+ magick $OUT/$name.ppm $OUT/$name.png"; fi
       continue
     fi
-    need_bin "$name"
-    run_logged "$name" 0 "$BIN/$name" --ppm "$OUT/$name.ppm"
-    if [ -f "$OUT/$name.ppm" ]; then
-      magick "$OUT/$name.ppm" "$OUT/$name.png"
-    else
-      echo "qa.sh: $name wrote no $OUT/$name.ppm" >>"$MISSING"
+    if phase terminal; then
+      need_bin "$name"
+      run_logged "$name" 0 "$BIN/$name" --ppm "$OUT/$name.ppm"
+    fi
+    if phase sheets; then
+      if [ -f "$OUT/$name.ppm" ]; then
+        magick "$OUT/$name.ppm" "$OUT/$name.png"
+      else
+        echo "qa.sh: $name wrote no $OUT/$name.ppm" >>"$MISSING"
+      fi
     fi
     continue
   fi
   if [ "$DRY" -eq 1 ]; then
-    say "+ $BIN/$name 2>&1 | tee $OUT/$name.log"
+    if phase terminal; then say "+ $BIN/$name 2>&1 | tee $OUT/$name.log"; fi
     continue
   fi
-  need_bin "$name"
-  run_logged "$name" 0 "$BIN/$name"
+  if phase terminal; then
+    need_bin "$name"
+    run_logged "$name" 0 "$BIN/$name"
+  fi
 done
 
 # 4. Windowed examples, strictly one at a time.
@@ -359,17 +395,21 @@ for name in $WINDOWED; do
   script=$(script_for ${KEYS[@]+"${KEYS[@]}"})
   shots=$(printf '%s\n' "$script" | tr ' ' '\n' | grep -c ':shot$' || true)
   if [ "$DRY" -eq 1 ]; then
-    say "+ CARNAGE_AUTOPILOT=\"$script\" CARNAGE_AUTOPILOT_OUT=$OUT/$name timeout $TIMEOUT $BIN/$name 2>&1 | tee $OUT/$name.log   # expects $shots shots"
+    if phase windowed; then
+      say "+ CARNAGE_AUTOPILOT=\"$script\" CARNAGE_AUTOPILOT_OUT=$OUT/$name timeout $TIMEOUT $BIN/$name 2>&1 | tee $OUT/$name.log   # expects $shots shots"
+    fi
     sheets_windowed "$name"
     continue
   fi
-  need_bin "$name"
-  mkdir -p "$OUT/$name"
-  rm -f "$OUT/$name"/f*.png
-  run_logged "$name" "$TIMEOUT" env CARNAGE_AUTOPILOT="$script" CARNAGE_AUTOPILOT_OUT="$OUT/$name" "$BIN/$name"
-  got=$(find "$OUT/$name" -maxdepth 1 -name 'f*.png' | wc -l | tr -d ' ')
-  if [ "$got" -lt "$shots" ]; then
-    echo "qa.sh: $name produced $got of $shots screenshots (script: $script)" >>"$MISSING"
+  if phase windowed; then
+    need_bin "$name"
+    mkdir -p "$OUT/$name"
+    rm -f "$OUT/$name"/f*.png
+    run_logged "$name" "$TIMEOUT" env CARNAGE_AUTOPILOT="$script" CARNAGE_AUTOPILOT_OUT="$OUT/$name" "$BIN/$name"
+    got=$(find "$OUT/$name" -maxdepth 1 -name 'f*.png' | wc -l | tr -d ' ')
+    if [ "$got" -lt "$shots" ]; then
+      echo "qa.sh: $name produced $got of $shots screenshots (script: $script)" >>"$MISSING"
+    fi
   fi
   sheets_windowed "$name"
 done
