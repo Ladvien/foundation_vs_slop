@@ -1,11 +1,11 @@
 # bevy_carnage — BACKLOG
 
-**Updated:** 2026-09-01
+**Updated:** 2026-10-11
 **Companions:** `CLAUDE.md` (rules), `README.md` (what the crate promises),
 `docs/research-brief.md` (the open problems), `docs/isomesh-upstream-asks.md` (what we need from the
 validator).
 
-**15 tickets archived, 10 landed in phase 3 (AG-015 … AG-024), 7 landed in phase 4 (AG-025 … AG-031), 0 open.**
+**15 tickets archived, 10 landed in phase 3 (AG-015 … AG-024), 7 landed in phase 4 (AG-025 … AG-031), 1 landed in phase 6 (AG-032), 1 open (AG-033, blocked).**
 The architectural change this backlog opened with has landed: the crate no longer cuts the triangle
 soup. It cuts a caller-supplied convex proxy and carries the render triangles along as a payload.
 
@@ -792,6 +792,21 @@ tick of every canvas. Also: the flaymap ray test now rejects NaN by negation, an
 `None` through the per-mesh memo, the four kernels joined `tests/determinism_lint.rs` (three sorts
 annotated), the leaf ratchets read target-gated tables, and `bevy_carnage::{wetmap, viscera}` lost a
 `default-features = false` that turned nothing off.
+
+---
+
+## Phase 6 — the visual pass (2026-10)
+
+Dependencies first, then every visual surface of the crate — 24 windowed examples, 11 headless
+recorders, 10 terminal examples, 15 committed GIFs, 15 web demos — looked at round by round, each
+defect a ticket and each ticket a commit. The registry release is cut once, after the last fix.
+
+| | ticket | size |
+|---|---|---|
+| [x] | **AG-032 — dependencies to the newest the ecosystem allows.** bevy 0.19.0 → 0.19.1 and serde 1.0.228 → 1.0.229 in both lockfiles (the workspace's, and the standalone one the mirror CI builds from); every other dependency was already the newest. Manifests untouched: every requirement already admits the newest version, and raising a library's minimum only restricts its consumers. `CLAUDE.md`'s vendored-source path follows to `bevy-0.19.1`. | S |
+| [ ] | **AG-033 — Bevy 0.20.** Out on 2026-10-08, and the crate stays on the 0.19 line until its two neighbours move. | L |
+
+> BLOCKED: bevy_hanabi has no bevy-0.20 release (crates.io 0.19.0; its main still declares bevy 0.19), and the game's avian3d 0.7 is on bevy 0.19 with no 0.20 release; the game consumes this crate by path, so the crate cannot move alone.
 
 ---
 
