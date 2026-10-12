@@ -72,6 +72,7 @@ use bevy::reflect::Reflect;
 use bevy::render::render_resource::{AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat};
 use bevy::shader::ShaderRef;
 use crate::cross_section::{Layer, Layers};
+use crate::flaymap::FlayCanvas;
 use crate::bloodstain::spectral::{Film, SO2_ARTERIAL, SO2_VENOUS, TABLE, srgb};
 
 /// **The material a canvas or a cap wears.** `StandardMaterial` underneath, [`FleshExtension`] on top.
@@ -123,10 +124,10 @@ pub struct FleshParams {
     /// mm at amount byte 255 (the wetmap's `film_depth_mm`), `w` the blood's oxygen saturation `[0, 1]`.
     pub wet: Vec4,
     /// `x` subsurface strength, `y` millimetres per mesh unit (curvature is measured in mesh units
-    /// and the table is in mm), `z` the [`FleshMode`] code, `w` the canvas flags — which of `wet`
-    /// and `flay` are bound. **Maintained by [`FleshExtension::set_wet`] and
-    /// [`FleshExtension::set_flay`]**; an unbound texture samples Bevy's fallback image, which would
-    /// otherwise read as a fully wet, fully peeled surface.
+    /// and the table is in mm), `z` the [`FleshMode`] code, `w` the canvas flags — which of `wet`,
+    /// `flay` and `dermis` are bound. **Maintained by [`FleshExtension::set_wet`],
+    /// [`FleshTables::material`] and [`FleshExtension::set_dermis`]**; an unbound texture samples
+    /// Bevy's fallback image, which would otherwise read as a fully wet, fully peeled surface.
     pub sss: Vec4,
 }
 
@@ -162,10 +163,10 @@ impl FleshParams {
     }
 }
 
-/// **The extension**: the dials, the two baked tables, and the two optional canvas data images.
+/// **The extension**: the dials, the two baked tables, and the optional canvas images.
 ///
-/// Bindings start at 100 so they cannot collide with `StandardMaterial`'s. `wet` and `flay` are the
-/// canvases' metallic-roughness images — the `R`/`A` channels those crates write and Bevy ignores.
+/// Bindings start at 100 so they cannot collide with `StandardMaterial`'s. `wet` is the wetmap's
+/// metallic-roughness image, read for the `R`/`A` channels that crate writes and Bevy ignores.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 pub struct FleshExtension {
     #[uniform(100)]
@@ -182,7 +183,10 @@ pub struct FleshExtension {
     /// `wetmap`'s roughness image: `R` amount, `A` wetness. Unbound means dry.
     #[texture(104)]
     pub wet: Option<Handle<Image>>,
-    /// `flaymap`'s roughness image: `R` depth over span, `A` peeled. Unbound means intact skin.
+    /// `flaymap`'s albedo image: the peeled tissue, and the flat colour the canvas was dressed
+    /// with wherever the skin is intact. The shader reads it with the same canvas's roughness
+    /// image, which [`FleshTables::material`] puts in the base's metallic-roughness slot: `R` the
+    /// depth over the span, `A` whether the texel is peeled. Unbound means intact skin.
     #[texture(105)]
     pub flay: Option<Handle<Image>>,
     /// The preset's dermis image: `rgb` the ratio the skin is multiplied by, `a` how much. Unbound
@@ -198,8 +202,10 @@ impl FleshExtension {
         self.wet = image;
     }
 
-    /// Bind (or unbind) the flaymap's roughness image, keeping the flag the shader gates on in step.
-    pub fn set_flay(&mut self, image: Option<Handle<Image>>) {
+    /// Bind (or unbind) the flaymap's albedo image, keeping the flag the shader gates on in step.
+    /// Private: the shader also reads the canvas's roughness image out of the base material, and
+    /// [`FleshTables::material`] is the one place that sets both.
+    fn set_flay(&mut self, image: Option<Handle<Image>>) {
         self.params.set_flag(FLAG_FLAY, image.is_some());
         self.flay = image;
     }
@@ -238,18 +244,35 @@ impl FleshTables {
     /// **A whole [`FleshMaterial`]** over `base`, with the canvases bound and the flags set. The base's
     /// `clearcoat` is forced to `1.0` — that is what turns Bevy's clearcoat lobe on at all; the shader
     /// then scales it per pixel by wetness, so a dry surface has none.
+    ///
+    /// **A skin over a flaymap keeps the skin it was authored with.** `base`'s colour, its
+    /// `base_color_texture` and the mesh's vertex colours show wherever the skin is intact, and the
+    /// canvas's tissue wherever it is peeled. Build the [`FlayCanvas`] with `base`'s colour factor
+    /// and roughness, as the preset does: the shader swaps the canvas's flat intact colour for the
+    /// authored skin by exactly the intact share of each texel. Two slots of `base` are the
+    /// canvas's. The metallic-roughness texture becomes the canvas's roughness image, so a skin's
+    /// own roughness map is replaced, and `perceptual_roughness` becomes `1.0` because Bevy
+    /// multiplies it by that image. The crater's normal map is used only when `base` carries none of
+    /// its own: a game's normal map is kept, and the crater then shades without its slope. Neither
+    /// gets a slot of its own because every texture the extension adds counts against WebGL2's
+    /// sixteen per stage, which `StandardMaterial` and the view already share.
     pub fn material(
         &self,
         mut base: StandardMaterial,
         params: FleshParams,
         wet: Option<Handle<Image>>,
-        flay: Option<Handle<Image>>,
+        flay: Option<&FlayCanvas>,
     ) -> FleshMaterial {
         base.clearcoat = 1.0;
         base.clearcoat_perceptual_roughness = params.wet.y;
         let mut extension = self.extension(params);
         extension.set_wet(wet);
-        extension.set_flay(flay);
+        if let Some(flay) = flay {
+            base.metallic_roughness_texture = Some(flay.roughness());
+            base.perceptual_roughness = 1.0;
+            base.normal_map_texture = base.normal_map_texture.or_else(|| Some(flay.normal()));
+            extension.set_flay(Some(flay.albedo()));
+        }
         FleshMaterial { base, extension }
     }
 }
