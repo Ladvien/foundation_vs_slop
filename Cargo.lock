@@ -894,7 +894,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_carnage"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "bevy",
  "bevy_hanabi",
