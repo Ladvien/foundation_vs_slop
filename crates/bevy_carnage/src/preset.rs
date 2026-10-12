@@ -744,7 +744,7 @@ impl Plugin for GorePlugin {
             .configure_sets(FixedUpdate, GoreSystems.before(VisceraSystems))
             .add_systems(
                 FixedUpdate,
-                (advance_clock, dress, take_hits, throw_bodies, bleed, age_bruises, soak_cloth, tick_canvases, flush_dermis, fly)
+                (advance_clock, dress, follow_policy, take_hits, throw_bodies, bleed, age_bruises, soak_cloth, tick_canvases, flush_dermis, fly)
                     .chain()
                     .in_set(GoreSystems),
             )
@@ -793,7 +793,9 @@ fn dress(
     meshes: Option<ResMut<Assets<Mesh>>>,
     mut undressed: Query<(Entity, &mut Gore, &Mesh3d, Option<&MeshMaterial3d<StandardMaterial>>), Without<Dressed>>,
     transforms: TransformHelper,
+    policy: Option<Res<crate::GorePolicy>>,
 ) {
+    let wet_sheen = policy.as_deref().map_or(1.0, |p| p.wetness.clamp(0.0, 1.0));
     let (Some(mut images), Some(standard), Some(mut flesh)) = (images, standard, flesh) else {
         return;
     };
@@ -849,6 +851,7 @@ fn dress(
                 let wet = WetCanvas::new(&mut images, dials.canvas, base_srgb, rough);
                 let mut params = FleshParams::for_layers(&layers, FleshMode::Canvas, scale.mm_per_unit);
                 params.wet.z = wet_settings.as_ref().map(|w| w.film_depth_mm).unwrap_or(2.0);
+                params.wet.x = wet_sheen;
                 let dermis = DermisCanvas::new(&mut images, dials.canvas);
                 let mut material = tables.material(base, params, Some(wet.roughness()), Some(&flay));
                 material.extension.set_dermis(Some(dermis.image()));
@@ -859,6 +862,7 @@ fn dress(
                 let layers = Layers::for_region(Region::Torso);
                 let mut params = FleshParams::for_layers(&layers, FleshMode::Cloth, scale.mm_per_unit);
                 params.wet.z = wet_settings.as_ref().map(|w| w.film_depth_mm).unwrap_or(2.0);
+                params.wet.x = wet_sheen;
                 let material = tables.material(base, params, Some(wet.roughness()), None);
                 entity_commands.insert((MeshMaterial3d(flesh.add(material)), wet, Soaking::default()));
             }
@@ -867,10 +871,32 @@ fn dress(
                 let layers = Layers::for_region(Region::Torso);
                 let mut params = FleshParams::for_layers(&layers, FleshMode::Cloth, scale.mm_per_unit);
                 params.wet.z = wet_settings.as_ref().map(|w| w.film_depth_mm).unwrap_or(2.0);
+                params.wet.x = wet_sheen;
                 params.sss.x = 0.0;
                 let material = tables.material(base, params, Some(wet.roughness()), None);
                 entity_commands.insert((MeshMaterial3d(flesh.add(material)), wet, FloorTag));
             }
+        }
+    }
+}
+
+/// **Keep every dressed surface's wet sheen on [`crate::GorePolicy::wetness`]** when the policy
+/// changes, as a settings menu moving a slider changes it. The sheen is the flesh material's clear
+/// coat at full wetness: wetness is the strongest disgust cue and it is not a colour, so the policy
+/// gives it a dial of its own. A surface dressed later reads the policy when it is dressed.
+fn follow_policy(
+    policy: Option<Res<crate::GorePolicy>>,
+    flesh: Option<ResMut<Assets<FleshMaterial>>>,
+    dressed: Query<&MeshMaterial3d<FleshMaterial>, With<Dressed>>,
+) {
+    let (Some(policy), Some(mut flesh)) = (policy, flesh) else { return };
+    if !policy.is_changed() {
+        return;
+    }
+    let sheen = policy.wetness.clamp(0.0, 1.0);
+    for material in &dressed {
+        if let Some(mut m) = flesh.get_mut(&material.0) {
+            m.extension.params.wet.x = sheen;
         }
     }
 }
@@ -897,6 +923,7 @@ struct HitContext<'w> {
     bone: MessageWriter<'w, BoneExposed>,
     wounded: MessageWriter<'w, Wounded>,
     fractured: MessageWriter<'w, GoreFractured>,
+    policy: Option<Res<'w, crate::GorePolicy>>,
 }
 
 /// The scene graph [`take_hits`] walks to find a hit's baked subject and its skin material.
@@ -932,8 +959,10 @@ fn take_hits(
         bone,
         wounded,
         fractured,
+        policy,
     } = &mut cx;
     let SubjectLookup { parents, subjects, breakables, dressed } = &lookup;
+    let policy = policy.as_deref().cloned().unwrap_or_default();
     let tick = clock.0;
     // Every hit of the tick, in one pass. A hit that reaches bone queues the subject's despawn, and a
     // later hit in the same batch on a sibling part still passes the query — so every insert below
@@ -1066,7 +1095,8 @@ fn take_hits(
         // plane cannot catch — a sheet, a wall, the next body part. Straight rather than ballistic
         // for those: a droplet at 8–40 m/s falls under a centimetre in the metre it travels.
         let droplets = crate::bloodstain::patterns::impact_spatter(&wound, &dials.blood);
-        for (other, other_mesh, other_xf, other_gore) in &surfaces {
+        // Blood on the world is the policy's `blood_decals`; the wound's own blood is on the body.
+        for (other, other_mesh, other_xf, other_gore) in surfaces.iter().filter(|_| policy.blood_decals) {
             if *other == hit.entity {
                 continue;
             }
@@ -1183,6 +1213,7 @@ fn take_hits(
 
         // 5. Guts, from a torso that has been opened to the muscle.
         if region == Region::Torso
+            && policy.viscera
             && dials.strands > 0
             && matches!(deepest, Layer::Muscle | Layer::Cortex | Layer::Marrow)
             && let Some(visc) = visc.as_deref()
@@ -1219,6 +1250,10 @@ fn take_hits(
             && let Some(msg) = BoneExposed::from_handoff(hit.entity, &h)
         {
             bone.write(msg);
+            // The bone shows whatever the policy says; whether the body comes apart is the policy's.
+            if !policy.dismemberment {
+                continue;
+            }
             // Walk up to a baked subject or a runtime body and break it.
             let mut root = hit.entity;
             let mut subject = subjects.get(root).ok();
@@ -1420,9 +1455,11 @@ fn bleed(
     meshes: Res<Assets<Mesh>>,
     mut sites: Query<(&Gore, &mut Wounds, &GlobalTransform, &mut WetCanvas), Without<FloorTag>>,
     mut floors: Query<(&Gore, &Mesh3d, &GlobalTransform, &mut WetCanvas), With<FloorTag>>,
+    policy: Option<Res<crate::GorePolicy>>,
 ) {
     let tick = clock.0;
     let edges = edge_settings(&dials, wet_settings.as_deref());
+    let on_the_world = policy.as_deref().is_none_or(|p| p.blood_decals);
     for (gore, mut wounds, xf, mut wet) in &mut sites {
         // A wound whose perfusion envelope has reached zero can never pulse again: the driving
         // stress is zero from then on, and no yield stress is below it.
@@ -1458,7 +1495,7 @@ fn bleed(
             let wobble = |k: u32| (crate::bloodstain::hash_f32(site.bleed.seed ^ tick.wrapping_mul(0x9E37_79B9) ^ k) - 0.5) * 0.04;
             let now = xf.transform_point(site.at_local);
             let at = Vec3::new(now.x + wobble(1), now.y, now.z + wobble(2));
-            for (floor_gore, floor_mesh, floor_xf, mut floor_wet) in &mut floors {
+            for (floor_gore, floor_mesh, floor_xf, mut floor_wet) in floors.iter_mut().filter(|_| on_the_world) {
                 let Some(floor_mesh) = meshes.get(&floor_mesh.0) else { continue };
                 let drip = StainShape {
                     major: radius * 2.0,
@@ -1634,7 +1671,7 @@ mod tests {
             .init_resource::<FractureCache>()
             .init_resource::<WetSettings>()
             .init_resource::<FlaySettings>()
-            .add_systems(FixedUpdate, (advance_clock, dress, take_hits, throw_bodies, bleed, age_bruises, soak_cloth, tick_canvases, flush_dermis, fly).chain());
+            .add_systems(FixedUpdate, (advance_clock, dress, follow_policy, take_hits, throw_bodies, bleed, age_bruises, soak_cloth, tick_canvases, flush_dermis, fly).chain());
         let images = app.world_mut().resource_mut::<Assets<Image>>().reserve_handle();
         app.world_mut().resource_mut::<FleshTables>().sss = images;
         app
@@ -2002,5 +2039,60 @@ mod tests {
         app.world_mut().run_schedule(FixedUpdate);
         let floor_wet = app.world().get::<WetCanvas>(floor).map(|w| w.wetted_area()).unwrap_or(0.0);
         assert!(floor_wet > 0.0, "nothing landed on the floor");
+    }
+
+    /// **The preset obeys the gore policy's toggles**, each against the shipped policy doing the
+    /// opposite. At [`crate::GoreTier::Blood`] a torso opened to the bone spills no guts and does
+    /// not come apart, though the bone still shows. With world blood off, the floor under the wound
+    /// stays dry. And when `wetness` changes, the dressed surfaces' sheen follows it.
+    #[test]
+    fn the_preset_obeys_the_gore_policy() {
+        let run = |policy: crate::GorePolicy| {
+            let mut app = headless();
+            app.insert_resource(policy).init_resource::<ViscSettings>();
+            let cube = Cuboid::new(0.4, 0.4, 0.4).mesh().build();
+            let proxy = [crate::ProxyCell::from_box(Vec3::ZERO, Vec3::splat(0.2))];
+            let fracture = crate::fracture_mesh(&[(&cube, Mat4::IDENTITY)], &proxy, &crate::CutSettings::new(4, 0.05, 3));
+            let breakable = GoreBreakable::from_fracture(fracture, Region::Torso, &crate::cross_section::Scale::default());
+            let mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(cube);
+            let plane = app.world_mut().resource_mut::<Assets<Mesh>>().add(Plane3d::new(Vec3::Y, Vec2::splat(1.5)).mesh().build());
+            // Twenty metres: spray thrown from a metre up at 8–40 m/s lands several metres out, past
+            // a three-metre floor.
+            let plane = app.world_mut().resource_mut::<Assets<Mesh>>().add(Plane3d::new(Vec3::Y, Vec2::splat(10.0)).mesh().build());
+            let root = world.spawn((Transform::from_xyz(0.0, 1.0, 0.0), GlobalTransform::from_xyz(0.0, 1.0, 0.0), breakable)).id();
+            let part = world.spawn((Mesh3d(mesh), Transform::IDENTITY, GlobalTransform::from_xyz(0.0, 1.0, 0.0), Gore::skin(Region::Torso), ChildOf(root))).id();
+            let floor = world.spawn((Mesh3d(plane), Transform::IDENTITY, GlobalTransform::IDENTITY, Gore::floor())).id();
+            app.world_mut().run_schedule(FixedUpdate);
+            app.world_mut().write_message(GoreHit::impact(part, Vec3::new(0.0, 1.0, 2.0), Vec3::NEG_Z, 0.03, 60.0));
+            app.world_mut().run_schedule(FixedUpdate);
+            let guts = app.world_mut().query_filtered::<(), With<Gut>>().iter(app.world()).count();
+            let count = |app: &App, broke: bool| {
+                if broke {
+                    let m = app.world().resource::<Messages<GoreFractured>>();
+                    m.get_cursor().read(m).count()
+                } else {
+                    let m = app.world().resource::<Messages<BoneExposed>>();
+                    m.get_cursor().read(m).count()
+                }
+            };
+            let (broke, bone) = (count(&app, true), count(&app, false));
+            let floor_wet = app.world().get::<WetCanvas>(floor).map(|w| w.wetted_area()).unwrap_or(0.0);
+            (guts, broke, bone, floor_wet, app, floor)
+        };
+        let (guts, broke, bone, floor_wet, mut app, floor) = run(crate::GorePolicy::default());
+        assert!(guts > 0 && broke == 1 && bone == 1 && floor_wet > 0.0, "the shipped policy: {guts} guts, {broke} breaks, {bone} bones, floor {floor_wet}");
+        let (guts, broke, bone, floor_wet, ..) = run(crate::GorePolicy::for_tier(crate::GoreTier::Blood));
+        assert_eq!((guts, broke, bone), (0, 0, 1), "at the Blood tier: guts, breaks, bones");
+        assert!(floor_wet > 0.0, "the Blood tier keeps blood on the world");
+        let (.., floor_wet, _, _) = run(crate::GorePolicy { blood_decals: false, ..Default::default() });
+        assert_eq!(floor_wet, 0.0, "blood reached the floor with world blood off");
+        app.world_mut().resource_mut::<crate::GorePolicy>().wetness = 0.25;
+        app.world_mut().run_schedule(FixedUpdate);
+        let sheen = app
+            .world()
+            .get::<MeshMaterial3d<FleshMaterial>>(floor)
+            .and_then(|m| app.world().resource::<Assets<FleshMaterial>>().get(&m.0))
+            .map(|m| m.extension.params.wet.x);
+        assert_eq!(sheen, Some(0.25), "the floor's sheen did not follow the policy");
     }
 }
