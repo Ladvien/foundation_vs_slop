@@ -79,6 +79,11 @@ for entry in $(awk '/^DEMOS=\(/{f=1;next} f&&/^\)/{exit} f{gsub(/[ \t]/,""); if 
     if [ ! -f "crates/$pkg/examples/$demo.rs" ]; then
         echo "::error::crates/$pkg/examples/$demo.rs does not exist" >&2
         fail=1
+    # A demo whose window names no canvas gets one Bevy creates and appends to the body, below the
+    # fold, while the page's own canvas stays black. Three of fifteen shipped that way.
+    elif ! grep -q '"#carnage-canvas"' "crates/$pkg/examples/$demo.rs"; then
+        echo "::error::crates/$pkg/examples/$demo.rs never sets canvas: Some(\"#carnage-canvas\") — it would draw below the page and leave the demo's canvas black" >&2
+        fail=1
     fi
 done
 
@@ -86,4 +91,4 @@ if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 
-echo "demo roster: $n_roster demos, built and allow-listed and legended, all agreeing"
+echo "demo roster: $n_roster demos, built and allow-listed and legended, each drawing into the page canvas"
