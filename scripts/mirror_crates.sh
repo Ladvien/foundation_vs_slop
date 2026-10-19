@@ -45,10 +45,7 @@ CRATES=(
     emerge-anim
     emerge-bevy
     emerge-mapper
-    # Vendored in with `git subtree add` rather than extracted from the game, so the flow here is the
-    # same as every other crate but the direction of the FIRST move was inward. Its nested
-    # `crates/bevy_debugger_bevy` travels with it — one mirror, both halves.
-    bevy_debugger_mcp
+    # bevy_debugger_mcp left on 2026-10-19: Ladvien/bevy_debugger_mcp is now its own source of truth on Bevy 0.20 (Sanctuary decision 0230); crates/bevy_debugger_mcp here is a frozen Bevy 0.19 copy, never mirrored again.
     # Vendored by `git subtree add` like `bevy_debugger_mcp` above, and mirrored for the same reason it
     # can be: the add recorded a `git-subtree-split` trailer, so a split rejoins the mirror's own history
     # and the non-forced push below fast-forwards. It is also the one mirrored crate that publishes to
