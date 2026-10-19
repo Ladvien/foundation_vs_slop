@@ -46,17 +46,13 @@ CRATES=(
     emerge-bevy
     emerge-mapper
     # bevy_debugger_mcp left on 2026-10-19: Ladvien/bevy_debugger_mcp is now its own source of truth on Bevy 0.20 (Sanctuary decision 0232); crates/bevy_debugger_mcp here is a frozen Bevy 0.19 copy, never mirrored again.
-    # Vendored by `git subtree add` like `bevy_debugger_mcp` above, and mirrored for the same reason it
-    # can be: the add recorded a `git-subtree-split` trailer, so a split rejoins the mirror's own history
-    # and the non-forced push below fast-forwards. It is also the one mirrored crate that publishes to
-    # crates.io; the registry release is cut from this tree, never from the mirror.
+    # bevy_carnage left on 2026-10-19: Ladvien/bevy_carnage is now its own source of truth on Bevy 0.20 (Sanctuary decision 0239); crates/bevy_carnage here is a frozen Bevy 0.19 copy (0.5.64), never mirrored again.
     # **The seven gore leaves that were listed here — `bloodstain`, `bevy_wetmap`, `bevy_viscera`,
     # `bevy_cross_section`, `bevy_flaymap`, `bevy_laceration`, `bevy_fracture_modes` — are modules
     # of `bevy_carnage` since 0.5.0 (2026-09-04).** Their repositories are archived, each with a
     # "moved" banner. On crates.io the six `bevy_*` leaves are yanked and `bloodstain` stays live by
     # decision; this line once said all seven were yanked, which was never true (FVS-Q-14). This
     # script must not touch them again, which is what removing them from this list guarantees.
-    bevy_carnage
 )
 
 # Mirrors that are created PUBLIC. Everything absent from this list is created private — see the

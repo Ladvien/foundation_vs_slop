@@ -1,3 +1,5 @@
+**Frozen at 0.5.64 (Bevy 0.19).** The live crate is Ladvien/bevy_carnage, its own source of truth since 2026-10-19; do not edit or mirror this copy.
+
 # bevy_carnage — notes for agents
 
 Deterministic runtime gore: take whatever meshes an entity actually loaded, plane-cut them into watertight-capped chunks, bore bullet channels through them, and drive blood, spatter and impact feel off the wounds that result.
