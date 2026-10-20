@@ -46,7 +46,7 @@ CRATES=(
     emerge-bevy
     emerge-mapper
     # bevy_debugger_mcp left on 2026-10-19: Ladvien/bevy_debugger_mcp is now its own source of truth on Bevy 0.20 (Sanctuary decision 0232); crates/bevy_debugger_mcp here is a frozen Bevy 0.19 copy, never mirrored again.
-    # bevy_carnage left on 2026-10-19: Ladvien/bevy_carnage is now its own source of truth on Bevy 0.20 (Sanctuary decision 0239); crates/bevy_carnage here is a frozen Bevy 0.19 copy (0.5.64), never mirrored again.
+    # bevy_carnage left on 2026-10-19: Ladvien/bevy_carnage is now its own source of truth on Bevy 0.20 (Sanctuary decision 0241); crates/bevy_carnage here is a frozen Bevy 0.19 copy (0.5.64), never mirrored again.
     # **The seven gore leaves that were listed here — `bloodstain`, `bevy_wetmap`, `bevy_viscera`,
     # `bevy_cross_section`, `bevy_flaymap`, `bevy_laceration`, `bevy_fracture_modes` — are modules
     # of `bevy_carnage` since 0.5.0 (2026-09-04).** Their repositories are archived, each with a
