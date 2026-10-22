@@ -1,12 +1,12 @@
 name: CI
 
 # Pure-CPU gate: the deterministic test suite (RNG guard, WFC pin, utility/ORCA goldens, and — once
-# landed — the headless replay/liveness harness). This is the hard gate on every push.
+# landed — the headless replay/liveness harness). This is the hard gate on every PR and on every push to main.
 #
 # `cargo fmt --check` and `cargo clippy` run as ADVISORY steps (continue-on-error): the codebase predates
 # any rustfmt/clippy enforcement (no rustfmt.toml; wider-than-default line width; ~26 standing clippy
 # lints), so blocking on them today would fail on untouched code. They surface drift without gating until
-# a dedicated cleanup pass lands. Determinism is pinned on this single target (ubuntu-latest) — f32
+# a dedicated cleanup pass lands. Determinism is pinned on this single target (big, x86_64 Linux) — f32
 # gameplay math may diverge on other CPUs/compilers, so treat other platforms with tolerance.
 #
 # The GPU/visual-regression lane (SSIM over devshot screenshots) is intentionally NOT here; it needs a
@@ -14,7 +14,7 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
   # 03:00 UTC daily, for `search-parallel-nightly` below. `workflow_dispatch` so it can also be run on
   # demand — which is what you want after touching the search or the sim, rather than waiting a day.
@@ -46,34 +46,21 @@ permissions:
   pages: write
   id-token: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: test (pure-CPU, hard gate)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, big]
     steps:
       - uses: actions/checkout@v4
-
-      # Bevy's Linux build needs ALSA / udev / windowing dev headers even though the tests never open a
-      # window (they only compile the binary target). No GPU is used by the pure-CPU test suite.
-      - name: Install Bevy build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       # Hard gate — the deterministic suite must pass. Default features only: the `test-harness` replay /
       # liveness / search-calibration tests are GPU-free (see the `harness` lane) but slower, so they run
@@ -136,22 +123,11 @@ jobs:
   # hides every suite after it, which is the whole reason the above went unnoticed.
   harness:
     name: replay + liveness (headless, GPU-free) — advisory, see note above
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, big]
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - name: Install Bevy Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-harness-${{ hashFiles('**/Cargo.lock') }}
       - name: Test (harness — replay + liveness + search-calibration, single-threaded)
         # Serial: headless Apps must not overlap (serial_guard + --test-threads=1).
         #
@@ -211,25 +187,13 @@ jobs:
   # concern validated at ship time, not a determinism one.
   release-determinism:
     name: determinism (release profile)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, big]
     env:
       CARGO_PROFILE_RELEASE_LTO: "false"
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
     steps:
       - uses: actions/checkout@v4
-      - name: Install Bevy build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
       - name: Test (deterministic core, release profile)
         run: cargo test --release --workspace
 
@@ -325,34 +289,15 @@ jobs:
   # ---------------------------------------------------------------------------
   site:
     name: demo site (fifteen wasm modules)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, big]
     steps:
       - uses: actions/checkout@v4
-
-      # The same packages the other jobs install. Nothing in the wasm graph needs
-      # them — winit's x11/wayland deps are target-gated away — but host build
-      # scripts of shared dependencies still run, and this is the cheapest way to
-      # not care which.
-      - name: Install Bevy build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: wasm target
         run: rustup target add wasm32-unknown-unknown
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-site-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       # **The version comes out of the lockfile, never a literal here.** A
       # `wasm-bindgen` CLI that disagrees with the crate emits glue for a

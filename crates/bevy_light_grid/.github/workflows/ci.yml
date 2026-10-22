@@ -8,8 +8,12 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,17 +21,9 @@ env:
 jobs:
   build:
     name: build (standalone) + test
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, big]
     steps:
       - uses: actions/checkout@v4
-
-      # The crate itself needs none of these — it takes `bevy_math` and `bevy_ecs` and draws nothing.
-      # They are here for the `beam` example, whose dev-dependency is the full Bevy umbrella.
-      - name: Install Bevy build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -43,7 +39,7 @@ jobs:
       # anyone. A plain `cargo build` takes no dev-dependencies, so it compiles exactly the feature set
       # a consumer gets.
       - name: Build with only the declared features
-        run: cargo build --release
+        run: cargo build
 
       # `tests/leaf.rs` is the boundary ratchet: it fails if `src/` ever names an engine crate or if
       # `[dependencies]` grows beyond `bevy_math` + `bevy_ecs`. That check is the crate's whole thesis.
