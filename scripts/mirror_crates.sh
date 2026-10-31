@@ -11,7 +11,9 @@
 # force-pushed would turn "I amended a commit message" into "the mirror's history silently diverged".
 # The push failing IS the correct outcome. To resolve deliberately:
 #
-#     git push --force-with-lease=main:<remote-sha> git@github.com:Ladvien/<name>.git <sha>:main
+#     git push --force-with-lease=main:<remote-sha> git@github.com:<org>/<name>.git <sha>:main
+#
+# where <org> is what `org_of <name>` below prints.
 #
 # WHY SIBLING PATH DEPS ARE LEFT ALONE: four of these crates depend on siblings by workspace path, so
 # their mirrors do not build standalone, and their READMEs say so. The alternative — rewriting path
@@ -29,7 +31,17 @@
 # Usage:  scripts/mirror_crates.sh [crate ...]     (default: every crate in CRATES)
 set -euo pipefail
 
-ORG=Ladvien
+# Mirrors live in the bevy-coven org (moved there 2026-10-31) unless they are listed in
+# LADVIEN_CRATES, whose repositories stayed on the owner's personal account.
+ORG=bevy-coven
+LADVIEN_CRATES=(det_rng deterministic_solver map_elites emerge-core emerge-anim emerge-bevy emerge-mapper)
+org_of() {
+    local c
+    for c in "${LADVIEN_CRATES[@]}"; do
+        [[ "$1" == "$c" ]] && { echo Ladvien; return; }
+    done
+    echo "$ORG"
+}
 
 # Every crate that gets a mirror. Order is cosmetic; each split is independent.
 CRATES=(
@@ -135,8 +147,9 @@ for name in "${CRATES[@]}"; do
         exit 1
     fi
 
-    url="git@github.com:$ORG/$name.git"
-    if ! gh repo view "$ORG/$name" >/dev/null 2>&1; then
+    org=$(org_of "$name")
+    url="git@github.com:$org/$name.git"
+    if ! gh repo view "$org/$name" >/dev/null 2>&1; then
         desc=$(sed -n 's/^description = "\(.*\)"$/\1/p' "$prefix/Cargo.toml" | head -1)
         # Visibility is per-crate and DEFAULTS TO PRIVATE, so a crate nobody thought about cannot be
         # published by omission. It is read from PUBLIC_CRATES rather than passed as a flag because this
@@ -147,8 +160,8 @@ for name in "${CRATES[@]}"; do
         for pub_name in "${PUBLIC_CRATES[@]}"; do
             [[ "$name" == "$pub_name" ]] && vis="--public"
         done
-        echo "== creating $ORG/$name (${vis#--})"
-        gh repo create "$ORG/$name" "$vis" --description "$desc"
+        echo "== creating $org/$name (${vis#--})"
+        gh repo create "$org/$name" "$vis" --description "$desc"
     fi
 
     echo "== $name"
