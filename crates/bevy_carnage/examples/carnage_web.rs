@@ -78,8 +78,7 @@ fn setup(
     commands.spawn((
         Camera3d::default(),
         preset_scene::sweep(0.0),
-        AmbientLight { brightness: preset_scene::AMBIENT, ..default() },
-        preset_scene::EXPOSURE,
+        preset_scene::camera_light(&mut images),
         Sweep,
     ));
     preset_scene::spawn(&mut commands, &mut meshes, &mut materials, &mut images);
@@ -103,6 +102,7 @@ fn keys(
     mut images: ResMut<Assets<Image>>,
     parts: Query<(Entity, &Part)>,
     scene: Query<Entity, Or<(With<Body>, With<Sheet>, With<Slab>, With<Sun>)>>,
+    surfaces: Query<Entity, Or<(With<Body>, With<Sheet>, With<Slab>)>>,
     pieces: Query<
         Entity,
         Or<(With<bevy_carnage::preset::Flying>, With<bevy_carnage::preset::Gut>, With<bevy_carnage::preset::Standing>)>,
@@ -140,11 +140,21 @@ fn keys(
         shots.numbers = !shots.numbers;
     }
     if input.just_pressed(KeyCode::KeyR) {
-        for e in scene.iter().chain(pieces.iter()) {
+        for e in &pieces {
             commands.entity(e).despawn();
         }
         shots.n = 0;
-        preset_scene::spawn(&mut commands, &mut meshes, &mut materials, &mut images);
+        // A whole body heals in place (`GoreReset`); one the last shot broke is built again.
+        if parts.is_empty() {
+            for e in &scene {
+                commands.entity(e).despawn();
+            }
+            preset_scene::spawn(&mut commands, &mut meshes, &mut materials, &mut images);
+        } else {
+            for e in &surfaces {
+                commands.write_message(bevy_carnage::preset::GoreReset::new(e));
+            }
+        }
     }
 }
 

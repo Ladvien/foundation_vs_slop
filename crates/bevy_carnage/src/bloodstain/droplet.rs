@@ -206,15 +206,25 @@ pub fn droplets(w: &Wound, s: &BloodSettings) -> Vec<Droplet> {
 
 /// Closed-form landing point on a horizontal plane. `None` if it starts at or below the plane.
 ///
-/// Solves `plane_y = from.y + v_y·t − ½·g·t²` for the positive root and evaluates the horizontal
-/// motion at that `t`. **Closed form rather than stepped**, because a stepped integration would need
-/// a timestep, and a timestep is a clock — which the determinism contract forbids on this side. The
-/// landing `y` is *assigned* `plane_y` rather than computed, so a stain is exactly on the plane it
-/// stained instead of a float's width above or below it.
+/// Solves `plane_y = from.y + v_y·t − ½·g·t²` for the positive root ([`flight_time`]) and evaluates
+/// the horizontal motion at that `t`. **Closed form rather than stepped**, because a stepped
+/// integration would need a timestep, and a timestep is a clock — which the determinism contract
+/// forbids on this side. The landing `y` is *assigned* `plane_y` rather than computed, so a stain is
+/// exactly on the plane it stained instead of a float's width above or below it.
 ///
 /// `None` for a droplet that starts at or under the plane, or whose discriminant is negative: both
 /// mean it never crosses, and inventing a landing point for it would be a fabricated result.
 pub fn landing(from: V3, d: &Droplet, gravity: f32, plane_y: f32) -> Option<V3> {
+    let t = flight_time(from, d, gravity, plane_y)?;
+    let mut at = vec::add(from, vec::scale(vec::scale(d.dir, d.speed), t));
+    at[1] = plane_y;
+    Some(at)
+}
+
+/// **How long a droplet is in the air before it reaches a horizontal plane**, seconds: the positive
+/// root [`landing`] places its stain with, so the time and the place describe one flight. `None`
+/// exactly where [`landing`] is.
+pub fn flight_time(from: V3, d: &Droplet, gravity: f32, plane_y: f32) -> Option<f32> {
     let h = from[1] - plane_y;
     if !(h > 0.0) || !h.is_finite() {
         return None;
@@ -236,9 +246,7 @@ pub fn landing(from: V3, d: &Droplet, gravity: f32, plane_y: f32) -> Option<V3> 
     if !(t > 0.0) || !t.is_finite() {
         return None;
     }
-    let mut at = vec::add(from, vec::scale(vec::scale(d.dir, d.speed), t));
-    at[1] = plane_y;
-    Some(at)
+    Some(t)
 }
 
 #[cfg(test)]

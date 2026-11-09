@@ -1,5 +1,213 @@
 [package]
 name = "bevy_carnage"
+# **`0.5.64`: a drop in flight is a streak** (`AG-137`). The spray drew every droplet as a disc as
+# wide as it was long, and read as red dots round the wound. A droplet is drawn its width plus
+# `vfx::DROPLET_STREAK_S` (1/90 s) of its flight along its velocity, and the spray's widths are
+# thinner. `capture_skinned --slow N`. The hero clips are re-cut.
+#
+# **`0.5.63`: a drop lies flat** (`AG-136`). A film of blood a few texels across was lifted by its
+# depth as a pool is, all edge and no interior, and a wall's spatter read as red beads. The flesh
+# shader compares the blood four texels around a fragment with its own and draws a small film with
+# 0.15 of the relief. Every digest is unchanged.
+#
+# **`0.5.62`: a shot that goes through goes through everything on its line** (`AG-135`). A shot
+# through a forearm held across the chest went in and out of the forearm and stopped there. It now
+# walks every crossing of the body it was sent at, counting itself in and out of each mesh by the
+# winding of the triangles it crosses, and opens a wound at every way in and out; every cloth crossing
+# is holed. A skin takes each droplet as its own stain, as a wall does. `capture_skinned --guard`.
+#
+# **`0.5.61`: a skinned crowd costs what a rigid one does** (`AG-134`). Every batch posed every
+# skinned surface in the world to box it for the spray, and walked every pose's triangles. A skinned
+# surface is now boxed by its joints without posing it, posed only when a ray reaches it, with the
+# blend reused where the weights repeat, and cast at through its bind-pose hierarchy refitted to the
+# pose. Forty skinned characters, twelve hits: 23.2 to 10.5 ms a tick. Every frame is unchanged.
+#
+# **`0.5.60`: a cast tests the triangles it can reach** (`AG-133`). The preset walked every triangle
+# of a mesh for every ray. A rigid surface's mesh now carries a bounding-volume hierarchy, built the
+# tick it is dressed and kept while the mesh is unchanged, and a cast through it lands exactly where
+# the walk did, to the bit. One hit on a 16,128-triangle part 1.53 to 0.59 ms a tick, twelve on forty
+# characters 12.1 to 9.3. Every frame of the skinned and tier clips is unchanged.
+#
+# **`0.5.59`: a shotgun on one character costs a third of what it did** (`AG-132`). The preset shades
+# a skin's flaymap after every hit, and `FlayCanvas::shade` redrew the whole canvas each time: 2.3 ms
+# of a twelve-pellet tick's 3.5. It now redraws the texels peeled since the last shade and the normals
+# round them, to the same bytes; twelve hits on one character 3.69 to 1.29 ms a tick. Every frame of
+# the skinned, tier-2, gore and flesh clips is unchanged.
+#
+# **`0.5.58`: a canvas ticks its blood, not the floor between** (`AG-131`). A wetmap ticked the one
+# rectangle round all its blood and copied the whole canvas into its snapshot twice a tick: a pool in
+# each of two corners of a 1024 floor cost 25.5 ms a tick. Each 32-texel tile now keeps the rectangle
+# round its own blood, and the passes and the snapshot cover those grown by what a tick can reach:
+# 0.46 ms, and one blob 0.34 to 0.23. Every digest holds.
+#
+# **`0.5.57`: a level's floor takes blood** (`AG-130`). A floor or a wall whose `UV_0` tiles its
+# texture, as a level's does, clamped every drop to its canvas's edge. `Gore::projected()` dresses it
+# on a copy of its mesh whose `UV_0` is the mesh seen square-on from the side it mostly faces, scaled
+# into `[0, 1]`, and whose `UV_1` is the tiling it had, which its own textures now read; the density is
+# the projection's. A mesh with a `UV_1` already is refused with a warning, and an unprojected floor
+# whose UVs tile is warned about once. `capture_skinned --stroll` walks across 30 cm tiles.
+#
+# **`0.5.56`: a foot that steps in blood tracks it** (`AG-129`). `GoreStep` is the footstep a game
+# raises for its sound; on the floor under it the sole lifts 30 % of the wet blood under its outline
+# (`WetCanvas::lift_uv`, never dried blood) and prints what it carried (`WetCanvas::print_uv`), a
+# boot's outline inked where it pressed and its tread holds blood, shedding 30 % a step so the prints
+# fade. The load is a public `Tread` on the foot. `capture_skinned --stroll` walks the mannequin
+# through a spill (`docs/skinned_stroll.gif`). The default skinned clip and tier 1 print the
+# digests they did.
+#
+# **`0.5.55`: every bruise on a limb ages** (`AG-128`). `Bruising` held one bruise, so a second
+# blow on the same mesh froze the first where it was. It now holds `sites`, one `BruiseSite` per
+# blow up to `MAX_BRUISES` (8), the oldest retiring past that, and every one is stepped. The
+# dermis canvas redraws them each model step over what it holds without them
+# (`DermisCanvas::draw_bruises`), multiplying the ratios they lay over the skin, so two that overlap
+# darken together: painted one over the other, they met at a pale seam. `capture_skinned --blows`
+# shows two on one shin (`docs/skinned_bruises.gif`). Every digest holds.
+#
+# **`0.5.54`: the flesh material fits a scene with an environment map, on the web** (`AG-127`). The
+# material sampled fifteen textures in its fragment stage, and a camera's `EnvironmentMapLight`
+# adds two, past the sixteen WebGL2 and wgpu's default limits allow: its pipeline failed to build
+# ("count was 17"). The subsurface and blood tables are now one image (`flesh::luts`), their
+# bytes and `the_flesh_tables_are_frozen` unchanged. And the preset's clips are lit by a room: a
+# procedural studio prefiltered on the CPU (`examples/common/studio.rs`) in place of a uniform
+# ambient, so wet blood has something to reflect. Every digest holds.
+#
+# **`0.5.53`: a graze is raw** (`AG-126`). Round every flaymap crater the skin it only grazed was
+# drawn bare, the dermis's pale pink mottled with the fat's cream, and read as a pale halo. A
+# fresh abrasion is raw and moist from the first moment: the graze now wears `GRAZE_FILM` (4 %) of
+# the cut film, ramped in over the skin's depth so its edge fades into the skin. Shader only;
+# every digest holds; WebGL2 checked again.
+#
+# **`0.5.52`: a crater is lit through its mouth** (`AG-125`). The flesh material lit a flaymap crater
+# as if it were open skin, so a wound pooled with blood was one red to its middle however deep it
+# went. Each texel below the skin now finds the crater's walls in the flaymap's own depth, eight
+# ways out to 15 texels, and every light term on it is multiplied by `1 − mean(sin h)`, the share of
+# the room it sees between them. `FleshParams::cut.y` carries the layer span. Shader only; every
+# digest holds; WebGL2 checked again.
+#
+# **`0.5.51`: a hit reads in the air, and follows the player's setting** (`AG-124`). The preset's
+# wounds put blood on surfaces and nothing in the air at the moment of the hit; `CarnageVfxPlugin`
+# turns every announced wound into a burst, but its mist was a few hard 1 cm dots flying at 40 m/s,
+# gone in two frames, and it read no `GorePolicy`, so a game that turned blood off still sprayed it.
+# The mist is now a soft puff that hangs at the wound, as Stokes has fine droplets do, three a spray
+# droplet, in the colour of a film as thin as they are; a tier that draws no blood throws the same
+# bursts in `substitute_srgb` (`CarnageEffects::substitute`, `Palette`). The preset's recorders and
+# demos add the plugin under `vfx`.
+#
+# **`0.5.50`: a slash lies on the skin and opens into it** (`AG-123`). A slash's path was a straight
+# line through the hit in the plane of the skin there, so across a curved limb its ends, and the
+# wound bed built along it, stood off the skin: on the mannequin's thigh a pale plank across the leg.
+# The path is now walked on the skin from the hit. And the bed's walls were lit as open skin, so a
+# narrow cut read as a pale ridge; its vertex colour now carries the light that reaches it down the
+# trough, `(1 + sin α)/2` at a lip and `sin² α` at the floor. The skinned clips' digests move with
+# the torn mesh their blood runs over.
+#
+# **`0.5.49`: a slash's wound bed rides a skinned limb** (`AG-122`). The bed under a laceration is a
+# mesh of its own, and on a skinned skin it had no joints and no `SkinnedMesh`, so it was drawn in
+# the bind pose: once the limb moved, it stood off the body as a pale fin across the cut. Each bed
+# vertex now takes the joints of the torn skin's vertex nearest it, the bed gets bounds when its skin
+# has them, and the plugin spawns it with the skin's `SkinnedMesh` and its culling component.
+#
+# **`0.5.48`: a character can be healed** (`AG-121`). A game that respawned or pooled a dressed
+# character had to despawn it and dress it again, every canvas and image rebuilt. `GoreReset` heals one
+# in place: its canvases cleared and re-uploaded, its bleeding, bruises and soaks stopped, a slashed
+# skin's own mesh put back and its wound bed removed, the bone handoff armed again. `WetCanvas::clear`,
+# `FlayCanvas::clear`, `DermisCanvas::clear` and `ClothHoles::clear` are public. A reset run is the
+# hitless run again, frame for frame and digest for digest.
+#
+# **`0.5.47`: blood has a surface** (`AG-120`). Every film of blood the flesh material drew was flat,
+# one colour to its rim: a pool read as a red decal, and at a light's mirror angle it lit up whole as
+# a white sticker. The film's own depth now lifts the shading normal, so a pool's edge curves down
+# and catches the light, a run stands up off the skin, and the mirror breaks into a glint; blood in a
+# crater lies level, cloth stays flat, and wet films are at roughness 0.3. Shader only; every digest
+# holds; WebGL2 checked again.
+#
+# **`0.5.46`: the canvases tick in parallel** (`AG-119`). With forty characters dressed, the wetmaps'
+# tick was the dearest system on every tick, hit or not: 2.8 ms on an M4 Pro with 49 bloody canvases.
+# A canvas's tick reads and writes only itself, so `tick_canvases` now runs them across Bevy's compute
+# pool: 0.86 ms, the bytes identical in any order. Single-threaded builds (the web) loop as before.
+#
+# **`0.5.45`: a shotgun in a crowd costs less** (`AG-118`). Twelve hits a tick on one of forty dressed
+# characters spent most of `take_hits` drawing stains and casting droplets at surfaces they could not
+# reach first. The spray now casts in the order its ray enters each surface's box and stops once a
+# landing is nearer than the next box (239 casts a shot become 167), and `bloodstain::stain::rasterise`
+# skips three kinds of work that cannot change a byte. Interleaved on an M4 Pro: 25–30 ms of
+# `take_hits` become 15–16 ms. Every recorder's frames are byte-identical.
+#
+# **`0.5.44`: a bruise is a blotch** (`AG-117`). The preset painted the bruise model's colour as a
+# disc of one tone with a hard rim — the model is a radial reduction whose pool is uniform inside its
+# diameter, and its change was shown six times over — so a blow left a flat brown dot. Its outline now
+# wanders by up to `BRUISE_WOBBLE` and its optical density is mottled by `BRUISE_MOTTLE` either way,
+# both seeded by where it is, and it is shown exactly as dark as the model makes it. The model's
+# colour is read once per shell rather than once per texel: 3.8 ms of spectral colour a repaint
+# becomes 0.27 ms on a 256 canvas. Dermis only; every recorder digest holds.
+#
+# **`0.5.43`: a burn has zones** (`AG-116`). A contact burn was one colour per degree fading to its
+# edge, so a third-degree iron burn read as a grey-brown smudge, the same as a bruise. It now shows
+# Jackson's three zones as far in as its degree reached — a charred eschar, a pale ring of stasis, a
+# red flare of hyperaemia past the contact (`preset::burn_zone`, `BURN_FLARE`) — round a margin that
+# wanders off round by up to `BURN_WOBBLE`, seeded by where it was burnt. `DermisCanvas::paint_radial`'s
+# painter takes the texel's direction as well. Dermis only; every recorder digest holds.
+#
+# **`0.5.42`: a crater is a wound, not a ring of fat** (`AG-115`). A flaymap crater showed the tissue it
+# bared dry: a pink graze, a wide ring of yellow fat and a red centre, read as a fried egg. The flesh
+# material's film of blood (`FleshParams::with_cut_film`) now lies over a canvas's peeled tissue as it
+# does over a cut face, by depth, from nothing on the graze to its full `1 mm` in the muscle; the
+# preset's skins wear it at `CUT_FACE_FILM_MM`. Shader only; every digest holds.
+#
+# **`0.5.41`: spilled guts look like bowel, not red tubing** (`AG-114`). Every strand was drawn in the
+# red of the blood it lay in, so a heap of guts read as red plastic tubing in a red pool.
+# `viscera::gut_image` is a texture for the tube's own `UV_0` — a salmon-pink serosa, the mesentery's
+# fat along the tethered side, faint vessels round the wall, the wound end bloodied and smears dragged
+# along the rest — and the preset's guts wear it at `viscera::GUT_ROUGHNESS`, one material for every
+# spill where each spill used to make its own.
+#
+# **`0.5.40`: a run of blood leans the way gravity does** (`AG-113`). A drip fell along the dominant
+# axis of gravity alone, so every run on a canvas was a straight, axis-parallel streak however the atlas
+# lay against the ground. A parcel now also steps one across on a share of the lines it falls through,
+# gravity's own `|minor| / |major|`, on the lines Bresenham would pick. Every texel of a line steps
+# alike, so the drip still conserves every byte; gravity along a texture axis keeps the old drip to
+# the byte.
+#
+# **`0.5.39`: a wetmap's stains have smooth edges on a plain `StandardMaterial`** (`AG-112`). A canvas's
+# images were its texels, so close up every stain was a soft staircase. `WetCanvas::new_detailed` keeps
+# the canvas and its digest and draws the two images up to `MAX_DETAIL` (4) times finer, redrawing the
+# tiles that changed on each flush: the coverage read as a cubic B-spline, the edge drawn crisp at
+# `DETAIL_EDGE`, the film's colour up to the rim. `docs/wetmap.gif` is drawn that way.
+#
+# **`0.5.38`: a cut face is wet with its own blood** (`AG-111`). A broken body's pieces showed their cut
+# faces bare, and a fat band read as cheese. The flesh material in `FleshMode::Cap` now lays a film of
+# blood over the tissue, full where the muscle is and a quarter of it over the fat at the rim, with its
+# clear coat (`FleshParams::cut`, `with_cut_film`); the preset's pieces wear `CUT_FACE_FILM_MM`.
+#
+# **`0.5.37`: a broken body lies in its own blood** (`AG-110`). A body that burst left its floor as clean
+# as it was. Every spawned piece's cut face is now a wound (`CutFaceBleed`) that pours onto the floor
+# beside the piece each pulse (`CUT_FACE_POUR`), so the heap lies in a pool; a game that spawns its own
+# pieces keeps the pours with `CutFaceBleed::of`.
+#
+# **`0.5.36`: a film's edge is a line** (`AG-109`). The flesh material read the wet map with one
+# bilinear tap, so every blood rim was the canvas's texel staircase, soft and fringed. It is now read
+# as a cubic B-spline in four taps and its rim drawn crisp at 4 % film depth: runs end in round drops.
+# Shader only; no digest moves. WebGL2 re-checked.
+#
+# **`0.5.35`: a wound bleeds in runs** (`AG-108`). A hole pulsed one ellipse at its centre, and its blood
+# ran from it as one column its own width. Every wound now pulses at `BLEED_WELLS` beads where its
+# blood spills: a hole's on the downhill arc of its rim, a cut's on its lower lip (`SLASH_WELLS` was
+# the cut's alone and is renamed). The skinned mannequin's skins are 256 texels a side.
+#
+# **`0.5.34`: a slash bleeds along its cut** (`AG-107`). A slash bled as a disc its own half-length in
+# radius, so a cut on a thigh painted one sheet the leg's width from the cut to the foot. Its wound is
+# now the cut it opened (`SLASH_OPEN_M` wide): a smear along it, and pulses that bead over the lower lip
+# at `SLASH_WELLS` fixed places (`WoundSite::cut`, `CutLine`).
+#
+# **`0.5.33`: a laceration is a spindle** (`AG-106`). Every slash opened one width from end to end
+# with square ends, onto a clean dry bed, and on a limb it read as a ribbon laid on the skin. The gape
+# now closes to a point at both ends (`GAPE_TAPER`), the floor shallows with it, and the bed is wet with
+# its own blood (`BED_BLOOD`, as vertex colour). `the_tear_is_frozen` is re-blessed, both halves.
+#
+# **`0.5.32`: the spray stops at what it reaches** (`AG-105`). Every surface took every droplet aimed
+# at it. Each droplet now stains the nearest thing on its line, flies through a cloth's hole, and one a
+# surface caught does not also land on the floor.
+#
 # **`0.5.31`: a blade cuts the shirt** (`AG-104`). A slash left the cloth over it whole. It now cuts a
 # slit along the blade (`ClothHoles::slit`, `SLIT_WIDTH`), its direction read in the garment's own UVs.
 #
@@ -172,7 +380,7 @@ name = "bevy_carnage"
 # `0.1.1` was documentation only: `0.1.0`'s README was packaged before the publish-prep edits landed and
 # told a reader on crates.io that the crate is "not on crates.io". A published version cannot be
 # amended, so that correction shipped as a patch release. No code changed between those two.
-version = "0.5.31"
+version = "0.5.64"
 edition = "2024"
 description = "Deterministic runtime gore for Bevy: plane-cut a character's own meshes into watertight-capped chunks, bore bullet channels through them, and drive blood, spatter and impact feel off the wounds that result."
 license = "MIT OR Apache-2.0"
@@ -197,6 +405,7 @@ bevy = { version = "0.19.0", default-features = false, features = [
     "bevy_pbr",     # StandardMaterial / MeshMaterial3d — the detached part keeps its own material
     "bevy_image",   # Image — the wetmap, flaymap and cross-section strip are CPU-authored images
     "bevy_render",  # render_resource::{Extent3d, TextureDimension, TextureFormat} for those images
+    "bevy_camera",  # NoFrustumCulling, DynamicSkinnedMeshBounds — a wound bed is culled as its skin is
     # `WorldAsset` — the scene handle a subject is keyed by. It lives in
     # `bevy_world_serialization`, NOT `bevy_scene`, and naming the wrong one here still built for a
     # long time: `cargo test` pulls the dev-dependency full umbrella, which enables everything, so the

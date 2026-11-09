@@ -23,7 +23,7 @@ pub use bruise::Bruise;
 pub use burn::{Burn, Degree};
 pub use droplet::{
     BACK_SPATTER_SPEED, BLOOD_DENSITY, BLOOD_SURFACE_TENSION, Droplet, FORWARD_SPATTER_SPEED,
-    droplet, droplet_count, droplets, landing, wound_seed,
+    droplet, droplet_count, droplets, flight_time, landing, wound_seed,
 };
 pub use dry::{Appearance, appearance, appearance_of, appearance_with_fresh};
 pub use origin::area_of_origin;

@@ -52,14 +52,14 @@
 //! [`GoreSystems`] and drives the clock itself.
 
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
-use bevy::mesh::{Indices, VertexAttributeValues};
+use bevy::mesh::{Indices, UvChannel, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::transform::helper::TransformHelper;
 use crate::cross_section::{CrossSectionPlugin, CrossSectionSettings, Layers, Region};
 use crate::flaymap::{BoneExposed, FlayCanvas, FlaySettings, FlaymapPlugin, Layer};
 use crate::laceration::{Gape, Laceration, LacerationBed, LacerationClock, LacerationPlugin, Tension};
-use crate::viscera::{Mesentery, Strand, ViscSettings, VisceraPlugin, VisceraSystems, spill, tube_mesh};
-use crate::wetmap::{StainShape, WetCanvas, WetSettings, WetmapPlugin};
+use crate::viscera::{GUT_ROUGHNESS, Mesentery, Strand, ViscSettings, VisceraPlugin, VisceraSystems, gut_image, spill, tube_mesh};
+use crate::wetmap::{Print, StainShape, WetCanvas, WetSettings, WetmapPlugin};
 use crate::bloodstain::{BloodSettings, Wound as BloodWound, WoundKind, wound_seed};
 
 use crate::flesh::{FleshMaterial, FleshMode, FleshParams, FleshPlugin, FleshTables};
@@ -99,6 +99,9 @@ pub struct Gore {
     /// bill: a head, a hand or a distant character does not need the 128 a torso's wounds read at, and
     /// 64 costs a quarter. See [`Gore::with_canvas`] and *What it costs* in `docs/preset.md`.
     pub canvas: Option<u32>,
+    /// **Lay a floor's or a wall's canvas over it from its broadest side**, rather than by its own
+    /// `UV_0` — see [`Gore::projected`]. `false` by default.
+    pub projected: bool,
 }
 
 /// The four surfaces the preset knows how to dress.
@@ -119,26 +122,44 @@ pub enum GoreKind {
 impl Gore {
     /// A body part of `region`.
     pub fn skin(region: Region) -> Self {
-        Self { kind: GoreKind::Skin(region), gravity_uv: Vec2::new(0.0, 1.0), uv_per_metre: None, canvas: None }
+        Self { kind: GoreKind::Skin(region), gravity_uv: Vec2::new(0.0, 1.0), uv_per_metre: None, canvas: None, projected: false }
     }
     /// A fabric surface.
     pub fn cloth() -> Self {
-        Self { kind: GoreKind::Cloth, gravity_uv: Vec2::new(0.0, 1.0), uv_per_metre: None, canvas: None }
+        Self { kind: GoreKind::Cloth, gravity_uv: Vec2::new(0.0, 1.0), uv_per_metre: None, canvas: None, projected: false }
     }
     /// A floor. Blood pools rather than runs, so its UV gravity is zero.
     pub fn floor() -> Self {
-        Self { kind: GoreKind::Floor, gravity_uv: Vec2::ZERO, uv_per_metre: None, canvas: None }
+        Self { kind: GoreKind::Floor, gravity_uv: Vec2::ZERO, uv_per_metre: None, canvas: None, projected: false }
     }
     /// A wall or any upright hard surface — see [`GoreKind::Wall`]. Blood runs down its atlas's `+v`,
     /// as on cloth; a wall whose UVs run the other way states it with [`Gore::with_gravity_uv`].
     pub fn wall() -> Self {
-        Self { kind: GoreKind::Wall, gravity_uv: Vec2::new(0.0, 1.0), uv_per_metre: None, canvas: None }
+        Self { kind: GoreKind::Wall, gravity_uv: Vec2::new(0.0, 1.0), uv_per_metre: None, canvas: None, projected: false }
     }
     /// The same surface with its canvases `texels` on an edge instead of the preset's dial — see
     /// [`Gore::canvas`]. Read when the mesh is dressed; a surface already dressed keeps its canvases.
     /// Zero leaves the preset's own.
     pub fn with_canvas(mut self, texels: u32) -> Self {
         self.canvas = (texels > 0).then_some(texels);
+        self
+    }
+    /// **The same floor or wall with its canvas laid over it from its broadest side**, for a mesh
+    /// whose `UV_0` tiles a texture — a level's floor, whose UVs run from 0 to 20 so a 15 cm tile
+    /// repeats — and so cannot hold blood: the wetmap clamps a UV outside `[0, 1]` to the canvas's edge.
+    ///
+    /// When it is dressed the preset gives the entity a copy of its mesh whose `UV_0` is the mesh seen
+    /// square-on from the side it mostly faces — from above for a floor, from the front for a wall,
+    /// `+v` down a wall — scaled to fit `[0, 1]` without stretching, and whose `UV_1` is the `UV_0` it
+    /// had; the surface's own textures read `UV_1`, so its tiles stay as they were, and every canvas
+    /// reads the projection. The density is the projection's, so [`Gore::uv_per_metre`] is set from it.
+    /// The entity's `Mesh3d` is that copy from then on; a mesh another entity shares is not touched.
+    ///
+    /// Refused, with one warning, on a mesh that already has a `UV_1` — it may be a lightmap's, and
+    /// the projection would overwrite it — and on a skin or a cloth, whose canvases must follow the
+    /// body's own atlas.
+    pub fn projected(mut self) -> Self {
+        self.projected = true;
         self
     }
     /// The canvas edge to dress this surface with.
@@ -480,6 +501,32 @@ fn face_uv(mesh: &Mesh, tri: [u32; 3], v: Vec3) -> Option<(Vec2, Vec3)> {
     Some(((t1 - t0) * a + (t2 - t0) * b, normal))
 }
 
+/// **Where a ray crosses a triangle**: `(t, u, v)`, its distance along `d` in lengths of `d` and the
+/// barycentric weights of the second and third corners, by Möller & Trumbore (1997). `None` for a
+/// miss, a ray along the face, or a crossing at or behind the origin.
+fn crossing(origin: Vec3, d: Vec3, [pa, pb, pc]: [Vec3; 3]) -> Option<(f32, f32, f32)> {
+    let e1 = pb - pa;
+    let e2 = pc - pa;
+    let h = d.cross(e2);
+    let det = e1.dot(h);
+    if det.abs() < 1.0e-9 {
+        return None;
+    }
+    let inv_det = 1.0 / det;
+    let s_vec = origin - pa;
+    let u = inv_det * s_vec.dot(h);
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let q = s_vec.cross(e1);
+    let v = inv_det * d.dot(q);
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let t = inv_det * e2.dot(q);
+    (t > 0.0).then_some((t, u, v))
+}
+
 /// The UV a world ray lands on, by the same Möller–Trumbore walk the canvases use — the preset needs
 /// it for the injuries that live in texture space (a bruise, a burn) rather than on a ray.
 fn ray_hit(mesh: &Mesh, xf: &GlobalTransform, from: Vec3, dir: Vec3) -> Option<Landing> {
@@ -508,43 +555,433 @@ fn ray_hit(mesh: &Mesh, xf: &GlobalTransform, from: Vec3, dir: Vec3) -> Option<L
         i += 3;
         let (Some(pa), Some(pb), Some(pc)) = (positions.get(a), positions.get(b), positions.get(c)) else { continue };
         let (pa, pb, pc) = (Vec3::from(*pa), Vec3::from(*pb), Vec3::from(*pc));
-        let e1 = pb - pa;
-        let e2 = pc - pa;
-        let h = d.cross(e2);
-        let det = e1.dot(h);
-        if det.abs() < 1.0e-9 {
+        let Some((t, u, v)) = crossing(origin, d, [pa, pb, pc]) else { continue };
+        if best.is_some_and(|(bt, _)| bt <= t) {
             continue;
         }
-        let inv_det = 1.0 / det;
-        let s_vec = origin - pa;
-        let u = inv_det * s_vec.dot(h);
-        if !(0.0..=1.0).contains(&u) {
-            continue;
-        }
-        let q = s_vec.cross(e1);
-        let v = inv_det * d.dot(q);
-        if v < 0.0 || u + v > 1.0 {
-            continue;
-        }
-        let t = inv_det * e2.dot(q);
-        if t <= 0.0 || best.is_some_and(|(bt, _)| bt <= t) {
-            continue;
-        }
-        let (Some(ua), Some(ub), Some(uc)) = (uvs.get(a), uvs.get(b), uvs.get(c)) else { continue };
-        let uv = Vec2::from(*ua) * (1.0 - u - v) + Vec2::from(*ub) * u + Vec2::from(*uc) * v;
-        best = Some((
-            t,
-            Landing {
-                uv,
-                point: origin + d * t,
-                normal: e1.cross(e2).normalize_or_zero(),
-                tri: [a as u32, b as u32, c as u32],
-                bary: Vec3::new(1.0 - u - v, u, v),
-                t,
-            },
-        ));
+        let Some(landing) = land(origin, d, (t, u, v), [a, b, c], positions, uvs) else { continue };
+        best = Some((t, landing));
     }
     best.map(|(_, landing)| landing)
+}
+
+/// The landing a crossing `(t, u, v)` of triangle `[a, b, c]` makes, mesh-local. `None` when a
+/// corner has no position or no UV, which is a triangle a cast passes over.
+fn land(origin: Vec3, d: Vec3, (t, u, v): (f32, f32, f32), [a, b, c]: [usize; 3], positions: &[[f32; 3]], uvs: &[[f32; 2]]) -> Option<Landing> {
+    let (pa, pb, pc) = (Vec3::from(*positions.get(a)?), Vec3::from(*positions.get(b)?), Vec3::from(*positions.get(c)?));
+    let (ua, ub, uc) = (Vec2::from(*uvs.get(a)?), Vec2::from(*uvs.get(b)?), Vec2::from(*uvs.get(c)?));
+    Some(Landing {
+        uv: ua * (1.0 - u - v) + ub * u + uc * v,
+        point: origin + d * t,
+        normal: (pb - pa).cross(pc - pa).normalize_or_zero(),
+        tri: [a as u32, b as u32, c as u32],
+        bary: Vec3::new(1.0 - u - v, u, v),
+        t,
+    })
+}
+
+/// **[`ray_hit`], through `index` when there is one**: the same landing, to the bit, from the few
+/// triangles whose boxes the ray enters instead of all of them. See [`crate::bvh`].
+fn ray_cast(mesh: &Mesh, index: Option<crate::bvh::Fitted<'_>>, xf: &GlobalTransform, from: Vec3, dir: Vec3) -> Option<Landing> {
+    let Some(index) = index else { return ray_hit(mesh, xf, from, dir) };
+    let inv = xf.affine().inverse();
+    let origin = inv.transform_point3(from);
+    let d = inv.transform_vector3(dir);
+    let Ok(Some(VertexAttributeValues::Float32x3(positions))) = mesh.try_attribute_option(Mesh::ATTRIBUTE_POSITION) else {
+        return None;
+    };
+    let Ok(Some(VertexAttributeValues::Float32x2(uvs))) = mesh.try_attribute_option(Mesh::ATTRIBUTE_UV_0) else {
+        return None;
+    };
+    let (t, u, v, tri) = index.nearest(positions, origin, d, crossing)?;
+    land(origin, d, (t, u, v), tri.corners.map(|c| c as usize), positions, uvs)
+}
+
+/// **The triangles a cast at `mesh` considers**, in index order with their ordinals — every triangle
+/// whose corners all have a position and a UV, which are the ones [`ray_hit`] does not pass over —
+/// and the positions they index. `None` for a mesh with no `Float32x3` positions, no `Float32x2`
+/// `UV_0`, or indices that cannot be read.
+fn castable(mesh: &Mesh) -> Option<(&[[f32; 3]], Vec<crate::bvh::Tri>)> {
+    let Ok(Some(VertexAttributeValues::Float32x3(positions))) = mesh.try_attribute_option(Mesh::ATTRIBUTE_POSITION) else {
+        return None;
+    };
+    let Ok(Some(VertexAttributeValues::Float32x2(uvs))) = mesh.try_attribute_option(Mesh::ATTRIBUTE_UV_0) else {
+        return None;
+    };
+    let ok = |c: [u32; 3]| c.iter().all(|&i| (i as usize) < positions.len() && (i as usize) < uvs.len());
+    let tri = |k: usize, corners: [u32; 3]| ok(corners).then_some(crate::bvh::Tri { corners, ordinal: k as u32 });
+    let tris = match mesh.try_indices_option().ok()? {
+        Some(Indices::U32(ix)) => ix.as_chunks::<3>().0.iter().enumerate().filter_map(|(k, t)| tri(k, *t)).collect(),
+        Some(Indices::U16(ix)) => ix.as_chunks::<3>().0.iter().enumerate().filter_map(|(k, t)| tri(k, t.map(u32::from))).collect(),
+        None => (0..positions.len() / 3).filter_map(|k| tri(k, [3 * k as u32, 3 * k as u32 + 1, 3 * k as u32 + 2])).collect(),
+    };
+    Some((positions, tris))
+}
+
+/// **What a mesh's hierarchy was built from**: its vertex count, its index count, and a hash of the
+/// bits of up to 32 of its positions spread through the buffer — so a mesh rewritten under the same
+/// asset, which Bevy reports as modified anyway, is indexed again even where the report is missed.
+type MeshStamp = (usize, usize, u64);
+
+fn mesh_stamp(mesh: &Mesh) -> Option<MeshStamp> {
+    let Ok(Some(VertexAttributeValues::Float32x3(positions))) = mesh.try_attribute_option(Mesh::ATTRIBUTE_POSITION) else {
+        return None;
+    };
+    let indices = mesh.try_indices_option().ok()?.map_or(0, |ix| ix.len());
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let step = (positions.len() / 32).max(1);
+    for p in positions.iter().step_by(step) {
+        for c in p {
+            for b in c.to_bits().to_le_bytes() {
+                h = (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+    }
+    Some((positions.len(), indices, h))
+}
+
+/// **The rigid meshes hits are cast at, indexed** ([`crate::bvh`]), kept across ticks by asset and
+/// built again when its [`MeshStamp`] moves or Bevy reports the asset modified. A skinned surface is
+/// cast at its pose, a new mesh each batch, and walks its triangles.
+#[derive(Default)]
+struct MeshIndex {
+    built: std::collections::HashMap<AssetId<Mesh>, (MeshStamp, crate::bvh::Bvh)>,
+    /// For each skinned mesh, the boxes its joints carry, or `None` for a rig they cannot box.
+    joints: std::collections::HashMap<AssetId<Mesh>, (MeshStamp, Option<JointBoxes>)>,
+}
+
+impl MeshIndex {
+    /// Index `mesh` under `id`, unless it already is as it is now. A mesh that cannot be cast at gets
+    /// an empty index, which lands nothing, as walking it does, and is not built again each tick.
+    fn ensure(&mut self, id: AssetId<Mesh>, mesh: &Mesh) {
+        let stamp = mesh_stamp(mesh).unwrap_or((0, 0, 0));
+        if self.built.get(&id).is_some_and(|(s, _)| *s == stamp) {
+            return;
+        }
+        let index = match castable(mesh) {
+            Some((positions, tris)) => crate::bvh::Bvh::build(positions, tris),
+            None => crate::bvh::Bvh::build(&[], Vec::new()),
+        };
+        self.built.insert(id, (stamp, index));
+    }
+
+    fn get(&self, id: AssetId<Mesh>) -> Option<&crate::bvh::Bvh> {
+        self.built.get(&id).map(|(_, b)| b)
+    }
+
+    /// Box the joints of skinned `mesh` under `id`, unless they already are as it is now.
+    fn ensure_joints(&mut self, id: AssetId<Mesh>, mesh: &Mesh) {
+        let stamp = mesh_stamp(mesh).unwrap_or((0, 0, 0));
+        if self.joints.get(&id).is_some_and(|(s, _)| *s == stamp) {
+            return;
+        }
+        self.joints.insert(id, (stamp, JointBoxes::of(mesh)));
+    }
+
+    fn joint_boxes(&self, id: AssetId<Mesh>) -> Option<&JointBoxes> {
+        self.joints.get(&id).and_then(|(_, j)| j.as_ref())
+    }
+
+    /// Forget everything kept for `id`.
+    fn forget(&mut self, id: &AssetId<Mesh>) {
+        self.built.remove(id);
+        self.joints.remove(id);
+    }
+}
+
+/// **The bind-space box of the vertices each joint moves**, for boxing a skinned mesh's pose without
+/// posing it. A posed vertex is `Σ wᵢ·Mᵢ·v` over its joints, the GPU's sum: where the weights add to
+/// one it is a blend of the points `Mᵢ·v`, each inside joint `i`'s box carried by `Mᵢ`, so it lies in
+/// the box round every carried box; where they add to `s` it is `s` times such a blend, within
+/// `|s − 1|` of its size of it — `slack`, the largest such — and where they add to nothing it is the
+/// origin. Posing a mesh is a blend of up to four matrices per vertex; this is eight corners per joint.
+#[derive(Debug)]
+struct JointBoxes {
+    /// `(joint, min, max)`, in joint order.
+    boxes: Vec<(u16, Vec3, Vec3)>,
+    slack: f32,
+    /// Whether some vertex has no weight at all, and so is posed to the origin.
+    unweighted: bool,
+}
+
+impl JointBoxes {
+    /// `None` for a mesh with no rig, a position that is not finite, or a weight that is negative or
+    /// not finite: no box can be had from its joints, so the pose itself is boxed.
+    fn of(mesh: &Mesh) -> Option<Self> {
+        let Ok(Some(VertexAttributeValues::Float32x3(positions))) = mesh.try_attribute_option(Mesh::ATTRIBUTE_POSITION) else {
+            return None;
+        };
+        let Ok(Some(VertexAttributeValues::Uint16x4(joints))) = mesh.try_attribute_option(Mesh::ATTRIBUTE_JOINT_INDEX) else {
+            return None;
+        };
+        let Ok(Some(VertexAttributeValues::Float32x4(weights))) = mesh.try_attribute_option(Mesh::ATTRIBUTE_JOINT_WEIGHT) else {
+            return None;
+        };
+        if joints.len() != positions.len() || weights.len() != positions.len() {
+            return None;
+        }
+        let mut boxes: std::collections::BTreeMap<u16, (Vec3, Vec3)> = std::collections::BTreeMap::new();
+        let (mut slack, mut unweighted) = (0.0f32, false);
+        for ((p, j), w) in positions.iter().zip(joints).zip(weights) {
+            let p = Vec3::from(*p);
+            if !p.is_finite() {
+                return None;
+            }
+            let mut sum = 0.0f32;
+            for (joint, weight) in j.iter().zip(w) {
+                if !weight.is_finite() || *weight < 0.0 {
+                    return None;
+                }
+                if *weight == 0.0 {
+                    continue;
+                }
+                sum += weight;
+                let span = boxes.entry(*joint).or_insert((p, p));
+                *span = (span.0.min(p), span.1.max(p));
+            }
+            // A vertex with no weight is posed to the origin, which `unweighted` covers; its sum's distance
+            // from one is not a slack, and counted as one it padded the box by its whole size.
+            if sum == 0.0 {
+                unweighted = true;
+            } else {
+                slack = slack.max((sum - 1.0).abs());
+            }
+        }
+        Some(Self { boxes: boxes.into_iter().map(|(j, (lo, hi))| (j, lo, hi)).collect(), slack, unweighted })
+    }
+
+    /// **The world box the mesh is inside under `pose`**, padded for the weights' slack and for
+    /// rounding. `None` when a joint is past the end of the pose, which posing would refuse too.
+    fn bounds(&self, pose: &Pose) -> Option<Bounds> {
+        let (mut lo, mut hi) = if self.unweighted { (Vec3::ZERO, Vec3::ZERO) } else { (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)) };
+        for (joint, min, max) in &self.boxes {
+            let m = pose.joint(*joint)?;
+            for k in 0..8 {
+                let corner = Vec3::new(if k & 1 == 0 { min.x } else { max.x }, if k & 2 == 0 { min.y } else { max.y }, if k & 4 == 0 { min.z } else { max.z });
+                let w = m.transform_point3(corner);
+                lo = lo.min(w);
+                hi = hi.max(w);
+            }
+        }
+        let size = lo.abs().max(hi.abs()).max_element();
+        let pad = Vec3::splat(1.0e-4 + size * (self.slack + 1.0e-5)) + (hi - lo) * 1.0e-4;
+        let (lo, hi) = (lo - pad, hi + pad);
+        (lo.is_finite() && hi.is_finite()).then_some(Bounds { min: lo, max: hi, to_local: bevy::math::Affine3A::IDENTITY, world_min: lo, world_max: hi })
+    }
+}
+
+/// **Where a surface can be reached**, for the broad phase of a batch's casts.
+#[derive(Clone, Copy)]
+enum Reach {
+    /// Nowhere: a skin whose pose cannot be had, which is never cast at its bind pose.
+    Never,
+    /// Anywhere: no box could be had, so every ray is cast at it and its refusal is still heard.
+    Anywhere,
+    /// Inside this box.
+    Within(Bounds),
+}
+
+impl Reach {
+    /// The box, when there is one.
+    fn bounds(self) -> Option<Bounds> {
+        match self {
+            Reach::Within(b) => Some(b),
+            _ => None,
+        }
+    }
+}
+
+/// **Where `surface` can be reached this batch, without posing it**: a rigid surface's box from its
+/// asset; a skinned one's from the boxes its joints carry under its pose. Only a rig its joints cannot
+/// box is posed for it, and the pose is kept in `posed` for the casts that follow.
+fn reach_of(
+    surface: &Surface,
+    asset: &Mesh,
+    rigging: &Rigging,
+    posed: &mut std::collections::HashMap<Entity, Option<Mesh>>,
+    identity: &GlobalTransform,
+    index: &MeshIndex,
+) -> Reach {
+    let within = |b: Option<Bounds>| b.map_or(Reach::Anywhere, Reach::Within);
+    match surface.skin.as_ref().filter(|_| Rig::of(asset).is_some()) {
+        None => within(Bounds::of(asset, &surface.xf)),
+        Some(skin) => {
+            let Some(pose) = rigging.pose(skin) else { return Reach::Never };
+            if let Some(b) = index.joint_boxes(surface.mesh.id()).and_then(|j| j.bounds(&pose)) {
+                return Reach::Within(b);
+            }
+            match cast_at(surface, asset, rigging, posed, identity) {
+                Some((m, xf)) => within(Bounds::of(m, xf)),
+                None => Reach::Never,
+            }
+        }
+    }
+}
+
+/// **The index to cast at `surface` through, drawn now as `mesh`**: its mesh's own for a rigid one;
+/// for a skinned one, the tree built over its bind pose refitted to `mesh`, its pose — once a batch,
+/// kept in `refits` — since posing moves the vertices and not the triangles.
+fn cast_index<'a>(
+    index: &'a MeshIndex,
+    refits: &'a mut std::collections::HashMap<Entity, crate::bvh::Refit>,
+    surface: &Surface,
+    asset: &Mesh,
+    mesh: &Mesh,
+) -> Option<crate::bvh::Fitted<'a>> {
+    let tree = index.get(surface.mesh.id())?;
+    match surface.skin.as_ref().filter(|_| Rig::of(asset).is_some()) {
+        None => Some(tree.fitted()),
+        Some(_) => {
+            let refit = match refits.entry(surface.entity) {
+                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(e) => e.insert(tree.refit(positions_of(mesh)?)),
+            };
+            Some(tree.with(refit))
+        }
+    }
+}
+
+/// A mesh's `Float32x3` positions, or `None`.
+fn positions_of(mesh: &Mesh) -> Option<&[[f32; 3]]> {
+    match mesh.try_attribute_option(Mesh::ATTRIBUTE_POSITION) {
+        Ok(Some(VertexAttributeValues::Float32x3(positions))) => Some(positions),
+        _ => None,
+    }
+}
+
+/// **How many steps a slash's path takes each way from the hit**, each that fraction of the blade's
+/// half-length. On the skinned mannequin's thigh, 8 cm in radius, a 7 cm half-blade steps 9 mm and the
+/// skin falls half a millimetre below each step, which the next step's ray takes back up.
+const SLASH_STEPS: u32 = 8;
+
+/// **A slash's path, laid on the skin it cuts**, in the mesh's own space, from the blade's middle at
+/// `at` on a face whose normal is `normal`, `half` either way along `along`.
+///
+/// A blade drawn across a limb follows the limb. A straight line through the hit in the plane of the
+/// skin there leaves it, and the wound bed [`tear`](crate::laceration::tear) builds along the path
+/// leaves with it: the mannequin's thigh slash runs 5.6 cm of its 7 cm half-length round a thigh 8 cm
+/// in radius, so its ends stood `√(r² + t²) − r`, near two centimetres, off the skin, and the bed was
+/// a pale plank laid across the leg. So the path is walked out from the hit both ways in
+/// [`SLASH_STEPS`] steps, each along the skin at the last point and brought back onto it by a ray down
+/// that point's normal, landing only on a face that faces out the way the skin there does. A step
+/// whose ray finds no such face within a step of the tangent ends the walk on that side: the blade
+/// has run off what it can reach.
+fn slash_path(mesh: &Mesh, at: Vec3, normal: Vec3, along: Vec3, half: f32) -> Vec<Vec3> {
+    let step = half / SLASH_STEPS as f32;
+    let near = triangles_near(mesh, at, half + 2.0 * step);
+    let walk = |sign: f32| {
+        let mut points = Vec::with_capacity(SLASH_STEPS as usize);
+        let (mut p, mut n, mut heading) = (at, normal, along * sign);
+        for _ in 0..SLASH_STEPS {
+            let ahead = (heading - n * heading.dot(n)).normalize_or_zero();
+            if ahead == Vec3::ZERO {
+                break;
+            }
+            let from = p + ahead * step + n * step;
+            let mut best: Option<(f32, Vec3)> = None;
+            for tri in &near {
+                let face = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize_or_zero();
+                if face.dot(n) > 0.0
+                    && let Some((t, _, _)) = crossing(from, -n, *tri)
+                    && t <= 2.0 * step
+                    && best.is_none_or(|(bt, _)| t < bt)
+                {
+                    best = Some((t, face));
+                }
+            }
+            let Some((t, face)) = best else { break };
+            p = from - n * t;
+            n = face;
+            heading = ahead;
+            points.push(p);
+        }
+        points
+    };
+    let (behind, ahead) = (walk(-1.0), walk(1.0));
+    behind.into_iter().rev().chain(core::iter::once(at)).chain(ahead).collect()
+}
+
+/// The triangles of `mesh` whose bounding boxes come within `reach` of `p` on every axis, as corners.
+fn triangles_near(mesh: &Mesh, p: Vec3, reach: f32) -> Vec<[Vec3; 3]> {
+    let Ok(Some(VertexAttributeValues::Float32x3(positions))) = mesh.try_attribute_option(Mesh::ATTRIBUTE_POSITION) else {
+        return Vec::new();
+    };
+    let (lo, hi) = (p - Vec3::splat(reach), p + Vec3::splat(reach));
+    let corner = |i: usize| positions.get(i).copied().map(Vec3::from);
+    let mut near = Vec::new();
+    let mut take = |[a, b, c]: [usize; 3]| {
+        let (Some(a), Some(b), Some(c)) = (corner(a), corner(b), corner(c)) else { return };
+        if a.min(b).min(c).cmple(hi).all() && a.max(b).max(c).cmpge(lo).all() {
+            near.push([a, b, c]);
+        }
+    };
+    match mesh.try_indices_option() {
+        Ok(Some(Indices::U32(ix))) => ix.as_chunks::<3>().0.iter().for_each(|t| take(t.map(|i| i as usize))),
+        Ok(Some(Indices::U16(ix))) => ix.as_chunks::<3>().0.iter().for_each(|t| take(t.map(usize::from))),
+        Ok(None) => (0..positions.len() / 3).for_each(|t| take([3 * t, 3 * t + 1, 3 * t + 2])),
+        Err(_) => {}
+    }
+    near
+}
+
+/// **A floor's or a wall's mesh with its canvas laid over it from its broadest side** (see
+/// [`Gore::projected`]): a copy whose `UV_0` is the projection and whose `UV_1` is the `UV_0` it had,
+/// and the two mesh-space vectors one canvas edge long along the projection's `u` and `v`. The side it
+/// faces most is the axis its triangles' areas project onto most; `u` and `v` are `x` and `z` seen from
+/// `y`, and the horizontal axis and `−y` seen from `x` or `z`, so `+v` runs down a wall.
+fn projected(mesh: &Mesh) -> Result<(Mesh, [Vec3; 2]), &'static str> {
+    if mesh.contains_attribute(Mesh::ATTRIBUTE_UV_1) {
+        return Err("it already has a UV_1, which may be a lightmap's, and the projection would overwrite it");
+    }
+    let Ok(Some(VertexAttributeValues::Float32x3(positions))) = mesh.try_attribute_option(Mesh::ATTRIBUTE_POSITION) else {
+        return Err("it has no Float32x3 positions");
+    };
+    let mut facing = Vec3::ZERO;
+    let mut triangle = |[a, b, c]: [usize; 3]| {
+        if let (Some(pa), Some(pb), Some(pc)) = (positions.get(a), positions.get(b), positions.get(c)) {
+            let (pa, pb, pc) = (Vec3::from(*pa), Vec3::from(*pb), Vec3::from(*pc));
+            facing += (pb - pa).cross(pc - pa).abs();
+        }
+    };
+    match mesh.try_indices_option() {
+        Ok(Some(Indices::U32(ix))) => ix.as_chunks::<3>().0.iter().for_each(|t| triangle(t.map(|i| i as usize))),
+        Ok(Some(Indices::U16(ix))) => ix.as_chunks::<3>().0.iter().for_each(|t| triangle(t.map(usize::from))),
+        Ok(None) => (0..positions.len() / 3).for_each(|t| triangle([3 * t, 3 * t + 1, 3 * t + 2])),
+        Err(_) => return Err("its indices cannot be read"),
+    }
+    let (u, v) = if facing.y >= facing.x && facing.y >= facing.z {
+        (Vec3::X, Vec3::Z)
+    } else if facing.z >= facing.x {
+        (Vec3::X, Vec3::NEG_Y)
+    } else {
+        (Vec3::Z, Vec3::NEG_Y)
+    };
+    let (mut lo, mut hi) = (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY));
+    for p in positions {
+        let at = Vec2::new(Vec3::from(*p).dot(u), Vec3::from(*p).dot(v));
+        lo = lo.min(at);
+        hi = hi.max(at);
+    }
+    let edge = (hi - lo).max_element();
+    if !(edge.is_finite() && edge > 0.0) {
+        return Err("it has no extent to lay a canvas over");
+    }
+    let uvs: Vec<[f32; 2]> = positions.iter().map(|p| ((Vec2::new(Vec3::from(*p).dot(u), Vec3::from(*p).dot(v)) - lo) / edge).to_array()).collect();
+    let mut copy = mesh.clone();
+    if let Ok(Some(own)) = mesh.try_attribute_option(Mesh::ATTRIBUTE_UV_0) {
+        copy.insert_attribute(Mesh::ATTRIBUTE_UV_1, own.clone());
+    }
+    copy.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    Ok((copy, [u * edge, v * edge]))
+}
+
+/// Whether any of a mesh's `UV_0` lies outside `[0, 1]` by more than a rounding error: a UV layout
+/// that tiles a texture rather than covering the mesh once.
+fn tiles(mesh: &Mesh) -> bool {
+    match mesh.try_attribute_option(Mesh::ATTRIBUTE_UV_0) {
+        Ok(Some(VertexAttributeValues::Float32x2(uvs))) => uvs.iter().flatten().any(|c| !(-1.0e-3..=1.0 + 1.0e-3).contains(c)),
+        _ => false,
+    }
 }
 
 /// **A mesh's atlas density, UV units per metre**: the square root of its total UV area over its
@@ -659,7 +1096,7 @@ fn announce(hit: &GoreHit, at: Vec3, normal: Vec3) -> Wounded {
     Wounded {
         at,
         normal,
-        area: core::f32::consts::PI * hit.radius_m * hit.radius_m,
+        area: opened_area(hit),
         severity: 1.0,
         kind: if hit.depth_mm() > 0.0 { WoundKind::Channel } else { WoundKind::Severance },
         class: if hit.so2 >= crate::bloodstain::spectral::SO2_ARTERIAL {
@@ -667,6 +1104,17 @@ fn announce(hit: &GoreHit, at: Vec3, normal: Vec3) -> Wounded {
         } else {
             crate::bloodstain::PatternClass::Impact
         },
+    }
+}
+
+/// **How much skin a hit opened**, m²: a disc its radius across, or for a slash a spindle as long as
+/// the blade and [`SLASH_OPEN_M`] wide at the middle, `π/4 · length · width`, the ellipse it is near.
+/// Until 0.5.34 a slash was a disc its own length across, 23 times the open skin of a 14 cm cut, and it
+/// bled and announced that much.
+fn opened_area(hit: &GoreHit) -> f32 {
+    match hit.kind {
+        HitKind::Slash { .. } => core::f32::consts::FRAC_PI_4 * 2.0 * hit.radius_m * SLASH_OPEN_M,
+        _ => core::f32::consts::PI * hit.radius_m * hit.radius_m,
     }
 }
 
@@ -683,10 +1131,15 @@ struct Surface {
 /// **A surface's bounds, for the spray's broad phase**: the axis-aligned box of its vertices in the
 /// mesh's own space, and the map into it from world space. A ray is moved into the box's space, not
 /// the box into the ray's, the way every cast in this crate moves the ray and not the geometry.
+#[derive(Clone, Copy)]
 struct Bounds {
     min: Vec3,
     max: Vec3,
     to_local: bevy::math::Affine3A,
+    /// The padded box as world space holds it, axis-aligned there: a slab test against it needs no
+    /// transform, and a ray that misses it misses the box.
+    world_min: Vec3,
+    world_max: Vec3,
 }
 
 impl Bounds {
@@ -708,7 +1161,45 @@ impl Bounds {
         // A box must never be a hair smaller than the triangles in it, or a cull loses blood.
         let pad = Vec3::splat(1.0e-4) + (max - min) * 1.0e-4;
         let to_local = xf.affine().inverse();
-        (min.is_finite() && max.is_finite() && to_local.is_finite()).then_some(Self { min: min - pad, max: max + pad, to_local })
+        let (min, max) = (min - pad, max + pad);
+        // The world box round the placed one's corners, padded again for the corners' own rounding.
+        let (mut world_min, mut world_max) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+        for k in 0..8 {
+            let corner = Vec3::new(if k & 1 == 0 { min.x } else { max.x }, if k & 2 == 0 { min.y } else { max.y }, if k & 4 == 0 { min.z } else { max.z });
+            let w = xf.affine().transform_point3(corner);
+            world_min = world_min.min(w);
+            world_max = world_max.max(w);
+        }
+        let world_pad = Vec3::splat(1.0e-4) + (world_max - world_min) * 1.0e-4 + world_min.abs().max(world_max.abs()) * 1.0e-6;
+        let (world_min, world_max) = (world_min - world_pad, world_max + world_pad);
+        (min.is_finite() && max.is_finite() && to_local.is_finite() && world_min.is_finite() && world_max.is_finite())
+            .then_some(Self { min, max, to_local, world_min, world_max })
+    }
+
+    /// Whether the ray from `from` along `dir` can reach the world box ahead of its origin. `false` is
+    /// exact — the placed box lies inside it — and `true` is "test the placed box". A ray that cannot
+    /// be tested passes.
+    fn may_reach(&self, from: Vec3, dir: Vec3) -> bool {
+        let (mut near, mut far) = (0.0f32, f32::INFINITY);
+        for axis in 0..3 {
+            let (o, d, lo, hi) = (from[axis], dir[axis], self.world_min[axis], self.world_max[axis]);
+            if !(o.is_finite() && d.is_finite()) {
+                return true;
+            }
+            if d == 0.0 {
+                if o < lo || o > hi {
+                    return false;
+                }
+                continue;
+            }
+            let (a, b) = ((lo - o) / d, (hi - o) / d);
+            near = near.max(a.min(b));
+            far = far.min(a.max(b));
+            if near > far {
+                return false;
+            }
+        }
+        true
     }
 
     /// **Whether the ray from `from` along `dir` can enter the box ahead of its origin**: the slab
@@ -723,6 +1214,24 @@ impl Bounds {
         self.span(from, dir).is_some()
     }
 
+    /// **How far along the ray from `from` along `dir` it enters the box**, in multiples of `dir`,
+    /// `0` from inside: a landing on the mesh inside is never nearer, since the box is padded past its
+    /// triangles. `Some(0.0)` for a ray that cannot be tested, which is cast at as [`reached_by`]
+    /// casts it; `None` when the ray never enters.
+    ///
+    /// [`reached_by`]: Self::reached_by
+    fn entry(&self, from: Vec3, dir: Vec3) -> Option<f32> {
+        if !self.may_reach(from, dir) {
+            return None;
+        }
+        let origin = self.to_local.transform_point3(from);
+        let d = self.to_local.transform_vector3(dir);
+        if !(origin.is_finite() && d.is_finite()) {
+            return Some(0.0);
+        }
+        self.local_span(origin, d).map(|(enters, _)| enters)
+    }
+
     /// **Where the ray from `from` along `dir` is inside the box**, as `(enters, leaves)` in multiples
     /// of `dir`, the entry clamped to the origin. The map into the box's space is affine, so these are
     /// the world ray's own parameters. `None` when it never is, or cannot be tested.
@@ -732,6 +1241,11 @@ impl Bounds {
         if !(origin.is_finite() && d.is_finite()) {
             return None;
         }
+        self.local_span(origin, d)
+    }
+
+    /// [`span`](Self::span) for a ray already in the box's space.
+    fn local_span(&self, origin: Vec3, d: Vec3) -> Option<(f32, f32)> {
         let (mut near, mut far) = (0.0f32, f32::INFINITY);
         for axis in 0..3 {
             if d[axis].abs() < 1.0e-12 {
@@ -751,17 +1265,35 @@ impl Bounds {
     }
 }
 
-/// **Where a ray leaves a mesh**: its last crossing, found as the first crossing of the same line
-/// cast back from just past the mesh's box. `t` is in the forward ray's measure, so it compares with
-/// a [`ray_hit`] on the same ray. `None` when the ray never reaches the mesh.
-fn ray_exit(mesh: &Mesh, xf: &GlobalTransform, from: Vec3, dir: Vec3) -> Option<Landing> {
-    let (_, leaves) = Bounds::of(mesh, xf)?.span(from, dir)?;
-    let beyond = leaves + 1.0e-3 * (1.0 + leaves.abs());
-    if !beyond.is_finite() {
-        return None;
+/// **How far past a crossing a walk along a ray casts again**, metres: far enough that the surface just
+/// crossed is behind the new cast at any coordinate a scene uses — twenty `f32` steps at four metres
+/// from the origin — and near enough that no two surfaces a shot crosses lie closer together.
+const WALK_STEP: f32 = 1.0e-5;
+
+/// **The most crossings a walk along one ray reads**: a bound on what a pathological mesh can cost,
+/// far past the eight a shot through a forearm and a chest in a shirt makes.
+const MAX_CROSSINGS: usize = 64;
+
+/// **Every place a ray crosses `mesh`**, nearest first, out to `upto` in the ray's own measure: each
+/// cast from [`WALK_STEP`] past the one before, so `t` compares with a [`ray_cast`] on the same ray.
+/// The first is that cast, to the bit.
+fn crossings_of(mesh: &Mesh, index: Option<crate::bvh::Fitted<'_>>, xf: &GlobalTransform, from: Vec3, dir: Vec3, upto: f32) -> Vec<Landing> {
+    let step = WALK_STEP / dir.length();
+    let mut found = Vec::new();
+    if !step.is_finite() {
+        return found;
     }
-    let back = ray_hit(mesh, xf, from + dir * beyond, -dir)?;
-    Some(Landing { t: beyond - back.t, ..back })
+    let mut t0 = 0.0f32;
+    while found.len() < MAX_CROSSINGS {
+        let Some(landing) = ray_cast(mesh, index, xf, from + dir * t0, dir) else { break };
+        let t = t0 + landing.t;
+        if t > upto {
+            break;
+        }
+        found.push(Landing { t, ..landing });
+        t0 = t + step;
+    }
+    found
 }
 
 /// **What to cast at for one dressed surface**: its asset placed by its own transform, or, for a
@@ -798,39 +1330,157 @@ fn is_under(root: Entity, entity: Entity, parents: &Query<&ChildOf>) -> bool {
     }
 }
 
-/// **The skin a ray reaches first under a character**: the nearest landing among the [`GoreKind::Skin`]
-/// surfaces below `hit.entity`, as each is drawn now. Clothing is not a candidate, because it is
-/// not what a wound opens on: the spray soaks it from the wound. Ties go to the lower entity, so the
-/// answer does not depend on the order a query happened to yield them. `None` when the ray reaches
-/// none of them.
+/// **The first surface a ray crosses among those `candidate` picks**, as each is drawn now: which, the
+/// landing on it, and the transform it was cast with. Ties go to the lower entity, so the answer does
+/// not depend on the order a query happened to yield them. `None` when the ray reaches none of them.
 #[allow(clippy::too_many_arguments)]
-fn nearest_skin(
+fn first_crossing(
+    candidate: impl Fn(&Surface) -> bool,
+    from: Vec3,
+    dir: Vec3,
+    surfaces: &[Surface],
+    meshes: &Assets<Mesh>,
+    rigging: &Rigging,
+    posed: &mut std::collections::HashMap<Entity, Option<Mesh>>,
+    bounds: &mut std::collections::HashMap<Entity, Reach>,
+    identity: &GlobalTransform,
+    index: &MeshIndex,
+    refits: &mut std::collections::HashMap<Entity, crate::bvh::Refit>,
+) -> Option<(Entity, Landing, GlobalTransform)> {
+    let mut best: Option<(Entity, Landing, GlobalTransform)> = None;
+    for surface in surfaces.iter().filter(|s| candidate(s)) {
+        let Some(asset) = meshes.get(&surface.mesh) else { continue };
+        let reach = *bounds.entry(surface.entity).or_insert_with(|| reach_of(surface, asset, rigging, posed, identity, index));
+        match reach {
+            Reach::Never => continue,
+            Reach::Within(b) if !b.reached_by(from, dir) => continue,
+            _ => {}
+        }
+        // Posed only now that the ray can reach it.
+        let Some((mesh, xf)) = cast_at(surface, asset, rigging, posed, identity) else { continue };
+        let xf = *xf;
+        let Some(landing) = ray_cast(mesh, cast_index(index, refits, surface, asset, mesh), &xf, from, dir) else { continue };
+        if best.as_ref().is_none_or(|(entity, l, _)| landing.t < l.t || (landing.t == l.t && surface.entity < *entity)) {
+            best = Some((surface.entity, landing, xf));
+        }
+    }
+    best
+}
+
+/// **The skins a hit at a character is cast at**: the [`GoreKind::Skin`] surfaces below the entity it
+/// names. Clothing is not a candidate, because it is not what a wound opens on: the spray soaks it from
+/// the wound.
+fn skin_under<'a>(root: Entity, parents: &'a Query<&ChildOf>) -> impl Fn(&Surface) -> bool + 'a {
+    move |s| matches!(s.gore.kind, GoreKind::Skin(_)) && is_under(root, s.entity, parents)
+}
+
+/// **One place a shot going through crosses the surface of the body it was sent at.**
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Leg {
+    /// It goes in here.
+    In,
+    /// It comes out here; `last` when nothing of the body lies beyond.
+    Out { last: bool },
+}
+
+/// **What [`take_hits`] works through**: a hit as the game sent it, or one leg of a shot going through,
+/// its `entity` the surface crossed there. A leg going in has its `from` where nothing of the body lies
+/// between it and the crossing; one coming out, just outside the crossing, and is cast back from there.
+enum Pass {
+    Sent(GoreHit),
+    Leg(GoreHit, Leg),
+}
+
+/// **The legs of a shot that goes through**: every place it crosses the surface of the body it was sent
+/// at, in order along it. The walk reads every crossing of every skin under the entity it was sent at
+/// — of that mesh alone, sent at one — nearest first, and keeps count of how deep in the body the shot
+/// is. A crossing goes in or comes out by its triangle's winding, read against the first crossing of
+/// the same mesh, which goes in because the shot starts outside: so a mesh wound inside out is read
+/// the right way round, and one made of overlapping shells counts each. A leg goes in where the count
+/// leaves zero and comes out where it returns there. A shot through a forearm held across the chest
+/// goes in and out of the forearm and then in and out of the chest; one through a shoulder where the
+/// arm's mesh overlaps the torso's goes in once and out once, since inside the overlap it is inside the
+/// body. A later leg in is [`EXIT_SCALE`] wider than the shot was sent: the projectile is the one that
+/// came out. Empty when the shot crosses nothing of the body.
+#[allow(clippy::too_many_arguments)]
+fn legs_through(
     hit: &GoreHit,
+    direct: bool,
     surfaces: &[Surface],
     parents: &Query<&ChildOf>,
     meshes: &Assets<Mesh>,
     rigging: &Rigging,
     posed: &mut std::collections::HashMap<Entity, Option<Mesh>>,
-    bounds: &mut std::collections::HashMap<Entity, Option<Bounds>>,
+    bounds: &mut std::collections::HashMap<Entity, Reach>,
     identity: &GlobalTransform,
-) -> Option<Entity> {
-    let mut best: Option<(f32, Entity)> = None;
-    for surface in surfaces {
-        if !matches!(surface.gore.kind, GoreKind::Skin(_)) || !is_under(hit.entity, surface.entity, parents) {
+    index: &MeshIndex,
+    refits: &mut std::collections::HashMap<Entity, crate::bvh::Refit>,
+) -> Vec<Pass> {
+    let out = hit.dir.normalize_or_zero();
+    if out == Vec3::ZERO || !hit.from.is_finite() {
+        return Vec::new();
+    }
+    let root = hit.entity;
+    let skins = skin_under(root, parents);
+    let candidate = |s: &Surface| if direct { s.entity == root } else { skins(s) };
+    // Every crossing, nearest first: the surface, where, where its cast started, and its triangle's
+    // winding against the shot — negative where the triangle faces the shot.
+    let mut crossings: Vec<(Entity, Vec3, Vec3, f32)> = Vec::new();
+    let mut start = hit.from;
+    while crossings.len() < MAX_CROSSINGS {
+        let Some((entity, landing, xf)) = first_crossing(candidate, start, hit.dir, surfaces, meshes, rigging, posed, bounds, identity, index, refits) else {
+            break;
+        };
+        let at = start + hit.dir * landing.t;
+        let facing = landing.normal.dot(xf.affine().inverse().transform_vector3(hit.dir));
+        crossings.push((entity, at, start, facing));
+        start = at + out * WALK_STEP;
+    }
+    // Which sign of winding goes in, per mesh, and how deep the shot is.
+    let mut sense: Vec<(Entity, bool)> = Vec::new();
+    let mut depth = 0u32;
+    let mut legs: Vec<(usize, bool)> = Vec::new();
+    for (k, &(entity, _, _, facing)) in crossings.iter().enumerate() {
+        if facing == 0.0 || !facing.is_finite() {
             continue;
         }
-        let Some(asset) = meshes.get(&surface.mesh) else { continue };
-        let Some((mesh, xf)) = cast_at(surface, asset, rigging, posed, identity) else { continue };
-        let bound = bounds.entry(surface.entity).or_insert_with(|| Bounds::of(mesh, xf));
-        if bound.as_ref().is_some_and(|b| !b.reached_by(hit.from, hit.dir)) {
-            continue;
-        }
-        let Some(landing) = ray_hit(mesh, xf, hit.from, hit.dir) else { continue };
-        if best.is_none_or(|(t, entity)| landing.t < t || (landing.t == t && surface.entity < entity)) {
-            best = Some((landing.t, surface.entity));
+        let facing_in = match sense.iter().find(|(e, _)| *e == entity) {
+            Some(&(_, s)) => s,
+            None => {
+                sense.push((entity, facing < 0.0));
+                facing < 0.0
+            }
+        };
+        if (facing < 0.0) == facing_in {
+            depth += 1;
+            if depth == 1 {
+                legs.push((k, true));
+            }
+        } else if depth > 0 {
+            depth -= 1;
+            if depth == 0 {
+                legs.push((k, false));
+            }
         }
     }
-    best.map(|(_, entity)| entity)
+    let mut first = true;
+    let count = legs.len();
+    legs.iter()
+        .enumerate()
+        .filter_map(|(i, &(k, goes_in))| {
+            let &(entity, at, start, _) = crossings.get(k)?;
+            if goes_in {
+                let radius_m = if first { hit.radius_m } else { hit.radius_m * EXIT_SCALE };
+                first = false;
+                Some(Pass::Leg(GoreHit { entity, from: start, radius_m, ..*hit }, Leg::In))
+            } else {
+                // Just outside, but nearer than whatever the shot crosses next.
+                let gap = crossings.get(k + 1).map_or(f32::INFINITY, |c| c.1.distance(at));
+                let outside = at + out * SURFACE_STAND_OFF.min(0.5 * gap);
+                Some(Pass::Leg(GoreHit { entity, from: outside, ..*hit }, Leg::Out { last: i + 1 == count }))
+            }
+        })
+        .collect()
 }
 
 /// What [`dress`] visits: every [`Gore`] entity that has not been dressed yet.
@@ -871,6 +1521,7 @@ type Bleeders<'w, 's> = Query<
         &'static Mesh3d,
         Option<&'static SkinnedMesh>,
         &'static mut WetCanvas,
+        Option<&'static RunDirection>,
     ),
     Without<FloorTag>,
 >;
@@ -909,6 +1560,83 @@ pub struct WoundSite {
     pub wound: BloodWound,
     /// The schedule.
     pub bleed: crate::bloodstain::Bleed,
+    /// **A slash's line on the wetmap**, so each pulse wells over the cut's lips along its length;
+    /// `None` for a wound that is a hole.
+    pub cut: Option<CutLine>,
+}
+
+impl WoundSite {
+    /// **Where well `k` of this wound beads, from its centre on the wetmap, and which way is out**:
+    /// along a cut's lower lip ([`CutLine::well`]), or on a hole's rim, the wells fanned over the arc
+    /// that faces `downhill`, where the blood that fills a crater spills over. A level hole spills all
+    /// round. The rim is the wound's own radius at `density` UV per metre.
+    fn well(&self, k: u32, downhill: Vec2, density: f32) -> (Vec2, Vec2) {
+        if let Some(cut) = self.cut {
+            return cut.well(self.bleed.seed, k, downhill);
+        }
+        let h = |salt: u32| crate::bloodstain::hash_f32(self.bleed.seed ^ k.wrapping_mul(0x85EB_CA6B) ^ salt);
+        let n = BLEED_WELLS.max(1) as f32;
+        let rim = (self.wound.area / core::f32::consts::PI).max(0.0).sqrt() * density;
+        let down = downhill.normalize_or_zero();
+        let (axis, fan) = if down == Vec2::ZERO { (Vec2::Y, core::f32::consts::PI) } else { (down, RIM_FAN) };
+        // Stratified over the fan, each a little off its share.
+        let angle = ((k as f32 + 0.25 + 0.5 * h(0x51)) / n * 2.0 - 1.0) * fan;
+        let (s, c) = (libm::sinf(angle), libm::cosf(angle));
+        let out = Vec2::new(c * axis.x - s * axis.y, s * axis.x + c * axis.y);
+        (out * rim, out)
+    }
+}
+
+/// **How far either side of downhill a hole's wells fan**, radians: 50°. Blood that fills a crater
+/// spills over the lower part of its rim, not the sides. This crate's own number.
+const RIM_FAN: f32 = 0.87;
+
+/// **How wide a slash opens, in metres on the body**: the lips stand this far apart at the middle of
+/// the cut once it has finished opening. 6 mm, which is what `Gape::default()` under
+/// `Tension::default()` opened at metre scale before 0.5.34 and still does; this crate's own number, as
+/// `Gape::default` is. Stated in metres now so the wound's area and its gape agree on any mesh scale.
+pub const SLASH_OPEN_M: f32 = 0.006;
+
+/// **How many places each pulse of a wound wells at**: along a cut's lower lip, or round the downhill
+/// rim of a hole. The pulse's blood is shared between them, so a wound bleeds as a few runs down the
+/// skin rather than one column its own width. This crate's own number.
+pub const BLEED_WELLS: u32 = 3;
+
+/// **A slash's line on a wetmap**: where along the cut, and how far out its lips are.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CutLine {
+    /// Half the cut, from its middle to one tip, as a change of `UV_0`.
+    pub half_uv: Vec2,
+    /// Half the open width at the middle, in UV: how far either lip stands from the line there. It
+    /// closes toward both tips as the laceration does, by `laceration::GAPE_TAPER`.
+    pub lip_uv: f32,
+}
+
+impl CutLine {
+    /// **Where well `k` of a cut beads, and which way is out from the cut there**: a place along the
+    /// cut, the wells spread from end to end and each a little off its share by `seed`, on the lip
+    /// `downhill` (UV) points across. A level cut, with no downhill, beads on both lips by turns.
+    ///
+    /// **The wells stay put for the wound's life.** The wetmap leaves its drip threshold behind in
+    /// every texel a run crosses, so a run is only long when it is fed over the track the last pulse
+    /// left wet; a bead somewhere new each pulse spends itself wetting new skin.
+    fn well(&self, seed: u32, k: u32, downhill: Vec2) -> (Vec2, Vec2) {
+        let h = |salt: u32| crate::bloodstain::hash_f32(seed ^ k.wrapping_mul(0x85EB_CA6B) ^ salt);
+        let n = BLEED_WELLS.max(1) as f32;
+        // Stratified over `[-0.75, 0.75]`, kept off the tips, where the cut has closed.
+        let along = ((k as f32 + 0.25 + 0.5 * h(0x51)) / n * 2.0 - 1.0) * 0.75;
+        let across = self.half_uv.normalize_or_zero().perp();
+        let lean = across.dot(downhill);
+        let side = if lean > 0.0 {
+            1.0
+        } else if lean < 0.0 || k % 2 == 1 {
+            -1.0
+        } else {
+            1.0
+        };
+        let open = libm::powf(libm::cosf(core::f32::consts::FRAC_PI_2 * along).max(0.0), crate::laceration::GAPE_TAPER);
+        (self.half_uv * along + across * (self.lip_uv * open * side), across * side)
+    }
 }
 
 /// **A spot on a skinned mesh, kept as a triangle and a place in it** rather than as a point. A point
@@ -1069,10 +1797,19 @@ struct Parted {
 /// dermis shows through — a bruise's colour over the same skin with nothing in it, so a skin tone
 /// stays the caller's — and `a` is how much of it shows. A peeled texel (the flaymap's `A`) hides
 /// it: the skin that carried it is gone.
+///
+/// **Bruises are redrawn, not repainted over themselves.** A bruise changes every model step, and
+/// several can overlap, so the canvas keeps what it holds apart from its bruises (`under`, made when the
+/// first is drawn) and [`DermisCanvas::draw_bruises`] rebuilds the bruises over it each time. Painted
+/// one over another, a bruise's faint margin was blended into its neighbour's core at every step and
+/// bleached a pale seam between them.
 #[derive(Component, Debug)]
 pub struct DermisCanvas {
     size: u32,
     px: Vec<u8>,
+    /// The canvas without its bruises — burns and anything else painted once — from the first bruise
+    /// on; `None` until then.
+    under: Option<Vec<u8>>,
     image: Handle<Image>,
     dirty: bool,
 }
@@ -1088,7 +1825,7 @@ impl DermisCanvas {
             bevy::render::render_resource::TextureFormat::Rgba8Unorm,
             bevy::asset::RenderAssetUsages::MAIN_WORLD | bevy::asset::RenderAssetUsages::RENDER_WORLD,
         );
-        Self { size, px: [255, 255, 255, 0].repeat((size as usize) * (size as usize)), image: images.add(image), dirty: false }
+        Self { size, px: [255, 255, 255, 0].repeat((size as usize) * (size as usize)), under: None, image: images.add(image), dirty: false }
     }
 
     /// The image the flesh material reads.
@@ -1101,9 +1838,10 @@ impl DermisCanvas {
         self.size
     }
 
-    /// The bytes this canvas holds in the main world apart from its image: the CPU copy of it.
+    /// The bytes this canvas holds in the main world apart from its image: the CPU copy of it, and of
+    /// it without its bruises once it has any.
     pub fn heap_bytes(&self) -> usize {
-        self.px.capacity()
+        self.px.capacity() + self.under.as_ref().map_or(0, Vec::capacity)
     }
 
     /// The size of the image it uploads, once; the main world and the GPU each hold a copy.
@@ -1111,46 +1849,60 @@ impl DermisCanvas {
         self.px.len()
     }
 
-    /// Paint a radial field: `colour(r_mm)` returns the linear ratio the skin is multiplied by and an
-    /// alpha, for the texel `r_mm` from `uv`, out to `radius_uv`. Alpha is taken as the max of what
-    /// was there, so two injuries overlap rather than erase.
-    pub fn paint_radial(&mut self, uv: Vec2, radius_uv: f32, mm_per_uv: f32, mut colour: impl FnMut(f32) -> ([f32; 3], f32)) {
-        if !uv.is_finite() || !radius_uv.is_finite() || radius_uv <= 0.0 {
-            return;
-        }
-        let n = self.size as i64;
-        // Saturated casts, then clamped: a huge radius or an off-atlas UV from a caller's mesh must
-        // not overflow the bounds arithmetic below.
-        let r_px = ((radius_uv * self.size as f32).ceil() as i64).clamp(0, n);
-        let cx = ((uv.x * self.size as f32) as i64).clamp(-n, 2 * n);
-        let cy = ((uv.y * self.size as f32) as i64).clamp(-n, 2 * n);
-        for y in (cy - r_px).max(0)..(cy + r_px + 1).min(n) {
-            for x in (cx - r_px).max(0)..(cx + r_px + 1).min(n) {
-                let du = (x as f32 + 0.5) / self.size as f32 - uv.x;
-                let dv = (y as f32 + 0.5) / self.size as f32 - uv.y;
-                let r_uv = (du * du + dv * dv).sqrt();
-                if r_uv > radius_uv {
-                    continue;
-                }
-                let (c, a) = colour(r_uv * mm_per_uv);
-                let a = if a.is_finite() { a.clamp(0.0, 1.0) } else { 0.0 };
-                if a <= 0.0 {
-                    continue;
-                }
-                let i = ((y * n + x) * 4) as usize;
-                if let Some(px) = self.px.get_mut(i..i + 4) {
-                    let old_a = px[3] as f32 / 255.0;
-                    let w = if a + old_a > 0.0 { a / (a + old_a) } else { 0.0 };
-                    for ch in 0..3 {
-                        let new = c[ch].clamp(0.0, 1.0);
-                        let old = px[ch] as f32 / 255.0;
-                        px[ch] = ((old + (new - old) * w) * 255.0).round() as u8;
-                    }
-                    px[3] = (a.max(old_a) * 255.0).round() as u8;
-                    self.dirty = true;
-                }
+    /// Paint a radial field: `colour(r_mm, dir)` returns the linear ratio the skin is multiplied by and
+    /// an alpha, for the texel `r_mm` from `uv` in the unit direction `dir` (in UV, zero at the centre),
+    /// out to `radius_uv`. Alpha is taken as the max of what was there, so two injuries overlap rather
+    /// than erase.
+    pub fn paint_radial(&mut self, uv: Vec2, radius_uv: f32, mm_per_uv: f32, mut colour: impl FnMut(f32, Vec2) -> ([f32; 3], f32)) {
+        let size = self.size;
+        let mut blend = |px: &mut [u8], c: [f32; 3], a: f32| {
+            let old_a = px[3] as f32 / 255.0;
+            let w = if a + old_a > 0.0 { a / (a + old_a) } else { 0.0 };
+            for ch in 0..3 {
+                let new = c[ch].clamp(0.0, 1.0);
+                let old = px[ch] as f32 / 255.0;
+                px[ch] = ((old + (new - old) * w) * 255.0).round() as u8;
             }
+            px[3] = (a.max(old_a) * 255.0).round() as u8;
+        };
+        // A mark painted once belongs under the bruises too, or the next redraw would take it away.
+        if let Some(under) = self.under.as_mut() {
+            radial(under, size, uv, radius_uv, mm_per_uv, &mut colour, &mut blend);
         }
+        self.dirty |= radial(&mut self.px, size, uv, radius_uv, mm_per_uv, &mut colour, &mut blend);
+    }
+
+    /// **Redraw every bruise** over what the canvas holds without them: bruise `i` centred at
+    /// `centres[i]`, out to `radius_uv`, its field `colour(i, r_mm, dir)` as
+    /// [`paint_radial`](Self::paint_radial) takes one, composed by multiplying the ratios they lay over
+    /// the skin, `1 − a + a·c` per channel, so two that overlap darken it as their chromophores would
+    /// together and neither bleaches the other. Alpha is their union.
+    pub fn draw_bruises(&mut self, centres: &[Vec2], radius_uv: f32, mm_per_uv: f32, mut colour: impl FnMut(usize, f32, Vec2) -> ([f32; 3], f32)) {
+        let under = self.under.get_or_insert_with(|| self.px.clone());
+        self.px.copy_from_slice(under);
+        let mut multiply = |px: &mut [u8], c: [f32; 3], a: f32| {
+            let old_a = px[3] as f32 / 255.0;
+            let out_a = 1.0 - (1.0 - old_a) * (1.0 - a);
+            for ch in 0..3 {
+                let old_m = 1.0 - old_a + old_a * px[ch] as f32 / 255.0;
+                let new_m = 1.0 - a + a * c[ch].clamp(0.0, 1.0);
+                let rgb = if out_a > 0.0 { 1.0 - (1.0 - old_m * new_m) / out_a } else { 1.0 };
+                px[ch] = (rgb.clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+            px[3] = (out_a * 255.0).round() as u8;
+        };
+        for (i, uv) in centres.iter().enumerate() {
+            radial(&mut self.px, self.size, *uv, radius_uv, mm_per_uv, |r_mm, dir| colour(i, r_mm, dir), &mut multiply);
+        }
+        self.dirty = true;
+    }
+
+    /// **Fade every bruise and burn**, keeping the canvas and its image: the bytes go back to a
+    /// fresh canvas's, re-uploaded on the next flush.
+    pub fn clear(&mut self) {
+        self.px.as_chunks_mut::<4>().0.fill([255, 255, 255, 0]);
+        self.under = None;
+        self.dirty = true;
     }
 
     /// Upload if anything changed.
@@ -1168,10 +1920,67 @@ impl DermisCanvas {
     }
 }
 
-/// **A bruise ageing under this entity's skin**, at one spot. The kernel is `crate::bloodstain::bruise`; the
-/// preset steps it on the fixed tick and repaints the dermis canvas when its colour moves.
-#[derive(Component, Debug)]
+/// **Visit every texel of a `size`² RGBA8 buffer within `radius_uv` of `uv`** with the field
+/// `colour(r_mm, dir)` gives there, handing `put` the texel and the colour and alpha, when the alpha is
+/// above zero. Whether anything was put.
+#[allow(clippy::too_many_arguments)]
+fn radial(
+    px: &mut [u8],
+    size: u32,
+    uv: Vec2,
+    radius_uv: f32,
+    mm_per_uv: f32,
+    mut colour: impl FnMut(f32, Vec2) -> ([f32; 3], f32),
+    mut put: impl FnMut(&mut [u8], [f32; 3], f32),
+) -> bool {
+    if !uv.is_finite() || !radius_uv.is_finite() || radius_uv <= 0.0 {
+        return false;
+    }
+    let n = size as i64;
+    // Saturated casts, then clamped: a huge radius or an off-atlas UV from a caller's mesh must not
+    // overflow the bounds arithmetic below.
+    let r_px = ((radius_uv * size as f32).ceil() as i64).clamp(0, n);
+    let cx = ((uv.x * size as f32) as i64).clamp(-n, 2 * n);
+    let cy = ((uv.y * size as f32) as i64).clamp(-n, 2 * n);
+    let mut any = false;
+    for y in (cy - r_px).max(0)..(cy + r_px + 1).min(n) {
+        for x in (cx - r_px).max(0)..(cx + r_px + 1).min(n) {
+            let du = (x as f32 + 0.5) / size as f32 - uv.x;
+            let dv = (y as f32 + 0.5) / size as f32 - uv.y;
+            let r_uv = (du * du + dv * dv).sqrt();
+            if r_uv > radius_uv {
+                continue;
+            }
+            let (c, a) = colour(r_uv * mm_per_uv, Vec2::new(du, dv).normalize_or_zero());
+            let a = if a.is_finite() { a.clamp(0.0, 1.0) } else { 0.0 };
+            if a <= 0.0 {
+                continue;
+            }
+            let i = ((y * n + x) * 4) as usize;
+            if let Some(texel) = px.get_mut(i..i + 4) {
+                put(texel, c, a);
+                any = true;
+            }
+        }
+    }
+    any
+}
+
+/// **The bruises ageing under this entity's skin**, each at its own spot, oldest first. The kernel is
+/// `crate::bloodstain::bruise`; the preset steps every one on the fixed tick and repaints the dermis
+/// canvas where its colour moves. Until 0.5.55 an entity held one, and a second blow started a new
+/// bruise while the first stopped ageing where it was, so a limb hit twice kept one bruise frozen
+/// beside one that darkened.
+#[derive(Component, Debug, Default)]
 pub struct Bruising {
+    /// Every bruise still ageing, oldest first, at most [`MAX_BRUISES`].
+    pub sites: Vec<BruiseSite>,
+}
+
+/// **One bruise**: where on the canvas, the kernel, and the fractional model steps carried between
+/// ticks.
+#[derive(Debug)]
+pub struct BruiseSite {
     /// Where on the canvas.
     pub uv: Vec2,
     /// The kernel.
@@ -1179,6 +1988,12 @@ pub struct Bruising {
     /// Fractional model steps carried between ticks.
     pub carry: f32,
 }
+
+/// **How many bruises one entity ages at once**: 8. A blow past that retires the oldest, which keeps
+/// the colour it had reached. A bound, not a model: each bruise is a kernel stepped and a patch of the
+/// canvas repainted every model step, and a limb beaten more than eight times has few texels left
+/// that are not already bruised.
+pub const MAX_BRUISES: usize = 8;
 
 /// **Blood soaking into this cloth** from one landing: the Lucas–Washburn front (`crate::bloodstain::wick`)
 /// widens the stain over the seconds after it lands.
@@ -1241,6 +2056,12 @@ impl ClothHoles {
     /// FNV-1a over the canvas's bytes: two runs that opened the same holes print the same number.
     pub fn digest(&self) -> u64 {
         self.canvas.px.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3))
+    }
+
+    /// **Mend every hole and slit**, keeping the canvas and its image. The material stays as the
+    /// first hole left it, a mask with nothing cut, which draws the cloth whole.
+    pub fn clear(&mut self) {
+        self.canvas.clear();
     }
 
     /// Whether any texel is open.
@@ -1373,6 +2194,72 @@ pub struct Flying(pub Vec3);
 /// so a caller resetting a scene can find it; the body it came from is gone.
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct Standing;
+
+/// **A broken body's cut face, still bleeding.** The preset spawns every piece with a cut face with
+/// one: its wound is the face — its area, its centre, the way it faces — opened on the tick the body
+/// broke, and each pulse of it pours onto the floor beneath it until the perfusion runs out, so a heap
+/// of pieces lies in its own pool. Before 0.5.37 a body that burst left its floor as clean as it was.
+///
+/// A game that spawns the pieces itself (`GoreDials::spawn_fragments` off) keeps the pours by
+/// inserting [`CutFaceBleed::of`] on each piece's cut face, with the piece's `Transform`.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct CutFaceBleed {
+    /// The face's centre, in the piece's own space, so the pour follows the piece as it falls.
+    pub centre_local: Vec3,
+    /// The face as a wound, where it was when the body broke: the pulse schedule's seed and area.
+    pub wound: BloodWound,
+    /// The schedule.
+    pub bleed: crate::bloodstain::Bleed,
+}
+
+impl CutFaceBleed {
+    /// **A cut face that opened on `tick`**, from its mesh and where the piece is. `None` for a face
+    /// with no area.
+    pub fn of(cap: &Mesh, place: &Transform, tick: u32) -> Option<Self> {
+        let (area, centre_local, normal) = face_measure(cap)?;
+        let scale = place.scale.abs().max_element();
+        let wound = BloodWound {
+            at: place.transform_point(centre_local).to_array(),
+            normal: (place.rotation * normal).to_array(),
+            area: area * scale * scale,
+            severity: 1.0,
+            kind: WoundKind::Severance,
+        };
+        Some(Self { centre_local, wound, bleed: crate::bloodstain::Bleed::new(tick, &wound) })
+    }
+}
+
+/// **How much of a cut face's pulse pours onto the floor**, as a share of the stain a wound of its
+/// area paints a pulse at. A face is all wound and nothing holds it shut, and a body that burst lies in
+/// most of its blood: at `0.5` each pour was a stain under a fifth of a metre across, hidden under the
+/// piece it came from. This crate's own number.
+pub const CUT_FACE_POUR: f32 = 1.5;
+
+/// **A mesh's area, centre and facing**, in its own space: the triangles' total area, their
+/// area-weighted centre and the unit sum of their normals. `None` for a mesh with no area.
+fn face_measure(mesh: &Mesh) -> Option<(f32, Vec3, Vec3)> {
+    let Ok(Some(VertexAttributeValues::Float32x3(positions))) = mesh.try_attribute_option(Mesh::ATTRIBUTE_POSITION) else {
+        return None;
+    };
+    let (mut area, mut centre, mut normal) = (0.0f32, Vec3::ZERO, Vec3::ZERO);
+    let mut add = |t: [usize; 3]| {
+        let [Some(a), Some(b), Some(c)] = t.map(|i| positions.get(i).copied().map(Vec3::from)) else { return };
+        let n = (b - a).cross(c - a);
+        let s = 0.5 * n.length();
+        if s.is_finite() {
+            area += s;
+            centre += (a + b + c) / 3.0 * s;
+            normal += n;
+        }
+    };
+    match mesh.try_indices_option() {
+        Ok(Some(Indices::U32(ix))) => ix.as_chunks::<3>().0.iter().for_each(|t| add(t.map(|i| i as usize))),
+        Ok(Some(Indices::U16(ix))) => ix.as_chunks::<3>().0.iter().for_each(|t| add(t.map(usize::from))),
+        Ok(None) => (0..positions.len() / 3).for_each(|t| add([3 * t, 3 * t + 1, 3 * t + 2])),
+        Err(_) => return None,
+    }
+    (area > 0.0 && area.is_finite()).then(|| (area, centre / area, normal.normalize_or_zero()))
+}
 
 /// A rendered gut tube the preset keeps in step with its strand.
 #[derive(Component, Clone, Copy, Debug)]
@@ -1546,13 +2433,23 @@ impl GoreHit {
     }
     /// **The same impact, going through.** Whether a projectile leaves a body is the game's ballistics,
     /// not this crate's — its calibre, its energy, the armour — so the game says so. The preset then
-    /// finds where the ray leaves the part it entered, opens an exit wound there [`EXIT_SCALE`] times
-    /// the entry's radius, as an exit is larger and more ragged than the hole it went in by, bleeds
-    /// from both, and throws the exit's **forward spatter** along the shot onto whatever is behind: a
-    /// wall, the floor, the next body part. Every cloth the ray crosses is holed, behind the body as
-    /// well as in front. The exit is announced as a second [`Wounded`], after the entry's, at the exit
-    /// point with its outward normal, so whatever a game hangs on a wound happens at both. The exit is
-    /// on the part that was entered: a shot through an arm into the chest exits the arm.
+    /// goes through **everything of the body on the shot's line**: a shot through a forearm held
+    /// across the chest goes in and out of the forearm, then in and out of the chest. Each way out is an
+    /// exit wound [`EXIT_SCALE`] times the entry's radius, as an exit is larger and more ragged than the
+    /// hole it went in by, and throws its **forward spatter** along the shot onto whatever is behind:
+    /// the chest the forearm was held over, a wall, the floor. A way back in after the first is as wide
+    /// as an exit, since the projectile is the one that came out. Every wound bleeds, every cloth the
+    /// ray crosses is holed — in front, between the parts, and behind — and every wound is announced as
+    /// a [`Wounded`] of its own, in order along the shot, an exit's normal facing the way the shot left.
+    ///
+    /// "The body" is every [`Gore::skin`] under the entity the hit names, or, sent at a mesh, that mesh,
+    /// so one mesh with an arm in front of its chest is gone through the same way. Where parts overlap
+    /// — an upper arm into the shoulder — the shot is inside the body all through the overlap and opens
+    /// nothing there. The walk counts the shot in and out of each mesh by the winding of the triangles it
+    /// crosses, so a part is read as closed; one left open where the shot leaves it opens no exit there.
+    /// A shot is never
+    /// carried on into a second character: whether it still could is the game's ballistics again, and
+    /// the last [`Wounded`] is where it left.
     pub fn through(mut self) -> Self {
         self.through = true;
         self
@@ -1667,13 +2564,16 @@ impl Plugin for GorePlugin {
         }
         app.init_resource::<GoreDials>()
             .init_resource::<GoreClock>()
+            .init_resource::<Airborne>()
             .add_message::<GoreHit>()
+            .add_message::<GoreReset>()
+            .add_message::<GoreStep>()
             .add_message::<GoreFractured>()
             .add_systems(FixedUpdate, scene_gore.before(dress).in_set(GoreSystems))
             .configure_sets(FixedUpdate, GoreSystems.before(VisceraSystems))
             .add_systems(
                 FixedUpdate,
-                (advance_clock, dress, take_hits, throw_bodies, bleed, age_bruises, soak_cloth, tick_canvases, flush_dermis, fly)
+                (advance_clock, dress, reset_gore, take_hits, land_stains, throw_bodies, bleed, pour_cut_faces, take_steps, age_bruises, soak_cloth, tick_canvases, flush_dermis, fly)
                     .chain()
                     .in_set(GoreSystems),
             )
@@ -1754,13 +2654,41 @@ fn dress(
     let (Some(mut images), Some(standard), Some(mut flesh)) = (images, standard, flesh) else {
         return;
     };
-    if tables.sss == Handle::default() {
+    if tables.luts == Handle::default() {
         // The tables are baked on `Startup`; a `FixedUpdate` before that would dress with nothing.
         return;
     }
     let mut meshes = meshes;
     let scale = settings.as_ref().map(|s| s.scale).unwrap_or_default();
     for (entity, mut gore, mesh3d, material, skin) in &mut undressed {
+        // A floor or a wall laid over from its broadest side is dressed on a copy of its mesh: see
+        // `Gore::projected`. The density is the projection's.
+        let mut laid: Option<Handle<Mesh>> = None;
+        if matches!(gore.kind, GoreKind::Floor | GoreKind::Wall)
+            && let Some(meshes) = meshes.as_mut()
+        {
+            let Some(mesh) = meshes.get(&mesh3d.0) else { continue };
+            if gore.projected {
+                match projected(mesh) {
+                    Ok((copy, [u, v])) => {
+                        let xf = transforms.compute_global_transform(entity).unwrap_or_default();
+                        let edge_m = 0.5 * (xf.affine().transform_vector3(u).length() + xf.affine().transform_vector3(v).length()) * dials.mm_per_unit / 1000.0;
+                        if edge_m.is_finite() && edge_m > 0.0 {
+                            gore.uv_per_metre = Some(1.0 / edge_m);
+                        }
+                        laid = Some(meshes.add(copy));
+                    }
+                    Err(why) => bevy::log::warn_once!("gore: a projected floor or wall is dressed by its own UV_0 instead, because {why}"),
+                }
+            } else if tiles(mesh) {
+                bevy::log::warn_once!(
+                    "gore: a floor's or a wall's UV_0 runs outside [0, 1], so it tiles its texture, and blood on it lands \
+                     clamped at its canvas's edge; dress it with Gore::projected()"
+                );
+            }
+        } else if gore.projected {
+            bevy::log::warn_once!("gore: Gore::projected is for a floor or a wall; a skin or a cloth is dressed by its own UV_0");
+        }
         if let (GoreKind::Skin(_), Some(meshes)) = (gore.kind, meshes.as_mut()) {
             match meshes.get(&mesh3d.0).map(|m| m.contains_attribute(Mesh::ATTRIBUTE_TANGENT)) {
                 None => continue,
@@ -1805,7 +2733,16 @@ fn dress(
                 ),
             }
         }
-        let base = material.and_then(|m| standard.get(&m.0).cloned()).unwrap_or_default();
+        let mut base = material.and_then(|m| standard.get(&m.0).cloned()).unwrap_or_default();
+        if let Some(laid) = laid {
+            // Its own textures keep the UVs they were authored on, now the copy's `UV_1`.
+            base.base_color_channel = UvChannel::Uv1;
+            base.emissive_channel = UvChannel::Uv1;
+            base.metallic_roughness_channel = UvChannel::Uv1;
+            base.normal_map_channel = UvChannel::Uv1;
+            base.occlusion_channel = UvChannel::Uv1;
+            commands.entity(entity).insert(Mesh3d(laid));
+        }
         let base_srgb = base.base_color.to_srgba();
         let base_srgb = [base_srgb.red, base_srgb.green, base_srgb.blue];
         let rough = base.perceptual_roughness;
@@ -1825,7 +2762,7 @@ fn dress(
                 // tangents the crater's normal map needs were generated above if the mesh had none.
                 let flay = FlayCanvas::new(&mut images, gore.canvas_texels(&dials), region, layers, base_srgb, rough);
                 let wet = WetCanvas::new(&mut images, gore.canvas_texels(&dials), base_srgb, rough);
-                let mut params = FleshParams::for_layers(&layers, FleshMode::Canvas, scale.mm_per_unit);
+                let mut params = FleshParams::for_layers(&layers, FleshMode::Canvas, scale.mm_per_unit).with_cut_film(CUT_FACE_FILM_MM);
                 params.wet.z = wet_settings.as_ref().map(|w| w.film_depth_mm).unwrap_or(2.0);
                 let dermis = DermisCanvas::new(&mut images, gore.canvas_texels(&dials));
                 let mut material = tables.material(base, params, Some(wet.roughness()), Some(&flay));
@@ -1870,7 +2807,7 @@ fn layers_for(region: Region, settings: Option<&CrossSectionSettings>) -> Layers
 /// The settings, caches and outputs [`take_hits`] reads — grouped so the system stays under Bevy's
 /// parameter limit and the hit loop reads as the module docs list it.
 #[derive(bevy::ecs::system::SystemParam)]
-struct HitContext<'w> {
+struct HitContext<'w, 's> {
     clock: Res<'w, GoreClock>,
     dials: Res<'w, GoreDials>,
     flay_settings: Option<Res<'w, FlaySettings>>,
@@ -1882,124 +2819,266 @@ struct HitContext<'w> {
     meshes: ResMut<'w, Assets<Mesh>>,
     standard: ResMut<'w, Assets<StandardMaterial>>,
     flesh: ResMut<'w, Assets<FleshMaterial>>,
+    images: Option<ResMut<'w, Assets<Image>>>,
     bone: MessageWriter<'w, BoneExposed>,
     wounded: MessageWriter<'w, Wounded>,
     fractured: MessageWriter<'w, GoreFractured>,
     policy: Option<Res<'w, GorePolicy>>,
+    /// The material every spill's strands share, and the `mm_per_unit` bits it was made under.
+    gut_look: Local<'s, Option<(u32, Handle<FleshMaterial>)>>,
+    /// The rigid meshes hits are cast at, indexed across ticks, and what Bevy reports changing them.
+    index: Local<'s, MeshIndex>,
+    mesh_events: MessageReader<'w, 's, AssetEvent<Mesh>>,
+    /// The stains a spray has thrown that have not landed.
+    airborne: ResMut<'w, Airborne>,
 }
 
-/// What [`throw_spray`] needs from the batch it is in: the surfaces, and the poses and boxes cached
-/// across the batch's hits.
-struct Thrown<'a> {
+/// What [`throw_spray`] needs from the batch it is in: the surfaces, the poses and boxes cached across
+/// the batch's hits, and the holes a droplet can fly through — those already in a cloth and those this
+/// batch opened, which are queued and not yet in it.
+struct Thrown<'a, 'w, 's> {
     surfaces: &'a [Surface],
     posed: &'a mut std::collections::HashMap<Entity, Option<Mesh>>,
-    bounds: &'a mut std::collections::HashMap<Entity, Option<Bounds>>,
+    bounds: &'a mut std::collections::HashMap<Entity, Reach>,
     identity: &'a GlobalTransform,
     edges: &'a WetSettings,
     tick: u32,
+    holes: &'a Query<'w, 's, &'static ClothHoles>,
+    /// `(cloth, UV, radius in UV)` of every hole opened earlier in this batch.
+    opened: &'a [(Entity, Vec2, f32)],
+    /// The meshes, indexed, and the skinned ones' indices refitted to their poses this batch.
+    index: &'a MeshIndex,
+    refits: &'a mut std::collections::HashMap<Entity, crate::bvh::Refit>,
+    /// Where each stain goes until its droplet lands.
+    airborne: &'a mut Airborne,
 }
 
-/// **What a wound throws lands on everything else**: the closed-form stains on every floor, and the
-/// spray's own droplets cast straight at every other dressed surface for what a floor's plane cannot
-/// catch — a sheet, a wall, the next body part. Straight rather than ballistic for those: a droplet at
-/// 8–40 m/s falls under a centimetre in the metre it travels. The spray leaves `wound.at` in a cone
-/// about `wound.normal`, and `struck`, the part the wound is on, is not cast at.
-#[allow(clippy::too_many_arguments)]
-fn throw_spray(
-    wound: &BloodWound,
-    seed: u32,
-    struck: Entity,
-    thrown: &mut Thrown,
-    bodies: &mut Bodies,
-    meshes: &Assets<Mesh>,
-    rigging: &Rigging,
-    dials: &GoreDials,
-    commands: &mut Commands,
-) {
-    let Thrown { surfaces, posed, bounds, identity, edges, tick } = thrown;
-    let (edges, tick) = (&**edges, *tick);
+/// **What a wound throws lands on what it reaches first.** Each droplet is cast straight at every
+/// dressed surface that is not a floor — a sheet, a wall, the next body part, the shirt the wound is
+/// under — and stains only the nearest, so a body part, a cloth or a wall in the way catches it and
+/// nothing behind is stained through it. A cloth's hole lets a droplet through. Then the closed-form
+/// stains of a horizontal plane go on every floor, for each droplet nothing caught. Straight rather
+/// than ballistic for the cast: a droplet at 8–40 m/s falls under a centimetre in the metre it
+/// travels. The spray leaves `wound.at` in a cone about `wound.normal`; `struck`, the part the wound
+/// is on, is not cast at. The first [`SPRAY_CAST`] droplets are cast; up to [`WALL_CAST`] when a
+/// wall's box is in a droplet's path.
+///
+/// **Each stain lands when its droplet would** (0.5.65): it goes into [`Airborne`] with the tick its
+/// droplet arrives on — the distance it flew at its own speed, or for a floor the fall the closed form
+/// gives it — and [`land_stains`] paints it then. Painted as the wound opened, a wall 1.2 m behind a
+/// body was spattered before the spray that carries the blood had crossed a tenth of the way.
+fn throw_spray(wound: &BloodWound, seed: u32, struck: Entity, thrown: &mut Thrown, bodies: &Bodies, meshes: &Assets<Mesh>, rigging: &Rigging, dials: &GoreDials) {
+    let Thrown { surfaces, posed, bounds, identity, edges, tick, holes, opened, index, refits, airborne } = thrown;
+    let index: &MeshIndex = index;
+    let (edges, tick, identity) = (&**edges, *tick, &**identity);
     let at_world = Vec3::from_array(wound.at);
     let droplets = crate::bloodstain::patterns::impact_spatter(wound, &dials.blood);
-    for surface in surfaces.iter() {
-        let Surface { entity: other, mesh: other_handle, gore: other_gore, .. } = surface;
-        if *other == struck {
+    // **What a droplet can be cast at**, each boxed once for the batch and posed, if it is skinned, only
+    // when a droplet's ray reaches its box: a crowd's pose is a pass over every vertex of every body.
+    let candidates: Vec<&Surface> = surfaces.iter().filter(|s| s.entity != struck && s.gore.kind != GoreKind::Floor).collect();
+    for s in &candidates {
+        if !bounds.contains_key(&s.entity)
+            && let Some(asset) = meshes.get(&s.mesh)
+        {
+            let reach = reach_of(s, asset, rigging, posed, identity, index);
+            bounds.insert(s.entity, reach);
+        }
+    }
+    let drawn: Vec<Option<Candidate>> = candidates
+        .iter()
+        .map(|s| match bounds.get(&s.entity) {
+            Some(Reach::Never) | None => None,
+            Some(reach) => Some((*s, reach.bounds())),
+        })
+        .collect();
+    let walls = drawn.iter().flatten().any(|(s, ..)| s.gore.kind == GoreKind::Wall);
+    let mut caught = vec![false; droplets.len()];
+    // `(where the ray enters its box, surface)`, reused by every droplet.
+    let mut order: Vec<(f32, usize)> = Vec::with_capacity(drawn.len());
+    for (i, d) in droplets.iter().enumerate().take(if walls { WALL_CAST } else { SPRAY_CAST }) {
+        let dir = Vec3::from_array(d.dir);
+        // Past the ordinary cap a droplet is cast only toward a wall, which is what the wider cap is for.
+        let toward_wall = || {
+            drawn.iter().flatten().any(|(s, b)| s.gore.kind == GoreKind::Wall && b.as_ref().is_none_or(|b| b.reached_by(at_world, dir)))
+        };
+        if i >= SPRAY_CAST && !toward_wall() {
             continue;
         }
-        let Ok((_, _, _, _, _, Some(mut other_wet))) = bodies.get_mut(*other) else { continue };
-        let Some(other_asset) = meshes.get(other_handle) else { continue };
-        let Some((other_mesh, other_xf)) = cast_at(surface, other_asset, rigging, posed, identity) else { continue };
-        match other_gore.kind {
-            GoreKind::Floor => {
-                let plane_y = other_xf.translation().y;
-                for stain in crate::bloodstain::stain::stains(wound, &dials.blood, plane_y) {
-                    let at = Vec3::new(stain.at[0], stain.at[1] + 0.5, stain.at[2]);
-                    let shape = StainShape {
-                        major: stain.radius * 2.2,
-                        minor: stain.radius * 2.0,
-                        spines: 3,
-                        satellites: 1,
-                        direction: [0.0, 1.0],
-                        seed: stain.seed,
-                    };
-                    let texels = other_wet.size();
-                    let _ = other_wet.paint_world_with(other_mesh, other_xf, at, Vec3::NEG_Y, &shape_on(other_gore, &shape, texels), tick, edges);
-                }
-            }
-            GoreKind::Wall => {
-                // **Each droplet is its own stain**: sized, stretched and pointed by how it struck
-                // (`hard_stain`), not the blob a body part or a sheet takes for it.
-                let bound = bounds.entry(*other).or_insert_with(|| Bounds::of(other_mesh, other_xf));
-                for (i, d) in droplets.iter().enumerate().take(WALL_CAST) {
-                    let dir = Vec3::from_array(d.dir);
-                    if bound.as_ref().is_some_and(|b| !b.reached_by(at_world, dir)) {
-                        continue;
-                    }
-                    let Some(l) = ray_hit(other_mesh, other_xf, at_world, dir) else { continue };
-                    let Some(stain) = hard_stain(other_mesh, other_xf, &l, d, &dials.blood, seed.wrapping_add(i as u32)) else { continue };
-                    let texels = other_wet.size();
-                    other_wet.paint_uv_with(l.uv, &shape_on(other_gore, &stain, texels), tick, edges);
-                }
-            }
+        let through_hole = |s: &&Surface, l: &Landing| {
+            s.gore.kind == GoreKind::Cloth
+                && (holes.get(s.entity).is_ok_and(|h| h.is_open_at(l.uv)) || opened.iter().any(|(e, uv, r)| *e == s.entity && uv.distance(l.uv) < *r))
+        };
+        let cast = |k: usize| -> Option<Landing> {
+            let (s, _) = drawn.get(k)?.as_ref()?;
+            let asset = meshes.get(&s.mesh)?;
+            let (m, xf) = cast_at(s, asset, rigging, posed, identity)?;
+            ray_cast(m, cast_index(index, refits, s, asset, m), xf, at_world, dir)
+        };
+        let Some((k, l)) = nearest_landing(&drawn, at_world, dir, &mut order, cast, through_hole) else { continue };
+        if let Some(c) = caught.get_mut(i) {
+            *c = true;
+        }
+        let Some(Some((s, _))) = drawn.get(k) else { continue };
+        let Some(asset) = meshes.get(&s.mesh) else { continue };
+        let Some((m, xf)) = drawn_now(s, asset, posed, identity) else { continue };
+        let Ok((_, _, _, _, _, Some(wet))) = bodies.get(s.entity) else { continue };
+        let texels = wet.size();
+        let shape = match s.gore.kind {
+            // **On a wall or a skin each droplet is its own stain**: sized, stretched and pointed by
+            // how it struck (`hard_stain`), not the blob a sheet takes for it. Until 0.5.62 a skin took
+            // the blob too, at least 2 cm across for the smallest droplet, and the forward spatter of a
+            // forearm's exit landed on the chest 4 cm behind it as twenty-four of them in one place:
+            // a sheet of blood the width of the chest where a stipple of drops belongs.
+            GoreKind::Wall | GoreKind::Skin(_) => match hard_stain(m, xf, &l, d, &dials.blood, seed.wrapping_add(i as u32)) {
+                Some(stain) => stain,
+                None => continue,
+            },
             _ => {
-                let mut landed = Vec::new();
-                // **Broad phase.** A droplet whose ray misses the surface's box cannot land on it,
-                // and the box is one pass over the vertices once per batch where a cast is one
-                // pass over the triangles once per droplet. A surface with no box (a mesh with no
-                // positions) is cast at, so its refusal is still heard.
-                let bound = bounds.entry(*other).or_insert_with(|| Bounds::of(other_mesh, other_xf));
-                for (i, d) in droplets.iter().enumerate().take(SPRAY_CAST) {
-                    let dir = Vec3::new(d.dir[0], d.dir[1], d.dir[2]);
-                    if bound.as_ref().is_some_and(|b| !b.reached_by(at_world, dir)) {
-                        continue;
-                    }
-                    let radius = crate::bloodstain::stain::stain_radius(d, d.speed, &dials.blood);
-                    let shape = StainShape {
-                        major: radius * 2.4,
-                        minor: radius * 1.6,
-                        spines: 2,
-                        satellites: 1,
-                        direction: [0.0, 1.0],
-                        seed: seed.wrapping_add(i as u32),
-                    };
-                    let texels = other_wet.size();
-                    if let Some(uv) =
-                        other_wet.paint_world_with(other_mesh, other_xf, at_world, dir, &shape_on(other_gore, &shape, texels), tick, edges)
-                        && other_gore.kind == GoreKind::Cloth
-                    {
-                        landed.push((uv, shape, tick));
-                    }
+                let radius = crate::bloodstain::stain::stain_radius(d, d.speed, &dials.blood);
+                StainShape { major: radius * 2.4, minor: radius * 1.6, spines: 2, satellites: 1, direction: [0.0, 1.0], seed: seed.wrapping_add(i as u32) }
+            }
+        };
+        // Straight at its own speed: the cast's `t` is metres along a unit direction.
+        airborne.stains.push(InFlight {
+            lands: tick.saturating_add(flight_ticks(l.t / d.speed, dials.hz)),
+            surface: s.entity,
+            at: Lands::Uv(l.uv),
+            drawn: shape_on(&s.gore, &shape, texels),
+            soaks: (s.gore.kind == GoreKind::Cloth).then_some(shape),
+        });
+    }
+    // **The floors**, in closed form, for every droplet nothing above caught. A stain's seed is the
+    // spray's own seed mixed with the droplet's ordinal, which is how a stain is matched to its droplet.
+    let spray_seed = wound_seed(wound);
+    for s in surfaces.iter().filter(|s| s.entity != struck && s.gore.kind == GoreKind::Floor) {
+        let Some(asset) = meshes.get(&s.mesh) else { continue };
+        let Some((_, floor_xf)) = drawn_now(s, asset, posed, identity) else { continue };
+        let Ok((_, _, _, _, _, Some(wet))) = bodies.get(s.entity) else { continue };
+        let plane_y = floor_xf.translation().y;
+        for stain in crate::bloodstain::stain::stains(wound, &dials.blood, plane_y) {
+            let ordinal = (stain.seed ^ spray_seed) as usize;
+            if caught.get(ordinal).copied().unwrap_or(false) {
+                continue;
+            }
+            // The fall the closed form placed it with: the same root, so the time and the place are
+            // one flight's.
+            let Some(fall) = droplets.get(ordinal).and_then(|d| crate::bloodstain::flight_time(wound.at, d, dials.blood.gravity, plane_y)) else {
+                continue;
+            };
+            let at = Vec3::new(stain.at[0], stain.at[1] + 0.5, stain.at[2]);
+            let shape = StainShape {
+                major: stain.radius * 2.2,
+                minor: stain.radius * 2.0,
+                spines: 3,
+                satellites: 1,
+                direction: [0.0, 1.0],
+                seed: stain.seed,
+            };
+            let texels = wet.size();
+            airborne.stains.push(InFlight {
+                lands: tick.saturating_add(flight_ticks(fall, dials.hz)),
+                surface: s.entity,
+                at: Lands::Above(at),
+                drawn: shape_on(&s.gore, &shape, texels),
+                soaks: None,
+            });
+        }
+    }
+}
+
+/// **The whole ticks a flight of `seconds` spans at `hz`**: zero for one that lands within the tick it
+/// left on, at most [`MAX_FLIGHT_TICKS`]; zero for a time that is not a number.
+fn flight_ticks(seconds: f32, hz: u32) -> u32 {
+    let ticks = seconds * hz as f32;
+    if ticks.is_finite() && ticks > 0.0 { (ticks as u32).min(MAX_FLIGHT_TICKS) } else { 0 }
+}
+
+/// **The longest a stain is held in the air**, ticks: two seconds at 60 Hz, past the fall from any
+/// height a body stands at. A bound on what a droplet a cast sent across a hall can keep queued.
+const MAX_FLIGHT_TICKS: u32 = 120;
+
+/// **Where a stain in the air will land.**
+#[derive(Clone, Copy, Debug)]
+enum Lands {
+    /// At this point of the surface's `UV_0`, where its droplet's ray met it.
+    Uv(Vec2),
+    /// On a floor, cast straight down from this point, which is half a metre above where the closed
+    /// form put it.
+    Above(Vec3),
+}
+
+/// **One stain a spray threw that has not landed yet.**
+#[derive(Clone, Copy, Debug)]
+struct InFlight {
+    /// The tick it lands on.
+    lands: u32,
+    /// The surface it lands on.
+    surface: Entity,
+    at: Lands,
+    /// Its shape on that surface's canvas.
+    drawn: StainShape,
+    /// On a cloth, its shape in metres, for the weave to soak from.
+    soaks: Option<StainShape>,
+}
+
+/// **The stains in the air**, in the order they were thrown. A resource because they outlive the hit
+/// that threw them; [`land_stains`] paints each on the tick it lands, and [`reset_gore`] drops those
+/// bound for a surface it wipes.
+#[derive(Resource, Default)]
+struct Airborne {
+    stains: Vec<InFlight>,
+}
+
+/// **Paint every stain whose droplet lands this tick**, in the order the sprays threw them. One whose
+/// surface has gone is dropped.
+fn land_stains(
+    clock: Res<GoreClock>,
+    dials: Res<GoreDials>,
+    wet_settings: Option<Res<WetSettings>>,
+    meshes: Res<Assets<Mesh>>,
+    mut airborne: ResMut<Airborne>,
+    mut canvases: Query<(&mut WetCanvas, Option<&mut Soaking>, &Mesh3d, &GlobalTransform)>,
+) {
+    let tick = clock.0;
+    if !airborne.stains.iter().any(|s| s.lands <= tick) {
+        return;
+    }
+    let edges = edge_settings(&dials, wet_settings.as_deref());
+    let mut still = Vec::with_capacity(airborne.stains.len());
+    for stain in airborne.stains.drain(..) {
+        if stain.lands > tick {
+            still.push(stain);
+            continue;
+        }
+        let Ok((mut wet, soaking, mesh3d, xf)) = canvases.get_mut(stain.surface) else { continue };
+        match stain.at {
+            Lands::Uv(uv) => {
+                wet.paint_uv_with(uv, &stain.drawn, tick, &edges);
+                if let (Some(shape), Some(mut soaking)) = (stain.soaks, soaking) {
+                    soaking.landings.push((uv, shape, tick));
                 }
-                if !landed.is_empty()
-                    && let Ok(mut e) = commands.get_entity(*other)
-                {
-                    e.queue(move |mut e: EntityWorldMut| {
-                        if let Some(mut soaking) = e.get_mut::<Soaking>() {
-                            soaking.landings.extend(landed);
-                        }
-                    });
+            }
+            Lands::Above(at) => {
+                if let Some(mesh) = meshes.get(&mesh3d.0) {
+                    let _ = wet.paint_world_with(mesh, xf, at, Vec3::NEG_Y, &stain.drawn, tick, &edges);
                 }
             }
         }
+    }
+    airborne.stains = still;
+}
+
+/// **What a surface is drawn as now, without posing it**: its asset placed by its own transform, or
+/// the pose [`cast_at`] already built and kept in `posed`. `None` for a skinned surface not posed yet.
+fn drawn_now<'a>(
+    surface: &'a Surface,
+    asset: &'a Mesh,
+    posed: &'a std::collections::HashMap<Entity, Option<Mesh>>,
+    identity: &'a GlobalTransform,
+) -> Option<(&'a Mesh, &'a GlobalTransform)> {
+    match surface.skin.as_ref().filter(|_| Rig::of(asset).is_some()) {
+        None => Some((asset, &surface.xf)),
+        Some(_) => posed.get(&surface.entity)?.as_ref().map(|m| (m, identity)),
     }
 }
 
@@ -2026,6 +3105,59 @@ struct SubjectLookup<'w, 's> {
     subjects: Query<'w, 's, (&'static FractureSubject, &'static GlobalTransform), Without<Broken>>,
     breakables: Query<'w, 's, &'static GlobalTransform, With<GoreBreakable>>,
     dressed: Query<'w, 's, &'static Dressed>,
+    /// The holes in every cloth, for the spray to fly through.
+    holes: Query<'w, 's, &'static ClothHoles>,
+}
+
+/// Something a ray can be cast at — `T` says which — and its box, if it has one.
+type Castable<T> = (T, Option<Bounds>);
+
+/// One surface a droplet can be cast at, and its box.
+type Candidate<'a> = Castable<&'a Surface>;
+
+/// **Where the ray from `from` along `dir` lands first among `drawn`**: the index of the surface and
+/// the landing, nearest first and, of two at one distance, the surface listed first. A landing
+/// `lets_through` passes (a droplet through a cloth's hole) is not a landing.
+///
+/// **The broad phase, nearest box first.** A ray that misses a surface's box cannot land on it; a
+/// surface with no box is cast at from the origin, so its refusal is still heard. The rest are cast
+/// in the order the ray enters their boxes, and once a landing is nearer than the next box's entry
+/// nothing further can beat it, since a mesh lies inside its padded box. Before 0.5.45 every box the
+/// ray entered was cast at, which in a crowd is most of them. `cast` casts at the surface it is given
+/// the index of, and is called only for one a ray can reach — so a skinned surface is posed only
+/// then. `order` is scratch, reused.
+fn nearest_landing<T>(
+    drawn: &[Option<Castable<T>>],
+    from: Vec3,
+    dir: Vec3,
+    order: &mut Vec<(f32, usize)>,
+    mut cast: impl FnMut(usize) -> Option<Landing>,
+    mut lets_through: impl FnMut(&T, &Landing) -> bool,
+) -> Option<(usize, Landing)> {
+    order.clear();
+    order.extend(drawn.iter().enumerate().filter_map(|(k, entry)| {
+        let (_, b) = entry.as_ref()?;
+        match b {
+            Some(b) => b.entry(from, dir).map(|t| (t, k)),
+            None => Some((0.0, k)),
+        }
+    }));
+    order.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut best: Option<(usize, Landing)> = None;
+    for &(enters, k) in order.iter() {
+        if best.as_ref().is_some_and(|(_, near)| near.t < enters) {
+            break;
+        }
+        let Some(Some((s, _))) = drawn.get(k) else { continue };
+        let Some(l) = cast(k) else { continue };
+        if best.as_ref().is_some_and(|(bk, near)| near.t < l.t || (near.t == l.t && *bk < k)) {
+            continue;
+        }
+        if !lets_through(s, &l) {
+            best = Some((k, l));
+        }
+    }
+    best
 }
 
 /// **Apply every hit.** See the module docs for the order.
@@ -2050,12 +3182,25 @@ fn take_hits(
         meshes,
         standard,
         flesh,
+        images,
         bone,
         wounded,
         fractured,
         policy,
+        gut_look,
+        index,
+        mesh_events,
+        airborne,
     } = &mut cx;
-    let SubjectLookup { parents, subjects, breakables, dressed } = &lookup;
+    let airborne: &mut Airborne = airborne;
+    // A mesh Bevy reports changed is indexed again when it is next cast at; read every tick, hits or
+    // none, so no report is missed.
+    for event in mesh_events.read() {
+        if let AssetEvent::Modified { id } | AssetEvent::Removed { id } | AssetEvent::Unused { id } = event {
+            index.forget(id);
+        }
+    }
+    let SubjectLookup { parents, subjects, breakables, dressed, holes: cloth_holes } = &lookup;
     let tick = clock.0;
     // What the player's settings allow, read once per batch. A tier that does not draw blood draws
     // none of the rest; each of the other three is its own switch, so a game can allow blood and
@@ -2066,6 +3211,21 @@ fn take_hits(
     // Every hit of the tick, in one pass. A hit that reaches bone queues the subject's despawn, and a
     // later hit in the same batch on a sibling part still passes the query — so every insert below
     // is a `try_insert`, which tolerates a despawn queued ahead of it where `insert` panics.
+    // Each rigid surface's mesh indexed the first tick it is there, so the build is paid when it is
+    // dressed rather than when it is first shot: 3 ms for sixteen thousand triangles on `big`.
+    for (_, _, mesh, _, skin) in bodies_index.iter() {
+        let id = mesh.0.id();
+        if index.get(id).is_some() {
+            continue;
+        }
+        if let Some(asset) = meshes.get(&mesh.0) {
+            // A skinned mesh's tree is built over its bind pose and refitted to each pose it is cast at.
+            index.ensure(id, asset);
+            if skin.filter(|_| Rig::of(asset).is_some()).is_some() {
+                index.ensure_joints(id, asset);
+            }
+        }
+    }
     let hits: Vec<GoreHit> = hits.read().copied().collect();
     if hits.is_empty() {
         return;
@@ -2076,22 +3236,62 @@ fn take_hits(
         .iter()
         .map(|(entity, gore, mesh, xf, skin)| Surface { entity, mesh: mesh.0.clone(), xf: *xf, gore: *gore, skin: skin.cloned() })
         .collect();
+    // Every rigid surface's mesh indexed before the batch casts at it: built once and kept while the
+    // mesh stays as it was, so a crowd sharing one mesh builds one.
+    for surface in &surfaces {
+        if let Some(asset) = meshes.get(&surface.mesh) {
+            index.ensure(surface.mesh.id(), asset);
+            if surface.skin.as_ref().filter(|_| Rig::of(asset).is_some()).is_some() {
+                index.ensure_joints(surface.mesh.id(), asset);
+            }
+        }
+    }
+    let index: &MeshIndex = index;
     // A skinned surface is posed once per batch, the first time a droplet is cast at it: a pose is a
     // pass over every vertex, and a batch of shots at one body would otherwise pose it once per shot.
     let mut posed: std::collections::HashMap<Entity, Option<Mesh>> = std::collections::HashMap::new();
-    // And each surface's box once per batch, for the same reason.
-    let mut bounds: std::collections::HashMap<Entity, Option<Bounds>> = std::collections::HashMap::new();
+    // And where each surface can be reached, once per batch, for the same reason.
+    let mut bounds: std::collections::HashMap<Entity, Reach> = std::collections::HashMap::new();
+    // And each posed surface's index, refitted to its pose, once per batch.
+    let mut refits: std::collections::HashMap<Entity, crate::bvh::Refit> = std::collections::HashMap::new();
     let identity = GlobalTransform::IDENTITY;
-    for hit in hits {
-        // **A hit at a character** names the entity the game's physics found, which is rarely the mesh
-        // that was struck: the preset casts the ray at every skin under it and hurts the nearest.
-        let hit = if bodies.contains(hit.entity) {
-            hit
-        } else {
-            let Some(entity) = nearest_skin(&hit, &surfaces, parents, meshes, &rigging, &mut posed, &mut bounds, &identity) else {
-                continue;
-            };
-            GoreHit { entity, ..hit }
+    // Every hole this batch opened, for droplets to fly through before the queued cut lands.
+    let mut opened: Vec<(Entity, Vec2, f32)> = Vec::new();
+    // Every hit in the order it was sent, and a shot going through as its legs, each taken in turn
+    // before the next hit.
+    let mut queue: std::collections::VecDeque<Pass> = hits.into_iter().map(Pass::Sent).collect();
+    while let Some(pass) = queue.pop_front() {
+        let (hit, leg) = match pass {
+            Pass::Leg(hit, leg) => (hit, leg),
+            Pass::Sent(hit) => {
+                let direct = bodies.contains(hit.entity);
+                // **A shot that goes through** is walked first: every place it crosses the body, in and
+                // out, is a leg of its own (see [`legs_through`]). One that crosses nothing goes on as
+                // any hit does.
+                if hit.through && matches!(hit.kind, HitKind::Impact { .. }) {
+                    let legs = legs_through(&hit, direct, &surfaces, parents, meshes, &rigging, &mut posed, &mut bounds, &identity, index, &mut refits);
+                    if !legs.is_empty() {
+                        for leg in legs.into_iter().rev() {
+                            queue.push_front(leg);
+                        }
+                        continue;
+                    }
+                }
+                // **A hit at a character** names the entity the game's physics found, which is rarely
+                // the mesh that was struck: the preset casts the ray at every skin under it and hurts
+                // the nearest.
+                if direct {
+                    (hit, Leg::In)
+                } else {
+                    let skins = skin_under(hit.entity, parents);
+                    let Some((entity, ..)) =
+                        first_crossing(skins, hit.from, hit.dir, &surfaces, meshes, &rigging, &mut posed, &mut bounds, &identity, index, &mut refits)
+                    else {
+                        continue;
+                    };
+                    (GoreHit { entity, ..hit }, Leg::In)
+                }
+            }
         };
         let Ok((gore, mesh3d, xf, skin, flay, wet)) = bodies.get_mut(hit.entity) else { continue };
         let gore = *gore;
@@ -2100,10 +3300,21 @@ fn take_hits(
         let xf = &xf;
         let skin: Option<SkinnedMesh> = skin.cloned();
         let Some(bind) = meshes.get(&mesh3d.0).cloned() else { continue };
+        let drawn_mesh = mesh3d.0.clone();
         // **Cast at the body as it is drawn.** A skinned mesh's asset is its bind pose, and the entity's
         // own transform plays no part in drawing it; the pose is what the player is aiming at. A rigid
         // mesh is the asset placed by its transform.
         let drawn = Drawn::of(&bind, skin.as_ref(), &rigging);
+        // The struck mesh's index: its own when it is drawn rigidly, refitted to its pose when it is posed.
+        let struck_refit = match &drawn {
+            Drawn::Posed(posed, _) => index.get(drawn_mesh.id()).zip(positions_of(posed)).map(|(tree, at)| tree.refit(at)),
+            _ => None,
+        };
+        let struck_index = index.get(drawn_mesh.id()).and_then(|tree| match (&drawn, &struck_refit) {
+            (Drawn::Rigid, _) => Some(tree.fitted()),
+            (Drawn::Posed(..), Some(refit)) => Some(tree.with(refit)),
+            _ => None,
+        });
         let (mesh, xf): (&Mesh, &GlobalTransform) = match &drawn {
             Drawn::Rigid => (&bind, xf),
             Drawn::Posed(posed, _) => (posed.as_ref(), &identity),
@@ -2121,12 +3332,105 @@ fn take_hits(
             _ => Region::Torso,
         };
 
+        // **Where a shot going through comes out**: a crater wider than the way in, cut from outside
+        // along the way the shot left, its own bleeding wound, and the forward spatter thrown along the
+        // shot onto what is behind — the next part of the body, a wall. Where nothing of the body lies
+        // beyond, every cloth the shot crosses after it is holed: the back of the shirt, a curtain.
+        if let Leg::Out { last } = leg {
+            let HitKind::Impact { depth_mm } = hit.kind else { continue };
+            let out = hit.dir.normalize_or_zero();
+            // Cast back from just outside: the first of this surface it meets is where the shot left.
+            let outside = hit.from;
+            let Some(exit) = ray_cast(mesh, struck_index, xf, outside, -hit.dir) else { continue };
+            let exit_world = xf.transform_point(exit.point);
+            let exit_normal = xf.affine().transform_vector3(exit.normal).normalize_or_zero();
+            let exit_normal = if exit_normal.dot(out) < 0.0 { -exit_normal } else { exit_normal };
+            let exit_radius = hit.radius_m * EXIT_SCALE;
+            let exit_wound = BloodWound {
+                at: exit_world.to_array(),
+                normal: exit_normal.to_array(),
+                area: core::f32::consts::PI * exit_radius * exit_radius,
+                severity: 1.0,
+                kind: WoundKind::Channel,
+            };
+            if !draws_blood {
+                wounded.write(Wounded { area: exit_wound.area, ..announce(&hit, exit_world, exit_normal) });
+                continue;
+            }
+            let exit_seed = wound_seed(&exit_wound);
+            if let Some(mut flay) = flay {
+                let _ = flay.paint_world(mesh, xf, outside, -out, radius_uv * EXIT_SCALE, depth_mm, tick);
+                if let Some(s) = flay_settings.as_deref() {
+                    flay.shade(s);
+                }
+            }
+            let mut exit_uv = None;
+            if let Some(mut wet) = wet {
+                let shape = StainShape {
+                    major: exit_radius * 2.6,
+                    minor: exit_radius * 2.0,
+                    spines: 6,
+                    satellites: 3,
+                    direction: [0.0, 1.0],
+                    seed: exit_seed,
+                };
+                let texels = wet.size();
+                exit_uv = wet.paint_world_with(mesh, xf, outside, -out, &shape_on(gore, &shape, texels), tick, &edges);
+            }
+            if last {
+                for surface in surfaces.iter().filter(|s| s.gore.kind == GoreKind::Cloth) {
+                    let Some(asset) = meshes.get(&surface.mesh) else { continue };
+                    let reach = *bounds.entry(surface.entity).or_insert_with(|| reach_of(surface, asset, &rigging, &mut posed, &identity, index));
+                    match reach {
+                        Reach::Never => continue,
+                        Reach::Within(b) if !b.reached_by(exit_world, hit.dir) => continue,
+                        _ => {}
+                    }
+                    let Some((cloth_mesh, cloth_xf)) = cast_at(surface, asset, &rigging, &mut posed, &identity) else { continue };
+                    let cloth_index = cast_index(index, &mut refits, surface, asset, cloth_mesh);
+                    let radius_uv = exit_radius * surface.gore.density() / crate::flaymap::UV_SPAN_M;
+                    let holes: Vec<(Vec2, f32)> =
+                        crossings_of(cloth_mesh, cloth_index, cloth_xf, exit_world, hit.dir, f32::INFINITY).iter().map(|c| (c.uv, radius_uv)).collect();
+                    // Open to the spray below before the queued hole is cut, as a hole in front is.
+                    opened.extend(holes.iter().map(|(uv, r)| (surface.entity, *uv, r * HOLE_OPEN * 0.75)));
+                    if !holes.is_empty()
+                        && let Ok(mut e) = commands.get_entity(surface.entity)
+                    {
+                        e.queue(move |mut e: EntityWorldMut| {
+                            if let Some(mut cloth) = e.get_mut::<ClothHoles>() {
+                                for (uv, radius_uv) in holes {
+                                    cloth.open(uv, radius_uv, exit_seed);
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+            if spray {
+                // Forward spatter leaves along the shot, not off the skin's face: the cone's axis is
+                // the projectile's own direction.
+                let forward = BloodWound { normal: out.to_array(), area: exit_wound.area * FORWARD_MIST, ..exit_wound };
+                let mut thrown = Thrown { surfaces: &surfaces, posed: &mut posed, bounds: &mut bounds, identity: &identity, edges: &edges, tick, holes: cloth_holes, opened: &opened, index, refits: &mut refits, airborne: &mut *airborne };
+                throw_spray(&forward, exit_seed, hit.entity, &mut thrown, &bodies, meshes, &rigging, dials);
+            }
+            let exit_at = match &drawn {
+                Drawn::Posed(..) => bind_landing(&bind, &exit).map(|(p, _)| (p, Some(SkinAnchor { tri: exit.tri, bary: exit.bary }))),
+                _ => Some((exit.point, None)),
+            };
+            if let (Some(uv), Some((at_local, skin))) = (exit_uv, exit_at) {
+                let site = WoundSite { uv, at_local, skin, wound: exit_wound, bleed: crate::bloodstain::Bleed::new(tick, &exit_wound), cut: None };
+                open_site(&mut commands, hit.entity, site, exit_radius * gore.density(), dials.open_wounds);
+            }
+            wounded.write(Wounded { area: exit_wound.area, ..announce(&hit, exit_world, exit_normal) });
+            continue;
+        }
+
         // **Reduction is substitution, never deletion** ([`GorePolicy`]). At a tier that does not draw
         // blood, a hit that would have opened a wound is still found, placed and announced: the same
         // `Wounded`, at the same point, with the same normal and area. Nothing is painted, torn or
         // thrown, and the game puts whatever it wants at that point in blood's place.
         if !draws_blood && matches!(hit.kind, HitKind::Impact { .. } | HitKind::Slash { .. }) {
-            let (at_world, normal_world) = match ray_hit(mesh, xf, hit.from, hit.dir) {
+            let (at_world, normal_world) = match ray_cast(mesh, struck_index, xf, hit.from, hit.dir) {
                 Some(l) => (xf.transform_point(l.point), xf.affine().transform_vector3(l.normal).normalize_or_zero()),
                 None => (hit.from, -hit.dir.normalize_or_zero()),
             };
@@ -2160,7 +3464,7 @@ fn take_hits(
         }
         // Where the ray lands, for every kind of hit — a slash and a blow never peel, so they have no
         // handoff to read a point from.
-        let landed = ray_hit(mesh, xf, hit.from, hit.dir);
+        let landed = ray_cast(mesh, struck_index, xf, hit.from, hit.dir);
         let site_uv = landed.map(|l| l.uv);
 
         // A blow: a bruise starts under the skin, pooled to the blow's radius.
@@ -2171,31 +3475,34 @@ fn take_hits(
                 pool_diameter_mm: (hit.radius_m * 2.0 * 1000.0).clamp(2.0, 100.0),
                 ..crate::bloodstain::bruise::Params::default()
             };
-            commands.entity(hit.entity).try_insert(Bruising { uv, bruise: crate::bloodstain::Bruise::new(params), carry: 0.0 });
+            let site = BruiseSite { uv, bruise: crate::bloodstain::Bruise::new(params), carry: 0.0 };
+            // **Added, not swapped**: every bruise already under the skin keeps ageing. In hit order,
+            // so two blows in one tick land in the order they were sent.
+            commands.entity(hit.entity).queue(move |mut e: EntityWorldMut| {
+                if let Some(mut bruising) = e.get_mut::<Bruising>() {
+                    if bruising.sites.len() >= MAX_BRUISES {
+                        bruising.sites.remove(0);
+                    }
+                    bruising.sites.push(site);
+                } else {
+                    e.insert(Bruising { sites: vec![site] });
+                }
+            });
         }
 
-        // A burn: the degree colours the dermis — reddened, blistered, charred. **These three colours
-        // are this crate's own**; the degree that picks one and the depth that is peeled are the model's.
+        // A burn: Jackson's three zones round the contact, as far in as the degree reached — see
+        // [`burn_zone`]. The degree is the model's; the colours are this crate's own.
         if let HitKind::Burn { .. } = hit.kind
             && let Some(uv) = site_uv
             && let Ok(mut entity_ref) = commands.get_entity(hit.entity)
         {
-            let (tint, alpha): ([f32; 3], f32) = match burn_degree {
-                crate::bloodstain::burn::Degree::None => ([1.0; 3], 0.0),
-                // Erythema: the dermis flushes, so red is kept and green and blue are taken.
-                crate::bloodstain::burn::Degree::First => ([1.0, 0.45, 0.40], 0.7),
-                // A blister: the epidermis lifts white over a pale bed.
-                crate::bloodstain::burn::Degree::Second => ([1.0, 0.92, 0.80], 0.6),
-                // Eschar: charred, near black.
-                crate::bloodstain::burn::Degree::Third => ([0.10, 0.06, 0.04], 1.0),
-            };
-            let radius_uv_burn = radius_uv;
+            let contact_mm = radius_uv * 1000.0 / gore.density().max(1.0e-6);
             let mm_per_uv = 1000.0 / gore.density().max(1.0e-6);
+            let margin = Margin::at(uv, 0);
             entity_ref.queue(move |mut e: EntityWorldMut| {
                 if let Some(mut dermis) = e.get_mut::<DermisCanvas>() {
-                    dermis.paint_radial(uv, radius_uv_burn, mm_per_uv, |r_mm| {
-                        let edge = 1.0 - (r_mm / (radius_uv_burn * mm_per_uv)).clamp(0.0, 1.0);
-                        (tint, alpha * edge.sqrt())
+                    dermis.paint_radial(uv, radius_uv * BURN_FLARE * (1.0 + BURN_WOBBLE), mm_per_uv, |r_mm, dir| {
+                        burn_zone(burn_degree, r_mm / (contact_mm * margin.scale(dir, BURN_WOBBLE)).max(1.0e-6))
                     });
                 }
             });
@@ -2212,47 +3519,94 @@ fn take_hits(
         };
         let normal_world = if normal_world.dot(-hit.dir) < 0.0 { -normal_world } else { normal_world };
 
+        // **A slash is a cut, not a disc.** Where it lies on the mesh asset — for a skinned body the
+        // bind pose, carried back through the pose at the triangle that was hit: the same triangle, the
+        // same stretch — its direction there, and the scale from the asset to the world.
+        let layout = match hit.kind {
+            HitKind::Slash { along, .. } => match (&drawn, &landed) {
+                (Drawn::Posed(_, pose), Some(l)) => bind_landing(&bind, l).and_then(|(p, n)| {
+                    let m = l.matrix(&bind, pose)?;
+                    let along_local = m.inverse().transform_vector3(along).normalize_or_zero();
+                    Some((p, n, along_local, skin::max_scale(&m).max(1.0e-6)))
+                }),
+                _ => at_local.map(|p| {
+                    let along_local = xf.affine().inverse().transform_vector3(along).normalize_or_zero();
+                    (p, normal_local.unwrap_or(Vec3::Y), along_local, xf.scale().max_element().max(1.0e-6))
+                }),
+            },
+            _ => None,
+        };
+        // And its line on this wetmap: the blade's half-length read in `UV_0` at the triangle it
+        // crossed, and how far out its lips stand once it has opened.
+        let cut = match (hit.kind, landed) {
+            (HitKind::Slash { along, .. }, Some(l)) => {
+                let half = xf.affine().inverse().transform_vector3(along.normalize_or_zero() * hit.radius_m);
+                face_uv(mesh, l.tri, half)
+                    .map(|(half_uv, _)| half_uv)
+                    .filter(|h| h.is_finite() && *h != Vec2::ZERO)
+                    .map(|half_uv| CutLine { half_uv, lip_uv: 0.5 * SLASH_OPEN_M * gore.density() })
+            }
+            _ => None,
+        };
+
         // 2. Blood at the wound and on the floors.
         let wound = BloodWound {
             at: [at_world.x, at_world.y, at_world.z],
             normal: [normal_world.x, normal_world.y, normal_world.z],
-            area: core::f32::consts::PI * hit.radius_m * hit.radius_m,
+            area: opened_area(&hit),
             severity: 1.0,
             kind: if hit.depth_mm() > 0.0 { WoundKind::Channel } else { WoundKind::Severance },
         };
         let seed = wound_seed(&wound);
-        let shape = StainShape {
-            major: hit.radius_m * 2.6,
-            minor: hit.radius_m * 2.0,
-            spines: 4,
-            satellites: 2,
-            direction: [0.0, 1.0],
-            seed,
+        let shape = match cut {
+            // A cut leaves its blood along itself: a smear as long as the blade and a little wider than
+            // the mouth, laid along the cut in the atlas. Until 0.5.34 it took a disc 2.6 times the
+            // blade's half-length tall, and on a thigh that read as a sheet with a line drawn in it.
+            Some(c) => StainShape {
+                // The cut's own length on this atlas, in the metres `shape_on` reads, so the smear
+                // ends where the cut does on an atlas stretched more one way than the other.
+                major: 2.0 * c.half_uv.length() / gore.density().max(1.0e-6),
+                minor: SLASH_OPEN_M * 2.0,
+                spines: 0,
+                satellites: 0,
+                direction: c.half_uv.normalize_or_zero().to_array(),
+                seed,
+            },
+            None => StainShape {
+                major: hit.radius_m * 2.6,
+                minor: hit.radius_m * 2.0,
+                spines: 4,
+                satellites: 2,
+                direction: [0.0, 1.0],
+                seed,
+            },
         };
         let mut painted = None;
         if let Some(mut wet) = wet {
             let texels = wet.size();
             painted = wet.paint_world_with(mesh, xf, hit.from, hit.dir, &shape_on(gore, &shape, texels), tick, &edges);
         }
-        if spray {
-            let mut thrown = Thrown { surfaces: &surfaces, posed: &mut posed, bounds: &mut bounds, identity: &identity, edges: &edges, tick };
-            throw_spray(&wound, seed, hit.entity, &mut thrown, &mut bodies, meshes, &rigging, dials, &mut commands);
-        }
         // **A hole in what it went through.** An impact crosses every cloth between where it came from
         // and the skin it wounds — a shirt over the wound, a curtain in front of the body — and opens
-        // a hole in each where it crossed, so the wound under clothing is seen. A cloth behind the
-        // skin is not reached when the shot stopped in the body; one that goes through holes it too,
-        // where it last crosses: the back of the shirt, a curtain behind. **A blade cuts a slit**
-        // instead, in the cloth over the skin it opens, as long as the cut and along it.
+        // a hole in each wherever it crossed, so the wound under clothing is seen. A cloth behind the
+        // skin is not reached when the shot stopped in the body; one going through holes what is
+        // behind from where it comes out, above. **A blade cuts a slit** instead, in the cloth over the
+        // skin it opens, as long as the cut and along it.
         if let (HitKind::Impact { .. } | HitKind::Slash { .. }, Some(skin_landing)) = (hit.kind, landed) {
             for surface in surfaces.iter().filter(|s| s.gore.kind == GoreKind::Cloth) {
                 let Some(asset) = meshes.get(&surface.mesh) else { continue };
-                let Some((cloth_mesh, cloth_xf)) = cast_at(surface, asset, &rigging, &mut posed, &identity) else { continue };
-                let bound = bounds.entry(surface.entity).or_insert_with(|| Bounds::of(cloth_mesh, cloth_xf));
-                if bound.as_ref().is_some_and(|b| !b.reached_by(hit.from, hit.dir)) {
-                    continue;
+                let reach = *bounds.entry(surface.entity).or_insert_with(|| reach_of(surface, asset, &rigging, &mut posed, &identity, index));
+                match reach {
+                    Reach::Never => continue,
+                    Reach::Within(b) if !b.reached_by(hit.from, hit.dir) => continue,
+                    _ => {}
                 }
-                let front = ray_hit(cloth_mesh, cloth_xf, hit.from, hit.dir).filter(|c| c.t <= skin_landing.t);
+                // Posed only now that the shot can reach it.
+                let Some((cloth_mesh, cloth_xf)) = cast_at(surface, asset, &rigging, &mut posed, &identity) else { continue };
+                // Every place the shot crosses it on the way to the skin, nearest first: a shirt's
+                // front, or the sleeve a shot left a forearm through and then the shirt over the chest.
+                let crossed = crossings_of(cloth_mesh, cast_index(index, &mut refits, surface, asset, cloth_mesh), cloth_xf, hit.from, hit.dir, skin_landing.t);
+                let front = crossed.first().copied();
                 let mut holes: Vec<(Vec2, f32)> = Vec::new();
                 let mut slits: Vec<(Vec2, Vec2)> = Vec::new();
                 match hit.kind {
@@ -2267,9 +3621,11 @@ fn take_hits(
                         }
                     }
                     _ => {
-                        let behind = if hit.through { ray_exit(cloth_mesh, cloth_xf, hit.from, hit.dir).filter(|c| c.t > skin_landing.t) } else { None };
                         let radius_uv = hit.radius_m * surface.gore.density() / crate::flaymap::UV_SPAN_M;
-                        holes.extend([front.map(|c| (c.uv, radius_uv)), behind.map(|c| (c.uv, radius_uv * EXIT_SCALE))].into_iter().flatten());
+                        holes.extend(crossed.iter().map(|c| (c.uv, radius_uv)));
+                        // What a droplet can fly through this batch, before the queued hole is cut: the
+                        // hole's open core, inside the narrowest its ragged edge comes.
+                        opened.extend(holes.iter().map(|(uv, r)| (surface.entity, *uv, r * HOLE_OPEN * 0.75)));
                     }
                 }
                 if !(holes.is_empty() && slits.is_empty())
@@ -2288,6 +3644,10 @@ fn take_hits(
                 }
             }
         }
+        if spray {
+            let mut thrown = Thrown { surfaces: &surfaces, posed: &mut posed, bounds: &mut bounds, identity: &identity, edges: &edges, tick, holes: cloth_holes, opened: &opened, index, refits: &mut refits, airborne: &mut *airborne };
+            throw_spray(&wound, seed, hit.entity, &mut thrown, &bodies, meshes, &rigging, dials);
+        }
         // The wound bleeds from where it opened on the skin: beside the ones it already has, or in
         // place of one it landed inside. Silenced, as `try_insert` is: an earlier hit this tick may
         // have broken the body and despawned the part.
@@ -2301,114 +3661,46 @@ fn take_hits(
             _ => (at_local, None),
         };
         if let (Some(uv), Some(at_local)) = (painted, site_at) {
-            let site = WoundSite { uv, at_local, skin: site_skin, wound, bleed: crate::bloodstain::Bleed::new(tick, &wound) };
+            let site = WoundSite { uv, at_local, skin: site_skin, wound, bleed: crate::bloodstain::Bleed::new(tick, &wound), cut };
             open_site(&mut commands, hit.entity, site, hit.radius_m * gore.density(), dials.open_wounds);
         }
         wounded.write(announce(&hit, at_world, normal_world));
 
-        // 3. **An exit**, for an impact the game says went through: where the ray leaves the part it
-        // entered, a crater wider than the entry's, cut from outside along the way the shot left, its
-        // own bleeding wound, and the forward spatter thrown along the shot onto what is behind.
-        if hit.through
-            && let HitKind::Impact { depth_mm } = hit.kind
-            && let Some(entry) = landed
-            && let Some(exit) = ray_exit(mesh, xf, hit.from, hit.dir).filter(|e| e.t > entry.t)
+        // 3. A slash gapes instead of cratering, along the layout above.
+        if let HitKind::Slash { depth_mm, .. } = hit.kind
+            && let Some((p, n_local, along_local, scale)) = layout
         {
-            let out = hit.dir.normalize_or_zero();
-            let exit_world = xf.transform_point(exit.point);
-            let exit_normal = xf.affine().transform_vector3(exit.normal).normalize_or_zero();
-            let exit_normal = if exit_normal.dot(out) < 0.0 { -exit_normal } else { exit_normal };
-            let exit_radius = hit.radius_m * EXIT_SCALE;
-            let exit_wound = BloodWound {
-                at: exit_world.to_array(),
-                normal: exit_normal.to_array(),
-                area: core::f32::consts::PI * exit_radius * exit_radius,
-                severity: 1.0,
-                kind: WoundKind::Channel,
-            };
-            let exit_seed = wound_seed(&exit_wound);
-            // Cut from just outside the exit, back along the shot, so the crater opens on that face.
-            let outside = exit_world + out * SURFACE_STAND_OFF;
-            let mut exit_uv = None;
-            if let Ok((_, _, _, _, flay, wet)) = bodies.get_mut(hit.entity) {
-                if let Some(mut flay) = flay {
-                    let _ = flay.paint_world(mesh, xf, outside, -out, radius_uv * EXIT_SCALE, depth_mm, tick);
-                    if let Some(s) = flay_settings.as_deref() {
-                        flay.shade(s);
-                    }
+            let half = hit.radius_m / scale;
+            let tension = Tension::default();
+            let source = meshes.add(bind.clone());
+            // The mesh it wore before its first slash, which a reset puts back.
+            commands.entity(hit.entity).queue(move |mut e: EntityWorldMut| {
+                if !e.contains::<Untorn>() {
+                    e.insert(Untorn(drawn_mesh));
                 }
-                if let Some(mut wet) = wet {
-                    let shape = StainShape {
-                        major: exit_radius * 2.6,
-                        minor: exit_radius * 2.0,
-                        spines: 6,
-                        satellites: 3,
-                        direction: [0.0, 1.0],
-                        seed: exit_seed,
-                    };
-                    let texels = wet.size();
-                    exit_uv = wet.paint_world_with(mesh, xf, outside, -out, &shape_on(gore, &shape, texels), tick, &edges);
-                }
-            }
-            if spray {
-                // Forward spatter leaves along the shot, not off the skin's face: the cone's axis is
-                // the projectile's own direction.
-                let forward = BloodWound { normal: out.to_array(), area: exit_wound.area * FORWARD_MIST, ..exit_wound };
-                let mut thrown = Thrown { surfaces: &surfaces, posed: &mut posed, bounds: &mut bounds, identity: &identity, edges: &edges, tick };
-                throw_spray(&forward, exit_seed, hit.entity, &mut thrown, &mut bodies, meshes, &rigging, dials, &mut commands);
-            }
-            let exit_at = match &drawn {
-                Drawn::Posed(..) => bind_landing(&bind, &exit).map(|(p, _)| (p, Some(SkinAnchor { tri: exit.tri, bary: exit.bary }))),
-                _ => Some((exit.point, None)),
-            };
-            if let (Some(uv), Some((at_local, skin))) = (exit_uv, exit_at) {
-                let site = WoundSite { uv, at_local, skin, wound: exit_wound, bleed: crate::bloodstain::Bleed::new(tick, &exit_wound) };
-                open_site(&mut commands, hit.entity, site, exit_radius * gore.density(), dials.open_wounds);
-            }
-            wounded.write(Wounded { area: exit_wound.area, ..announce(&hit, exit_world, exit_normal) });
+            });
+            // **The wound is torn into a mesh this entity owns.** The laceration rewrites the entity's
+            // drawn mesh in place, and a loaded scene shares one mesh handle between every instance of
+            // a character: torn through the shared handle, one slash opened the same gape on every
+            // enemy wearing that mesh. The copy keeps whatever the mesh had, tangents and joint weights
+            // included.
+            let torn = meshes.add(bind.clone());
+            commands.entity(hit.entity).try_insert(Mesh3d(torn));
+            commands.entity(hit.entity).try_insert(Laceration {
+                path: slash_path(&bind, p, n_local, along_local, half),
+                normal: n_local,
+                // `SLASH_OPEN_M` in the world, in the asset's own units, under the tension it opens at.
+                gape: Gape { width_max: SLASH_OPEN_M / (scale * tension.skin.max(1.0e-6)), ..Gape::default() },
+                tension,
+                bed_depth_mm: depth_mm.max(1.0),
+                region,
+                opened_at: tick,
+                source,
+                ..Default::default()
+            });
         }
 
-        // 4. A slash gapes instead of cratering.
-        if let HitKind::Slash { along, depth_mm } = hit.kind {
-            // The cut is laid out on the mesh asset. For a skinned body that is the bind pose, so the
-            // point, the face normal, the direction of travel and the length are carried back to it
-            // through the pose at the triangle that was hit: the same triangle, the same stretch.
-            let layout = match (&drawn, &landed) {
-                (Drawn::Posed(_, pose), Some(l)) => bind_landing(&bind, l).and_then(|(p, n)| {
-                    let m = l.matrix(&bind, pose)?;
-                    let along_local = m.inverse().transform_vector3(along).normalize_or_zero();
-                    Some((p, n, along_local, hit.radius_m / skin::max_scale(&m).max(1.0e-6)))
-                }),
-                _ => at_local.map(|p| {
-                    let inv = xf.affine().inverse();
-                    let along_local = inv.transform_vector3(along).normalize_or_zero();
-                    (p, normal_local.unwrap_or(Vec3::Y), along_local, hit.radius_m / xf.scale().max_element().max(1.0e-6))
-                }),
-            };
-            if let Some((p, n_local, along_local, half)) = layout {
-                let source = meshes.add(bind.clone());
-                // **The wound is torn into a mesh this entity owns.** The laceration rewrites the
-                // entity's drawn mesh in place, and a loaded scene shares one mesh handle between every
-                // instance of a character: torn through the shared handle, one slash opened the same
-                // gape on every enemy wearing that mesh. The copy keeps whatever the mesh had, tangents
-                // and joint weights included.
-                let torn = meshes.add(bind.clone());
-                commands.entity(hit.entity).try_insert(Mesh3d(torn));
-                commands.entity(hit.entity).try_insert(Laceration {
-                    path: vec![p - along_local * half, p, p + along_local * half],
-                    normal: n_local,
-                    gape: Gape::default(),
-                    tension: Tension::default(),
-                    bed_depth_mm: depth_mm.max(1.0),
-                    region,
-                    opened_at: tick,
-                    source,
-                    ..Default::default()
-                });
-            }
-        }
-
-        // 5. Guts, from a torso that has been opened to the muscle.
+        // 4. Guts, from a torso that has been opened to the muscle.
         if region == Region::Torso
             && dials.strands > 0
             && guts
@@ -2416,18 +3708,32 @@ fn take_hits(
             && let Some(visc) = visc.as_deref()
         {
             let strands = spill(at_world, normal_world + Vec3::new(0.0, -0.4, 0.0), dials.strands, seed, visc);
-            let mut muscle_params = FleshParams::for_layers(&Layers::for_region(region), FleshMode::Cap, dials.mm_per_unit);
-            // Every texel is muscle: the strands carry no `UV_1`, so the shader's depth is `0`, and
-            // `layer_of` walks past every band start it is not below. Muscle is index 2, so fat and
-            // muscle start at `0` and cortex and marrow start past any depth. (`Vec4::ZERO` selected
-            // marrow, whose profile is fat's — caught in review.)
-            muscle_params.bands = Vec4::new(0.0, 0.0, 2.0, 2.0);
-            let gut_material = flesh.add(tables.material(
-                StandardMaterial { base_color: Color::srgb(0.55, 0.20, 0.22), perceptual_roughness: 0.25, ..default() },
-                muscle_params,
-                None,
-                None,
-            ));
+            // One material for every spill, made on the first: bowel's own texture over the muscle's
+            // subsurface profile. Until 0.5.41 each spill made a new one, the red of the blood it fell
+            // in.
+            let key = dials.mm_per_unit.to_bits();
+            let gut_material = match gut_look.as_ref() {
+                Some((k, material)) if *k == key => material.clone(),
+                _ => {
+                    let mut muscle_params = FleshParams::for_layers(&Layers::for_region(region), FleshMode::Cap, dials.mm_per_unit);
+                    // Every texel is muscle: the strands carry no `UV_1`, so the shader's depth is `0`, and
+                    // `layer_of` walks past every band start it is not below. Muscle is index 2, so fat and
+                    // muscle start at `0` and cortex and marrow start past any depth. (`Vec4::ZERO` selected
+                    // marrow, whose profile is fat's — caught in review.)
+                    muscle_params.bands = Vec4::new(0.0, 0.0, 2.0, 2.0);
+                    // The texture goes where every image goes; with no `Assets<Image>` there is no
+                    // renderer to draw the strands either.
+                    let texture = images.as_deref_mut().map(|images| images.add(gut_image()));
+                    let material = flesh.add(tables.material(
+                        StandardMaterial { base_color: Color::WHITE, base_color_texture: texture, perceptual_roughness: GUT_ROUGHNESS, ..default() },
+                        muscle_params,
+                        None,
+                        None,
+                    ));
+                    **gut_look = Some((key, material.clone()));
+                    material
+                }
+            };
             for strand in strands {
                 let anchors = (0..strand.nodes().len() as u32).step_by(4).map(|i| (i, at_world)).collect();
                 let tube = meshes.add(tube_mesh(&strand, 8));
@@ -2442,7 +3748,7 @@ fn take_hits(
             }
         }
 
-        // 6. Bone.
+        // 5. Bone.
         if let Some(h) = handoff
             && let Some(msg) = BoneExposed::from_handoff(hit.entity, &h)
         {
@@ -2499,7 +3805,7 @@ fn take_hits(
                 let cap = cap_material(region, atlas.as_deref(), standard, tables, flesh, dials);
                 let pieces = place(leaves, root_xf, at_world, posing.as_ref().map(|p| (p, &**meshes)));
                 if dials.spawn_fragments {
-                    spawn_pieces(&mut commands, &pieces, &skin, &cap);
+                    spawn_pieces(&mut commands, meshes, tick, &pieces, &skin, &cap);
                     commands.entity(root).despawn();
                 } else {
                     commands.entity(root).try_insert(Broken);
@@ -2539,6 +3845,175 @@ struct Piece {
 #[derive(Component)]
 struct Broken;
 
+/// The mesh a slashed skin wore before its first slash: the shared handle a reset puts back, where
+/// the slash left the entity drawing a torn copy of its own.
+#[derive(Component)]
+struct Untorn(Handle<Mesh>);
+
+/// **A foot came down**: the footstep a game already raises for its sound, told to the gore. A sole
+/// put down in wet blood on a floor picks some of it up, and a sole carrying blood leaves a print,
+/// fainter at every step until it has walked it off — see [`Tread`]. Read once per tick, after the
+/// tick's bleeding, so a foot planted in the pool a wound is filling picks up this tick's blood.
+///
+/// The preset does not find feet or decide when one lands: a game's animation already knows, and a
+/// guess from the mesh would print a sliding foot or miss a planted one. Send one per foot per step.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct GoreStep {
+    /// Whose sole it is. The blood it carries is kept on this entity as a [`Tread`], so name the same
+    /// entity for every step of one foot — its bone, or its mesh.
+    pub foot: Entity,
+    /// Where the sole meets the ground, world space: the print's centre. The floor it lands on is the
+    /// nearest straight below a point [`STEP_REACH_M`] above this, no further than that below it.
+    pub at: Vec3,
+    /// Heel to toe, world space; laid flat onto the floor.
+    pub heading: Vec3,
+    /// The sole's size and tread.
+    pub sole: Sole,
+}
+
+impl GoreStep {
+    /// A [`Sole::BOOT`] put down at `at`, toe toward `heading`.
+    pub fn new(foot: Entity, at: Vec3, heading: Vec3) -> Self {
+        Self { foot, at, heading, sole: Sole::BOOT }
+    }
+    /// The same step with another sole.
+    pub fn with_sole(mut self, sole: Sole) -> Self {
+        self.sole = sole;
+        self
+    }
+}
+
+/// **A sole**, for [`GoreStep`]: its size, and its tread.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sole {
+    /// Heel to toe, metres.
+    pub length_m: f32,
+    /// Across the forefoot, metres.
+    pub width_m: f32,
+    /// Which patches of it give up blood first: any number, the same for every step of one shoe, so
+    /// its prints leave the same gaps. Two shoes of a pair may share it; a print is symmetric.
+    pub tread: u32,
+}
+
+impl Sole {
+    /// An adult's boot, 29 by 11 cm. This crate's own figure.
+    pub const BOOT: Sole = Sole { length_m: 0.29, width_m: 0.11, tread: 0 };
+}
+
+/// **The blood on a foot's sole**, kept on the [`GoreStep::foot`] entity by the preset from its first
+/// step. Read it to drive a game's own look — a sound, or blood drawn on the shoe — and a
+/// [`GoreReset`] of the foot or anything above it wipes it.
+///
+/// `load` is how much of a full print the next step inks: a step in wet blood adds the mean coverage
+/// it stood in, up to `1`, and every step sheds [`TREAD_SHED`] of it onto the floor first, so prints
+/// out of a pool fade geometrically — the sixth is about a sixth of the first — and a sole that
+/// crossed only dried blood carries none.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+pub struct Tread {
+    /// What the next print inks, `0` to `1`.
+    pub load: f32,
+}
+
+/// **The share of a sole's blood each print leaves**: `0.3`, so the sixth print out of a pool inks
+/// `0.7⁵ ≈ 0.17` of the first and the eighth is a scatter of flecks. This crate's own number: nothing
+/// published counts the steps a bloodied sole prints on a hard floor.
+pub const TREAD_SHED: f32 = 0.3;
+
+/// **The share of the wet blood under a sole a step takes up**: `0.3`. What it leaves is a lighter
+/// sole-shaped dent in the pool that the pool's own spread fills. This crate's own number.
+pub const TREAD_LIFT: f32 = 0.3;
+
+/// **How far above and below [`GoreStep::at`] a floor is looked for**: `0.25` m — a step lands on the
+/// floor under the foot, never on one a storey down. This crate's own number.
+pub const STEP_REACH_M: f32 = 0.25;
+
+/// **Heal a character, or wipe a surface, back to how it was dressed.** `entity` is a dressed surface
+/// or any ancestor of dressed surfaces, the way [`GoreHit::entity`] is: every surface at or below it
+/// is reset. Its canvases are cleared in place — blood, peeled tissue, bruises, burns, holes in its
+/// cloth — and the next flush uploads them clean; its bleeding, bruising and soaking stop, and a
+/// foot's [`Tread`] is wiped; a slashed
+/// skin draws its intact mesh again and its wound bed goes; a subject broken without spawning its
+/// pieces can break again. Nothing is reallocated, so a pooled or respawned character costs the
+/// bytes overwritten rather than a fresh dressing: every canvas and image built again.
+///
+/// **What it leaves.** What has left the body: thrown pieces, spilled guts, the stains it bled on a
+/// floor or a wall — reset a floor or a wall by sending its own entity, which clears its canvas. A body
+/// the preset broke into pieces has been despawned and cannot be reset. Hits read on the same tick
+/// land after the reset.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct GoreReset {
+    /// The surface, or an ancestor of the surfaces, to reset.
+    pub entity: Entity,
+}
+
+impl GoreReset {
+    /// Reset `entity` and every dressed surface below it.
+    pub fn new(entity: Entity) -> Self {
+        Self { entity }
+    }
+}
+
+/// The state [`reset_gore`] clears on one surface.
+type Resettable<'a> = (
+    Option<&'a mut WetCanvas>,
+    Option<&'a mut FlayCanvas>,
+    Option<&'a mut DermisCanvas>,
+    Option<&'a mut ClothHoles>,
+    Option<&'a mut Soaking>,
+    Option<&'a Untorn>,
+);
+
+/// **Apply every [`GoreReset`]**, before the tick's hits.
+fn reset_gore(
+    mut commands: Commands,
+    mut resets: MessageReader<GoreReset>,
+    clock: Res<GoreClock>,
+    mut airborne: ResMut<Airborne>,
+    children: Query<&Children>,
+    beds: Query<(), With<LacerationBed>>,
+    mut surfaces: Query<Resettable>,
+) {
+    let tick = clock.0;
+    for reset in resets.read() {
+        let mut todo = vec![reset.entity];
+        while let Some(e) = todo.pop() {
+            if let Ok(below) = children.get(e) {
+                for child in below.iter() {
+                    // A wound's bed is the slash's, and goes with it.
+                    if beds.contains(child) {
+                        commands.entity(child).try_despawn();
+                    } else {
+                        todo.push(child);
+                    }
+                }
+            }
+            // Blood still in the air toward it is wiped with what it already holds.
+            airborne.stains.retain(|s| s.surface != e);
+            let Ok((wet, flay, dermis, holes, soaking, untorn)) = surfaces.get_mut(e) else { continue };
+            if let Some(mut wet) = wet {
+                wet.clear(tick);
+            }
+            if let Some(mut flay) = flay {
+                flay.clear(tick);
+            }
+            if let Some(mut dermis) = dermis {
+                dermis.clear();
+            }
+            if let Some(mut holes) = holes {
+                holes.clear();
+            }
+            if let Some(mut soaking) = soaking {
+                soaking.landings.clear();
+            }
+            let mut entity = commands.entity(e);
+            if let Some(untorn) = untorn {
+                entity.try_insert(Mesh3d(untorn.0.clone()));
+            }
+            entity.try_remove::<(Wounds, Bruising, Laceration, Untorn, Broken, ThrowNow, CutFaceBleed, Tread)>();
+        }
+    }
+}
+
 /// A runtime body whose pieces are made on the next tick — the meshes need `Assets<Mesh>`, which
 /// the hit loop does not hold.
 #[derive(Component)]
@@ -2569,8 +4044,149 @@ fn cap_material(
         .and_then(|a| a.material(region))
         .and_then(|h| standard.get(&h).cloned())
         .unwrap_or_else(|| StandardMaterial { base_color: Color::srgb(0.55, 0.12, 0.12), perceptual_roughness: 0.4, ..default() });
-    flesh.add(tables.material(base, FleshParams::for_layers(&layers, FleshMode::Cap, dials.mm_per_unit), None, None))
+    let params = FleshParams::for_layers(&layers, FleshMode::Cap, dials.mm_per_unit).with_cut_film(CUT_FACE_FILM_MM);
+    flesh.add(tables.material(base, params, None, None))
 }
+
+/// **How far past the contact a burn's reddening reaches**, as a multiple of the contact's radius:
+/// `1.7`. The zone of hyperaemia is the inflamed skin round a burn, not under the thing that burnt
+/// it, and it fades into the skin rather than stopping: drawn out to `1.4` it fell off over two
+/// texels of a 128 canvas and read as a thin red outline. This crate's own number.
+pub const BURN_FLARE: f32 = 1.7;
+
+/// **What a burn of `degree` shows at `t` contact radii from its centre**: the linear ratio the skin is
+/// multiplied by, and how much of it shows.
+///
+/// Jackson's three zones (Jackson 1953, `doi:10.1002/bjs.18004016413`): **coagulation** at the
+/// centre, where the tissue is dead — a charred eschar, near black; **stasis** round it, pale and
+/// blistered; and **hyperaemia** outermost, reddened, fading from the stasis ring out to
+/// [`BURN_FLARE`]. A burn has the zones up to the degree it reached and no deeper: a first-degree
+/// burn is all hyperaemia, a second a blister in a red ring, a third an eschar in a pale ring in a
+/// red one. Until 0.5.43 a burn of each degree was one colour fading to its edge, and a third-degree
+/// contact read as a grey smudge. The zones' widths and colours are this crate's own.
+pub fn burn_zone(degree: crate::bloodstain::burn::Degree, t: f32) -> ([f32; 3], f32) {
+    use crate::bloodstain::burn::Degree;
+    const ESCHAR: [f32; 3] = [0.10, 0.06, 0.04];
+    const STASIS: [f32; 3] = [1.0, 0.93, 0.84];
+    const HYPERAEMIA: [f32; 3] = [1.0, 0.45, 0.40];
+    let t = if t.is_finite() { t.max(0.0) } else { return ([1.0; 3], 0.0) };
+    // The edge of a zone, blended over a tenth of the radius either side of it.
+    let inside = |edge: f32| 1.0 - smooth01((t - edge + 0.1) / 0.2);
+    let (coagulation, stasis) = match degree {
+        Degree::None => return ([1.0; 3], 0.0),
+        Degree::First => (0.0, 0.0),
+        Degree::Second => (0.0, inside(0.7)),
+        Degree::Third => (inside(0.55), inside(0.85)),
+    };
+    let stasis = (stasis - coagulation).max(0.0);
+    // The flare fades from where the stasis ring of a third-degree burn ends, whatever the degree.
+    let hyperaemia = (1.0 - coagulation - stasis).max(0.0) * (1.0 - smooth01((t - 0.85) / (BURN_FLARE - 0.85)));
+    let mix = |c: usize| coagulation * ESCHAR[c] + stasis * STASIS[c] + (1.0 - coagulation - stasis) * HYPERAEMIA[c];
+    ([mix(0), mix(1), mix(2)], coagulation + 0.65 * stasis + 0.75 * hyperaemia)
+}
+
+/// The cubic smoothstep over `[0, 1]`, clamped.
+fn smooth01(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// **How far a burn's zones wander off round**, as a share of their radius either way: `0.15`. A
+/// contact burn's margin follows the skin's give and the object's edge, not a compass; drawn
+/// perfectly round its three zones read as a target. This crate's own number.
+pub const BURN_WOBBLE: f32 = 0.15;
+
+/// **How far a bruise's outline wanders off round**, as a share of its radius either way: `0.25`.
+/// The model is a radial reduction, so it hands back a disc; blood under the skin tracks along the
+/// tissue planes it meets, and drawn as the disc a bruise read as a flat brown dot. Wider than a
+/// burn's, whose margin is the shape of what touched the skin. This crate's own number.
+pub const BRUISE_WOBBLE: f32 = 0.25;
+
+/// **How patchy a bruise is**: its optical density varies by this share either way across it,
+/// `0.4`, as a pool that much thicker or thinner would. An ecchymosis is mottled where the blood
+/// pooled unevenly; the model's pool is uniform inside its diameter. This crate's own number.
+pub const BRUISE_MOTTLE: f32 = 0.4;
+
+/// The size of a bruise's mottle, mm: the larger of its two scales of noise. This crate's own.
+const BRUISE_MOTTLE_MM: f32 = 9.0;
+
+/// The shape of one injury's margin under intact skin: two lobed waves round it, with amplitudes
+/// and phases from the place it was made, so an injury is the same shape every run and two are not.
+#[derive(Clone, Copy, Debug)]
+struct Margin {
+    seed: u32,
+    three: Vec2,
+    five: Vec2,
+}
+
+impl Margin {
+    /// The margin an injury at `uv` has; `salt` keeps a bruise's from a burn's at the same place.
+    fn at(uv: Vec2, salt: u32) -> Self {
+        let seed = uv.x.to_bits() ^ uv.y.to_bits().rotate_left(16) ^ salt;
+        let h = |salt: u32| 2.0 * crate::bloodstain::hash_f32(seed ^ salt) - 1.0;
+        Self { seed, three: Vec2::new(h(0x3A11), h(0x3A12)), five: Vec2::new(h(0x5B21), h(0x5B22)) }
+    }
+
+    /// **The injury's radius in direction `dir`**, as a multiple of the round one: within `wobble`
+    /// of one. The waves are the third and fifth harmonics of the direction's angle, taken as powers
+    /// of `dir` read as a complex number, so no angle is ever computed.
+    fn scale(self, dir: Vec2, wobble: f32) -> f32 {
+        let mul = |a: Vec2, b: Vec2| Vec2::new(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+        let d2 = mul(dir, dir);
+        let d3 = mul(d2, dir);
+        let d5 = mul(d3, d2);
+        let wave = 0.6 * self.three.dot(d3) + 0.4 * self.five.dot(d5);
+        1.0 + wobble * (wave / core::f32::consts::SQRT_2).clamp(-1.0, 1.0)
+    }
+}
+
+/// Salts a bruise's [`Margin`] apart from a burn's at the same place.
+const BRUISE_SALT: u32 = 0xB205_E000;
+
+/// **A bruise's colour in each of the model's shells**, linear. The model is a step per shell, so
+/// these are every colour it can show at its age, read once a repaint rather than once a texel.
+fn bruise_shells(bruise: &crate::bloodstain::Bruise) -> [[f32; 3]; crate::bloodstain::bruise::SHELLS] {
+    use crate::bloodstain::bruise::DR_MM;
+    core::array::from_fn(|i| linear(bruise.srgb_through_at((i as f32 + 0.5) * DR_MM)))
+}
+
+/// **What a bruise shows `r_mm` from its centre in the unit direction `dir`**: the linear ratio the
+/// skin is multiplied by, and how much of it shows. `shells` is [`bruise_shells`].
+///
+/// The colour is the model's — the bruise seen through the whole skin, over the same skin with
+/// nothing in it (the outermost shell), so the caller's skin tone is what the chromophores modulate —
+/// read at a radius stretched by the bruise's [`Margin`] and darkened more or less by its mottle. Far
+/// out, where the model holds no chromophore, the ratio is one and nothing shows. Until 0.5.44 the
+/// ratio was read at the true radius with no mottle and shown six times as strongly as it changed,
+/// so a bruise was a disc of one colour with a hard rim.
+fn bruise_texel(shells: &[[f32; 3]; crate::bloodstain::bruise::SHELLS], margin: Margin, r_mm: f32, dir: Vec2) -> ([f32; 3], f32) {
+    use crate::bloodstain::bruise::DR_MM;
+    let r = r_mm / margin.scale(dir, BRUISE_WOBBLE);
+    // The shell `srgb_through_at` reads: the one the radius falls in, the outermost past the grid.
+    let shell = if r.is_finite() { (r / DR_MM) as usize } else { 0 };
+    let (Some(here), Some(blank)) = (shells.get(shell).or(shells.last()), shells.last()) else {
+        return ([1.0; 3], 0.0);
+    };
+    let at = dir * (r_mm / BRUISE_MOTTLE_MM);
+    let tile = 65_536.0;
+    let coarse = crate::cross_section::value_noise(at.x, at.y, tile, margin.seed ^ 0x40B7);
+    let fine = crate::cross_section::value_noise(at.x * 2.3, at.y * 2.3, tile, margin.seed ^ 0x9C2D);
+    let mottle = 1.0 + BRUISE_MOTTLE * (2.0 * (0.65 * coarse + 0.35 * fine) - 1.0);
+    // The mottle scales the optical density, as a pool that much thicker or thinner would: a power of
+    // the ratio, which never clamps, so on average the bruise is as dark as the model says.
+    let ratio = core::array::from_fn(|c| (here[c] / blank[c].max(1.0e-4)).clamp(0.0, 1.0).powf(mottle));
+    let change = ratio.iter().fold(0.0f32, |m, &v| m.max(1.0 - v));
+    // Shown wherever it changes the skin at all; how much it changes it is the ratio's to say.
+    (ratio, (change * 50.0).clamp(0.0, 1.0))
+}
+
+/// **The thickest film of blood exposed tissue wears**, mm, on a broken body's cut face and, since
+/// 0.5.42, on a crater's walls where a skin is peeled: `1.0`, the blood table's last column, where
+/// whole blood is opaque and the tissue under it no longer shows. A quarter of it lies over the fat at
+/// the rim. At `0.6` the faces read as candy red over the fat. Before 0.5.38 a cut face was drawn
+/// bare, and a fat band read as cheese; before 0.5.42 a crater was ringed by bare yellow fat. This
+/// crate's own number.
+pub const CUT_FACE_FILM_MM: f32 = 1.0;
 
 /// **Place a broken body's pieces in the world**, each with the velocity the preset launches it at.
 ///
@@ -2653,13 +4269,14 @@ impl Posing {
 }
 
 /// Spawn placed pieces: skin outside, a banded cap inside. The ones that stood stay [`Standing`];
-/// the rest are [`Flying`] at their velocity.
-fn spawn_pieces(commands: &mut Commands, pieces: &[GorePiece], skin: &Handle<StandardMaterial>, cap: &Handle<FleshMaterial>) {
+/// the rest are [`Flying`] at their velocity. Every cut face bleeds from `tick` ([`CutFaceBleed`]).
+fn spawn_pieces(commands: &mut Commands, meshes: &Assets<Mesh>, tick: u32, pieces: &[GorePiece], skin: &Handle<StandardMaterial>, cap: &Handle<FleshMaterial>) {
     for fate in [PieceFate::Stood, PieceFate::Thrown, PieceFate::Fell] {
         for piece in pieces.iter().filter(|p| p.fate == fate) {
-            let meshes = [(piece.outer.clone(), None), (piece.cap.clone(), Some(cap.clone()))];
-            for (mesh, cap) in meshes {
+            let parts = [(piece.outer.clone(), None), (piece.cap.clone(), Some(cap.clone()))];
+            for (mesh, cap) in parts {
                 let Some(mesh) = mesh else { continue };
+                let pours = cap.as_ref().and_then(|_| meshes.get(&mesh)).and_then(|m| CutFaceBleed::of(m, &piece.transform, tick));
                 let mut e = match cap {
                     Some(cap) => commands.spawn((Mesh3d(mesh), MeshMaterial3d(cap), piece.transform)),
                     None => commands.spawn((Mesh3d(mesh), MeshMaterial3d(skin.clone()), piece.transform)),
@@ -2668,6 +4285,9 @@ fn spawn_pieces(commands: &mut Commands, pieces: &[GorePiece], skin: &Handle<Sta
                     e.insert(Standing);
                 } else {
                     e.insert(Flying(piece.velocity));
+                }
+                if let Some(pours) = pours {
+                    e.insert(pours);
                 }
             }
         }
@@ -2678,6 +4298,7 @@ fn spawn_pieces(commands: &mut Commands, pieces: &[GorePiece], skin: &Handle<Sta
 /// [`GoreFractured`], and — when the preset owns the pieces — spawn them and despawn the body.
 fn throw_bodies(
     mut commands: Commands,
+    clock: Res<GoreClock>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut fractured: MessageWriter<GoreFractured>,
     mut bodies: Query<(Entity, &GlobalTransform, &mut ThrowNow)>,
@@ -2704,7 +4325,7 @@ fn throw_bodies(
             .collect();
         let pieces = place(leaves, xf, throw.at, throw.posing.as_ref().map(|p| (p, &*meshes)));
         if throw.spawn {
-            spawn_pieces(&mut commands, &pieces, &throw.skin, &throw.cap);
+            spawn_pieces(&mut commands, &meshes, clock.0, &pieces, &throw.skin, &throw.cap);
             commands.entity(entity).despawn();
         } else {
             commands.entity(entity).remove::<ThrowNow>();
@@ -2728,7 +4349,9 @@ fn bleed(
     let tick = clock.0;
     let drips = policy.as_deref().is_none_or(|p| p.draws_blood() && p.blood_decals);
     let edges = edge_settings(&dials, wet_settings.as_deref());
-    for (gore, mut wounds, xf, mesh3d, skin, mut wet) in &mut sites {
+    for (gore, mut wounds, xf, mesh3d, skin, mut wet, run) in &mut sites {
+        // Which way blood runs on this atlas now, for the lip a cut beads over.
+        let downhill = run.map_or(gore.gravity_uv, |r| r.0);
         // The pose a skinned body is drawn in now, read once for every wound it is bleeding and only
         // if one of them needs it.
         let mut pose: Option<Option<Pose>> = None;
@@ -2743,16 +4366,28 @@ fn bleed(
                 continue;
             };
             let r = (site.wound.area / core::f32::consts::PI).sqrt().max(0.002) * (0.6 + pulse.severity);
-            let shape = StainShape {
-                major: r * 1.6,
-                minor: r,
-                spines: 0,
-                satellites: 0,
-                direction: [0.0, 1.0],
-                seed: site.bleed.seed ^ tick,
-            };
             let texels = wet.size();
-            wet.paint_uv_with(site.uv, &shape_on(gore, &shape, texels), tick, &edges);
+            // **A wound wells where its blood spills**: over a cut's lower lip, or the downhill rim of
+            // a hole. The pulse is shared between `BLEED_WELLS` beads by area, each at its own fixed
+            // place and drawn out down the slope, narrow: a run goes as far as its blood over its
+            // width. Until 0.5.35 a hole pulsed one ellipse at its centre, and the blood ran from it as
+            // one column the wound's own width.
+            let bead = r / (BLEED_WELLS as f32).sqrt();
+            let run = if downhill == Vec2::ZERO { [0.0, 1.0] } else { downhill.normalize_or_zero().to_array() };
+            for k in 0..BLEED_WELLS {
+                let shape = StainShape {
+                    major: bead * 2.6,
+                    minor: bead * 0.6,
+                    spines: 0,
+                    satellites: 0,
+                    direction: run,
+                    seed: site.bleed.seed ^ tick ^ k.wrapping_mul(0x27D4_EB2F),
+                };
+                // Centred half a bead out past the lip or the rim, so it sits on the skin.
+                let (edge, out) = site.well(k, downhill, gore.density());
+                let at = site.uv + edge + out * (0.5 * bead * gore.density());
+                wet.paint_uv_with(at, &shape_on(gore, &shape, texels), tick, &edges);
+            }
             // What runs off the body onto the world is the world's share of the blood.
             if !drips {
                 continue;
@@ -2802,37 +4437,155 @@ fn bleed(
     }
 }
 
-/// **Age every bruise** by the dial's hours per tick and repaint its dermis when a model step lands.
+/// **Put down every [`GoreStep`]**: lift from the floor under the sole, then print what the sole
+/// carried, then carry what it lifted. Lifting first is what lets a sole walk its blood off: printed
+/// first, it would pick its own wet print back up and never fade.
+#[allow(clippy::too_many_arguments)]
+fn take_steps(
+    mut commands: Commands,
+    mut steps: MessageReader<GoreStep>,
+    clock: Res<GoreClock>,
+    dials: Res<GoreDials>,
+    wet_settings: Option<Res<WetSettings>>,
+    meshes: Res<Assets<Mesh>>,
+    treads: Query<&Tread>,
+    mut floors: Query<(Entity, &Gore, &Mesh3d, &GlobalTransform, &mut WetCanvas), With<FloorTag>>,
+    policy: Option<Res<GorePolicy>>,
+) {
+    let tick = clock.0;
+    let prints = policy.as_deref().is_none_or(|p| p.draws_blood() && p.blood_decals);
+    let edges = edge_settings(&dials, wet_settings.as_deref());
+    // Each foot's load as the tick's steps change it, in the order they were sent.
+    let mut carried: Vec<(Entity, f32)> = Vec::new();
+    for step in steps.read() {
+        if !prints || !step.at.is_finite() || !step.heading.is_finite() {
+            continue;
+        }
+        let held = carried
+            .iter()
+            .find(|(e, _)| *e == step.foot)
+            .map(|c| c.1)
+            .or_else(|| treads.get(step.foot).ok().map(|t| t.load))
+            .unwrap_or(0.0);
+        let toe = Vec3::new(step.heading.x, 0.0, step.heading.z).normalize_or_zero();
+        let from = step.at + Vec3::Y * STEP_REACH_M;
+        // The floor under the sole: the nearest a ray straight down meets within reach.
+        let mut under: Option<(Entity, Landing)> = None;
+        for (entity, _, mesh3d, xf, _) in &floors {
+            let Some(mesh) = meshes.get(&mesh3d.0) else { continue };
+            let Some(landing) = ray_hit(mesh, xf, from, Vec3::NEG_Y) else { continue };
+            let drop = xf.transform_point(landing.point).distance(from);
+            if drop <= 2.0 * STEP_REACH_M && under.as_ref().is_none_or(|(_, best)| drop < best.t) {
+                under = Some((entity, Landing { t: drop, ..landing }));
+            }
+        }
+        let mut load = held;
+        if let Some((entity, landing)) = under
+            && let Ok((_, gore, mesh3d, xf, mut wet)) = floors.get_mut(entity)
+            && let Some(mesh) = meshes.get(&mesh3d.0)
+        {
+            // The toe's way on the canvas: where a ray a little toward it lands, or the opposite of
+            // where one a little back does, at a floor's edge.
+            let ahead = |sign: f32| ray_hit(mesh, xf, from + toe * (0.05 * sign), Vec3::NEG_Y).map(|l| (l.uv - landing.uv) * sign);
+            let heading = ahead(1.0).or_else(|| ahead(-1.0)).map_or(Vec2::ZERO, |d| d.normalize_or_zero());
+            let print = Print {
+                length: step.sole.length_m * gore.density(),
+                width: step.sole.width_m * gore.density(),
+                heading: heading.to_array(),
+                seed: step.sole.tread,
+            };
+            let picked = wet.lift_uv(landing.uv, &print, TREAD_LIFT, tick, &edges);
+            wet.print_uv(landing.uv, &print, held, tick);
+            load = (held * (1.0 - TREAD_SHED) + picked).clamp(0.0, 1.0);
+        }
+        match carried.iter_mut().find(|(e, _)| *e == step.foot) {
+            Some(c) => c.1 = load,
+            None => carried.push((step.foot, load)),
+        }
+    }
+    for (foot, load) in carried {
+        if let Ok(mut entity) = commands.get_entity(foot) {
+            entity.try_insert(Tread { load });
+        }
+    }
+}
+
+/// **Pour every cut face of a broken body onto the floor beneath it**, a pulse at a time, until its
+/// perfusion runs out ([`CutFaceBleed`]). Each pulse is a stain [`CUT_FACE_POUR`] of the radius a
+/// wound of the face's area paints, cast straight down from above the face's centre as the piece is
+/// now, so a piece in the air leaves a trail and one at rest grows a pool that the floor's wetmap
+/// spreads. A tier that paints no blood pours none.
+#[allow(clippy::too_many_arguments)]
+fn pour_cut_faces(
+    mut commands: Commands,
+    clock: Res<GoreClock>,
+    dials: Res<GoreDials>,
+    wet_settings: Option<Res<WetSettings>>,
+    meshes: Res<Assets<Mesh>>,
+    faces: Query<(Entity, &CutFaceBleed, &Transform)>,
+    mut floors: Query<(&Gore, &Mesh3d, &GlobalTransform, &mut WetCanvas), With<FloorTag>>,
+    policy: Option<Res<GorePolicy>>,
+) {
+    let tick = clock.0;
+    let drips = policy.as_deref().is_none_or(|p| p.draws_blood() && p.blood_decals);
+    let edges = edge_settings(&dials, wet_settings.as_deref());
+    for (entity, face, xf) in &faces {
+        if crate::bloodstain::bleed::envelope(face.bleed.age(tick), &dials.blood) <= 0.0 {
+            commands.entity(entity).remove::<CutFaceBleed>();
+            continue;
+        }
+        if !drips {
+            continue;
+        }
+        let Some(pulse) = crate::bloodstain::bleed::pulse_wound(&face.bleed, &face.wound, tick, dials.hz, &dials.blood) else {
+            continue;
+        };
+        let reach = (face.wound.area / core::f32::consts::PI).sqrt().max(0.002);
+        let r = reach * (0.6 + pulse.severity) * CUT_FACE_POUR;
+        let shape = StainShape { major: r * 1.25, minor: r, spines: 0, satellites: 3, direction: [0.0, 1.0], seed: face.bleed.seed ^ tick };
+        // **Where the blood leaves the face**: off its side by as far as the face reaches, so a face
+        // turned sideways pours beside its piece and one turned up or down pours round its foot. From
+        // above, so a piece lying on the floor, its centre at the floor's height, still casts onto it.
+        // Pieces fly without turning, so the face's normal is still the one it broke with.
+        let at = xf.transform_point(face.centre_local);
+        let n = Vec3::from_array(face.wound.normal);
+        let out = Vec3::new(n.x, 0.0, n.z) * reach;
+        let from = Vec3::new(at.x + out.x, at.y.max(dials.floor_y) + 0.25, at.z + out.z);
+        for (floor_gore, floor_mesh, floor_xf, mut floor_wet) in &mut floors {
+            let Some(floor_mesh) = meshes.get(&floor_mesh.0) else { continue };
+            let texels = floor_wet.size();
+            let _ = floor_wet.paint_world_with(floor_mesh, floor_xf, from, Vec3::NEG_Y, &shape_on(floor_gore, &shape, texels), tick, &edges);
+        }
+    }
+}
+
+/// **Age every bruise** by the dial's hours per tick and repaint its dermis when a model step lands,
+/// oldest first, so where two overlap the younger is painted last.
 fn age_bruises(
     dials: Res<GoreDials>,
     mut bruised: Query<(&Gore, &mut Bruising, &mut DermisCanvas)>,
 ) {
     let per_tick = dials.bruise_hours_per_tick.max(0.0) / crate::bloodstain::bruise::STEP_H;
     for (gore, mut bruising, mut dermis) in &mut bruised {
-        bruising.carry += per_tick;
-        let steps = bruising.carry.floor() as u32;
-        if steps == 0 {
+        let mut stepped = false;
+        for site in &mut bruising.sites {
+            site.carry += per_tick;
+            let steps = site.carry.floor() as u32;
+            if steps > 0 {
+                site.carry -= steps as f32;
+                site.bruise.advance(steps);
+                stepped = true;
+            }
+        }
+        if !stepped {
             continue;
         }
-        bruising.carry -= steps as f32;
-        bruising.bruise.advance(steps);
         let mm_per_uv = 1000.0 / gore.density().max(1.0e-6);
         let radius_uv = crate::bloodstain::bruise::RADIUS_MM / mm_per_uv;
-        let uv = bruising.uv;
-        let bruise = &bruising.bruise;
-        // The ratio of the bruised skin to the same skin with nothing in it, in linear light, so the
-        // caller's skin tone is what the chromophores modulate. Far out, where the model holds no
-        // chromophore, the ratio is one and the alpha is zero.
-        let blank = linear(bruise.srgb_through_at(crate::bloodstain::bruise::RADIUS_MM));
-        dermis.paint_radial(uv, radius_uv, mm_per_uv, |r_mm| {
-            let here = linear(bruise.srgb_through_at(r_mm));
-            let ratio = [
-                (here[0] / blank[0].max(1.0e-4)).clamp(0.0, 1.0),
-                (here[1] / blank[1].max(1.0e-4)).clamp(0.0, 1.0),
-                (here[2] / blank[2].max(1.0e-4)).clamp(0.0, 1.0),
-            ];
-            let change = (1.0 - ratio[0]).max(1.0 - ratio[1]).max(1.0 - ratio[2]);
-            (ratio, (change * 6.0).clamp(0.0, 1.0))
+        let centres: Vec<Vec2> = bruising.sites.iter().map(|site| site.uv).collect();
+        let looks: Vec<_> = bruising.sites.iter().map(|site| (bruise_shells(&site.bruise), Margin::at(site.uv, BRUISE_SALT))).collect();
+        dermis.draw_bruises(&centres, radius_uv * (1.0 + BRUISE_WOBBLE), mm_per_uv, |i, r_mm, dir| {
+            looks.get(i).map_or(([1.0; 3], 0.0), |(shells, margin)| bruise_texel(shells, *margin, r_mm, dir))
         });
     }
 }
@@ -2975,6 +4728,12 @@ fn runoff(mesh: &Mesh, pose: &Pose, wounds: &[WoundSite]) -> Option<Vec2> {
 
 /// Run and dry every wetmap on the fixed tick. A cloth runs only past what its weave holds
 /// ([`GoreDials::cloth_holds`]).
+///
+/// **Every canvas at once.** A canvas's tick reads its own blood, its own mesh, pose and wounds, and
+/// the settings, and writes only itself, so the canvases are ticked across the compute pool and the
+/// bytes are the same in any order. Where Bevy's `multi_threaded` feature is off, as on the web, it is
+/// the loop it was. Before 0.5.46 it was a loop everywhere, and in a crowd it was the most expensive
+/// system on every tick, hit or not.
 fn tick_canvases(
     clock: Res<GoreClock>,
     dials: Res<GoreDials>,
@@ -2991,10 +4750,11 @@ fn tick_canvases(
         spread_rate: settings.spread_rate * 0.25,
         ..settings.clone()
     };
-    for (gore, mut wet, mesh3d, wounds, skin, run) in &mut canvases {
+    let (tick, meshes, rigging, settings) = (clock.0, meshes.as_deref(), &rigging, &*settings);
+    canvases.par_iter_mut().for_each(|(gore, mut wet, mesh3d, wounds, skin, run)| {
         let gravity = match run {
             Some(mut run) => {
-                if let (Some(skin), Some(wounds), Some(mesh)) = (skin, wounds, meshes.as_deref().and_then(|m| m.get(&mesh3d.0)))
+                if let (Some(skin), Some(wounds), Some(mesh)) = (skin, wounds, meshes.and_then(|m| m.get(&mesh3d.0)))
                     && !wounds.0.is_empty()
                     && let Some(pose) = rigging.pose(skin)
                     && let Some(downhill) = runoff(mesh, &pose, &wounds.0)
@@ -3005,8 +4765,8 @@ fn tick_canvases(
             }
             None => gore.gravity_uv,
         };
-        wet.tick(clock.0, gravity, if gore.kind == GoreKind::Cloth { &cloth } else { &settings });
-    }
+        wet.tick(tick, gravity, if gore.kind == GoreKind::Cloth { &cloth } else { settings });
+    });
 }
 
 /// Thrown pieces fall to the floor and stop. **A piece at rest on the floor is not touched**: it
@@ -3060,7 +4820,10 @@ mod tests {
         app.init_resource::<FleshTables>()
             .init_resource::<GoreDials>()
             .init_resource::<GoreClock>()
+            .init_resource::<Airborne>()
             .add_message::<GoreHit>()
+            .add_message::<GoreReset>()
+            .add_message::<GoreStep>()
             .add_message::<GoreFractured>()
             .add_message::<BoneExposed>()
             .add_message::<Wounded>()
@@ -3068,9 +4831,9 @@ mod tests {
             .init_resource::<WetSettings>()
             .init_resource::<FlaySettings>()
             .add_systems(FixedUpdate, scene_gore.before(dress))
-            .add_systems(FixedUpdate, (advance_clock, dress, take_hits, throw_bodies, bleed, age_bruises, soak_cloth, tick_canvases, flush_dermis, fly).chain());
+            .add_systems(FixedUpdate, (advance_clock, dress, reset_gore, take_hits, land_stains, throw_bodies, bleed, pour_cut_faces, take_steps, age_bruises, soak_cloth, tick_canvases, flush_dermis, fly).chain());
         let images = app.world_mut().resource_mut::<Assets<Image>>().reserve_handle();
-        app.world_mut().resource_mut::<FleshTables>().sss = images;
+        app.world_mut().resource_mut::<FleshTables>().luts = images;
         app
     }
 
@@ -3218,6 +4981,113 @@ mod tests {
         assert_eq!(normals.len(), 1);
     }
 
+    /// **A shot that goes through goes through everything of the body on its line.** A forearm box
+    /// held 4 cm in front of a chest box, both skins under one root, a cloth of two sheets between them
+    /// and a wall behind, one shot at the root:
+    /// - through, it goes in and out of the forearm and then in and out of the chest: four `Wounded` in
+    ///   order along the shot, each exit's normal the way the shot went, the forearm's exit on the
+    ///   forearm and not on the chest 4 cm beyond it, and the way into the chest as wide as an exit. Both
+    ///   sheets between the parts are holed, each part keeps two wounds, and the wall is wetted;
+    /// - stopped, it opens the forearm alone and holes and wets nothing behind it;
+    /// - at a tier that draws no blood, it announces the same four wounds, field for field, and opens,
+    ///   holes and wets nothing;
+    /// - the same two boxes as one mesh are gone through the same way;
+    /// - two boxes overlapping as one mesh are one body: in once, out once, nothing in the overlap;
+    /// - a box wound inside out is gone into and out of the right way round.
+    #[test]
+    fn a_shot_through_a_forearm_goes_on_into_the_chest() {
+        let boxed = |size: Vec3, at: Vec3| Cuboid::from_size(size).mesh().build().translated_by(at);
+        let merged = |mut a: Mesh, b: Mesh| {
+            assert!(a.merge(&b).is_ok(), "two meshes would not merge");
+            a
+        };
+        // The forearm spans z 0.14 to 0.22, the chest -0.1 to 0.1.
+        let forearm = || boxed(Vec3::new(0.12, 0.12, 0.08), Vec3::new(0.0, 0.0, 0.18));
+        let chest = || boxed(Vec3::new(0.6, 0.6, 0.2), Vec3::ZERO);
+        // Two sheets between them, one mesh, each sheet on its own half of the atlas.
+        let sheet = |z: f32, u0: f32| {
+            let mut m = Plane3d::new(Vec3::Z, Vec2::splat(0.3)).mesh().build().translated_by(Vec3::new(0.0, 0.0, z));
+            if let Some(VertexAttributeValues::Float32x2(uvs)) = m.attribute_mut(Mesh::ATTRIBUTE_UV_0) {
+                for uv in uvs.iter_mut() {
+                    uv[0] = u0 + uv[0] * 0.5;
+                }
+            }
+            m
+        };
+        // What one shot does: every `Wounded` it announced, as (where, which way, how wide); how many
+        // texels of each sheet are open; how much of the wall is wet; how many wounds each part keeps.
+        let run = |parts: Vec<Mesh>, through: bool, at_root: bool, tier: Option<crate::GoreTier>| {
+            let mut app = headless();
+            if let Some(tier) = tier {
+                app.insert_resource(GorePolicy::for_tier(tier));
+            }
+            let world = app.world_mut();
+            let root = world.spawn((Transform::IDENTITY, GlobalTransform::IDENTITY)).id();
+            let parts: Vec<Entity> = parts
+                .into_iter()
+                .map(|m| {
+                    let m = world.resource_mut::<Assets<Mesh>>().add(m);
+                    world.spawn((Mesh3d(m), Transform::IDENTITY, GlobalTransform::IDENTITY, Gore::skin(Region::Limb), ChildOf(root))).id()
+                })
+                .collect();
+            let cloth = world.resource_mut::<Assets<Mesh>>().add(merged(sheet(0.125, 0.0), sheet(0.11, 0.5)));
+            let cloth = world.spawn((Mesh3d(cloth), Transform::IDENTITY, GlobalTransform::IDENTITY, Gore::cloth().with_canvas(128))).id();
+            let panel = world.resource_mut::<Assets<Mesh>>().add(Plane3d::new(Vec3::Z, Vec2::splat(1.0)).mesh().build());
+            let at_wall = Transform::from_xyz(0.0, 0.0, -1.0);
+            let wall = world.spawn((Mesh3d(panel), at_wall, GlobalTransform::from(at_wall), Gore::wall())).id();
+            app.world_mut().run_schedule(FixedUpdate);
+            let target = if at_root { root } else { parts[0] };
+            let hit = GoreHit::impact(target, Vec3::new(0.02, 0.01, 2.0), Vec3::NEG_Z, 0.01, 5.0);
+            app.world_mut().write_message(if through { hit.through() } else { hit });
+            app.world_mut().run_schedule(FixedUpdate);
+            let w = app.world();
+            let mut cursor = w.resource::<Messages<Wounded>>().get_cursor();
+            let wounded: Vec<(Vec3, Vec3, f32)> = cursor.read(w.resource::<Messages<Wounded>>()).map(|m| (m.at, m.normal, m.area)).collect();
+            let open = |half: u32| {
+                let Some(holes) = w.get::<ClothHoles>(cloth) else { return 0 };
+                (0..64u32 * 64).filter(|k| holes.is_open_at(Vec2::new(((k % 64) as f32 + 0.5) / 64.0, ((k / 64) as f32 + 0.5) / 64.0)) && (k % 64 >= 32) == (half == 1)).count()
+            };
+            let wet = w.get::<WetCanvas>(wall).map(|c| c.wetted_area()).unwrap_or(0.0);
+            let kept: Vec<usize> = parts.iter().map(|e| w.get::<Wounds>(*e).map_or(0, |o| o.0.len())).collect();
+            (wounded, [open(0), open(1)], wet, kept)
+        };
+        let check = |wounded: &[(Vec3, Vec3, f32)], expected: &[f32], what: &str| {
+            assert_eq!(wounded.len(), expected.len(), "{what}: {} wounds announced, at {:?}", wounded.len(), wounded.iter().map(|w| w.0.z).collect::<Vec<_>>());
+            for (k, ((at, normal, _), z)) in wounded.iter().zip(expected).enumerate() {
+                assert!((at.z - z).abs() < 0.003, "{what}: wound {k} at z {} where the shot crosses at {z}", at.z);
+                let goes_in = k % 2 == 0;
+                assert!(if goes_in { normal.z > 0.9 } else { normal.z < -0.9 }, "{what}: wound {k}'s normal {normal:?} does not face the way the shot {}", if goes_in { "came" } else { "went" });
+            }
+        };
+        let (wounded, open, wet, kept) = run(vec![forearm(), chest()], true, true, None);
+        check(&wounded, &[0.22, 0.14, 0.1, -0.1], "two parts, through");
+        let stylised = run(vec![forearm(), chest()], true, true, Some(crate::GoreTier::Stylised));
+        assert_eq!(stylised.0, wounded, "a tier that draws no blood announced other wounds than the default tier");
+        assert_eq!((stylised.1, stylised.2, stylised.3), ([0, 0], 0.0, vec![0, 0]), "a tier that draws no blood holed, wetted or opened something");
+        let widen = EXIT_SCALE * EXIT_SCALE;
+        assert!((wounded[1].2 / wounded[0].2 - widen).abs() < 1.0e-3, "the forearm's exit is not an exit's width");
+        assert!((wounded[2].2 / wounded[0].2 - widen).abs() < 1.0e-3, "the way into the chest is not an exit's width");
+        assert!(open[0] > 0 && open[1] > 0, "the sheets between the forearm and the chest were not both holed: {open:?} texels open");
+        assert!(wet > 0.0, "the chest's exit threw nothing on the wall");
+        assert_eq!(kept, vec![2, 2], "the forearm and the chest keep {kept:?} wounds");
+        let (wounded, open, wet, kept) = run(vec![forearm(), chest()], false, true, None);
+        check(&wounded, &[0.22], "two parts, stopped");
+        assert_eq!((open, wet, kept), ([0, 0], 0.0, vec![1, 0]), "a shot the forearm stopped reached past it");
+        let (wounded, ..) = run(vec![merged(forearm(), chest())], true, true, None);
+        check(&wounded, &[0.22, 0.14, 0.1, -0.1], "one mesh, through");
+        let overlapping = merged(boxed(Vec3::new(0.12, 0.12, 0.08), Vec3::new(0.0, 0.0, 0.1)), chest());
+        let (wounded, ..) = run(vec![overlapping], true, false, None);
+        check(&wounded, &[0.14, -0.1], "overlapping shells, through");
+        let mut inside_out = chest();
+        if let Some(Indices::U32(ix)) = inside_out.indices_mut() {
+            for t in ix.as_chunks_mut::<3>().0 {
+                t.swap(1, 2);
+            }
+        }
+        let (wounded, ..) = run(vec![inside_out], true, false, None);
+        check(&wounded, &[0.1, -0.1], "inside out, through");
+    }
+
     /// **A blade cuts a slit in the cloth over the skin it opens, along the cut.** A sheet of cloth in
     /// front of a skin box, a slash across it along world `X`, which on this plane is the atlas's `u`.
     /// The cloth is open at the middle of the cut; the opening runs at least twice as far along `u` as
@@ -3254,6 +5124,136 @@ mod tests {
         // A 0.2 m blade on a 1 m sheet of 128 texels is 25.6 texels end to end; the lens closes before
         // its tips.
         assert!((14..=27).contains(&along), "the slit is {along} texels long for a 25.6-texel blade");
+    }
+
+    /// **A slash leaves its blood along the cut, not as a disc its own length across.** A slash along
+    /// world `X` across the front of a skin box, which on that face is the atlas's `u`. The blood it
+    /// leaves runs at least four times as far along `u` as down `v`; and the wound it announces is the
+    /// cut's, a tenth of a disc the blade's half-length in radius or less.
+    #[test]
+    fn a_slash_bleeds_along_its_cut_not_from_a_disc() {
+        let mut app = headless();
+        let body = {
+            let world = app.world_mut();
+            let mesh = world.resource_mut::<Assets<Mesh>>().add(Cuboid::new(0.6, 0.6, 0.2).mesh().build());
+            world.spawn((Mesh3d(mesh), Transform::IDENTITY, GlobalTransform::IDENTITY, Gore::skin(Region::Torso))).id()
+        };
+        app.world_mut().run_schedule(FixedUpdate);
+        let radius = 0.1;
+        app.world_mut().write_message(GoreHit::slash(body, Vec3::new(0.0, 0.0, 2.0), Vec3::NEG_Z, Vec3::X, radius, 5.0));
+        app.world_mut().run_schedule(FixedUpdate);
+        let Some(wet) = app.world().get::<WetCanvas>(body) else { panic!("the body was not dressed") };
+        let n = wet.size();
+        let (mut us, mut vs) = (Vec::new(), Vec::new());
+        for y in 0..n {
+            for x in 0..n {
+                if wet.amount_at(x, y) > 0 {
+                    us.push(x as i64);
+                    vs.push(y as i64);
+                }
+            }
+        }
+        let extent = |v: &[i64]| v.iter().max().zip(v.iter().min()).map_or(0, |(a, b)| a - b + 1);
+        let (along, down) = (extent(&us), extent(&vs));
+        assert!(along > 0, "the slash left no blood");
+        assert!(along >= 4 * down, "the slash's blood runs {along} texels along the cut and {down} down it");
+        let (wounded, _) = announced(&app);
+        let Some(cut) = wounded.last() else { panic!("the slash announced nothing") };
+        let disc = core::f32::consts::PI * radius * radius;
+        assert!(cut.area > 0.0 && cut.area <= disc / 10.0, "the slash announced {} m², against {disc} for a disc its half-length across", cut.area);
+    }
+
+    /// **A hole bleeds over its downhill rim in runs, not as one column its own width.** A shot at a
+    /// skin box, four seconds of pulses, and the canvas read across in rows from two and a half to
+    /// three and a half radii below the wound, past what the hit's own stain covers: some row there
+    /// holds two or more separate runs. One stream from the wound's centre is one run in every row.
+    #[test]
+    fn a_hole_bleeds_in_runs_from_its_lower_rim() {
+        let mut app = headless();
+        let body = {
+            let world = app.world_mut();
+            let mesh = world.resource_mut::<Assets<Mesh>>().add(Cuboid::new(0.6, 0.6, 0.2).mesh().build());
+            world.spawn((Mesh3d(mesh), Transform::IDENTITY, GlobalTransform::IDENTITY, Gore::skin(Region::Torso).with_canvas(256))).id()
+        };
+        app.world_mut().run_schedule(FixedUpdate);
+        let radius = 0.05;
+        app.world_mut().write_message(GoreHit::impact(body, Vec3::new(0.0, 0.0, 2.0), Vec3::NEG_Z, radius, 4.0));
+        for _ in 0..240 {
+            app.world_mut().run_schedule(FixedUpdate);
+        }
+        let world = app.world();
+        let (Some(wet), Some(gore), Some(wounds)) = (world.get::<WetCanvas>(body), world.get::<Gore>(body), world.get::<Wounds>(body)) else {
+            panic!("the body was not dressed, or the shot opened no wound")
+        };
+        let Some(site) = wounds.0.first() else { panic!("the shot opened no wound") };
+        let n = wet.size() as f32;
+        let r = radius * gore.density() * n;
+        let (cx, cy) = (site.uv.x * n, site.uv.y * n);
+        let mut most = 0;
+        for y in (cy + 2.5 * r) as u32..(cy + 3.5 * r) as u32 {
+            let (mut runs, mut inside) = (0, false);
+            for x in (cx - 2.0 * r).max(0.0) as u32..((cx + 2.0 * r) as u32).min(wet.size()) {
+                let here = wet.amount_at(x, y) > 0;
+                runs += usize::from(here && !inside);
+                inside = here;
+            }
+            most = most.max(runs);
+        }
+        assert!(most >= 2, "below the wound the blood is at most {most} run(s) wide in any row");
+    }
+
+    /// **A droplet stops at the first thing it reaches, unless there is a hole in it.** A shot at a
+    /// skin box throws its back spatter toward the muzzle, where a wall stands. With nothing between,
+    /// the wall is wetted. With a second wall in front of it, the first catches the spray and the wall
+    /// behind stays dry. With a cloth curtain in front instead, the shot holes the curtain on its way
+    /// in and the spray reaches the wall behind only through that hole: some, and less than with
+    /// nothing between. And a droplet a wall caught does not also land on the floor: with no wall at
+    /// all, the floor far out takes more.
+    #[test]
+    fn a_droplet_stops_at_the_first_surface_it_reaches_unless_it_finds_a_hole() {
+        // `between`: 0 nothing, 1 a wall, 2 a cloth curtain; `back`: whether the far wall stands.
+        let run = |between: u8, back: bool| {
+            let mut app = headless();
+            let world = app.world_mut();
+            let (body, panel, ground) = {
+                let mut meshes = world.resource_mut::<Assets<Mesh>>();
+                (
+                    meshes.add(Cuboid::new(0.6, 0.6, 0.2).mesh().build()),
+                    meshes.add(Plane3d::new(Vec3::Z, Vec2::splat(1.5)).mesh().build()),
+                    // Wide enough for a droplet at 40 m/s to come down on it.
+                    meshes.add(Plane3d::new(Vec3::Y, Vec2::splat(30.0)).mesh().build()),
+                )
+            };
+            let body = world.spawn((Mesh3d(body), Transform::IDENTITY, GlobalTransform::IDENTITY, Gore::skin(Region::Torso))).id();
+            let (near, far, low) = (Transform::from_xyz(0.0, 0.0, 0.5), Transform::from_xyz(0.0, 0.0, 1.2), Transform::from_xyz(0.0, -0.6, 0.0));
+            let back = back.then(|| world.spawn((Mesh3d(panel.clone()), far, GlobalTransform::from(far), Gore::wall())).id());
+            let floor = world.spawn((Mesh3d(ground), low, GlobalTransform::from(low), Gore::floor())).id();
+            match between {
+                1 => {
+                    world.spawn((Mesh3d(panel), near, GlobalTransform::from(near), Gore::wall()));
+                }
+                2 => {
+                    let close = Transform::from_xyz(0.0, 0.0, 0.2);
+                    world.spawn((Mesh3d(panel), close, GlobalTransform::from(close), Gore::cloth()));
+                }
+                _ => {}
+            }
+            app.world_mut().run_schedule(FixedUpdate);
+            app.world_mut().write_message(GoreHit::impact(body, Vec3::new(0.0, 0.05, 2.0), Vec3::NEG_Z, 0.04, 5.0));
+            app.world_mut().run_schedule(FixedUpdate);
+            let area = |e: Entity| app.world().get::<WetCanvas>(e).map(|c| c.wetted_area()).unwrap_or(0.0);
+            (back.map(area).unwrap_or(0.0), area(floor))
+        };
+        let (open_back, walled_floor) = run(0, true);
+        let (walled_back, _) = run(1, true);
+        let (curtained_back, _) = run(2, true);
+        let (_, bare_floor) = run(0, false);
+        assert!(open_back > 0.0, "with nothing between, the wall took no spray");
+        assert_eq!(walled_back, 0.0, "a wall behind a wall was spattered through it");
+        assert!(curtained_back > 0.0, "no droplet went through the hole the shot made in the curtain");
+        assert!(curtained_back < open_back, "the curtain caught nothing: {curtained_back} against {open_back}");
+        assert!(bare_floor > 0.0, "with no wall the spray never came down on the floor");
+        assert!(walled_floor < bare_floor, "droplets a wall caught landed on the floor as well: {walled_floor} against {bare_floor}");
     }
 
     /// **An atlas density nobody stated is measured from the mesh, at its world scale.** A 3 m
@@ -3480,11 +5480,38 @@ mod tests {
         app.world_mut().write_message(GoreHit::slash(body, Vec3::new(1.0, 0.7, 2.0), Vec3::NEG_Z, Vec3::Y, 0.1, 4.0));
         app.world_mut().run_schedule(FixedUpdate);
         let Some(cut) = app.world().get::<Laceration>(body) else { panic!("a slash laid no laceration") };
-        let [from, at, to] = [cut.path[0], cut.path[1], cut.path[2]];
+        let (Some(&from), Some(&at), Some(&to)) = (cut.path.first(), cut.path.get(cut.path.len() / 2), cut.path.last()) else {
+            panic!("the cut has no path")
+        };
         assert!(at.distance(Vec3::new(1.7, 0.0, 0.2)) < 0.03, "the cut's middle is at {at:?} in the bind pose");
         let along = (to - from).normalize_or_zero();
         assert!(along.dot(Vec3::X) > 0.99, "the cut runs {along:?}; up the bent forearm is along +X in the bind pose");
         assert!(((to - from).length() - 0.2).abs() < 0.02, "the cut is {} m long, the slash's 0.2", (to - from).length());
+    }
+
+    /// **A slash across a limb lies on its skin.** A blade drawn round a curved surface follows it, and
+    /// the wound bed is built along the path. Laid as a straight line through the hit in the plane of
+    /// the skin there, a 0.3 m slash across a sphere of radius 0.3 had its ends 35 mm off the sphere,
+    /// and its bed with them. Walked on the skin, every point of the path is on the sphere's facets —
+    /// a 24 × 12 UV sphere's sit up to about 5 mm inside it — and the path is as long as the blade.
+    #[test]
+    fn a_slash_across_a_limb_lies_on_its_skin() {
+        let mut app = headless();
+        let sphere = app.world_mut().resource_mut::<Assets<Mesh>>().add(Sphere::new(0.3).mesh().uv(24, 12));
+        let body = app.world_mut().spawn((Mesh3d(sphere), Transform::IDENTITY, GlobalTransform::IDENTITY, Gore::skin(Region::Limb))).id();
+        app.world_mut().run_schedule(FixedUpdate);
+        app.world_mut().write_message(GoreHit::slash(body, Vec3::new(0.0, 0.05, 2.0), Vec3::NEG_Z, Vec3::X, 0.15, 8.0));
+        app.world_mut().run_schedule(FixedUpdate);
+        let Some(cut) = app.world().get::<Laceration>(body) else { panic!("a slash laid no laceration") };
+        for p in &cut.path {
+            let r = p.length();
+            assert!((0.292..=0.3001).contains(&r), "a point of the cut is {} mm off the sphere: {p:?}", (r - 0.3) * 1000.0);
+        }
+        let length: f32 = cut.path.windows(2).map(|w| w[1].distance(w[0])).sum();
+        assert!((length - 0.3).abs() < 0.015, "the cut is {length} m long on the skin, the blade's 0.3");
+        let ends = cut.path.first().zip(cut.path.last()).map(|(a, b)| (a.x, b.x));
+        // 0.15 m of arc either way on a 0.3 m sphere is half a radian: `0.3 · sin 0.5` along x.
+        assert!(ends.is_some_and(|(a, b)| a < -0.13 && b > 0.13), "the cut does not run round the sphere along x: ends at {ends:?}");
     }
 
     /// **Blood runs downhill in the world on a skinned limb, whichever way its atlas is laid out.** The
@@ -3659,6 +5686,314 @@ mod tests {
         assert!(app.world().get_entity(root).is_ok(), "the preset despawned a body the game owns");
     }
 
+    /// **A broken body's pieces pour onto the floor beneath them.** A body over a floor is hit to bone
+    /// and breaks; from then on its pieces' cut faces are the only blood that can arrive on the floor,
+    /// since the part that was hit is gone with its wound. Over the next five seconds the floor's blood
+    /// grows by more than it held when the body broke; with no pours it can only shrink, as the floor
+    /// soaks it up.
+    #[test]
+    fn a_broken_body_pours_onto_the_floor_beneath_its_pieces() {
+        let mut app = headless();
+        let floor = {
+            let world = app.world_mut();
+            let mesh = world.resource_mut::<Assets<Mesh>>().add(Plane3d::new(Vec3::Y, Vec2::splat(2.0)).mesh().build());
+            world.spawn((Mesh3d(mesh), Transform::IDENTITY, GlobalTransform::IDENTITY, Gore::floor())).id()
+        };
+        let (_, parts, _) = breakable_body(&mut app);
+        app.world_mut().write_message(GoreHit::impact(parts[0], Vec3::new(0.0, 1.0, 2.0), Vec3::NEG_Z, 0.03, 60.0));
+        app.world_mut().run_schedule(FixedUpdate);
+        app.world_mut().run_schedule(FixedUpdate);
+        let pours = app.world_mut().query::<&CutFaceBleed>().iter(app.world()).count();
+        assert!(pours > 0, "the body broke into pieces with no cut face bleeding");
+        let mass = |app: &App| {
+            let Some(wet) = app.world().get::<WetCanvas>(floor) else { panic!("the floor was not dressed") };
+            (0..wet.size()).flat_map(|y| (0..wet.size()).map(move |x| (x, y))).map(|(x, y)| u64::from(wet.amount_at(x, y))).sum::<u64>()
+        };
+        let at_break = mass(&app);
+        for _ in 0..300 {
+            app.world_mut().run_schedule(FixedUpdate);
+        }
+        let later = mass(&app);
+        assert!(later > 2 * at_break.max(1), "the floor held {at_break} when the body broke and {later} five seconds on");
+    }
+
+    /// **A burn shows the zones its degree reached, deepest at the centre.** A third-degree burn is
+    /// an eschar at its centre, near black and wholly shown; a pale ring round it; a red ring past the
+    /// contact; and nothing at [`BURN_FLARE`]. A second-degree burn is pale at its centre in a red
+    /// ring, a first-degree one red all over, and a burn of no degree shows nothing.
+    #[test]
+    fn a_burn_shows_the_zones_its_degree_reached() {
+        use crate::bloodstain::burn::Degree;
+        let pale = |c: [f32; 3]| c.iter().all(|&v| v > 0.8);
+        let red = |c: [f32; 3]| c[0] > c[1] + 0.3 && c[0] > c[2] + 0.3;
+        let (c, a) = burn_zone(Degree::Third, 0.0);
+        assert!(c.iter().all(|&v| v < 0.2) && a > 0.99, "a third-degree centre is {c:?} at {a}, not an eschar");
+        let (c, a) = burn_zone(Degree::Third, 0.7);
+        assert!(pale(c) && a > 0.3, "a third-degree burn's stasis ring is {c:?} at {a}");
+        let (c, a) = burn_zone(Degree::Third, 1.1);
+        assert!(red(c) && a > 0.3, "a third-degree burn's hyperaemia is {c:?} at {a}");
+        assert_eq!(burn_zone(Degree::Third, BURN_FLARE).1, 0.0, "the reddening reaches past the flare");
+        let (c, _) = burn_zone(Degree::Second, 0.0);
+        assert!(pale(c), "a second-degree centre is {c:?}, not a blister");
+        assert!(red(burn_zone(Degree::Second, 1.1).0), "a second-degree burn has no red ring");
+        let (c, a) = burn_zone(Degree::First, 0.0);
+        assert!(red(c) && a > 0.5, "a first-degree burn is {c:?} at {a}, not reddened");
+        assert_eq!(burn_zone(Degree::None, 0.0).1, 0.0, "a burn of no degree shows");
+    }
+
+    /// **A projected wall's canvas runs down it.** A 3 m by 2.4 m wall facing +z is laid over square-on:
+    /// `u` along it from its left edge, `v` from its top edge down, both over its longer side, so blood
+    /// that runs down the canvas's `+v` (`Gore::wall`'s default) runs down the wall.
+    #[test]
+    fn a_projected_wall_runs_its_canvas_down_the_wall() {
+        let wall = Plane3d::new(Vec3::Z, Vec2::new(1.5, 1.2)).mesh().build();
+        let Ok((laid, [u, v])) = projected(&wall) else { panic!("a plain wall was refused") };
+        assert!(u.distance(Vec3::X * 3.0) < 1.0e-5 && v.distance(Vec3::NEG_Y * 3.0) < 1.0e-5, "laid along {u} and {v}");
+        let (Some(VertexAttributeValues::Float32x3(at)), Some(VertexAttributeValues::Float32x2(uv))) =
+            (laid.attribute(Mesh::ATTRIBUTE_POSITION), laid.attribute(Mesh::ATTRIBUTE_UV_0))
+        else {
+            panic!("the laid wall lost its positions or its UVs")
+        };
+        for (p, t) in at.iter().zip(uv) {
+            assert!((t[0] - (p[0] + 1.5) / 3.0).abs() < 1.0e-6 && (t[1] - (1.2 - p[1]) / 3.0).abs() < 1.0e-6, "{p:?} laid at {t:?}");
+        }
+    }
+
+    /// **A floor whose UVs tile takes blood where it falls, once it is projected.** A 3 m floor whose
+    /// `UV_0` repeats its texture four times, dressed with `Gore::projected`, and a bloody sole put
+    /// down at x = −1 and x = +1 on z = 0: each print lands in its own patch of the canvas, a sixth of
+    /// the way in from either side and halfway down, and nowhere else. Dressed by its own `UV_0`, the canvas would have clamped
+    /// both. The entity draws a copy of its mesh whose `UV_1` is the tiling it had, its own textures
+    /// read `UV_1`, and the density is the projection's: one canvas over three metres.
+    #[test]
+    fn a_projected_floor_whose_uvs_tile_takes_blood_where_it_falls() {
+        let mut app = headless();
+        let mut plane = Plane3d::new(Vec3::Y, Vec2::splat(1.5)).mesh().build();
+        if let Some(VertexAttributeValues::Float32x2(uvs)) = plane.attribute_mut(Mesh::ATTRIBUTE_UV_0) {
+            uvs.iter_mut().for_each(|uv| *uv = [uv[0] * 4.0, uv[1] * 4.0]);
+        }
+        let tiling = plane.attribute(Mesh::ATTRIBUTE_UV_0).cloned();
+        let own = app.world_mut().resource_mut::<Assets<Mesh>>().add(plane);
+        let material = app.world_mut().resource_mut::<Assets<StandardMaterial>>().add(StandardMaterial::default());
+        let floor = app
+            .world_mut()
+            .spawn((Mesh3d(own.clone()), MeshMaterial3d(material), Transform::IDENTITY, GlobalTransform::IDENTITY, Gore::floor().projected()))
+            .id();
+        let foot = app.world_mut().spawn(Tread { load: 1.0 }).id();
+        app.world_mut().run_schedule(FixedUpdate);
+        let laid = app.world().get::<Mesh3d>(floor).map(|m| m.0.clone());
+        assert!(laid.as_ref().is_some_and(|h| *h != own), "a projected floor drew its own mesh");
+        let second = laid.and_then(|h| app.world().resource::<Assets<Mesh>>().get(&h).and_then(|m| m.attribute(Mesh::ATTRIBUTE_UV_1).cloned()));
+        assert!(second.is_some() && second.map(|a| a.get_bytes().to_vec()) == tiling.map(|a| a.get_bytes().to_vec()), "the copy's UV_1 is not the tiling the floor had");
+        let channel = app
+            .world()
+            .get::<MeshMaterial3d<FleshMaterial>>(floor)
+            .and_then(|m| app.world().resource::<Assets<FleshMaterial>>().get(&m.0))
+            .map(|m| m.base.base_color_channel.clone());
+        assert_eq!(channel, Some(UvChannel::Uv1), "the floor's own texture no longer reads the tiling");
+        let density = app.world().get::<Gore>(floor).and_then(|g| g.uv_per_metre).unwrap_or(0.0);
+        assert!((density - 1.0 / 3.0).abs() < 1.0e-4, "the projected density is {density}, not a third of a UV per metre");
+        for x in [-1.0, 1.0] {
+            app.world_mut().write_message(GoreStep::new(foot, Vec3::new(x, 0.0, 0.0), Vec3::Z));
+            app.world_mut().run_schedule(FixedUpdate);
+        }
+        let Some(wet) = app.world().get::<WetCanvas>(floor) else { panic!("the floor has no wetmap") };
+        let n = wet.size();
+        let (mut left, mut right, mut elsewhere) = (0u32, 0u32, 0u32);
+        for ty in 0..n {
+            for tx in 0..n {
+                let (u, v, a) = ((tx as f32 + 0.5) / n as f32, (ty as f32 + 0.5) / n as f32, u32::from(wet.amount_at(tx, ty)));
+                let mid = (0.4..0.6).contains(&v);
+                match u {
+                    u if mid && (0.1..0.24).contains(&u) => left += a,
+                    u if mid && (0.76..0.9).contains(&u) => right += a,
+                    _ => elsewhere += a,
+                }
+            }
+        }
+        assert!(left > 0 && right > 0 && elsewhere == 0, "the prints landed at ({left}, {right}) and {elsewhere} elsewhere");
+    }
+
+    /// **A sole walks the blood it stood in off in fading prints.** A 3 m floor holds a wet pool at
+    /// x = −1; a boot steps into it, then five times along +x on clean floor, one step a tick apart.
+    /// Every print holds blood and each holds less than the one before; the step into the pool took
+    /// blood out of it. Out of a pool left to dry first, or at a tier that draws no blood, the same
+    /// walk prints nothing.
+    #[test]
+    fn a_sole_walks_its_blood_off_in_fading_prints() {
+        // The print masses at x = −0.5 to 1.3, 0.45 m apart, and the floor's whole mass after the step in.
+        let walk = |into_pool: bool, dried: bool, tier: Option<crate::GoreTier>| -> (Vec<u32>, u32) {
+            let mut app = headless();
+            if let Some(tier) = tier {
+                app.insert_resource(GorePolicy::for_tier(tier));
+            }
+            if dried {
+                app.insert_resource(WetSettings { dry_ticks: 20, ..WetSettings::default() });
+            }
+            let plane = app.world_mut().resource_mut::<Assets<Mesh>>().add(Plane3d::new(Vec3::Y, Vec2::splat(1.5)).mesh().build());
+            let floor = app
+                .world_mut()
+                .spawn((Mesh3d(plane.clone()), Transform::IDENTITY, GlobalTransform::IDENTITY, Gore::floor().with_uv_per_metre(1.0 / 3.0)))
+                .id();
+            let foot = app.world_mut().spawn_empty().id();
+            app.world_mut().run_schedule(FixedUpdate);
+            let pool = StainShape { major: 0.5 / 3.0, minor: 0.5 / 3.0, spines: 0, satellites: 0, direction: [1.0, 0.0], seed: 7 };
+            let world = app.world_mut();
+            let mesh = world.resource::<Assets<Mesh>>().get(&plane).cloned();
+            if let (Some(mesh), Some(mut wet)) = (mesh, world.get_mut::<WetCanvas>(floor)) {
+                let painted = wet.paint_world(&mesh, &GlobalTransform::IDENTITY, Vec3::new(-1.0, 1.0, 0.0), Vec3::NEG_Y, &pool, 1);
+                assert!(painted.is_some(), "the pool missed the floor");
+            }
+            for _ in 0..(if dried { 40 } else { 1 }) {
+                app.world_mut().run_schedule(FixedUpdate);
+            }
+            let step = |app: &mut App, x: f32| {
+                app.world_mut().write_message(GoreStep::new(foot, Vec3::new(x, 0.0, 0.0), Vec3::X));
+                app.world_mut().run_schedule(FixedUpdate);
+            };
+            // Both runs tick alike, so only the step can tell their pools apart.
+            if into_pool {
+                step(&mut app, -1.0);
+            } else {
+                app.world_mut().run_schedule(FixedUpdate);
+            }
+            let Some(wet) = app.world().get::<WetCanvas>(floor) else { panic!("the floor has no wetmap") };
+            let n = wet.size();
+            let total: u32 = (0..n).flat_map(|ty| (0..n).map(move |tx| (tx, ty))).map(|(tx, ty)| u32::from(wet.amount_at(tx, ty))).sum();
+            let mut prints = Vec::new();
+            for x in [-0.5, -0.05, 0.4, 0.85, 1.3] {
+                step(&mut app, x);
+                let Some(wet) = app.world().get::<WetCanvas>(floor) else { panic!("the floor has no wetmap") };
+                // World x and z of a texel on the 3 m plane centred on the origin.
+                let mut mass = 0;
+                for ty in 0..n {
+                    for tx in 0..n {
+                        let (wx, wz) = (((tx as f32 + 0.5) / n as f32 - 0.5) * 3.0, ((ty as f32 + 0.5) / n as f32 - 0.5) * 3.0);
+                        if (x - 0.12..x + 0.12).contains(&wx) && wz.abs() < 0.1 {
+                            mass += u32::from(wet.amount_at(tx, ty));
+                        }
+                    }
+                }
+                prints.push(mass);
+            }
+            (prints, total)
+        };
+        let (prints, stepped_in) = walk(true, false, None);
+        assert!(prints.iter().all(|&m| m > 0), "a print held no blood: {prints:?}");
+        assert!(prints.windows(2).all(|w| w[1] < w[0]), "the prints did not fade step by step: {prints:?}");
+        let (_, stood_off) = walk(false, false, None);
+        assert!(stepped_in < stood_off, "the step into the pool took no blood out of it ({stepped_in} against {stood_off})");
+        let (dry, _) = walk(true, true, None);
+        assert!(dry.iter().all(|&m| m == 0), "a sole that crossed dried blood printed: {dry:?}");
+        let (clean, _) = walk(true, false, Some(crate::GoreTier::Stylised));
+        assert!(clean.iter().all(|&m| m == 0), "a tier that draws no blood printed steps: {clean:?}");
+    }
+
+    /// **Every bruise on a limb ages, not only the newest.** Two blows on one limb at two spots,
+    /// thirty ticks apart, then thirty ticks more: both bruises are still ageing, the first older than
+    /// the second by the thirty ticks between them, to within one model step. Until 0.5.55 the second
+    /// blow replaced the first, which stopped where it was. Past [`MAX_BRUISES`] the oldest retires.
+    #[test]
+    fn every_bruise_on_a_limb_ages() {
+        let mut app = headless();
+        let sphere = app.world_mut().resource_mut::<Assets<Mesh>>().add(Sphere::new(0.3).mesh().uv(24, 12));
+        let body = app.world_mut().spawn((Mesh3d(sphere), Transform::IDENTITY, GlobalTransform::IDENTITY, Gore::skin(Region::Limb))).id();
+        app.world_mut().run_schedule(FixedUpdate);
+        let blow = |app: &mut App, x: f32, y: f32| app.world_mut().write_message(GoreHit::blunt(body, Vec3::new(x, y, 2.0), Vec3::NEG_Z, 0.04));
+        let ticks = |app: &mut App, n: u32| (0..n).for_each(|_| app.world_mut().run_schedule(FixedUpdate));
+        blow(&mut app, -0.1, 0.0);
+        ticks(&mut app, 30);
+        blow(&mut app, 0.1, 0.05);
+        ticks(&mut app, 30);
+        let hours: Vec<f32> = app.world().get::<Bruising>(body).map(|b| b.sites.iter().map(|s| s.bruise.hours()).collect()).unwrap_or_default();
+        assert_eq!(hours.len(), 2, "the limb holds {} bruises, not the two it took", hours.len());
+        let between = 30.0 * app.world().resource::<GoreDials>().bruise_hours_per_tick;
+        assert!(hours[1] > 0.0, "the second bruise did not age: {hours:?}");
+        assert!(
+            (hours[0] - hours[1] - between).abs() <= crate::bloodstain::bruise::STEP_H + 1.0e-4,
+            "the first bruise is {} h older than the second, not the {between} h between the blows: {hours:?}",
+            hours[0] - hours[1]
+        );
+        for i in 0..10 {
+            blow(&mut app, -0.15 + 0.03 * i as f32, -0.1);
+        }
+        ticks(&mut app, 1);
+        let held = app.world().get::<Bruising>(body).map(|b| b.sites.len()).unwrap_or(0);
+        assert_eq!(held, MAX_BRUISES, "twelve blows left {held} bruises ageing");
+    }
+
+    /// **Overlapping bruises darken the skin together, redraw after redraw, and a burn survives them.**
+    /// A solid bruise laying a ratio of 0.5 and a faint one laying 0.9 at a fifth's strength, drawn
+    /// over each other twenty times as twenty model steps would: where both reach, the skin is
+    /// multiplied by `0.5 · 0.98`, no lighter and no darker on the twentieth than the first. Painted
+    /// one over another, the faint one's margin was blended into the solid one's core every step and
+    /// bleached a seam. A burn painted between redraws is still there after the next.
+    #[test]
+    fn overlapping_bruises_darken_together_and_a_burn_survives_their_redraws() {
+        let mut images = Assets::<Image>::default();
+        let mut dermis = DermisCanvas::new(&mut images, 64);
+        let centres = [Vec2::new(0.4, 0.5), Vec2::new(0.6, 0.5)];
+        let field = |i: usize, _r_mm: f32, _dir: Vec2| if i == 0 { ([0.5; 3], 1.0) } else { ([0.9; 3], 0.2) };
+        // The ratio a texel multiplies the skin's red by.
+        let shown = |d: &DermisCanvas, x: usize, y: usize| {
+            let i = (y * 64 + x) * 4;
+            let a = d.px[i + 3] as f32 / 255.0;
+            1.0 - a + a * d.px[i] as f32 / 255.0
+        };
+        for _ in 0..20 {
+            dermis.draw_bruises(&centres, 0.15, 1.0, field);
+        }
+        let both = shown(&dermis, 32, 32);
+        assert!((both - 0.5 * 0.98).abs() < 0.01, "where both bruises reach the skin is multiplied by {both}, not 0.49");
+        assert!((shown(&dermis, 22, 32) - 0.5).abs() < 0.01, "where only the solid one reaches it is {}", shown(&dermis, 22, 32));
+        dermis.paint_radial(Vec2::new(0.2, 0.2), 0.05, 1.0, |_, _| ([0.3; 3], 1.0));
+        dermis.draw_bruises(&centres, 0.15, 1.0, field);
+        assert!((shown(&dermis, 12, 12) - 0.3).abs() < 0.01, "the burn was redrawn away: {}", shown(&dermis, 12, 12));
+    }
+
+    /// **A bruise is a blotch, not a disc, and its colour is still the model's.** A day-old 40 mm
+    /// bruise, read round its centre: at one radius inside its front some directions are a third
+    /// denser than others, and how far it reaches differs by a fifth between directions; past where
+    /// the wobble can carry its front nothing shows; and everywhere in its uniform core its density is
+    /// the model's within the mottle, some texels denser and some fainter.
+    #[test]
+    fn a_bruise_is_a_blotch_whose_colour_is_the_models() {
+        use crate::bloodstain::bruise::{Bruise, Chromophore, Params, STEP_H};
+        let mut bruise = Bruise::new(Params { pool_diameter_mm: 40.0, ..Params::default() });
+        bruise.advance((24.0 / STEP_H) as u32);
+        let shells = bruise_shells(&bruise);
+        let margin = Margin::at(Vec2::new(0.31, 0.62), BRUISE_SALT);
+        // Optical density, summed over the channels: what the mottle scales.
+        let dark = |r_mm: f32, dir: Vec2| {
+            let (c, a) = bruise_texel(&shells, margin, r_mm, dir);
+            a * c.iter().map(|&v| -v.max(1.0e-6).ln()).sum::<f32>()
+        };
+        let dirs: Vec<Vec2> = (0..48).map(|i| Vec2::from_angle(i as f32 * core::f32::consts::TAU / 48.0)).collect();
+
+        let ring: Vec<f32> = dirs.iter().map(|&d| dark(8.0, d)).collect();
+        let (lo, hi) = ring.iter().fold((f32::MAX, 0.0f32), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        assert!(lo > 0.0 && hi > lo * 1.33, "at 8 mm the bruise runs {lo} to {hi}: a flat disc, not a blotch");
+
+        let reach: Vec<f32> = dirs.iter().map(|&d| (0..200).map(|k| k as f32 * 0.5).filter(|&r| dark(r, d) > 0.02).fold(0.0, f32::max)).collect();
+        let (near, far) = reach.iter().fold((f32::MAX, 0.0f32), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        assert!(far > near * 1.2, "the bruise reaches {near} to {far} mm: a round outline");
+
+        let front = bruise.front_mm(Chromophore::Bilirubin, 0.05).max(bruise.front_mm(Chromophore::Hemoglobin, 0.05));
+        let beyond = front * (1.0 + BRUISE_WOBBLE) + 6.0;
+        assert!(dirs.iter().all(|&d| dark(beyond, d) < 0.02), "the bruise shows at {beyond} mm, past its front at {front}");
+
+        let model = {
+            let (here, blank) = (shells[(8.0 / crate::bloodstain::bruise::DR_MM) as usize], shells[shells.len() - 1]);
+            (0..3).map(|c| -(here[c] / blank[c]).ln()).sum::<f32>()
+        };
+        let core: Vec<f32> = (1..=24).flat_map(|k| dirs.iter().map(move |&d| (k as f32 * 0.5, d))).map(|(r, d)| dark(r, d) / model).collect();
+        let (lo, hi) = core.iter().fold((f32::MAX, 0.0f32), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        assert!(
+            lo >= 1.0 - BRUISE_MOTTLE - 1.0e-3 && hi <= 1.0 + BRUISE_MOTTLE + 1.0e-3 && lo < 0.95 && hi > 1.05,
+            "inside 12 mm the bruise runs {lo} to {hi} of the model's density {model}"
+        );
+    }
+
     /// A blow bruises without bleeding, and the bruise warms the dermis under the blow within the
     /// first hours; a contact burn hot enough for a third-degree eschar blackens the dermis without
     /// peeling anything, and neither opens a wound.
@@ -3673,6 +6008,7 @@ mod tests {
             .init_resource::<FleshTables>()
             .insert_resource(GoreDials { bruise_hours_per_tick: 1.0, ..default() })
             .init_resource::<GoreClock>()
+            .init_resource::<Airborne>()
             .add_message::<GoreHit>()
             .add_message::<GoreFractured>()
             .add_message::<BoneExposed>()
@@ -3680,9 +6016,9 @@ mod tests {
             .init_resource::<FractureCache>()
             .init_resource::<WetSettings>()
             .init_resource::<FlaySettings>()
-            .add_systems(FixedUpdate, (advance_clock, dress, take_hits, throw_bodies, bleed, age_bruises, soak_cloth, tick_canvases, flush_dermis, fly).chain());
+            .add_systems(FixedUpdate, (advance_clock, dress, take_hits, land_stains, throw_bodies, bleed, pour_cut_faces, age_bruises, soak_cloth, tick_canvases, flush_dermis, fly).chain());
         let images = app.world_mut().resource_mut::<Assets<Image>>().reserve_handle();
-        app.world_mut().resource_mut::<FleshTables>().sss = images;
+        app.world_mut().resource_mut::<FleshTables>().luts = images;
         let mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(Cuboid::new(0.4, 0.4, 0.2).mesh().build());
         let material = app.world_mut().resource_mut::<Assets<StandardMaterial>>().add(StandardMaterial::default());
         let spawn = |app: &mut App| {
@@ -3705,7 +6041,7 @@ mod tests {
             app.world_mut().run_schedule(FixedUpdate);
         }
         assert!(app.world().get::<Wounds>(bruised).is_none() && app.world().get::<Wounds>(burnt).is_none(), "neither bleeds");
-        let hours = app.world().get::<Bruising>(bruised).map(|b| b.bruise.hours()).unwrap_or(0.0);
+        let hours = app.world().get::<Bruising>(bruised).and_then(|b| b.sites.first()).map(|b| b.bruise.hours()).unwrap_or(0.0);
         assert!(hours >= 6.0, "the bruise aged {hours} h");
         let dermis = app.world().get::<DermisCanvas>(bruised).map(|d| d.px.clone()).unwrap_or_default();
         let (mut warmth, mut n) = (0.0f32, 0u32);
@@ -3739,6 +6075,7 @@ mod tests {
             .init_resource::<FleshTables>()
             .init_resource::<GoreDials>()
             .init_resource::<GoreClock>()
+            .init_resource::<Airborne>()
             .add_message::<GoreHit>()
             .add_message::<GoreFractured>()
             .add_message::<BoneExposed>()
@@ -3746,9 +6083,9 @@ mod tests {
             .init_resource::<FractureCache>()
             .init_resource::<WetSettings>()
             .init_resource::<FlaySettings>()
-            .add_systems(FixedUpdate, (advance_clock, dress, take_hits, throw_bodies, bleed, age_bruises, soak_cloth, tick_canvases, flush_dermis, fly).chain());
+            .add_systems(FixedUpdate, (advance_clock, dress, take_hits, land_stains, throw_bodies, bleed, pour_cut_faces, age_bruises, soak_cloth, tick_canvases, flush_dermis, fly).chain());
         let images = app.world_mut().resource_mut::<Assets<Image>>().reserve_handle();
-        app.world_mut().resource_mut::<FleshTables>().sss = images;
+        app.world_mut().resource_mut::<FleshTables>().luts = images;
         let sphere = app.world_mut().resource_mut::<Assets<Mesh>>().add(Sphere::new(0.3).mesh().uv(16, 8));
         let plane = app.world_mut().resource_mut::<Assets<Mesh>>().add(Plane3d::new(Vec3::Y, Vec2::splat(1.5)).mesh().build());
         let material = app.world_mut().resource_mut::<Assets<StandardMaterial>>().add(StandardMaterial::default());
@@ -3801,6 +6138,229 @@ mod tests {
             turned_away += usize::from(!reached);
         }
         assert!(caught > 100 && turned_away > 1000, "{caught} rays hit and {turned_away} were culled: the test saw too little of one");
+    }
+
+    /// **Casting nearest box first lands every droplet where casting at everything would.** Eight
+    /// overlapping surfaces — spheres and boxes, scaled, turned and moved, one with no box, two that
+    /// let a droplet through half their atlas as a cloth's hole would — and four thousand
+    /// deterministic rays: `nearest_landing` and a cast at every surface in list order agree on the
+    /// surface and the landing for every ray. Some rays land behind a nearer surface's box, so the
+    /// early stop is exercised, and some pass through the hole to what lies behind. Every other
+    /// surface is cast at through its index, and the reference walks every triangle.
+    #[test]
+    fn nearest_box_first_lands_where_casting_at_everything_would() {
+        let shapes = [
+            Sphere::new(0.4).mesh().uv(16, 8),
+            Cuboid::new(0.6, 0.3, 0.5).mesh().build(),
+            Sphere::new(0.25).mesh().uv(12, 6),
+            Cuboid::new(1.2, 0.1, 0.8).mesh().build(),
+        ];
+        let xfs: Vec<GlobalTransform> = (0..8u32)
+            .map(|k| {
+                let r = |s: u32| crate::hash_f32(k.wrapping_mul(31).wrapping_add(s.wrapping_mul(977)));
+                GlobalTransform::from(
+                    Transform::from_xyz(r(1) * 1.6 - 0.8, r(2) * 1.6 - 0.8, r(3) * 1.6 - 0.8)
+                        .with_rotation(Quat::from_euler(EulerRot::XYZ, r(4) * 3.0, r(5) * 3.0, r(6) * 3.0))
+                        .with_scale(Vec3::new(0.6 + r(7), 0.6 + r(8), 0.6 + r(9))),
+                )
+            })
+            .collect();
+        let indexed: Vec<crate::bvh::Bvh> = shapes.iter().filter_map(|m| castable(m).map(|(p, t)| crate::bvh::Bvh::build(p, t))).collect();
+        let drawn: Vec<Option<Castable<usize>>> =
+            xfs.iter().enumerate().map(|(k, xf)| Some((k, if k == 5 { None } else { Bounds::of(&shapes[k % shapes.len()], xf) }))).collect();
+        let (shape_of, xf_of, index_of) = (&shapes, &xfs, &indexed);
+        let cast = |from: Vec3, dir: Vec3| {
+            move |k: usize| ray_cast(&shape_of[k % shape_of.len()], index_of.get(k % shape_of.len()).filter(|_| k % 2 == 0).map(|b| b.fitted()), &xf_of[k], from, dir)
+        };
+        let hole = |k: &usize, l: &Landing| *k % 4 == 3 && l.uv.x < 0.5;
+        let mut order = Vec::new();
+        let (mut behind, mut through) = (0, 0);
+        for i in 0..4000u32 {
+            let r = |k: u32| crate::hash_f32(i.wrapping_mul(7919).wrapping_add(k.wrapping_mul(104_729)));
+            let from = Vec3::new(r(1), r(2), r(3)) * 6.0 - Vec3::splat(3.0);
+            let aimed = Vec3::new(r(7), r(8), r(9)) * 1.6 - Vec3::splat(0.8);
+            let dir = if i % 3 == 0 { Vec3::new(r(4), r(5), r(6)) * 2.0 - Vec3::ONE } else { aimed - from };
+
+            let mut every: Option<(usize, Landing)> = None;
+            let mut hits = 0;
+            for (k, entry) in drawn.iter().enumerate() {
+                let Some((tag, _)) = entry else { continue };
+                let Some(l) = ray_hit(&shapes[k % shapes.len()], &xfs[k], from, dir) else { continue };
+                hits += 1;
+                if hole(tag, &l) {
+                    through += 1;
+                    continue;
+                }
+                if every.as_ref().is_none_or(|(_, near)| l.t < near.t) {
+                    every = Some((k, l));
+                }
+            }
+            behind += usize::from(hits > 1);
+            let first = nearest_landing(&drawn, from, dir, &mut order, cast(from, dir), hole);
+            assert_eq!(
+                first.map(|(k, l)| (k, l.t.to_bits(), l.uv.to_array().map(f32::to_bits))),
+                every.map(|(k, l)| (k, l.t.to_bits(), l.uv.to_array().map(f32::to_bits))),
+                "ray {i} from {from:?} along {dir:?}"
+            );
+        }
+        assert!(behind > 500 && through > 50, "{behind} rays crossed two surfaces and {through} went through the hole: too few to test");
+    }
+
+    /// **A skinned mesh's joints box its pose without posing it.** Three hundred vertices on four
+    /// joints, their weights adding to one, to three per cent more or less, or to nothing, under forty
+    /// random poses — turned, moved and stretched unevenly: every vertex `posed_mesh` places lies in
+    /// the box its joints carry. A negative weight gives no box, and the pose itself is boxed instead.
+    #[test]
+    fn a_skinned_mesh_is_boxed_by_its_joints_without_being_posed() {
+        let r = |k: u32| crate::hash_f32(k.wrapping_mul(0x2545_F491) ^ 0x9E37_79B9);
+        let n = 300u32;
+        let rig = |negative: bool| {
+            let positions: Vec<[f32; 3]> = (0..n).map(|k| [r(3 * k) * 2.0 - 1.0, r(3 * k + 1) * 2.0 - 1.0, r(3 * k + 2) * 2.0 - 1.0]).collect();
+            // Most vertices on one joint each, so a joint's box is tight round its own and a vertex
+            // scaled off it by its weights' slack leaves it; every fifth blended over all four.
+            let joints: Vec<[u16; 4]> = (0..n).map(|k| if k % 5 == 4 { [0, 1, 2, 3] } else { [(k % 4) as u16, 0, 0, 0] }).collect();
+            let weights: Vec<[f32; 4]> = (0..n)
+                .map(|k| {
+                    let w: [f32; 4] = if k % 5 == 4 { core::array::from_fn(|s| r(5000 + 4 * k + s as u32)) } else { [1.0, 0.0, 0.0, 0.0] };
+                    let sum: f32 = w.iter().sum();
+                    match k % 10 {
+                        0 => [0.0; 4],
+                        1 => w.map(|x| x / sum * 1.03),
+                        2 => w.map(|x| x / sum * 0.97),
+                        3 if negative => [0.6, 0.6, -0.2, 0.0],
+                        _ => w.map(|x| x / sum),
+                    }
+                })
+                .collect();
+            let mut mesh = Mesh::new(bevy::mesh::PrimitiveTopology::TriangleList, bevy::asset::RenderAssetUsages::default());
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.5f32, 0.5]; n as usize]);
+            mesh.insert_attribute(Mesh::ATTRIBUTE_JOINT_INDEX, VertexAttributeValues::Uint16x4(joints));
+            mesh.insert_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT, weights);
+            mesh.insert_indices(Indices::U32((0..n).collect()));
+            mesh
+        };
+        let mesh = rig(false);
+        let Some(boxes) = JointBoxes::of(&mesh) else { panic!("an ordinary rig was refused a box") };
+        let mut checked = 0;
+        for p in 0..40u32 {
+            let q = |k: u32| r(90_000 + 64 * p + k);
+            let pose = Pose::from_matrices(
+                (0..4u32)
+                    .map(|j| {
+                        let scale = Vec3::new(0.5 + 1.5 * q(10 * j), 0.5 + 1.5 * q(10 * j + 1), 0.5 + 1.5 * q(10 * j + 2));
+                        let turn = Quat::from_euler(EulerRot::XYZ, q(10 * j + 3) * 6.0, q(10 * j + 4) * 6.0, q(10 * j + 5) * 6.0);
+                        // Away from the origin, on every axis, so a vertex with no weight — posed to the
+                        // origin — is outside every joint's box.
+                        let at = Vec3::new(q(10 * j + 6), q(10 * j + 7), q(10 * j + 8)) * 20.0 + Vec3::splat(4.0);
+                        Mat4::from_scale_rotation_translation(scale, turn, at)
+                    })
+                    .collect(),
+            );
+            let Some(b) = boxes.bounds(&pose) else { panic!("pose {p} gave no box") };
+            let Some(posed) = skin::posed_mesh(&mesh, &pose) else { panic!("pose {p} could not be posed") };
+            let Some(VertexAttributeValues::Float32x3(at)) = posed.attribute(Mesh::ATTRIBUTE_POSITION) else { panic!("posed without positions") };
+            for (v, w) in at.iter().enumerate() {
+                let w = Vec3::from(*w);
+                assert!(w.cmpge(b.min).all() && w.cmple(b.max).all(), "pose {p}: vertex {v} at {w} is outside {:?}..{:?}", b.min, b.max);
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 40 * n);
+        assert!(JointBoxes::of(&rig(true)).is_none(), "a rig with a negative weight was boxed by its joints");
+    }
+
+    /// **An indexed cast lands where walking every triangle does, to the bit.** Spheres, an axis-aligned
+    /// box, a torus, and a soup of random triangles with duplicates — two triangles on one place, so a
+    /// crossing ties and the index buffer's order must decide — indexed and not, placed and turned,
+    /// and thousands of rays at each: random, aimed at a vertex where triangles meet, along an axis,
+    /// and from inside. `ray_cast` through the index and `ray_hit` walking every triangle return the
+    /// same landing, every field bit for bit, or both none. Then every vertex is moved — twisted and
+    /// jittered, as a pose moves a skin's — and the tree is refitted to it rather than built again: the
+    /// same again, at the moved mesh.
+    #[test]
+    fn an_indexed_cast_lands_where_walking_every_triangle_does() {
+        let r = |k: u32| crate::hash_f32(k.wrapping_mul(0x9E37_79B9).wrapping_add(0x85EB_CA6B));
+        let soup = |indexed: bool| {
+            let mut positions: Vec<[f32; 3]> = (0..300u32).map(|k| [r(3 * k) - 0.5, r(3 * k + 1) - 0.5, r(3 * k + 2) - 0.5]).collect();
+            let mut uvs: Vec<[f32; 2]> = (0..300u32).map(|k| [r(1000 + k), r(2000 + k)]).collect();
+            let mut indices: Vec<u32> = (0..300u32).map(|k| (r(5000 + k) * 299.0) as u32).collect();
+            // Every tenth triangle again, later in the buffer: the same crossing at the same distance.
+            let again: Vec<u32> = indices.chunks(3).step_by(10).flatten().copied().collect();
+            indices.extend(again);
+            let mut mesh = Mesh::new(bevy::mesh::PrimitiveTopology::TriangleList, bevy::asset::RenderAssetUsages::default());
+            if !indexed {
+                positions = indices.iter().map(|&i| positions[i as usize]).collect();
+                uvs = indices.iter().map(|&i| uvs[i as usize]).collect();
+            }
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+            if indexed {
+                mesh.insert_indices(Indices::U32(indices));
+            }
+            mesh
+        };
+        let meshes = [Sphere::new(0.4).mesh().uv(32, 16), Cuboid::new(0.6, 0.3, 0.5).mesh().build(), Torus::new(0.2, 0.4).mesh().build(), soup(true), soup(false)];
+        let (mut landed, mut tied) = (0, 0);
+        for (m, mesh) in meshes.iter().enumerate() {
+            let Some((positions, tris)) = castable(mesh) else { panic!("mesh {m} cannot be cast at") };
+            let index = crate::bvh::Bvh::build(positions, tris);
+            let corners: Vec<Vec3> = positions.iter().map(|p| Vec3::from(*p)).collect();
+            for (x, xf) in [GlobalTransform::IDENTITY, GlobalTransform::from(Transform::from_xyz(0.3, -0.2, 0.1).with_rotation(Quat::from_rotation_y(0.7)).with_scale(Vec3::splat(1.7)))].iter().enumerate() {
+                for i in 0..2500u32 {
+                    let q = |k: u32| crate::hash_f32(i.wrapping_mul(7919).wrapping_add(k.wrapping_mul(104_729)).wrapping_add((m as u32) << 20).wrapping_add((x as u32) << 28));
+                    let from = Vec3::new(q(1), q(2), q(3)) * 3.0 - Vec3::splat(1.5);
+                    let at = |p: Vec3| xf.transform_point(p);
+                    let dir = match i % 5 {
+                        // At a vertex, where several triangles meet.
+                        0 | 1 => at(corners[(q(4) * (corners.len() - 1) as f32) as usize]) - from,
+                        // Along an axis.
+                        2 => [Vec3::X, Vec3::NEG_Y, Vec3::Z][(i / 5 % 3) as usize],
+                        // From inside, anywhere.
+                        3 => Vec3::new(q(5), q(6), q(7)) * 2.0 - Vec3::ONE,
+                        _ => at(Vec3::new(q(8), q(9), q(10)) * 0.8 - Vec3::splat(0.4)) - from,
+                    };
+                    let from = if i % 5 == 3 { at(Vec3::new(q(11), q(12), q(13)) * 0.4 - Vec3::splat(0.2)) } else { from };
+                    let bits = |l: Landing| (l.t.to_bits(), l.uv.to_array().map(f32::to_bits), l.tri, l.bary.to_array().map(f32::to_bits), l.point.to_array().map(f32::to_bits), l.normal.to_array().map(f32::to_bits));
+                    let walked = ray_hit(mesh, xf, from, dir).map(bits);
+                    let indexed = ray_cast(mesh, Some(index.fitted()), xf, from, dir).map(bits);
+                    assert_eq!(indexed, walked, "mesh {m}, transform {x}, ray {i} from {from:?} along {dir:?}");
+                    landed += usize::from(walked.is_some());
+                    tied += usize::from(walked.is_some() && m >= 3 && i % 5 < 2);
+                }
+            }
+        }
+        assert!(landed > 5000 && tied > 50, "{landed} rays landed and {tied} were aimed at the soup's vertices: too few to test");
+
+        let mut refit_landed = 0;
+        for (m, mesh) in meshes.iter().enumerate() {
+            let Some((positions, tris)) = castable(mesh) else { panic!("mesh {m} cannot be cast at") };
+            let tree = crate::bvh::Bvh::build(positions, tris);
+            let moved_at: Vec<[f32; 3]> = positions
+                .iter()
+                .enumerate()
+                .map(|(v, p)| {
+                    let p = Vec3::from(*p);
+                    let twist = Quat::from_rotation_y(p.y * 1.3);
+                    (twist * p * 1.2 + (Vec3::new(r(70_000 + 3 * v as u32), r(70_001 + 3 * v as u32), r(70_002 + 3 * v as u32)) - Vec3::splat(0.5)) * 0.05).to_array()
+                })
+                .collect();
+            let mut moved = mesh.clone();
+            moved.insert_attribute(Mesh::ATTRIBUTE_POSITION, moved_at.clone());
+            let refit = tree.refit(&moved_at);
+            let corners: Vec<Vec3> = moved_at.iter().map(|p| Vec3::from(*p)).collect();
+            for i in 0..2000u32 {
+                let q = |k: u32| crate::hash_f32(i.wrapping_mul(6007).wrapping_add(k.wrapping_mul(92_821)).wrapping_add((m as u32) << 21));
+                let from = Vec3::new(q(1), q(2), q(3)) * 3.0 - Vec3::splat(1.5);
+                let dir = if i % 2 == 0 { corners[(q(4) * (corners.len() - 1) as f32) as usize] - from } else { Vec3::new(q(5), q(6), q(7)) * 0.8 - Vec3::splat(0.4) - from };
+                let bits = |l: Landing| (l.t.to_bits(), l.uv.to_array().map(f32::to_bits), l.tri, l.point.to_array().map(f32::to_bits));
+                let walked = ray_hit(&moved, &GlobalTransform::IDENTITY, from, dir).map(bits);
+                let refitted = ray_cast(&moved, Some(tree.with(&refit)), &GlobalTransform::IDENTITY, from, dir).map(bits);
+                assert_eq!(refitted, walked, "moved mesh {m}, ray {i} from {from:?} along {dir:?}");
+                refit_landed += usize::from(walked.is_some());
+            }
+        }
+        assert!(refit_landed > 3000, "{refit_landed} rays landed on the moved meshes: too few to test");
     }
 
     /// **A measurement, not a test**: milliseconds one `FixedUpdate` costs when it takes one hit, and
@@ -3856,6 +6416,69 @@ mod tests {
         let wounded = app.world().resource::<Messages<Wounded>>();
         let bone = app.world().resource::<Messages<BoneExposed>>();
         (wounded.get_cursor().read(wounded).copied().collect(), bone.get_cursor().read(bone).count())
+    }
+
+    /// **A reset body is as it was dressed, and heals for good.** A limb takes a shot to the bone, a
+    /// blow, a burn and a slash, and bleeds for half a second; one [`GoreReset`] later its three
+    /// canvases are byte for byte a freshly dressed limb's, nothing is bleeding, bruising or open, and
+    /// it draws its own shared mesh again where the slash had it drawing a torn copy, and the slash's
+    /// bed is gone. A second of ticks after that it is still clean, and a second shot to the bone
+    /// announces the bone again, which a handoff left spent would swallow.
+    #[test]
+    fn a_reset_body_is_as_it_was_dressed() {
+        let limb = |app: &mut App| {
+            let sphere = app.world_mut().resource_mut::<Assets<Mesh>>().add(Sphere::new(0.3).mesh().uv(24, 12));
+            let body = app.world_mut().spawn((Mesh3d(sphere.clone()), Transform::IDENTITY, GlobalTransform::IDENTITY, Gore::skin(Region::Limb))).id();
+            app.world_mut().run_schedule(FixedUpdate);
+            (body, sphere)
+        };
+        let state = |app: &App, body: Entity| {
+            let w = app.world();
+            (
+                w.get::<WetCanvas>(body).map(|c| c.digest()),
+                w.get::<FlayCanvas>(body).map(|c| c.digest()),
+                w.get::<DermisCanvas>(body).map(|c| c.px.clone()),
+            )
+        };
+        let mut fresh = headless();
+        let (twin, _) = limb(&mut fresh);
+        let clean = state(&fresh, twin);
+
+        let mut app = headless();
+        let (body, sphere) = limb(&mut app);
+        let to_bone = |app: &mut App| app.world_mut().write_message(GoreHit::impact(body, Vec3::new(0.0, 0.05, 2.0), Vec3::NEG_Z, 0.03, 60.0));
+        to_bone(&mut app);
+        app.world_mut().write_message(GoreHit::blunt(body, Vec3::new(0.0, -0.12, 2.0), Vec3::NEG_Z, 0.04));
+        app.world_mut().write_message(GoreHit::burn(body, Vec3::new(0.12, 0.0, 2.0), Vec3::NEG_Z, 0.03, 150.0, 1.0));
+        app.world_mut().write_message(GoreHit::slash(body, Vec3::new(-0.1, 0.1, 2.0), Vec3::NEG_Z, Vec3::X, 0.05, 8.0));
+        for _ in 0..30 {
+            app.world_mut().run_schedule(FixedUpdate);
+        }
+        let w = app.world();
+        assert!(w.get::<Wounds>(body).is_some() && w.get::<Bruising>(body).is_some() && w.get::<Laceration>(body).is_some(), "the hits did not all land");
+        assert_ne!(state(&app, body), clean, "the hits changed nothing");
+        assert_ne!(w.get::<Mesh3d>(body).map(|m| m.0.id()), Some(sphere.id()), "the slash did not tear a copy");
+        // `headless` runs no `LacerationPlugin`, which is what lays a slash's bed: lay one by hand.
+        app.world_mut().spawn((LacerationBed, ChildOf(body)));
+        let beds = |app: &mut App| app.world_mut().query_filtered::<(), With<LacerationBed>>().iter(app.world()).count();
+        let bones = announced(&app).1;
+        assert_eq!(bones, 1, "the shot did not reach the bone");
+
+        app.world_mut().write_message(GoreReset::new(body));
+        app.world_mut().run_schedule(FixedUpdate);
+        let w = app.world();
+        assert_eq!(state(&app, body), clean, "a reset limb's canvases are not a fresh one's");
+        assert!(w.get::<Wounds>(body).is_none() && w.get::<Bruising>(body).is_none() && w.get::<Laceration>(body).is_none(), "a wound outlived the reset");
+        assert_eq!(w.get::<Mesh3d>(body).map(|m| m.0.id()), Some(sphere.id()), "the limb still draws the torn copy");
+        assert_eq!(beds(&mut app), 0, "the slash's bed outlived the reset");
+        for _ in 0..60 {
+            app.world_mut().run_schedule(FixedUpdate);
+        }
+        assert_eq!(state(&app, body), clean, "something kept bleeding after the reset");
+
+        to_bone(&mut app);
+        app.world_mut().run_schedule(FixedUpdate);
+        assert_eq!(announced(&app).1, bones + 1, "the bone was not announced again after the reset");
     }
 
     /// **A tier that draws no blood still announces the hit, and paints nothing.** Reduction is

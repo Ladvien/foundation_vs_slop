@@ -14,33 +14,36 @@
 //! | `4` | a hot iron on the right forearm |
 //! | `5` | a blow to the left shin |
 //! | `6` | a shot through the chest: an exit wound on the back, and its forward spatter on the wall behind |
-//! | `C` | reset, with a shirt on or off: a shot to the chest holes it and the wound shows through |
-//! | `R` | reset |
+//! | `C` | rebuild, with a shirt on or off: a shot to the chest holes it and the wound shows through |
+//! | `R` | heal the body and wipe what it bled on, in place (`GoreReset`); a body that broke is rebuilt |
 //!
 //! The wounds are the preset's and ride the limb they are on: the arm that took the shot keeps waving
 //! with its wound on it, blood runs along it and drips from where the wound is now.
 
 use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
 use bevy::prelude::*;
-use bevy_carnage::preset::{GoreHit, GorePlugin, GoreSystems};
+use bevy_carnage::preset::{Flying, GoreHit, GorePlugin, GoreReset, GoreSystems, Gut, Standing};
 
 mod common;
 use common::mannequin::{self, Bone, Mannequin};
 use common::preset_scene::{self, Backdrop, Sheet, Slab, Sun};
 
 fn main() {
-    App::new()
-        .add_plugins(common::autopilot::plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window { title: "bevy_carnage — skinned".into(), ..default() }),
-            ..default()
-        })))
-        .add_plugins(common::autopilot::Autopilot)
-        .add_plugins(GorePlugin)
-        .insert_resource(Time::<Fixed>::from_hz(60.0))
-        .add_systems(Startup, setup)
-        .add_systems(Update, (mannequin::animate, keys))
-        .configure_sets(FixedUpdate, GoreSystems)
-        .run();
+    let mut app = App::new();
+    app.add_plugins(common::autopilot::plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window { title: "bevy_carnage — skinned".into(), ..default() }),
+        ..default()
+    })))
+    .add_plugins(common::autopilot::Autopilot)
+    .add_plugins(GorePlugin)
+    .insert_resource(Time::<Fixed>::from_hz(60.0))
+    .add_systems(Startup, setup)
+    .add_systems(Update, (mannequin::animate, keys))
+    .configure_sets(FixedUpdate, GoreSystems);
+    // Blood in the air, from every wound the preset announces.
+    #[cfg(feature = "vfx")]
+    app.add_plugins(bevy_carnage::CarnageVfxPlugin);
+    app.run();
 }
 
 fn setup(
@@ -53,8 +56,7 @@ fn setup(
     commands.spawn((
         Camera3d::default(),
         mannequin::view(),
-        AmbientLight { brightness: preset_scene::AMBIENT, ..default() },
-        preset_scene::EXPOSURE,
+        preset_scene::camera_light(&mut images),
     ));
     let root = mannequin::spawn(&mut commands, &mut meshes, &mut materials, &mut images, &mut bindposes, false);
     commands.entity(root).insert(mannequin::breakable());
@@ -68,8 +70,12 @@ fn setup(
     ));
 }
 
-/// Everything a reset despawns: the character, the sheet, the slab, the wall and the lights.
+/// Everything a rebuild despawns: the character, the sheet, the slab, the wall and the lights.
 type Scene = Or<(With<Mannequin>, With<Sheet>, With<Slab>, With<Backdrop>, With<Sun>)>;
+/// Every surface a reset heals or wipes: the character and what it bleeds on.
+type Surfaces = Or<(With<Mannequin>, With<Sheet>, With<Slab>, With<Backdrop>)>;
+/// What a body throws, and a reset clears away.
+type Thrown = Or<(With<Flying>, With<Gut>, With<Standing>)>;
 
 #[allow(clippy::too_many_arguments)]
 fn keys(
@@ -82,6 +88,9 @@ fn keys(
     mut images: ResMut<Assets<Image>>,
     mut bindposes: ResMut<Assets<SkinnedMeshInverseBindposes>>,
     scene: Query<Entity, Scene>,
+    surfaces: Query<Entity, Surfaces>,
+    thrown: Query<Entity, Thrown>,
+    whole: Query<(), With<Mannequin>>,
     mut shirt: Local<bool>,
 ) {
     let hit = if input.just_pressed(KeyCode::Digit1) {
@@ -106,7 +115,22 @@ fn keys(
     if clothes {
         *shirt = !*shirt;
     }
-    if clothes || input.just_pressed(KeyCode::KeyR) {
+    let reset = input.just_pressed(KeyCode::KeyR);
+    if reset || clothes {
+        for entity in &thrown {
+            commands.entity(entity).despawn();
+        }
+    }
+    // **R heals the body in place** while it is whole: a `GoreReset` for it and for every surface it
+    // bled on. A body that broke has been despawned, and a shirt changes what is dressed, so those
+    // build the scene again.
+    if reset && !clothes && !whole.is_empty() {
+        for entity in &surfaces {
+            commands.write_message(GoreReset::new(entity));
+        }
+        return;
+    }
+    if clothes || reset {
         for entity in &scene {
             commands.entity(entity).despawn();
         }

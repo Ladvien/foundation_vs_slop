@@ -51,11 +51,16 @@ fn main() {
         if let Some(tier) = tier {
             // Before the plugin, which `init_resource`s the shipped one and so leaves this alone.
             app.insert_resource(GorePolicy::for_tier(tier));
-            if tier == GoreTier::Stylised {
-                // The game's half of a tier that draws no blood: a spark where it would have been.
+            // The game's half of a tier that draws no blood: a spark where it would have been. With
+            // `vfx` the crate throws that spark itself, as the substitute palette's burst.
+            if tier == GoreTier::Stylised && cfg!(not(feature = "vfx")) {
                 app.add_systems(Update, preset_scene::sparks);
             }
         }
+        // **Blood in the air**: the burst `CarnageVfxPlugin` throws from every wound the preset
+        // announces, in the substitute palette at a tier that draws no blood. The digest cannot see it.
+        #[cfg(feature = "vfx")]
+        app.add_plugins(bevy_carnage::CarnageVfxPlugin);
         app.add_plugins(GorePlugin)
             .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(1.0 / 60.0)))
             .insert_resource(Time::<Fixed>::from_hz(60.0))
@@ -67,7 +72,8 @@ fn main() {
         let world = rec.world();
         let mut cam = world.query_filtered::<Entity, With<Camera3d>>();
         if let Some(entity) = cam.iter(world).next() {
-            world.entity_mut(entity).insert((AmbientLight { brightness: preset_scene::AMBIENT, ..default() }, preset_scene::EXPOSURE));
+            let light = preset_scene::camera_light(&mut world.resource_mut::<Assets<Image>>());
+            world.entity_mut(entity).insert(light);
         }
     }
 

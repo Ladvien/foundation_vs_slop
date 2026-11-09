@@ -27,7 +27,7 @@ State per texel is `amount: u8` (normalised coverage) and `age: u16` (ticks sinc
 
 `tick` runs four passes, in exactly this order:
 
-1. **Drip.** A wet texel holding more than `drip_rate` sheds the **excess** one texel along `gravity_uv` and keeps the rest, so a run leaves a trail instead of translating wholesale like a sprite. The step is quantised to the dominant axis: a fractional step would need interpolation, which is a second movement model. What leaves a texel arrives in exactly one other, or is lost at the border — nothing else, because the step is a translation and at most one texel can step into another. It is **conserved to the byte wherever the destination is also wet**: a wet destination sheds down to the threshold, so its residue is at most `threshold` and the parcel is at most `255 − threshold`, which sums to exactly 255 and needs no clamp. The one lossy case is blood running onto a dry crust that is *already saturated*, and there the loss is the model rather than a rounding error — `amount` is normalised coverage, so a texel at 255 is fully covered and more blood on it is not representable because it would not be visible.
+1. **Drip.** A wet texel holding more than `drip_rate` sheds the **excess** one texel along `gravity_uv` and keeps the rest, so a run leaves a trail instead of translating wholesale like a sprite. The parcel falls one texel down gravity's dominant axis, and on a share of the lines it falls through it steps one across as well: the share is gravity's own lean, `|minor| / |major|`, and the lines are the ones Bresenham would step on, so a lean of a half steps across on every other line at a steady rhythm. Before 0.5.40 the step was the dominant axis alone, so every run on a canvas was a straight, axis-parallel streak whatever the atlas's angle to the ground. **Every texel of a line steps alike**, so each line moves as a translation, and what leaves a texel arrives in exactly one other, or is lost at the border — nothing else, because at most one texel can step into another. It is **conserved to the byte wherever the destination is also wet**: a wet destination sheds down to the threshold, so its residue is at most `threshold` and the parcel is at most `255 − threshold`, which sums to exactly 255 and needs no clamp. The one lossy case is blood running onto a dry crust that is *already saturated*, and there the loss is the model rather than a rounding error — `amount` is normalised coverage, so a texel at 255 is fully covered and more blood on it is not representable because it would not be visible. Gravity along a texture axis is the drip as it was before, to the byte.
 2. **Spread.** `spread_rate` diffuses into the 4-neighbourhood, written as an **antisymmetric flux** on each edge's coverage difference, `round(spread_rate/4 · (aᵢ − aⱼ))`. `f32::round` is odd, so the flux one way is exactly minus the flux the other: conserved to the byte again.
 3. **Time.** `age` increments and the substrate takes its cut. Age stops at `dry_ticks`, which makes a fully dried canvas a **fixed point** — nothing moves, no byte changes, and no upload is requested.
 4. **Shade.** `bloodstain::dry::appearance` writes the sRGB and roughness bytes: oxyhaemoglobin → methaemoglobin → hemichrome for colour, and `wet_roughness` → `dry_roughness` for gloss.
@@ -36,7 +36,7 @@ Both moving passes read a snapshot taken at their own top and write disjoint slo
 
 **Dry paint does not move.** Wetness gates every change to `amount` in passes 1–3, which is what makes a run stop where it stopped rather than creeping forever, and what stops a dried crust from soaking away.
 
-**A tick costs what the blood covers, not what the canvas covers.** A canvas keeps the smallest rectangle holding every texel with blood in it. Since one tick moves blood at most two texels (drip one, then spread one more), the passes run over that rectangle grown by two, and every other texel is zero and would stay zero. A canvas whose blood has all set, or that has none, is a fixed point, so `tick` returns at once until a paint or a change of settings wakes it, and `is_still` reports it. Both are exact: the canvas's buffer, images and digest are what four passes over every texel produce, and `the_live_rectangle_changes_nothing_but_the_cost` checks that tick for tick. Measured on 40 canvases of 128² on an x86_64 Linux host: idle, 17.7 ms a tick became effectively nothing; each shot once, 18.0 ms became 0.47 ms.
+**A tick costs what the blood covers, not what the canvas covers.** A canvas keeps, for each 32-texel tile, the smallest rectangle holding the blood in that tile (0.5.58). Since one tick moves blood at most two texels (drip one, then spread one more), the passes run over the union of those rectangles grown by two, as disjoint runs along the rows, and every other texel is zero and would stay zero; their snapshot is taken over that grown by one more, which is everything a pass reads. A canvas whose blood has all set, or that has none, is a fixed point, so `tick` returns at once until a paint or a change of settings wakes it, and `is_still` reports it. Both are exact: the canvas's buffer, images and digest are what four passes over every texel produce, and `the_live_tiles_change_nothing_but_the_cost` checks that tick for tick. Measured on 40 canvases of 128² on an x86_64 Linux host: idle, 17.7 ms a tick became effectively nothing; each shot once, 18.0 ms became 0.47 ms. **Until 0.5.58 the rectangle was one, round all the blood**, and both moving passes copied the whole canvas into their snapshot every tick: a 1024 canvas with a pool in each of two opposite corners ticked every texel between them. Measured on `big` in release, 100 ticks each, old and new interleaved twice: one blob 0.34 ms a tick became 0.23, two corners 25.5 became 0.46, and a trail of twelve small stains across the canvas 1.59 became 0.29.
 
 `lib.rs` is `#![doc = include_str!("../README.md")]`, so this is a doctest and the compiler checks it:
 
@@ -91,9 +91,12 @@ fn on_hit(
 | Component | `WetCanvas` | One actor's canvas. Holds the buffer and the two image handles. |
 | Resource | `WetSettings` | Nine dials: `drip_rate`, `spread_rate`, `dry_ticks`, `absorbency`, `max_canvas_updates_per_tick`, `humidity`, `film_depth_mm`, `so2`, `edge_samples`. |
 | Constant | `UV_SPAN_M` | How much world one UV unit is taken to be — see below. |
+| Constant | `MAX_DETAIL`, `DETAIL_EDGE` | The finest `new_detailed` draws (4), and where it draws a stain's edge (4 % of full coverage). |
+| Type | `Print` | A sole's outline on a canvas, for `lift_uv` and `print_uv`: length, width, heading, tread seed. |
+| Constant | `PRINT_CORE` | The share of full coverage a sole's print holds where it inks (0.6). |
 | Re-export | `StainShape`, `bevy_carnage::bloodstain` | The silhouette `paint_*` takes, and the blood model it comes from. |
 
-`WetCanvas`: `new`, `albedo`, `roughness`, `paint_uv`, `paint_uv_with`, `paint_world`, `paint_world_with`, `tick`, `flush`, `digest`, `wetted_area`, plus the read-only `size`, `amount_at`, `age_at`, `is_dirty`, `dirty_since`, `is_still`.
+`WetCanvas`: `new`, `new_detailed`, `albedo`, `roughness`, `paint_uv`, `paint_uv_with`, `paint_world`, `paint_world_with`, `wick_uv`, `lift_uv`, `print_uv`, `tick`, `flush`, `clear`, `digest`, `wetted_area`, plus the read-only `size`, `detail`, `amount_at`, `age_at`, `is_dirty`, `dirty_since`, `is_still`, `heap_bytes`, `image_bytes`. `clear` (0.5.48) wipes every drop of blood off in place, for a respawned or pooled surface: the digest is a fresh canvas's again and the images re-upload on the next flush.
 
 ## The metallic-roughness image carries data, not just gloss
 
@@ -113,6 +116,36 @@ So `R · film_depth_mm / 255` is the millimetres of blood on a texel and `A` is 
 `bloodstain::stain::rasterise` answers *how covered is this texel* once per texel, at the texel's own centre, so at the shipped 128-texel canvas a stain's rim is a staircase. `WetSettings::edge_samples = n` rasterises the mask at `n` times the resolution and box-filters each `n × n` block down, so a texel the silhouette only clips receives the share of it that is actually inside.
 
 It ships at **`1`** and that is not a fallback: the box filter over one tap is the identity — divisor one, rounding term zero — so the default writes the bytes the crate has always written and **every frozen digest is untouched by the dial existing**. `4` is what the examples use; the scratch mask costs `(major · size · n)²` bytes, so past 4 it buys nothing a player can see for four times the rasterisation. Reach it through `paint_uv_with` / `paint_world_with`, which take the settings the way `tick` does — `paint_uv` and `paint_world` are the same stamp at one sample.
+
+## Smooth edges on a plain `StandardMaterial`: `new_detailed`
+
+A canvas's images are its texels, and a sampler magnifies them bilinearly, so close up a stain's rim is the texels' staircase drawn soft. `WetCanvas::new_detailed(images, size, detail, base_srgb, base_roughness)` keeps the canvas — the same buffer, the same passes and the same `digest` as `new` at `size` — and draws its two images `detail` times finer, up to `MAX_DETAIL` (4). On `flush`, every 32-texel tile whose texels changed is redrawn: the coverage is read as a cubic B-spline (Sigg & Hadwiger, *GPU Gems 2*, ch. 20), the same reading the `flesh` feature's shader makes of the map, and the blood is drawn where that crosses `DETAIL_EDGE`, 4 % of full coverage, anti-aliased over one pixel. Inside the edge the colour is the film's own, weighted by how much blood each texel holds, so a pool keeps its colour up to its rim instead of fading into the surface. R and A of the metallic-roughness image are the smoothed coverage and wetness under that edge. `wetmap.gif` is drawn this way, at detail 4.
+
+What it cannot do, and what it costs:
+
+- **A long, shallow staircase stays a gentle wave.** A straight edge at a slant, drawn in whole texels, comes out with its corners gone and its steps softened, not straight: the spline is four texels wide and does not know the line was meant to be straight. `a_detailed_image_draws_an_edge_crisp_and_red_to_its_rim` measures a slope of 0.3.
+- **The edge sits where the faintest blood is.** At 4 % of full coverage a stain is drawn out to the edge of its texels, so its size matches the canvas's; a threshold of a quarter was tried and lost most of the clip's stains, whose coverage is mostly below that. The other side of it: a run one texel wide at full coverage is drawn close to three texels wide, by the spline's arithmetic.
+- **`detail²` the bytes.** Both images and their CPU copies grow by it, so at 128 a detail of 2 uploads what a 256 canvas does and 4 what a 512 does — see the budget below.
+- **A redraw per flush.** Measured on an x86_64 Linux host in release, at 128 and detail 4: 1.7 ms to redraw six drying stains of 10×10 texels, and 5.9 ms when a third of the canvas changed at once; at detail 2, 0.5 ms and 1.7 ms. The plugin's budget counts canvases, not milliseconds, so a game with many detailed canvases should lower `max_canvas_updates_per_tick`.
+
+A material that reads the canvas in its own shader, as the `flesh` feature's does, gains nothing from it and should keep `new`.
+
+## A sole on the canvas: `lift_uv` and `print_uv`
+
+Two calls for a foot on a floor (0.5.56), both over a `Print`'s outline: a squared heel, a narrow waist
+and a forefoot widest at the ball, sized in UV units as a `StainShape` is.
+
+- `lift_uv(uv, print, share, tick, settings)` takes `share` of the wet blood under the outline and
+  returns how much was there, as the mean coverage under it. **Dry blood is neither taken nor
+  counted**: dry paint does not move, here as in the passes. A texel left empty is age 0 again.
+- `print_uv(uv, print, load, tick)` inks the outline with `load` of a full print. Where the sole
+  pressed hardest and its tread holds blood, a texel takes `PRINT_CORE` of full coverage at a full
+  load and six tenths of that at none; the share of the outline that inks follows the load. Like
+  `wick_uv`, a texel takes the larger of what it held and what the print brings, so a print on a pool
+  adds nothing, and a texel it raises is fresh blood.
+
+Call `lift_uv` first for a step, or a sole picks its own print back up. The preset's `GoreStep` is
+this, on whichever floor is under the foot; see [`preset.md`](preset.md#footprints).
 
 ## Two things the caller owns, and one convention
 

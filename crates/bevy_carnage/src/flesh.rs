@@ -34,12 +34,58 @@
 //! caller dials. The film's *colour* is not recomputed here — `wetmap` already composites it on
 //! the CPU from the same spectral model, and that CPU byte is what a golden hashes.
 //!
+//! **A film has a surface** (0.5.47). The film's depth, read from the wet map as a cubic B-spline,
+//! is a height above what it lies on, drawn `FILM_RELIEF` (6) times its depth because a meniscus is
+//! far narrower than a canvas texel, and that height tilts the shading normal and the coat's, by
+//! screen-space derivatives so no tangents are needed (Mikkelsen 2010), never past 25°. A pool's edge
+//! curves down to the floor and catches the light, a run stands up off the skin, and a pool at a
+//! light's mirror angle shows a glint where it was one white sticker. Blood in a peeled crater lies
+//! level in the hollow and a weave holds its blood between the yarns, so neither is lifted; the
+//! relief fades out where a canvas texel is under a pixel. Wet films are at roughness `0.3`.
+//!
+//! **A film a few texels across lies nearly flat** (0.5.63). The relief stands for a meniscus at
+//! the edge of a film wider than many texels; a drop a few texels across has no interior for that
+//! edge to bound, and lifted whole it was a dome: a wall's spatter read as red beads stuck on, though a
+//! drop spread on a wall is a tenth of a millimetre deep and centimetres across. Four taps of the wet
+//! map at the corners of a square `FILM_SPAN_TEXELS` (4) texels out compare the blood around a
+//! fragment with its own; where the surround holds under `FILM_SPAN_LOW` (0.25) of it the film is
+//! drawn with `FILM_SMALL_RELIEF` (0.15) of the relief, rising to all of it at `FILM_SPAN_HIGH`
+//! (0.6). A ratio and not an amount, so a wide film keeps its relief however thin it is. Own numbers.
+//!
 //! **Blood on cloth.** Where the surface under the blood is a fabric rather than skin, the film
 //! colour is composited on the GPU instead: [`blood_lut`] tabulates the Kubelka–Munk film
 //! reflectance from `crate::bloodstain::spectral` over a black and over a white substrate, and the shader
 //! interpolates by the fabric's own albedo per channel. That keeps the fabric's hue, which the CPU
 //! composite (grey substrate) cannot. The *spread* of blood into cloth is not here either: it is
 //! `crate::bloodstain::wick`'s Lucas–Washburn front driving the wetmap's spread rate, on the CPU.
+//!
+//! **A film's edge is a line.** The wet map is read as a cubic B-spline in four bilinear taps (Sigg &
+//! Hadwiger, *GPU Gems 2*, ch. 20), not one bilinear tap, and its rim is drawn crisp at 4 % of the
+//! canvas's film depth (`WET_EDGE` in `flesh.wgsl`, own number), sharpened over one pixel's change
+//! in the smoothed amount. A bilinear read of a canvas whose texels are wet or not drew every rim as
+//! the texels' staircase, soft and fringed; the spline's level set is a curve, so a run ends in a
+//! round drop and a pool in a smooth line however far the canvas is magnified. Since 0.5.36.
+//!
+//! **Exposed tissue is wet with its own blood** ([`FleshParams::with_cut_film`]). In
+//! [`FleshMode::Cap`] the tissue the strip draws, and in [`FleshMode::Canvas`] the tissue a flaymap
+//! has bared, gets a film of blood over it, its full depth where the vessels are, in the muscle, and
+//! a quarter of it over the fat at the rim, graded by the tissue's own depth below the skin, with the
+//! film's clear coat. Off by default; the preset's broken pieces wear it since 0.5.38, where a bare fat
+//! band read as cheese, and its skins' craters since 0.5.42, where a crater was a ring of bare fat.
+//! A crater's graze wears 4 % of the film (`GRAZE_FILM` in the shader, since 0.5.53), ramped in over
+//! the first 6 % of the layer span, about the skin's own depth: the ooze of a fresh abrasion, which is
+//! raw and moist from the first moment. Bare, the graze was pale pink mottled with the fat's cream,
+//! and round every crater it read as a pale halo.
+//!
+//! **A crater is lit through its mouth** (0.5.52). In [`FleshMode::Canvas`], a texel below the skin
+//! looks out over the flaymap's own depth in eight directions, to 1, 3, 7 and 15 texels, for the
+//! highest wall it sees each way, and every light term on it — diffuse, coat, subsurface — is
+//! multiplied by `1 − mean(sin h)`: the cosine-weighted share of its view that clears the walls, the
+//! same crossed-strings result a laceration's bed is lit by. The walls are measured in millimetres,
+//! the depth from the canvas's `R` channel over [`FleshParams::cut`]`.y` (the layer span) and the
+//! canvas's size on the body from screen-space derivatives of the position and the UV. A deep
+//! crater's floor darkens and its rim keeps its red; drawn as open skin, a crater pooled with blood
+//! was the same red to its middle whatever its depth. It leaves out light the walls throw back.
 //!
 //! # Determinism
 //!
@@ -60,10 +106,23 @@
 //! carries `AG-096`): `carnage_web`, built from the mirror's tip with `webgl2`, in Chrome on ANGLE over
 //! Metal, took a shot, a slash, an arterial spurt and three shots to bone. It drew the wounds, the pools
 //! and the broken body, and the console held nothing but Bevy's notices that its optional plugins need
-//! storage buffers WebGL2 lacks. The demo site itself stays WebGPU, like every other module on it.
+//! storage buffers WebGL2 lacks. Again after the wet map became a B-spline with a crisp rim
+//! (2026-10-13, 0.5.36, `AG-109`): `flesh` with `webgl2` for `webgpu`, in Firefox 157 on an Xvfb
+//! display, whose WebGL2 is Mesa's llvmpipe (headless Firefox offered none): WebGL 2.0, GLSL ES
+//! 3.00, the `Gl` backend; the limb, the sphere's crater and its run and the sheet's streaks drew,
+//! and the console held only Bevy's notices about the software driver and the plugins that need what
+//! WebGL2 lacks. Again after a film was given a surface (2026-10-13, 0.5.47, `AG-120`), whose shader
+//! takes screen-space derivatives of the world position and the UV and samples the wet map five
+//! times: the same build, browser and driver drew the sphere's run standing and shining, the limb and
+//! the sheet, with the same notices and nothing else. The demo site itself stays WebGPU, like every
+//! other module on it.
 //!
 //! The uniform block is sixteen-byte aligned, there are no storage buffers, and the extension adds
-//! five textures and one sampler to `StandardMaterial`'s. The shader reads the metallic-roughness
+//! four textures and one sampler to `StandardMaterial`'s: since 0.5.54 the two tables are one image
+//! ([`luts`]), because with them apart the material used fifteen of the sixteen sampled textures a
+//! stage may have on WebGL2 and under WebGPU's default limits, and a camera with an
+//! `EnvironmentMapLight`, two cubemaps more, failed to build its pipeline (measured: "count was 17").
+//! The shader reads the metallic-roughness
 //! texture through `StandardMaterial`'s own binding and sampler, so reading it again adds no
 //! binding. The wrap term runs over the view's directional lights; point and spot lights get the
 //! ordinary PBR response, and
@@ -110,8 +169,9 @@ pub enum FleshMode {
     /// A body canvas: tissue from the flaymap's depth byte, wetness from the wetmap's.
     Canvas,
     /// A fabric canvas: no subsurface; the wetmap's amount byte composites blood over the base. Blood
-    /// in a weave is held between the yarns, so a wet patch stays matte where a film on a floor
-    /// shines: its roughness goes to `0.7` rather than `0.45`, and its clear coat is a third.
+    /// in a weave is held between the yarns, so a wet patch stays matte and flat where a film on a
+    /// floor shines and stands: its roughness goes to `0.7` rather than `0.3`, its clear coat is a
+    /// third, and it is not lifted.
     Cloth,
     /// A floor, a wall or a slab: as [`Cloth`](Self::Cloth), but blood stands on it as a film and
     /// pools shine.
@@ -146,6 +206,14 @@ pub struct FleshParams {
     /// [`FleshTables::material`] and [`FleshExtension::set_dermis`]**; an unbound texture samples
     /// Bevy's fallback image, which would otherwise read as a fully wet, fully peeled surface.
     pub sss: Vec4,
+    /// `x` the thickest film of blood exposed tissue wears, mm: a cut face in [`FleshMode::Cap`], and
+    /// a crater's walls where the skin is peeled in [`FleshMode::Canvas`]; `0` (as
+    /// [`FleshParams::for_layers`] ships) draws the tissue bare. The film is `x` from half the layer
+    /// span below the skin down, and a quarter of it at the skin, so the rim's fat shows through. See
+    /// [`FleshParams::with_cut_film`]. `y` the layer span, mm — the depth a flaymap's `R` channel reads
+    /// `1` at — which a crater's walls are measured in when the shader works out how much light
+    /// reaches its floor. `z` and `w` are unused.
+    pub cut: Vec4,
 }
 
 /// The `sss.w` bit that says the wetmap image is bound.
@@ -170,7 +238,16 @@ impl FleshParams {
             bands: Vec4::new(s[1] / span, s[2] / span, s[3] / span, s[4] / span),
             wet: Vec4::new(0.3, 0.3, 2.0, SO2_VENOUS),
             sss: Vec4::new(1.0, mm_per_unit, mode.code(), 0.0),
+            cut: Vec4::new(0.0, span, 0.0, 0.0),
         }
+    }
+
+    /// **The same dials, with a fresh wound's blood on the tissue it bares**, `film_mm` where it lies
+    /// thickest. Tissue cut or torn open is wet with its own blood: drawn bare, a fat band reads as
+    /// cheese and a crater as a ring of fat.
+    pub fn with_cut_film(mut self, film_mm: f32) -> Self {
+        self.cut.x = if film_mm.is_finite() { film_mm.max(0.0) } else { 0.0 };
+        self
     }
 
     fn set_flag(&mut self, flag: u32, on: bool) {
@@ -180,7 +257,7 @@ impl FleshParams {
     }
 }
 
-/// **The extension**: the dials, the two baked tables, and the optional canvas images.
+/// **The extension**: the dials, the baked tables, and the optional canvas images.
 ///
 /// Bindings start at 100 so they cannot collide with `StandardMaterial`'s. `wet` is the wetmap's
 /// metallic-roughness image, read for the `R`/`A` channels that crate writes and Bevy ignores.
@@ -188,15 +265,16 @@ impl FleshParams {
 pub struct FleshExtension {
     #[uniform(100)]
     pub params: FleshParams,
-    /// [`sss_lut`], from [`FleshTables`].
+    /// [`luts`], from [`FleshTables`]: the subsurface and the blood tables in one image.
+    ///
+    /// **One image, and one sampler for all four textures** (binding 102), because every texture the
+    /// extension adds counts against the sixteen a stage may sample on WebGL2 and under WebGPU's
+    /// default limits, with `StandardMaterial`'s and the view's already counted. With the two tables
+    /// apart the material used fifteen, and a camera with an `EnvironmentMapLight` — two cubemaps
+    /// more — failed to build its pipeline on the web. Packed, it is sixteen with one.
     #[texture(101)]
     #[sampler(102)]
-    pub sss_lut: Handle<Image>,
-    /// [`blood_lut`], from [`FleshTables`]. **One sampler serves all five textures** (binding 102):
-    /// every one of them is read linearly, clamped, at level zero, and WebGL2 caps a stage at
-    /// sixteen samplers with `StandardMaterial`'s and the view's already counted.
-    #[texture(103)]
-    pub blood_lut: Handle<Image>,
+    pub luts: Handle<Image>,
     /// `wetmap`'s roughness image: `R` amount, `A` wetness. Unbound means dry.
     #[texture(104)]
     pub wet: Option<Handle<Image>>,
@@ -249,13 +327,12 @@ impl MaterialExtension for FleshExtension {
     }
 }
 
-/// **The two tables, baked once on `Startup`.**
+/// **The two tables, baked once on `Startup`**, into one image: [`luts`].
 #[derive(Resource, Clone, Debug, Default)]
 pub struct FleshTables {
-    /// The pre-integrated subsurface table, [`SSS_COLS`] × ([`SSS_ROWS`] · 5 layers), linear RGBA.
-    pub sss: Handle<Image>,
-    /// The blood film table, [`BLOOD_COLS`] × 4 rows, sRGB RGBA.
-    pub blood: Handle<Image>,
+    /// [`luts`]: the pre-integrated subsurface table in its top-left corner and the blood film
+    /// table in its last four rows, `Rgba8Unorm`.
+    pub luts: Handle<Image>,
 }
 
 impl FleshTables {
@@ -264,7 +341,7 @@ impl FleshTables {
         params.set_flag(FLAG_WET, false);
         params.set_flag(FLAG_FLAY, false);
         params.set_flag(FLAG_DERMIS, false);
-        FleshExtension { params, sss_lut: self.sss.clone(), blood_lut: self.blood.clone(), wet: None, flay: None, dermis: None }
+        FleshExtension { params, luts: self.luts.clone(), wet: None, flay: None, dermis: None }
     }
 
     /// **A whole [`FleshMaterial`]** over `base`, with the canvases bound and the flags set. The base's
@@ -330,25 +407,15 @@ fn bake_tables(mut tables: ResMut<FleshTables>, images: Option<ResMut<Assets<Ima
         warn!("bevy_carnage::flesh: no Assets<Image>; the flesh tables are not baked");
         return;
     };
-    let extent = Extent3d { width: SSS_COLS, height: SSS_ROWS * Layer::ALL.len() as u32, depth_or_array_layers: 1 };
-    let mut sss = Image::new(
-        extent,
+    let mut image = Image::new(
+        Extent3d { width: LUTS_WIDTH, height: LUTS_HEIGHT, depth_or_array_layers: 1 },
         TextureDimension::D2,
-        sss_lut(),
+        luts(),
         TextureFormat::Rgba8Unorm,
         RenderAssetUsages::RENDER_WORLD,
     );
-    sss.sampler = clamped_linear();
-    let mut blood = Image::new(
-        Extent3d { width: BLOOD_COLS, height: 4, depth_or_array_layers: 1 },
-        TextureDimension::D2,
-        blood_lut(),
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    blood.sampler = clamped_linear();
-    tables.sss = images.add(sss);
-    tables.blood = images.add(blood);
+    image.sampler = clamped_linear();
+    tables.luts = images.add(image);
 }
 
 fn clamped_linear() -> ImageSampler {
@@ -517,6 +584,33 @@ pub fn blood_lut() -> Vec<u8> {
     out
 }
 
+/// The width of [`luts`]: the blood table's.
+pub const LUTS_WIDTH: u32 = BLOOD_COLS;
+/// The height of [`luts`]: the subsurface table's rows, then the blood table's four.
+pub const LUTS_HEIGHT: u32 = SSS_ROWS * Layer::ALL.len() as u32 + 4;
+
+/// **Both tables in one image's bytes**, [`LUTS_WIDTH`] × [`LUTS_HEIGHT`], RGBA8, row-major: the
+/// subsurface table ([`sss_lut`]) in the top-left [`SSS_COLS`] columns of its first rows, the rest of
+/// those rows zero, and the blood table ([`blood_lut`]) in the last four rows, byte for byte. The
+/// image is `Rgba8Unorm`, so the blood rows, which are sRGB-encoded, are decoded in the shader, and
+/// the shader holds each lookup to its own table's texel centres, so neither filters into the other
+/// or into the padding.
+pub fn luts() -> Vec<u8> {
+    let (sss, blood) = (sss_lut(), blood_lut());
+    let row = LUTS_WIDTH as usize * 4;
+    let mut out = vec![0; row * LUTS_HEIGHT as usize];
+    for (y, src) in sss.chunks(SSS_COLS as usize * 4).enumerate() {
+        if let Some(dst) = out.get_mut(y * row..y * row + src.len()) {
+            dst.copy_from_slice(src);
+        }
+    }
+    let at = row * (SSS_ROWS as usize * Layer::ALL.len());
+    if let Some(dst) = out.get_mut(at..at + blood.len()) {
+        dst.copy_from_slice(&blood);
+    }
+    out
+}
+
 /// FNV-1a over both tables' bytes — the golden `the_flesh_tables_are_frozen` locks.
 pub fn lut_digest() -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -613,5 +707,23 @@ mod tests {
     #[test]
     fn the_flesh_tables_are_frozen() {
         assert_eq!(lut_digest(), 17_594_585_363_927_039_033);
+    }
+
+    /// **The packed image holds both tables where the shader reads them**: the subsurface table's rows
+    /// in the first [`SSS_COLS`] columns of the top rows, the blood table's four rows last, and zero
+    /// between. The shader's offsets are written against exactly this; a table shifted by one row or
+    /// column would shade every surface with its neighbour's values.
+    #[test]
+    fn the_packed_image_holds_both_tables_where_the_shader_reads_them() {
+        let (packed, sss, blood) = (luts(), sss_lut(), blood_lut());
+        let row = LUTS_WIDTH as usize * 4;
+        let sss_row = SSS_COLS as usize * 4;
+        let sss_rows = SSS_ROWS as usize * Layer::ALL.len();
+        assert_eq!(packed.len(), row * LUTS_HEIGHT as usize);
+        for y in 0..sss_rows {
+            assert_eq!(&packed[y * row..y * row + sss_row], &sss[y * sss_row..(y + 1) * sss_row], "subsurface row {y}");
+            assert!(packed[y * row + sss_row..(y + 1) * row].iter().all(|b| *b == 0), "row {y} is not padded with zero");
+        }
+        assert_eq!(&packed[sss_rows * row..], &blood[..], "the blood table is not the last four rows");
     }
 }

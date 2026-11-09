@@ -6,7 +6,7 @@ Texture-space flaying for Bevy: hit the same place twice and the skin comes off,
 
 ![A torso hit again and again: the crater opens through pink dermis and cream fat to red muscle, and blood fills its floor and runs down the chest](https://raw.githubusercontent.com/Ladvien/bevy_carnage/main/docs/flaymap.gif)
 
-The clip above is `capture_gore`'s third, and its torso is dressed as a game would dress skin: this flaymap for what is peeled, `wetmap` for the blood over it, and `flesh::FleshMaterial` to composite the two. The flaymap alone draws the tissue dry.
+The clip above is `capture_gore`'s third, and its torso is dressed as a game would dress skin: this flaymap for what is peeled, `wetmap` for the blood over it, and `flesh::FleshMaterial` to composite the two. The flaymap alone draws the tissue dry. Since 0.5.42 the material also lays a film of blood over the tissue the flaymap bares (`FleshParams::with_cut_film`), none on the graze at the rim, partial over the fat, full in the muscle, so the crater reads as a wound; drawn dry, its wide ring of cream fat read as a fried egg.
 
 ## The family
 
@@ -72,6 +72,8 @@ Bevy reads exactly two channels out of a metallic-roughness texture — **green*
 | A | `255` where anything has been removed, `0` on intact surface | `0` or `255` |
 
 So `R · span_mm / 255` is the millimetres of tissue gone and `A` is the wound's own mask — the two things a caller's shader would otherwise have to infer from the colour, which cannot be done, because flayed muscle and a red shirt are the same red. A subsurface term, a wetness boost or a rim darkening can be driven off the image the `StandardMaterial` is already sampling, with no second texture and no second upload. Both are **output**: the depth buffer stays the authority and nothing here reads a pixel back.
+
+The crate's own flesh material does exactly that (0.5.52): it reads `R` around each peeled texel to find the crater's walls and lights the floor only by the share of the room it can see between them, so a deep crater darkens toward its middle. See `bevy_carnage::flesh`.
 
 ## The digest
 
@@ -152,11 +154,11 @@ fn on_hit(
 | Constant | `UV_SPAN_M` | How much world one UV unit is taken to be — one metre. |
 | Re-export | `Layer`, `Layers`, `Region`, `Scale` | The tissue model, the blood model under it, and the four names in this crate's signatures. |
 
-`FlayCanvas`: `new`, `albedo`, `roughness`, `paint_uv`, `paint_world`, `shade`, `flush`, `digest`, `exposed_area`, plus the read-only `size`, `region`, `layers`, `depth_at`, `bone_texels`, `is_dirty`, `dirty_since`.
+`FlayCanvas`: `new`, `albedo`, `roughness`, `paint_uv`, `paint_world`, `shade`, `flush`, `clear`, `digest`, `exposed_area`, plus the read-only `size`, `region`, `layers`, `depth_at`, `bone_texels`, `is_dirty`, `dirty_since`. `clear` (0.5.48) heals every wound in place: the digest is a fresh canvas's again and the bone handoff is armed again, so the next wound to reach the cortex sends `BoneExposed` once more.
 
 ## Three things the caller owns
 
-**The schedule.** `paint_uv` takes the tick *number* and `shade` is called by you. Nothing here reads a clock, virtual or real, because a flaymap that read one could not be a golden. Peel, then `shade` once after the last hit of the tick, and the plugin uploads what changed.
+**The schedule.** `paint_uv` takes the tick *number* and `shade` is called by you. Nothing here reads a clock, virtual or real, because a flaymap that read one could not be a golden. Peel, then `shade` once after the last hit of the tick, and the plugin uploads what changed. Since 0.5.59 `shade` redraws only what was peeled since the last shade, and the normals one texel round it; the first shade, and a shade with another texel size, `tile_mm` or `seed`, redraws every texel. The bytes are those of a full redraw (`shading_what_changed_is_shading_everything`), so shading after every paint costs each paint's footprint rather than the canvas.
 
 **The message.** `BoneExposed` is registered here and written nowhere in this crate: only you know whether the thing you just peeled has a skeleton something else owns.
 

@@ -5,6 +5,9 @@ mod audit;
 mod bake;
 mod bond;
 mod bore;
+/// A hierarchy over a mesh's triangles, for the preset's casts. Behind `flesh` with the preset.
+#[cfg(feature = "flesh")]
+mod bvh;
 #[cfg(feature = "vfx")]
 mod decal;
 mod feel;
@@ -54,8 +57,8 @@ pub use severance::{Reach, capsule, directional, radial, spread, swept_triangle}
 pub use tree::{FragmentId, FragmentTree, TreeNode};
 #[cfg(feature = "vfx")]
 pub use vfx::{
-    BleedingChunk, CarnageEffects, CarnageVfxPlugin, CarnageVfxSystems, EffectFade, EffectTtl,
-    RibbonInstance, arterial_spurt, gib_ribbon, mist_puff, spatter_burst, wound_seep,
+    BleedingChunk, Bursts, CarnageEffects, CarnageVfxPlugin, CarnageVfxSystems, EffectFade, EffectTtl, Palette,
+    RibbonInstance, arterial_spurt, gib_ribbon, mist_puff, puff_image, spatter_burst, wound_seep,
 };
 pub use wound::{
     CapFace, Wound, cap_faces, largest_cap, wound_from_ejecta, wound_of_channel, wounds_from_bonds,
