@@ -233,7 +233,7 @@ ron = { version = "0.12" }
 # (`bevy_render-0.19.0/src/settings.rs` selects `Backends::BROWSER_WEBGPU` on wasm when both are on),
 # so these modules are WebGPU-only and `web/play.html` gates on an adapter before importing them.
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-bevy = { version = "0.19", default-features = false, features = ["web", "webgpu"] }
+bevy = { version = "0.19", default-features = false, features = ["web", "webgl2"] }
 
 [features]
 default = ["serde", "vfx", "flesh"]
